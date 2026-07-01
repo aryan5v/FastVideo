@@ -188,6 +188,16 @@ rocm = [
     "amdsmi",
 ]
 
+# Apple Silicon MLX-native runtime (fastvideo/mlx_runtime). Opt-in via
+# `uv pip install -e '.[mlx]'` on an Apple Silicon Mac. MLX is macOS/arm64
+# only, so it is guarded by an environment marker and installs to a no-op on
+# other platforms. On macOS the torch wheel resolved via [tool.uv.sources]
+# (download.pytorch.org/whl/cpu) already ships the MPS backend on arm64, so no
+# extra torch index is needed for the hybrid encode/decode path.
+mlx = [
+    "mlx>=0.22; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
+
 [project.scripts]
 fastvideo = "fastvideo.entrypoints.cli.main:main"
 dreamverse-server = "dreamverse.server_entry:cli"

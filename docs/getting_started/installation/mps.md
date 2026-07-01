@@ -85,6 +85,21 @@ Alternative with Conda environment:
 uv pip install -e .
 ```
 
+#### 3. (Optional) Experimental MLX-native runtime
+
+For the experimental Apple-native FastWan path (`fastvideo/mlx_runtime`), install the
+`mlx` extra. MLX runs the DiT denoising loop directly on Metal via
+[MLX](https://github.com/ml-explore/mlx); the text encoder and VAE decode currently run
+on the PyTorch MPS backend.
+
+```bash
+uv pip install -e '.[mlx]'
+```
+
+The `mlx` dependency is guarded by an Apple-Silicon environment marker, so the command is
+a no-op for the MLX package on non-`arm64` machines. On macOS, the `torch` wheel resolved
+by FastVideo already ships the MPS backend on Apple Silicon — no extra index is required.
+
 ## Development Environment Setup
 
 If you're planning to contribute to FastVideo please see the following page:
@@ -94,7 +109,13 @@ If you're planning to contribute to FastVideo please see the following page:
 
 ### For Basic Inference
 
-- Mac M1, M2, M3, or M4 (at least 32 GB RAM is preferable for high quality video generation)
+- Mac M1, M2, M3, or M4.
+- **16 GB unified memory** is the baseline target for local generation (e.g. FastWan
+  T2V-1.3B at 480p / 5s). To fit 16 GB, encode the prompt and free the text encoder
+  before loading the DiT (the MLX example supports a subprocess encode-then-free mode).
+- **32 GB+** gives more headroom for higher resolution, longer clips, and running the
+  full-precision Wan VAE decoder; Mac Studio-class machines (64 GB+) can push to 720p and
+  longer generations.
 
 ## Troubleshooting
 

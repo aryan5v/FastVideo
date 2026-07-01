@@ -40,3 +40,19 @@ def test_mps_uses_fp16_eager_compatibility_settings(monkeypatch) -> None:
     assert pipeline_config.precision == "fp16"
     assert pipeline_config.vae_tiling is True
     assert pipeline_config.vae_precision == "fp16"
+
+
+def test_mps_reports_unified_memory_and_device_name() -> None:
+    # These introspection helpers are dependency-free (os.sysconf / sysctl
+    # fallback) so they return sane values even on non-Mac test runners. They
+    # feed benchmark labels and memory-aware config tiers.
+    total_memory = MpsPlatform.get_device_total_memory()
+    assert isinstance(total_memory, int)
+    assert total_memory > 0
+
+    device_name = MpsPlatform.get_device_name()
+    assert isinstance(device_name, str)
+    assert device_name != ""
+
+    # Metal exposes no CUDA-style compute capability; must be None, not a raise.
+    assert MpsPlatform.get_device_capability() is None

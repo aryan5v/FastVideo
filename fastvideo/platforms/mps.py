@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 
 from fastvideo.logger import init_logger
@@ -24,19 +26,51 @@ class MpsPlatform(Platform):
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
-        raise NotImplementedError
+        # Metal has no CUDA-style compute-capability tuple. Return ``None`` so
+        # capability-gated code paths (e.g. FP4/FP8 kernels) treat MPS as
+        # "unknown / unsupported" rather than crashing.
+        return None
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        raise NotImplementedError
+        """Best-effort human-readable chip name (e.g. ``Apple M3 Max``).
+
+        Used to label benchmark rows and pick memory-aware config tiers. Falls
+        back to the machine architecture when the SoC brand string is not
+        available (e.g. off-Mac test runners).
+        """
+        import platform as _platform
+        import subprocess
+
+        try:
+            name = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            if name:
+                return name
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return _platform.machine() or "mps"
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        raise NotImplementedError
+        # Apple Silicon exposes no per-device UUID; the SoC name is the most
+        # stable identifier available.
+        return cls.get_device_name(device_id)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        raise NotImplementedError
+        """Total unified memory in bytes.
+
+        On Apple Silicon the GPU shares system RAM, so the total unified-memory
+        budget is the amount of physical RAM. Uses ``os.sysconf`` to stay
+        dependency-free and portable across macOS and Linux CI.
+        """
+        try:
+            return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+        except (OSError, ValueError, AttributeError):
+            return 0
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: bool | None) -> bool:
@@ -49,6 +83,13 @@ class MpsPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(cls, device: torch.types.Device | None = None) -> float:
+        """Current MPS allocation in bytes (0.0 when unavailable)."""
+        current_allocated = getattr(torch.mps, "current_allocated_memory", None)
+        if current_allocated is not None:
+            try:
+                return float(current_allocated())
+            except (RuntimeError, AttributeError):
+                return 0.0
         return 0.0
 
     @classmethod
