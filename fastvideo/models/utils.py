@@ -171,13 +171,23 @@ def pred_noise_to_pred_video(pred_noise: torch.Tensor,
     # timestep shape should be [B]
     dtype = pred_noise.dtype
     device = pred_noise.device
-    pred_noise = pred_noise.double().to(device)
-    noise_input_latent = noise_input_latent.double().to(device)
-    sigmas = scheduler.sigmas.double().to(device)
-    timesteps = scheduler.timesteps.double().to(device)
-    timestep_id = torch.argmin(
-        (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
-    sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
+    calculation_dtype = torch.float32 if device.type == "mps" else torch.float64
+    pred_noise = pred_noise.to(device=device, dtype=calculation_dtype)
+    noise_input_latent = noise_input_latent.to(device=device, dtype=calculation_dtype)
+    if device.type == "mps":
+        # MPS can produce invalid reduction indices for the 1,000-entry
+        # training schedule. This tiny lookup has no material performance
+        # cost on CPU; the latent arithmetic remains on MPS.
+        timestep_id = torch.argmin(
+            (scheduler.timesteps.cpu().unsqueeze(0) - timestep.cpu().unsqueeze(1)).abs(), dim=1)
+        sigmas = scheduler.sigmas[timestep_id].to(device=device, dtype=calculation_dtype)
+    else:
+        sigmas = scheduler.sigmas.to(device=device, dtype=calculation_dtype)
+        timesteps = scheduler.timesteps.to(device=device, dtype=calculation_dtype)
+        timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
+        sigmas = sigmas[timestep_id]
+    sigma_t = sigmas.reshape(-1, 1, 1, 1)
     pred_video = noise_input_latent - sigma_t * pred_noise
     return pred_video.to(dtype)
 
@@ -215,16 +225,27 @@ def pred_noise_to_x_bound(pred_noise: torch.Tensor,
     # timestep shape should be [B]
     dtype = pred_noise.dtype
     device = pred_noise.device
-    pred_noise = pred_noise.double().to(device)
-    noise_input_latent = noise_input_latent.double().to(device)
-    sigmas = scheduler.sigmas.double().to(device)
-    timesteps = scheduler.timesteps.double().to(device)
-    timestep_id = torch.argmin(
-        (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
-    sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
-
-    boundary_timestep_id = torch.argmin(
-        (timesteps.unsqueeze(0) - boundary_timestep.unsqueeze(1)).abs(), dim=1)
-    sigma_t_boundary = sigmas[boundary_timestep_id].reshape(-1, 1, 1, 1)
+    calculation_dtype = torch.float32 if device.type == "mps" else torch.float64
+    pred_noise = pred_noise.to(device=device, dtype=calculation_dtype)
+    noise_input_latent = noise_input_latent.to(device=device, dtype=calculation_dtype)
+    if device.type == "mps":
+        # See pred_noise_to_pred_video: perform only the schedule lookup on
+        # CPU to avoid an MPS reduction-index bug.
+        timestep_id = torch.argmin(
+            (scheduler.timesteps.cpu().unsqueeze(0) - timestep.cpu().unsqueeze(1)).abs(), dim=1)
+        boundary_timestep_id = torch.argmin(
+            (scheduler.timesteps.cpu().unsqueeze(0) - boundary_timestep.cpu().unsqueeze(1)).abs(), dim=1)
+        sigma_t = scheduler.sigmas[timestep_id].to(device=device, dtype=calculation_dtype).reshape(-1, 1, 1, 1)
+        sigma_t_boundary = (scheduler.sigmas[boundary_timestep_id].to(
+            device=device, dtype=calculation_dtype).reshape(-1, 1, 1, 1))
+    else:
+        sigmas = scheduler.sigmas.to(device=device, dtype=calculation_dtype)
+        timesteps = scheduler.timesteps.to(device=device, dtype=calculation_dtype)
+        timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
+        boundary_timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - boundary_timestep.unsqueeze(1)).abs(), dim=1)
+        sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
+        sigma_t_boundary = sigmas[boundary_timestep_id].reshape(-1, 1, 1, 1)
     pred_video = noise_input_latent - (sigma_t - sigma_t_boundary) * pred_noise
     return pred_video.to(dtype)

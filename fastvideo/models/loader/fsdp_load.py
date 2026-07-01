@@ -350,6 +350,17 @@ def load_model_from_full_model_state_dict(
                 )
                 continue
 
+            # FastWan VSA checkpoints include these tensors, but a dense SDPA
+            # model intentionally does not instantiate the VSA gate. Ignore
+            # the checkpoint-only tensor in that case; a VSA model still has
+            # the parameter and loads it through the normal path above.
+            if ".to_gate_compress." in target_param_name:
+                logger.warning(
+                    "Skipping checkpoint-only VSA gate: %s",
+                    target_param_name,
+                )
+                continue
+
             # For non-strict loads, treat this as an "unexpected key" and skip it
             # (mirrors torch.nn.Module.load_state_dict(strict=False)).
             if not strict:

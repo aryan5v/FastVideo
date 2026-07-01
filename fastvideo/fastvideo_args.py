@@ -727,8 +727,29 @@ class FastVideoArgs:
         from fastvideo.platforms import current_platform
 
         if current_platform.is_mps():
+            # MPS does not support FastVideo's CUDA autocast / Inductor paths.
+            # Use explicit FP16 casts and eager execution for the compatibility
+            # baseline; a future Metal-native backend can opt into compilation.
             self.use_fsdp_inference = False
             self.dit_layerwise_offload = False
+            self.dit_cpu_offload = False
+            self.pin_cpu_memory = False
+            self.disable_autocast = True
+            self.enable_torch_compile = False
+            # Wan's feature-cache decoder retains large activations across
+            # frames. Use the existing temporal/spatial tiler on MPS so the
+            # decoder can release each tile before moving to the next one.
+            if hasattr(self.pipeline_config, "vae_tiling"):
+                self.pipeline_config.vae_tiling = True
+            if getattr(self.pipeline_config, "vae_precision", None) == "fp32":
+                logger.info("Using FP16 VAE weights for MPS compatibility.")
+                self.pipeline_config.vae_precision = "fp16"
+
+            if self.pipeline_config.dit_precision == "bf16":
+                logger.info("Using FP16 DiT weights for MPS compatibility.")
+                self.pipeline_config.dit_precision = "fp16"
+            if getattr(self.pipeline_config, "precision", None) == "bf16":
+                self.pipeline_config.precision = "fp16"
 
         if self.dit_layerwise_offload:
             if self.use_fsdp_inference:

@@ -723,8 +723,8 @@ class CosmosDenoisingStage(DenoisingStage):
     pretrained Cosmos model's training convention.
     """
 
-    def __init__(self, transformer, scheduler, pipeline=None) -> None:
-        super().__init__(transformer, scheduler, pipeline)
+    def __init__(self, transformer, scheduler) -> None:
+        super().__init__(transformer, scheduler)
 
     def _run_transformer(
         self,
@@ -1224,8 +1224,8 @@ class DmdDenoisingStage(DenoisingStage):
     Denoising stage for DMD.
     """
 
-    def __init__(self, transformer, scheduler) -> None:
-        super().__init__(transformer, scheduler)
+    def __init__(self, transformer, scheduler, pipeline=None) -> None:
+        super().__init__(transformer, scheduler, pipeline)
         self.scheduler = FlowMatchEulerDiscreteScheduler(shift=8.0)
 
     def forward(
@@ -1243,10 +1243,9 @@ class DmdDenoisingStage(DenoisingStage):
         Returns:
             The batch with denoised latents.
         """
-        # Setup precision and autocast settings
-        # TODO(will): make the precision configurable for inference
-        # target_dtype = PRECISION_TO_TYPE[fastvideo_args.precision]
-        target_dtype = torch.bfloat16
+        # Match the loaded DiT instead of assuming CUDA BF16. MPS uses the
+        # FP16 compatibility path configured in FastVideoArgs.
+        target_dtype = next(self.transformer.parameters()).dtype
         autocast_enabled = (target_dtype != torch.float32) and not fastvideo_args.disable_autocast
 
         # Get timesteps and calculate warmup steps
@@ -1315,7 +1314,9 @@ class DmdDenoisingStage(DenoisingStage):
                 ).to(target_dtype) * 1000.0 if fastvideo_args.pipeline_config.embedded_cfg_scale is not None else None)
 
                 # Predict noise residual
-                with torch.autocast(device_type="cuda", dtype=target_dtype, enabled=autocast_enabled):
+                with torch.autocast(device_type=get_local_torch_device().type,
+                                    dtype=target_dtype,
+                                    enabled=autocast_enabled):
                     if (vsa_available and self.attn_backend == VideoSparseAttentionBackend):
                         self.attn_metadata_builder_cls = self.attn_backend.get_builder_cls()
 
@@ -1360,9 +1361,26 @@ class DmdDenoisingStage(DenoisingStage):
 
                     if i < len(timesteps) - 1:
                         next_timestep = timesteps[i + 1] * torch.ones([1], dtype=torch.long, device=pred_video.device)
-                        noise = torch.randn(video_raw_latent_shape,
-                                            dtype=pred_video.dtype,
-                                            generator=batch.generator[0]).to(self.device)
+                        if pred_video.device.type == "mps":
+                            # CPU generators are passed to workers over an IPC
+                            # boundary. Reusing one for a second MPS noise draw
+                            # can trigger an asynchronous Metal RNG failure.
+                            # Seed a device-local generator instead; include
+                            # the DMD step so each re-noise is distinct.
+                            seed = int(batch.seed or 0) + i
+                            mps_generator = torch.Generator(device="mps").manual_seed(seed)
+                            noise = torch.randn(
+                                video_raw_latent_shape,
+                                dtype=pred_video.dtype,
+                                device=pred_video.device,
+                                generator=mps_generator,
+                            )
+                        else:
+                            noise = torch.randn(
+                                video_raw_latent_shape,
+                                dtype=pred_video.dtype,
+                                generator=batch.generator[0],
+                            ).to(self.device)
                         latents = self.scheduler.add_noise(pred_video.flatten(0, 1), noise.flatten(0, 1),
                                                            next_timestep).unflatten(0, pred_video.shape[:2])
                     else:

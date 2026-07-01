@@ -1238,7 +1238,10 @@ class AutoencoderKLWan(nn.Module, ParallelTiledVAE):
         return enc
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        if self.use_feature_cache:
+        # Feature-cache decoding is fastest on CUDA but retains activations
+        # for every temporal chunk. Once tiling is enabled, route through the
+        # tiled decoder so MPS can release each spatial/temporal tile.
+        if self.use_feature_cache and not self.use_tiling:
             self.clear_cache()
             iter_ = z.shape[2]
             x = self.post_quant_conv(z)
@@ -1277,11 +1280,16 @@ class AutoencoderKLWan(nn.Module, ParallelTiledVAE):
         return out
 
     def tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
+        # The generic tiled decoder already returns
+        # ``(latent_frames - 1) * temporal_compression_ratio + 1`` frames.
+        # Do not trim the causal warm-up frames again: doing so turns a
+        # requested 33-frame clip into 30 frames.
+        blend_num_frames = self.blend_num_frames
         self.blend_num_frames *= 2
-        dec = ParallelTiledVAE.tiled_decode(self, z)
-        start_frame_idx = self.temporal_compression_ratio - 1
-        dec = dec[:, :, start_frame_idx:]
-        return dec
+        try:
+            return ParallelTiledVAE.tiled_decode(self, z)
+        finally:
+            self.blend_num_frames = blend_num_frames
 
     def spatial_tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
         dec = ParallelTiledVAE.spatial_tiled_decode(self, z)

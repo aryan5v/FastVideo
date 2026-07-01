@@ -145,9 +145,17 @@ class DecodingStage(PipelineStage):
             latents = self._denormalize_latents(latents)
 
         # Decode latents
-        with torch.autocast(device_type="cuda", dtype=vae_dtype, enabled=vae_autocast_enabled):
+        with torch.autocast(device_type=get_local_torch_device().type,
+                            dtype=vae_dtype,
+                            enabled=vae_autocast_enabled):
             if fastvideo_args.pipeline_config.vae_tiling:
-                self.vae.enable_tiling()
+                if get_local_torch_device().type == "mps" and isinstance(self.vae, ParallelTiledVAE):
+                    # Wan's default feature-cache decoder retains activations
+                    # across the whole clip. Temporal tiles bound that memory
+                    # on unified-memory Macs as well as spatial tiles.
+                    self.vae.enable_tiling(use_temporal_tiling=True)
+                else:
+                    self.vae.enable_tiling()
             # if fastvideo_args.vae_sp:
             #     self.vae.enable_parallel()
             if not vae_autocast_enabled:
@@ -212,9 +220,14 @@ class DecodingStage(PipelineStage):
             cache = self.vae.get_streaming_cache()
 
         # Decode latents with streaming
-        with torch.autocast(device_type="cuda", dtype=vae_dtype, enabled=vae_autocast_enabled):
+        with torch.autocast(device_type=get_local_torch_device().type,
+                            dtype=vae_dtype,
+                            enabled=vae_autocast_enabled):
             if fastvideo_args.pipeline_config.vae_tiling:
-                self.vae.enable_tiling()
+                if get_local_torch_device().type == "mps" and isinstance(self.vae, ParallelTiledVAE):
+                    self.vae.enable_tiling(use_temporal_tiling=True)
+                else:
+                    self.vae.enable_tiling()
             if not vae_autocast_enabled:
                 latents = latents.to(vae_dtype)
             image, cache = self.vae.streaming_decode(latents, cache, is_first_chunk)

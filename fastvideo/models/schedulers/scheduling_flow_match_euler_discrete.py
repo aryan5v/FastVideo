@@ -652,11 +652,20 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin,
         else:
             raise ValueError(f"[add_noise] Invalid timestep shape: {timestep.shape}")
         # timestep shape should be [B]
-        self.sigmas = self.sigmas.to(noise.device)
-        self.timesteps = self.timesteps.to(noise.device)
-        timestep_id = torch.argmin(
-            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
-        sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+        if noise.device.type == "mps":
+            # MPS can return an out-of-range index for this reduction over the
+            # 1,000-entry training schedule. The lookup is tiny and performed
+            # once per DMD step, so compute it on CPU and keep latent math on
+            # MPS.
+            timestep_id = torch.argmin(
+                (self.timesteps.cpu().unsqueeze(0) - timestep.cpu().unsqueeze(1)).abs(), dim=1)
+            sigma = self.sigmas[timestep_id].to(noise.device).reshape(-1, 1, 1, 1)
+        else:
+            self.sigmas = self.sigmas.to(noise.device)
+            self.timesteps = self.timesteps.to(noise.device)
+            timestep_id = torch.argmin(
+                (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
+            sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
         sample = (1 - sigma) * clean_latent + sigma * noise
         return sample.type_as(noise)
 

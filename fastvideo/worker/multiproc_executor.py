@@ -693,16 +693,27 @@ class WorkerMultiprocProc:
                         logging_info = None
                         if envs.FASTVIDEO_STAGE_LOGGING:
                             logging_info = output_batch.logging_info
-                        # result tensor shared by CUDA IPC to avoid serialization overhead
+                        # CUDA tensors use CUDA IPC here. MPS tensors cannot
+                        # be serialized through multiprocessing, so materialize
+                        # result tensors on CPU before sending them to the
+                        # parent process.
                         result = output_batch.output
+                        trajectory_latents = output_batch.trajectory_latents
+                        trajectory_timesteps = output_batch.trajectory_timesteps
+                        if isinstance(result, torch.Tensor) and result.device.type == "mps":
+                            result = result.cpu()
+                        if isinstance(trajectory_latents, torch.Tensor) and trajectory_latents.device.type == "mps":
+                            trajectory_latents = trajectory_latents.cpu()
+                        if isinstance(trajectory_timesteps, torch.Tensor) and trajectory_timesteps.device.type == "mps":
+                            trajectory_timesteps = trajectory_timesteps.cpu()
                         extra = output_batch.extra or {}
                         extra["peak_memory_mb"] = (torch.cuda.max_memory_allocated() / (1024 * 1024))
                         self.pipe.send({
                             "output_batch": result,
                             "logging_info": logging_info,
                             "extra": extra,
-                            "trajectory_latents": output_batch.trajectory_latents,
-                            "trajectory_timesteps": output_batch.trajectory_timesteps,
+                            "trajectory_latents": trajectory_latents,
+                            "trajectory_timesteps": trajectory_timesteps,
                         })
                     else:
                         result = self.worker.execute_method(method, *args, **kwargs)

@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 import torch
 
 import fastvideo.envs as envs
+from fastvideo.distributed import get_local_torch_device
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
@@ -99,7 +100,7 @@ class PipelineStage(ABC):
     @property
     def device(self) -> torch.device:
         """Get the device for this stage."""
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return get_local_torch_device()
 
     def set_logging(self, enable: bool):
         """

@@ -15,6 +15,12 @@ class MpsPlatform(Platform):
     device_type: str = "mps"
     dispatch_key: str = "MPS"
     device_control_env_var: str = "MPS_VISIBLE_DEVICES"
+    simple_compile_backend: str = "eager"
+
+    @classmethod
+    def get_torch_device(cls):
+        """Return the MPS module for callers that need a torch device handle."""
+        return torch.mps
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
