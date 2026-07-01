@@ -280,7 +280,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=16)
     parser.add_argument("--torch-device", default="auto", help="'auto', 'mps', or 'cpu' for text/VAE components.")
     parser.add_argument("--torch-dtype", choices=("fp16", "fp32"), default="fp16")
-    parser.add_argument("--mlx-dtype", choices=("fp16", "fp32"), default="fp16")
+    parser.add_argument("--mlx-dtype", choices=("fp16", "bf16", "fp32"), default="fp16")
     parser.add_argument(
         "--mlx-quantization",
         choices=("none", "int8", "int4", "mxfp8", "mxfp4", "nvfp4"),
@@ -314,8 +314,8 @@ def main() -> None:
     from diffusers import UniPCMultistepScheduler
 
     from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-    from fastvideo.models.utils import pred_noise_to_pred_video
     from fastvideo.mlx_runtime.fastwan import mlx_dit_from_diffusers_safetensors
+    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
 
     mx.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -326,7 +326,7 @@ def main() -> None:
     latent_frames = (args.num_frames - 1) // 4 + 1
     latent_height = args.height // 8
     latent_width = args.width // 8
-    mx_dtype = mx.float16 if args.mlx_dtype == "fp16" else mx.float32
+    mx_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[args.mlx_dtype]
     quantization = None if args.mlx_quantization == "none" else args.mlx_quantization
 
     total_start = time.perf_counter()
@@ -379,41 +379,46 @@ def main() -> None:
         latent_width=latent_width,
     )
 
+    # DMD keeps the whole update on the MLX device via the native sampler. Only
+    # the (non-distilled) diffusers scheduler path still round-trips to torch.
+    dmd_schedule = MLXDMDSchedule.from_torch_scheduler(scheduler) if args.denoising_mode == "dmd" else None
+
     denoise_start = time.perf_counter()
     mx.reset_peak_memory()
     for step_index, timestep in enumerate(timesteps):
-        noise_latents = latents
-        latent_model_input = latents.astype(mx_dtype)
+        noise_input_latent = latents
         timestep_mx = mx.array([float(timestep.item())]).astype(mx.float32)
-        noise_pred = dit(latent_model_input, encoder_hidden_states, timestep_mx, freqs_cis)
-        mx.eval(noise_pred)
-
-        noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
-        latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
+        noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
 
         if args.denoising_mode == "dmd":
-            noise_latents_torch = torch.from_numpy(np.array(noise_latents.astype(mx.float32)))
-            pred_video_btc = pred_noise_to_pred_video(
-                pred_noise=noise_pred_torch.permute(0, 2, 1, 3, 4).flatten(0, 1),
-                noise_input_latent=noise_latents_torch.permute(0, 2, 1, 3, 4).flatten(0, 1),
-                timestep=timestep.repeat(noise_pred_torch.shape[0]),
-                scheduler=scheduler,
-            ).unflatten(0, (noise_pred_torch.shape[0], noise_pred_torch.shape[2]))
+            # On-device DMD update: no per-step MLX->torch->MLX round-trip. The
+            # affine math runs in fp32 to match the torch reference precision,
+            # then casts back to the runtime dtype. Re-noise is drawn with MLX's
+            # RNG (seeded above) instead of the torch CPU generator.
+            ts_val = float(timestep.item())
+            noise_input_f32 = noise_input_latent.astype(mx.float32)
+            pred_noise_f32 = noise_pred.astype(mx.float32)
             if step_index < len(timesteps) - 1:
-                next_timestep = timesteps[step_index + 1].reshape(1)
-                noise = torch.randn(latents_torch.shape, generator=generator, dtype=latents_torch.dtype)
-                latents_btc = scheduler.add_noise(
-                    pred_video_btc.flatten(0, 1),
-                    noise.permute(0, 2, 1, 3, 4).flatten(0, 1),
-                    next_timestep,
-                ).unflatten(0, pred_video_btc.shape[:2])
-                latents_torch = latents_btc.permute(0, 2, 1, 3, 4)
+                next_ts: float | None = float(timesteps[step_index + 1].item())
+                renoise = mx.random.normal(noise_input_f32.shape).astype(mx.float32)
             else:
-                latents_torch = pred_video_btc.permute(0, 2, 1, 3, 4)
+                next_ts, renoise = None, None
+            latents = dmd_step(
+                latents=noise_input_f32,
+                noise_input_latent=noise_input_f32,
+                pred_noise=pred_noise_f32,
+                schedule=dmd_schedule,
+                timestep=ts_val,
+                next_timestep=next_ts,
+                noise=renoise,
+            ).astype(mx_dtype)
         else:
+            mx.eval(noise_pred)
+            noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
+            latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
             latents_torch = scheduler.step(noise_pred_torch, timestep, latents_torch, return_dict=False)[0]
+            latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
 
-        latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
         mx.eval(latents)
         print(f"denoise step {step_index + 1}/{len(timesteps)} complete")
     denoise_time = time.perf_counter() - denoise_start

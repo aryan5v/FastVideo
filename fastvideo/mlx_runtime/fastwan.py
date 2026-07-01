@@ -257,8 +257,28 @@ def linear(x, weight, bias=None):
     return y
 
 
+def _use_fast_norm() -> bool:
+    """Opt-in to MLX's fused ``mx.fast`` normalization kernels.
+
+    Off by default so the numerically-explicit reference path stays the
+    baseline. Set ``FASTVIDEO_MLX_FAST_NORM=1`` to route LayerNorm/RMSNorm
+    through single fused Metal kernels (fewer intermediates, less memory
+    traffic) and benchmark the speedup.
+    """
+    import os
+
+    return os.environ.get("FASTVIDEO_MLX_FAST_NORM", "0") == "1"
+
+
 def layer_norm(x, weight=None, bias=None, eps: float = 1e-6):
     import mlx.core as mx
+
+    if _use_fast_norm():
+        # Compute in fp32 (matching the reference below) so downstream dtype
+        # and precision are identical across call sites.
+        w = weight.astype(mx.float32) if weight is not None else None
+        b = bias.astype(mx.float32) if bias is not None else None
+        return mx.fast.layer_norm(x.astype(mx.float32), w, b, eps)
 
     x_float = x.astype(mx.float32)
     mean = mx.mean(x_float, axis=-1, keepdims=True)
@@ -273,6 +293,9 @@ def layer_norm(x, weight=None, bias=None, eps: float = 1e-6):
 
 def rms_norm(x, weight, eps: float = 1e-6):
     import mlx.core as mx
+
+    if _use_fast_norm():
+        return mx.fast.rms_norm(x, weight, eps)
 
     orig_dtype = x.dtype
     x_float = x.astype(mx.float32)
@@ -594,6 +617,9 @@ def _load_mx_array_from_safetensor(handle, name: str, dtype):
         tensor = tensor.to(torch.float16)
     elif dtype == mx.float32:
         tensor = tensor.to(torch.float32)
+    elif dtype == mx.bfloat16:
+        # NumPy has no bfloat16, so bridge through fp32 and cast on-device below.
+        tensor = tensor.to(torch.float32)
     array = mx.array(tensor.numpy())
     del tensor
     if dtype is not None and array.dtype != dtype:
@@ -684,7 +710,7 @@ def mlx_dit_from_diffusers_safetensors(
     total_blocks = int(config["num_layers"])
     if num_blocks is None:
         num_blocks = total_blocks
-    cast_dtype = mx.float16 if dtype == "fp16" else mx.float32
+    cast_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[dtype]
     spec = MLXQuantizationSpec.from_name(quantization) if (quantization is None or isinstance(quantization, str)) else quantization
 
     top_level_names = [
