@@ -11,6 +11,10 @@ from pathlib import Path
 
 import numpy as np
 
+from fastvideo.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass(frozen=True)
 class FastWanShape:
@@ -504,7 +508,16 @@ def mlx_block_weights_from_torch(torch_block) -> dict[str, "mx.array"]:
 class MLXWanDiT:
     """Experimental FP16 Wan/FastWan DiT forward path in MLX."""
 
-    def __init__(self, weights: dict[str, "mx.array"], blocks: list[MLXWanTransformerBlock], config: dict) -> None:
+    def __init__(
+        self,
+        weights: dict[str, "mx.array"],
+        blocks: list[MLXWanTransformerBlock],
+        config: dict,
+        *,
+        compile: bool = False,
+    ) -> None:
+        import os
+
         self.weights = weights
         self.blocks = blocks
         self.config = config
@@ -516,6 +529,13 @@ class MLXWanDiT:
         self.out_channels = int(config["out_channels"])
         self.patch_size = tuple(config["patch_size"])
         self.freq_dim = int(config["freq_dim"])
+        # Opt-in graph fusion. With fixed weights and static shapes, the whole
+        # denoise-step forward is a pure function of (latents, timestep) -- a
+        # good mx.compile target. Off by default so the eager path stays the
+        # baseline; enable via constructor or FASTVIDEO_MLX_COMPILE=1 and verify
+        # with the benchmark's SSIM ~= 1.0 check.
+        self._enable_compile = compile or os.environ.get("FASTVIDEO_MLX_COMPILE", "0") == "1"
+        self._compiled_forward = None
 
     def patch_embed(self, hidden_states):
         batch, channels, frames, height, width = hidden_states.shape
@@ -581,13 +601,34 @@ class MLXWanDiT:
         hidden_states = hidden_states.transpose(0, 7, 1, 4, 2, 5, 3, 6)
         return hidden_states.reshape(batch, self.out_channels, frames, height, width)
 
-    def __call__(self, hidden_states, encoder_hidden_states, timestep, freqs_cis):
+    def _forward(self, hidden_states, encoder_hidden_states, timestep, cos, sin):
+        """Pure forward used both eagerly and as the mx.compile target.
+
+        ``cos``/``sin`` are passed as separate array args (rather than a tuple)
+        so the function traces cleanly under mx.compile.
+        """
         batch, _, frames, height, width = hidden_states.shape
+        freqs_cis = (cos, sin) if cos is not None else None
         hidden_states = self.patch_embed(hidden_states)
         temb, timestep_proj, encoder_hidden_states = self.condition(timestep, encoder_hidden_states)
         for block in self.blocks:
             hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, freqs_cis=freqs_cis)
         return self.output(hidden_states, temb, batch=batch, frames=frames, height=height, width=width)
+
+    def __call__(self, hidden_states, encoder_hidden_states, timestep, freqs_cis):
+        cos, sin = freqs_cis if freqs_cis is not None else (None, None)
+        if self._enable_compile and cos is not None:
+            import mlx.core as mx
+
+            if self._compiled_forward is None:
+                self._compiled_forward = mx.compile(self._forward)
+            try:
+                return self._compiled_forward(hidden_states, encoder_hidden_states, timestep, cos, sin)
+            except Exception as exc:  # noqa: BLE001 - some quant graphs may not trace; fall back to eager.
+                logger.warning("mx.compile forward failed (%s); falling back to eager execution.", exc)
+                self._enable_compile = False
+                self._compiled_forward = None
+        return self._forward(hidden_states, encoder_hidden_states, timestep, cos, sin)
 
 
 def mx_split_two(x, *, axis: int):
