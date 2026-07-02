@@ -20,6 +20,10 @@ from fastvideo.mlx_runtime.fastwan import (
     mlx_block_weights_from_diffusers_safetensors,
     quantization_support_error,
 )
+from fastvideo.mlx_runtime.checkpoint import (
+    load_mlx_dit_checkpoint,
+    save_mlx_dit_checkpoint,
+)
 from fastvideo.mlx_runtime.memory import (
     AppliedMemoryLimits,
     add_memory_limit_args,
@@ -40,8 +44,10 @@ __all__ = [
     "fastwan_shape",
     "fastwan_shape_from_config",
     "gib_to_bytes",
+    "load_mlx_dit_checkpoint",
     "mlx_dit_from_diffusers_safetensors",
     "mlx_block_weights_from_diffusers_safetensors",
     "mlx_block_weights_from_torch",
     "quantization_support_error",
+    "save_mlx_dit_checkpoint",
 ]

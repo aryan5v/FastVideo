@@ -296,6 +296,13 @@ def main() -> None:
     parser.add_argument("--taehv-parallel", action="store_true", help="Decode all TAEHV frames at once; faster but higher memory.")
     parser.add_argument("--prompt-encode-mode", choices=("inline", "subprocess"), default="inline")
     parser.add_argument("--prompt-embeds-cache", type=Path, default=None)
+    parser.add_argument("--mlx-checkpoint", type=Path, default=None,
+                        help="Load the DiT from a pre-quantized MLX checkpoint directory "
+                        "(created with --save-mlx-checkpoint) instead of casting/quantizing "
+                        "the Diffusers weights on every run.")
+    parser.add_argument("--save-mlx-checkpoint", type=Path, default=None,
+                        help="After loading the DiT, save it (cast + quantized) as an MLX "
+                        "checkpoint directory for fast reloads via --mlx-checkpoint.")
     add_memory_limit_args(parser)
     parser.add_argument("--encode-prompt-only", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -357,14 +364,25 @@ def main() -> None:
     load_start = time.perf_counter()
     mx.clear_cache()
     mx.reset_peak_memory()
-    dit = mlx_dit_from_diffusers_safetensors(
-        checkpoint_path,
-        config_path,
-        dtype=args.mlx_dtype,
-        quantization=quantization,
-    )
+    if args.mlx_checkpoint is not None:
+        from fastvideo.mlx_runtime.checkpoint import load_mlx_dit_checkpoint
+
+        dit = load_mlx_dit_checkpoint(args.mlx_checkpoint)
+        config = dit.config
+    else:
+        dit = mlx_dit_from_diffusers_safetensors(
+            checkpoint_path,
+            config_path,
+            dtype=args.mlx_dtype,
+            quantization=quantization,
+        )
     load_time = time.perf_counter() - load_start
     load_peak_memory = mx.get_peak_memory()
+
+    if args.save_mlx_checkpoint is not None:
+        from fastvideo.mlx_runtime.checkpoint import save_mlx_dit_checkpoint
+
+        save_mlx_dit_checkpoint(dit, args.save_mlx_checkpoint)
 
     if args.denoising_mode == "dmd":
         scheduler = FlowMatchEulerDiscreteScheduler(shift=args.flow_shift)

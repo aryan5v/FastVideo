@@ -75,4 +75,5 @@ jobs:
             fastvideo/tests/mlx/test_memory_limits.py \
             fastvideo/tests/mlx/test_quant_capability.py \
             fastvideo/tests/mlx/test_mlx_dit_parity.py \
+            fastvideo/tests/mlx/test_mlx_checkpoint.py \
             -q
