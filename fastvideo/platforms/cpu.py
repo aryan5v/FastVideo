@@ -5,7 +5,8 @@ import platform
 
 import torch
 
-from fastvideo.platforms.interface import CpuArchEnum, Platform, PlatformEnum
+from fastvideo.platforms.interface import (AttentionBackendEnum, CpuArchEnum,
+                                           Platform, PlatformEnum)
 
 
 class CpuPlatform(Platform):
@@ -47,6 +48,14 @@ class CpuPlatform(Platform):
     def get_current_memory_usage(cls, device: torch.types.Device | None = None) -> float:
         # For CPU, we can't easily get memory usage without additional libraries
         return 0.0
+
+    @classmethod
+    def get_attn_backend_cls(cls, selected_backend: AttentionBackendEnum | None, head_size: int,
+                             dtype: torch.dtype) -> str:
+        # Torch SDPA is the only backend that runs on CPU. Selecting it here
+        # (mirroring MpsPlatform) lets reference models run on CPU-only
+        # machines, e.g. the MLX-vs-torch DiT parity tests in CI.
+        return "fastvideo.attention.backends.sdpa.SDPABackend"
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
