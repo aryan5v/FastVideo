@@ -111,8 +111,11 @@ Silicon branch on top of upstream main and consists of:
   `fastvideo-kernel/`; the MPS platform hard-codes dense torch SDPA, and the
   MLX path uses dense `mx.fast` SDPA. Mac models must target FullAttn/dense
   variants.
-- Pre-quantized checkpoint distribution or an MLX exporter — every run
-  downloads fp16 weights and re-quantizes at load.
+- Pre-quantized checkpoint *distribution*. The runtime side now exists
+  (`fastvideo/mlx_runtime/checkpoint.py` saves/loads a cast + quantized DiT so
+  reloads skip requantization; `--save-mlx-checkpoint`/`--mlx-checkpoint` in
+  the generation example), but no pre-quantized weights are published on
+  Hugging Face yet, and load-time/download-size targets are unmeasured.
 - Image-to-video, multi-device, and a real CLI surface (the Mac path is driven
   by example scripts).
 
@@ -159,6 +162,34 @@ behind raw speed numbers.
    the SSIM regression gate is enforced on every runtime change. Speed that
    breaks quality does not count as progress.
 
+### Two lanes: FastVideo-in-general vs the MLX fast lane
+
+The goal is bringing FastVideo — not only FastWan-QAD — to Macs. That happens
+on two lanes with different economics:
+
+- **Compatibility lane (torch-MPS).** `MpsPlatform` is model-agnostic: any
+  FastVideo pipeline whose components fit in unified memory can run through
+  the normal pipeline abstractions with dense SDPA, fp16, and eager execution.
+  This lane inherits every model family the repo supports (Wan 2.1/2.2,
+  HunyuanVideo, LTX-2, …) at whatever speed torch-MPS delivers. Work here is
+  general: memory-tier controls, decode strategies, prompt-encoder freeing,
+  and CI all apply across families. Each family still needs a one-time
+  verification pass (op coverage, dtype quirks, memory fit), which is why the
+  benchmark suite tracks model coverage explicitly.
+- **Fast lane (MLX).** The MLX DiT runtime is per-architecture by design —
+  today it implements the Wan T2V transformer. Wan is the right first target
+  because FastWan's 3-step DMD models make consumer-Mac latency plausible at
+  all. Extending the fast lane to another family (Wan 2.2 TI2V-5B is next per
+  M6; HunyuanVideo/LTX-2 later) is a bounded port: block parity harness →
+  full-DiT parity test → benchmark cells, the same ladder Wan followed. The
+  parity/benchmark/checkpoint infrastructure built for Wan is family-agnostic
+  and is the reusable part.
+
+Practically: FastWan-QAD-style models are the flagship demo of the fast lane,
+while the compatibility lane is what makes this "FastVideo on Mac" rather than
+"one model on Mac". Both lanes ship through the same presets, benchmarks, and
+docs.
+
 ## Milestones and exit criteria (July–November 2026)
 
 Each milestone is done only when every exit criterion is met. Criteria are
@@ -170,16 +201,30 @@ Harden what exists so everything after it can be trusted.
 
 Exit criteria:
 
-- A full-DiT MLX-vs-PyTorch parity test with pinned tolerances exists and is
-  runnable in CI (CPU-golden variant) and on-device.
-- End-to-end prompt→video succeeds on a stock 16 GB M-series Mac at a pinned
+- **[done]** A full-DiT MLX-vs-PyTorch parity test with pinned tolerances
+  exists and is runnable in CI (CPU-golden variant) and on-device:
+  `fastvideo/tests/mlx/test_mlx_dit_parity.py` (fp32 tolerance 2e-4, measured
+  ~1.7e-6 on the MLX CPU backend; int8 gated at ≥20 dB SNR, measured ~43 dB).
+  `CpuPlatform` now selects Torch SDPA so the reference model also runs on
+  CPU-only machines via `mlx[cpu]`.
+- **[measured under a cap; stock 16 GB machine still pending]** End-to-end
+  prompt→video succeeds on a stock 16 GB M-series Mac at a pinned
   configuration (3-step DMD, INT8, TAEHV, 448×832×61), with peak memory and
-  wall time recorded in this document.
-- MXFP/NVFP4-style modes detect MLX capability and fail with a clear message
-  (or are marked unsupported) instead of raising deep inside `mx.quantize`.
-- TAEHV is vendored — no downloading and executing remote code at runtime.
-- `mlx_wan_quant_benchmark.py` uses the on-device DMD sampler.
-- The branch is rebased onto current upstream main.
+  wall time recorded. First real-device numbers now exist (M4 Max, MLX
+  allocator capped to 16 GiB: INT8+TAEHV 480×832×81 passes at 4.69 GiB MLX
+  peak — see `apple_silicon_benchmark_baseline.md`); a run on an actual 16 GB
+  machine remains the closing evidence.
+- **[done]** MXFP/NVFP4-style modes detect MLX capability and fail with a
+  clear message instead of raising deep inside `mx.quantize`
+  (`ensure_quantization_supported`; both benchmark sweeps record
+  `unsupported_by_mlx` rows and keep going).
+- **[done]** TAEHV is vendored (`fastvideo/third_party/taehv`, MIT) — no
+  downloading and executing remote code at runtime; the checkpoint download
+  is sha256-pinned.
+- **[done]** `mlx_wan_quant_benchmark.py` uses the on-device DMD sampler.
+- **[blocked on fork sync]** The branch is rebased onto current upstream main
+  — the fork's `main` currently predates this branch's base, so there is
+  nothing newer to rebase onto until the fork syncs with hao-ai-lab main.
 
 ### M2 — Benchmark suite as a product surface (Months 1–2)
 
@@ -200,7 +245,12 @@ Exit criteria:
   `fastvideo/mlx_runtime/`. Initial workflow exists; first hosted-run results
   should be recorded before treating this as fully closed.
 - A baseline report for at least one 16 GB and one 64 GB machine is checked
-  into the repository.
+  into the repository. A first M4 Max baseline (including a 16 GiB-capped
+  stress run) is in `apple_silicon_benchmark_baseline.md`.
+- Model coverage beyond Wan: at least one additional FastVideo family (e.g.
+  Wan 2.2 TI2V-5B or LTX-2) verified end to end on the torch-MPS
+  compatibility lane, with its result recorded in the baseline report — this
+  keeps "FastVideo on Mac" honest, not just "FastWan on Mac".
 
 ### M3 — Runtime hardening and UX (Months 2–3)
 
@@ -209,9 +259,12 @@ Exit criteria:
 - `mx.compile` is on by default, with the SSIM gate proving no quality
   regression and the step-time improvement published in the benchmark report.
 - Zero host/device transfers inside the denoise loop, asserted by test.
-- Pre-quantized MLX checkpoints can be saved and loaded: 16 GB users download
-  INT8 weights (roughly half the bytes) and skip requantization on every run;
-  load-time and download-size targets recorded.
+- **[partially done]** Pre-quantized MLX checkpoints can be saved and loaded:
+  16 GB users download INT8 weights (roughly half the bytes) and skip
+  requantization on every run; load-time and download-size targets recorded.
+  Save/load with exact round-trip tests landed
+  (`fastvideo/mlx_runtime/checkpoint.py`); remaining: publish pre-quantized
+  weights and record on-device load-time/size numbers.
 - A real CLI replaces the example scripts:
   `fastvideo generate --preset mac-16gb|mac-32gb|mac-64gb`, wired through the
   existing pipeline and platform abstractions.
