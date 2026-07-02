@@ -110,9 +110,11 @@ If you're planning to contribute to FastVideo please see the following page:
 ### For Basic Inference
 
 - Mac M1, M2, M3, or M4.
-- **16 GB unified memory** is the baseline target for local generation (e.g. FastWan
-  T2V-1.3B at 480p / 5s). To fit 16 GB, encode the prompt and free the text encoder
-  before loading the DiT (the MLX example supports a subprocess encode-then-free mode).
+- **16 GB unified memory** is the baseline target for accessible local generation.
+  Expect lower resolutions, shorter clips, quantized DiT weights, and memory-aware
+  decode paths first. To fit smaller machines, encode the prompt and free the text
+  encoder before loading the DiT (the MLX example supports a subprocess
+  encode-then-free mode).
 - **32 GB+** gives more headroom for higher resolution, longer clips, and running the
   full-precision Wan VAE decoder; Mac Studio-class machines (64 GB+) can push to 720p and
   longer generations.

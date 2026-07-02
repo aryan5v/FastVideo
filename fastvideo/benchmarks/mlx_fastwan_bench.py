@@ -51,7 +51,7 @@ from examples.inference.basic.mlx_wan_prompt_to_video import (
 REFERENCE_MODE = "fp16"
 REFERENCE_DECODER = "wan-vae"
 
-ALLOWED_MODES = ("fp16", "bf16", "int8", "int4", "mxfp8", "mxfp4")
+ALLOWED_MODES = ("fp16", "bf16", "int8", "int4", "mxfp8", "mxfp4", "nvfp4")
 ALLOWED_DECODERS = ("taehv", "wan-vae")
 
 
@@ -74,7 +74,7 @@ def _mode_to_dtype_quant(mode: str) -> tuple[str, str | None]:
         return "bf16", None
     if mode == "fp16":
         return "fp16", None
-    # int8/int4/mxfp* -> fp16 activations + quantized weights.
+    # int8/int4/mxfp*/nvfp4 -> fp16 activations + quantized weights.
     return "fp16", mode
 
 
@@ -98,6 +98,7 @@ def _denoise_dmd_on_device(
     encoder_hidden_states,
     freqs_cis,
     timesteps: list[int],
+    renoise_by_step: list[np.ndarray],
     schedule,
     dmd_step,
     mx_dtype,
@@ -116,7 +117,7 @@ def _denoise_dmd_on_device(
         pred_noise_f32 = noise_pred.astype(mx.float32)
         if step_index < len(timesteps) - 1:
             next_ts: float | None = float(timesteps[step_index + 1])
-            renoise = mx.random.normal(noise_input_f32.shape).astype(mx.float32)
+            renoise = mx.array(renoise_by_step[step_index]).astype(mx.float32)
         else:
             next_ts, renoise = None, None
         latents = dmd_step(
@@ -149,11 +150,22 @@ def _latent_delta_metrics(candidate: np.ndarray, baseline: np.ndarray) -> dict[s
     }
 
 
-def _ms_ssim(reference_video: Path, candidate_video: Path) -> float | None:
+def _ms_ssim(reference_video: Path, candidate_video: Path, *, required: bool = False) -> float | None:
     """Mean MS-SSIM between two mp4s, via the repo's tested helper."""
     if not reference_video.exists() or not candidate_video.exists():
         return None
-    from fastvideo.tests.utils import compute_video_ssim_torchvision
+    try:
+        from fastvideo.tests.utils import compute_video_ssim_torchvision
+    except ImportError as exc:
+        message = (
+            "MS-SSIM is unavailable because `pytorch-msssim` is not installed. "
+            "Install FastVideo with the test extra, e.g. `uv pip install -e '.[mlx,test]'`, "
+            "or run without an SSIM assertion."
+        )
+        if required:
+            raise RuntimeError(message) from exc
+        print(f"{message} Skipping MS-SSIM.")
+        return None
 
     ssim_values = compute_video_ssim_torchvision(str(reference_video), str(candidate_video), use_ms_ssim=True)
     return float(ssim_values[0])
@@ -198,6 +210,7 @@ def _generate_cell(
     freqs_cis,
     timesteps: list[int],
     latents_seed: np.ndarray,
+    renoise_by_step: list[np.ndarray],
 ) -> Cell:
     import mlx.core as mx
 
@@ -233,6 +246,7 @@ def _generate_cell(
         encoder_hidden_states=encoder_hidden_states.astype(mx_dtype),
         freqs_cis=freqs_cis,
         timesteps=timesteps,
+        renoise_by_step=renoise_by_step,
         schedule=schedule,
         dmd_step=dmd_step,
         mx_dtype=mx_dtype,
@@ -349,6 +363,13 @@ def main() -> None:
     ).numpy()
 
     timesteps = [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()]
+    # Keep DMD stochasticity identical across benchmark cells. Without this,
+    # FP16/INT8/decoder comparisons can accidentally measure different re-noise
+    # samples instead of only quantization or decoder differences.
+    renoise_by_step = [
+        torch.randn(latents_seed.shape, generator=generator, dtype=torch.float32).numpy()
+        for _ in range(max(0, len(timesteps) - 1))
+    ]
 
     cells: list[Cell] = []
     for mode in modes:
@@ -365,6 +386,7 @@ def main() -> None:
                     freqs_cis=freqs_cis,
                     timesteps=timesteps,
                     latents_seed=latents_seed,
+                    renoise_by_step=renoise_by_step,
                 )
             )
 
@@ -386,7 +408,7 @@ def main() -> None:
     rows: list[dict] = []
     failures: list[str] = []
     for cell in cells:
-        ms_ssim = _ms_ssim(Path(reference_video), cell.video_path)
+        ms_ssim = _ms_ssim(Path(reference_video), cell.video_path, required=args.assert_min_ssim is not None)
         cell.metrics["ms_ssim_vs_ref"] = ms_ssim
         if reference_latents is not None:
             cell.metrics.update(_latent_delta_metrics(cell.latents, reference_latents))
