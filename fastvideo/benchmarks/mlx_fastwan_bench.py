@@ -31,6 +31,7 @@ Run on an Apple Silicon Mac (needs ``mlx`` + a torch build with MPS):
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import time
@@ -55,8 +56,29 @@ ALLOWED_MODES = ("fp16", "bf16", "int8", "int4", "mxfp8", "mxfp4", "nvfp4")
 ALLOWED_DECODERS = ("taehv", "wan-vae")
 
 
+@dataclass(frozen=True)
+class PromptCase:
+    id: str
+    prompt: str
+
+
+PROMPT_SETS = {
+    "motion7": (
+        PromptCase("beach-sunset", "A slow cinematic sunset over ocean waves at a quiet beach."),
+        PromptCase("fox-forest", "A fox runs through a misty pine forest, leaves kicking up behind it."),
+        PromptCase("raccoon-sunflowers", "A raccoon walks through a sunflower field as petals move in the wind."),
+        PromptCase("surfing-cat", "A cat wearing sunglasses surfs across a bright blue ocean wave."),
+        PromptCase("burning-clock", "A vintage table clock burns on a wooden desk, flames flickering realistically."),
+        PromptCase("forest-walk", "Video game style footage of a man walking through a dense forest path."),
+        PromptCase("sea-dock-yachts", "Several yachts are parked at a sea dock while water ripples around them."),
+    ),
+}
+
+
 @dataclass
 class Cell:
+    prompt_id: str
+    prompt: str
     mode: str
     decoder: str
     video_path: Path
@@ -88,6 +110,82 @@ def _parse_list(raw: str, allowed: tuple[str, ...], label: str) -> list[str]:
     if unknown:
         raise ValueError(f"Unsupported {label}: {unknown} (allowed: {list(allowed)})")
     return items
+
+
+def _safe_slug(value: str, *, fallback: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    slug = "-".join(part for part in slug.split("-") if part)
+    return slug[:64] or fallback
+
+
+def _load_prompt_cases(prompt: str, prompt_file: Path | None, prompt_set: str = "single") -> list[PromptCase]:
+    """Load one prompt, a built-in prompt set, or a text/jsonl prompt file."""
+    if prompt_file is None:
+        if prompt_set == "single":
+            return [PromptCase(id="prompt-001", prompt=prompt)]
+        if prompt_set not in PROMPT_SETS:
+            raise ValueError(f"Unsupported prompt set: {prompt_set} (allowed: {sorted(PROMPT_SETS) + ['single']})")
+        return list(PROMPT_SETS[prompt_set])
+    cases: list[PromptCase] = []
+    for line_index, raw_line in enumerate(prompt_file.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        prompt_id = f"prompt-{len(cases) + 1:03d}"
+        prompt_text = line
+        if prompt_file.suffix.lower() == ".jsonl":
+            item = json.loads(line)
+            prompt_text = str(item.get("prompt") or item.get("text") or item.get("caption") or "").strip()
+            if not prompt_text:
+                raise ValueError(f"{prompt_file}:{line_index} has no prompt/text/caption field")
+            prompt_id = str(item.get("id") or item.get("name") or prompt_id)
+        cases.append(PromptCase(id=_safe_slug(prompt_id, fallback=f"prompt-{len(cases) + 1:03d}"), prompt=prompt_text))
+    if not cases:
+        raise ValueError(f"No prompts found in {prompt_file}")
+    return cases
+
+
+def _gib_to_bytes(value: float | None) -> int | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise ValueError("memory limits must be positive GiB values")
+    return int(value * 1024**3)
+
+
+def _apply_runtime_limits(args, mx) -> dict[str, int | float | str | None]:
+    """Apply optional MLX/MPS memory caps for memory-tier benchmark runs.
+
+    MLX limits cap the Apple-native DiT path. The PyTorch MPS watermarks are a
+    best-effort cap for the hybrid prompt/decode stages and must be set before
+    importing torch.
+    """
+    applied: dict[str, int | float | str | None] = {}
+    if args.torch_mps_high_watermark_ratio is not None:
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(args.torch_mps_high_watermark_ratio)
+        applied["torch_mps_high_watermark_ratio"] = args.torch_mps_high_watermark_ratio
+    if args.torch_mps_low_watermark_ratio is not None:
+        os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = str(args.torch_mps_low_watermark_ratio)
+        applied["torch_mps_low_watermark_ratio"] = args.torch_mps_low_watermark_ratio
+
+    memory_limit = _gib_to_bytes(args.mlx_memory_limit_gib)
+    if memory_limit is not None:
+        applied["mlx_memory_limit_bytes"] = memory_limit
+        applied["mlx_previous_memory_limit_bytes"] = int(mx.set_memory_limit(memory_limit))
+
+    cache_limit = 0 if args.mlx_disable_cache else _gib_to_bytes(args.mlx_cache_limit_gib)
+    if cache_limit is not None:
+        applied["mlx_cache_limit_bytes"] = cache_limit
+        applied["mlx_previous_cache_limit_bytes"] = int(mx.set_cache_limit(cache_limit))
+
+    wired_limit = _gib_to_bytes(args.mlx_wired_limit_gib)
+    if wired_limit is not None:
+        applied["mlx_wired_limit_bytes"] = wired_limit
+        try:
+            applied["mlx_previous_wired_limit_bytes"] = int(mx.set_wired_limit(wired_limit))
+        except Exception as exc:  # noqa: BLE001 - macOS version / system limit dependent.
+            applied["mlx_wired_limit_error"] = f"{type(exc).__name__}: {exc}"
+    return applied
 
 
 def denoise_dmd_on_device(
@@ -173,6 +271,7 @@ def _ms_ssim(reference_video: Path, candidate_video: Path, *, required: bool = F
 
 def _markdown_table(rows: list[dict]) -> str:
     columns = [
+        ("prompt_id", "prompt"),
         ("mode", "mode"),
         ("decoder", "decoder"),
         ("status", "status"),
@@ -198,6 +297,88 @@ def _markdown_table(rows: list[dict]) -> str:
                 cells.append(str(value))
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
+
+
+def _format_metric(value) -> str:
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def _html_grid(rows: list[dict]) -> str:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("prompt_id", "prompt")), []).append(row)
+
+    sections = []
+    for prompt_id, group_rows in groups.items():
+        prompt = next((str(row.get("prompt", "")) for row in group_rows if row.get("prompt")), "")
+        cards = []
+        for row in group_rows:
+            title = f"{row.get('mode', '-')} / {row.get('decoder', '-')}"
+            status = row.get("status", "-")
+            video_path = row.get("video_path")
+            if video_path:
+                media = f'<video src="{html.escape(str(video_path))}" muted loop controls playsinline></video>'
+            else:
+                media = f'<div class="missing">No video<br>{html.escape(str(row.get("error", "")))}</div>'
+            metrics = (
+                f"status={status} · total={_format_metric(row.get('total_s'))}s · "
+                f"denoise={_format_metric(row.get('denoise_s'))}s · "
+                f"decode={_format_metric(row.get('decode_s'))}s · "
+                f"peak={_format_metric(row.get('peak_gib'))}GiB"
+            )
+            cards.append(
+                "<article>"
+                f"<h3>{html.escape(title)}</h3>"
+                f"{media}"
+                f"<p>{html.escape(metrics)}</p>"
+                "</article>"
+            )
+        sections.append(
+            "<section>"
+            f"<h2>{html.escape(prompt_id)}</h2>"
+            f"<p class=\"prompt\">{html.escape(prompt)}</p>"
+            f"<div class=\"grid\">{''.join(cards)}</div>"
+            "</section>"
+        )
+
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FastVideo MLX benchmark grid</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #111; color: #eee; }
+    button { margin-right: 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid #555; background: #222; color: #eee; }
+    section { margin-top: 28px; }
+    .prompt { color: #bbb; max-width: 900px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    article { background: #1b1b1b; border: 1px solid #333; border-radius: 12px; padding: 12px; }
+    h1, h2, h3 { margin: 0 0 10px; }
+    video { width: 100%; border-radius: 8px; background: #000; }
+    article p { color: #bbb; font-size: 13px; line-height: 1.4; }
+    .missing { min-height: 160px; display: grid; place-items: center; text-align: center; color: #f5b5b5; background: #2a1515; border-radius: 8px; padding: 12px; }
+  </style>
+</head>
+<body>
+  <h1>FastVideo MLX benchmark grid</h1>
+  <p>Use the controls below to start/stop every clip together for side-by-side inspection.</p>
+  <button onclick="for (const v of document.querySelectorAll('video')) { v.currentTime = 0; v.play(); }">Restart + play all</button>
+  <button onclick="for (const v of document.querySelectorAll('video')) v.pause();">Pause all</button>
+""" + "\n".join(sections) + """
+</body>
+</html>
+"""
+
+
+def _write_html_grid(rows: list[dict], output_dir: Path) -> Path:
+    html_path = output_dir / "index.html"
+    html_path.write_text(_html_grid(rows))
+    return html_path
 
 
 def _generate_cell(
@@ -255,7 +436,11 @@ def _generate_cell(
     denoise_s = time.perf_counter() - denoise_start
     denoise_peak = _peak_memory_bytes(mx)
 
-    video_path = args.output_dir / f"video_{mode}_{decoder}_{args.height}x{args.width}x{args.num_frames}.mp4"
+    video_path = (
+        args.output_dir
+        / f"{args.current_prompt_id}"
+        / f"video_{mode}_{decoder}_{args.height}x{args.width}x{args.num_frames}.mp4"
+    )
     decode_start = time.perf_counter()
     decode_latents_to_video(
         model_root=args.model_root,
@@ -272,9 +457,12 @@ def _generate_cell(
     decode_s = time.perf_counter() - decode_start
 
     metrics: dict[str, float | int | str | bool | None] = {
+        "prompt_id": args.current_prompt_id,
+        "prompt": args.current_prompt,
         "mode": mode,
         "decoder": decoder,
         "status": "ok",
+        "video_path": str(video_path.relative_to(args.output_dir)),
         "load_s": load_s,
         "denoise_s": denoise_s,
         "decode_s": decode_s,
@@ -285,14 +473,40 @@ def _generate_cell(
         "compute_dtype": base_dtype,
         "compile": os.environ.get("FASTVIDEO_MLX_COMPILE", "0") == "1",
         "fast_norm": os.environ.get("FASTVIDEO_MLX_FAST_NORM", "0") == "1",
+        "mlx_memory_limit_gib": args.mlx_memory_limit_gib,
+        "mlx_cache_limit_gib": args.mlx_cache_limit_gib,
+        "mlx_disable_cache": args.mlx_disable_cache,
+        "mlx_wired_limit_gib": args.mlx_wired_limit_gib,
+        "torch_mps_high_watermark_ratio": args.torch_mps_high_watermark_ratio,
+        "torch_mps_low_watermark_ratio": args.torch_mps_low_watermark_ratio,
     }
-    return Cell(mode=mode, decoder=decoder, video_path=video_path, latents=latents_np, metrics=metrics)
+    return Cell(
+        prompt_id=args.current_prompt_id,
+        prompt=args.current_prompt,
+        mode=mode,
+        decoder=decoder,
+        video_path=video_path,
+        latents=latents_np,
+        metrics=metrics,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MLX FastWan prove-out benchmark (latency + quality).")
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
     parser.add_argument("--prompt", default="A paper boat sails through a shallow stream in a mossy forest.")
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=None,
+        help="Optional prompt set. Plain text uses one prompt per non-empty line; .jsonl accepts prompt/text/caption plus optional id/name.",
+    )
+    parser.add_argument(
+        "--prompt-set",
+        choices=("single", *PROMPT_SETS.keys()),
+        default="single",
+        help="Built-in standard prompt set. Ignored when --prompt-file is supplied.",
+    )
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--num-frames", type=int, default=81)
@@ -320,12 +534,26 @@ def main() -> None:
     parser.add_argument("--taehv-source-path", type=Path, default=None)
     parser.add_argument("--taehv-checkpoint-path", type=Path, default=None)
     parser.add_argument("--taehv-parallel", action="store_true")
+    parser.add_argument("--mlx-memory-limit-gib", type=float, default=None,
+                        help="Set MLX memory limit in GiB for memory-tier testing (DiT path).")
+    parser.add_argument("--mlx-cache-limit-gib", type=float, default=None,
+                        help="Set MLX cache limit in GiB. Use --mlx-disable-cache to force 0.")
+    parser.add_argument("--mlx-disable-cache", action="store_true",
+                        help="Set MLX cache limit to 0 for stricter memory-tier tests.")
+    parser.add_argument("--mlx-wired-limit-gib", type=float, default=None,
+                        help="Set MLX wired-memory limit in GiB where supported by macOS/MLX.")
+    parser.add_argument("--torch-mps-high-watermark-ratio", type=float, default=None,
+                        help="Set PYTORCH_MPS_HIGH_WATERMARK_RATIO before importing torch.")
+    parser.add_argument("--torch-mps-low-watermark-ratio", type=float, default=None,
+                        help="Set PYTORCH_MPS_LOW_WATERMARK_RATIO before importing torch.")
     args = parser.parse_args()
 
     if args.compile:
         os.environ["FASTVIDEO_MLX_COMPILE"] = "1"
 
     import mlx.core as mx
+
+    runtime_limits = _apply_runtime_limits(args, mx)
     import torch
 
     mx.random.seed(args.seed)
@@ -341,16 +569,6 @@ def main() -> None:
     latent_frames = (args.num_frames - 1) // 4 + 1
     latent_height = args.height // 8
     latent_width = args.width // 8
-
-    # Shared prompt encode + rotary + initial noise (identical across all cells).
-    prompt_embeds = encode_prompt(
-        model_root=args.model_root,
-        prompt=args.prompt,
-        max_sequence_length=args.max_sequence_length,
-        device_arg=args.torch_device,
-        dtype_arg=args.torch_dtype,
-    )
-    encoder_hidden_states = mx.array(prompt_embeds.numpy())
     freqs_cis = make_rotary_embeddings(
         config,
         latent_frames=latent_frames,
@@ -375,36 +593,51 @@ def main() -> None:
 
     from fastvideo.mlx_runtime.fastwan import UnsupportedMLXQuantizationError
 
+    prompt_cases = _load_prompt_cases(args.prompt, args.prompt_file, args.prompt_set)
     cells: list[Cell] = []
     unsupported_rows: list[dict] = []
-    for mode in modes:
-        for decoder in decoders:
-            print(f"=== cell: mode={mode} decoder={decoder} ===")
-            try:
-                cells.append(
-                    _generate_cell(
-                        args=args,
-                        mode=mode,
-                        decoder=decoder,
-                        checkpoint_path=checkpoint_path,
-                        config_path=config_path,
-                        encoder_hidden_states=encoder_hidden_states,
-                        freqs_cis=freqs_cis,
-                        timesteps=timesteps,
-                        latents_seed=latents_seed,
-                        renoise_by_step=renoise_by_step,
+    for prompt_case in prompt_cases:
+        args.current_prompt_id = prompt_case.id
+        args.current_prompt = prompt_case.prompt
+        prompt_embeds = encode_prompt(
+            model_root=args.model_root,
+            prompt=prompt_case.prompt,
+            max_sequence_length=args.max_sequence_length,
+            device_arg=args.torch_device,
+            dtype_arg=args.torch_dtype,
+        )
+        encoder_hidden_states = mx.array(prompt_embeds.numpy())
+
+        for mode in modes:
+            for decoder in decoders:
+                print(f"=== cell: prompt={prompt_case.id} mode={mode} decoder={decoder} ===")
+                try:
+                    cells.append(
+                        _generate_cell(
+                            args=args,
+                            mode=mode,
+                            decoder=decoder,
+                            checkpoint_path=checkpoint_path,
+                            config_path=config_path,
+                            encoder_hidden_states=encoder_hidden_states,
+                            freqs_cis=freqs_cis,
+                            timesteps=timesteps,
+                            latents_seed=latents_seed,
+                            renoise_by_step=renoise_by_step,
+                        )
                     )
-                )
-            except UnsupportedMLXQuantizationError as exc:
-                # Record the cell as unsupported and keep sweeping: a partial
-                # report on this MLX build beats crashing the whole run.
-                print(f"skipping cell (unsupported by this MLX build): {exc}")
-                unsupported_rows.append({
-                    "mode": mode,
-                    "decoder": decoder,
-                    "status": "unsupported_by_mlx",
-                    "error": str(exc),
-                })
+                except UnsupportedMLXQuantizationError as exc:
+                    # Record the cell as unsupported and keep sweeping: a partial
+                    # report on this MLX build beats crashing the whole run.
+                    print(f"skipping cell (unsupported by this MLX build): {exc}")
+                    unsupported_rows.append({
+                        "prompt_id": prompt_case.id,
+                        "prompt": prompt_case.prompt,
+                        "mode": mode,
+                        "decoder": decoder,
+                        "status": "unsupported_by_mlx",
+                        "error": str(exc),
+                    })
 
     if not cells:
         metrics_path = args.output_dir / "metrics.json"
@@ -413,33 +646,43 @@ def main() -> None:
             f"No benchmark cell could run: every requested mode is unsupported by this MLX build. "
             f"Wrote {metrics_path}.")
 
-    # Resolve the SSIM/latent reference: external clip, else the fp16+wan-vae cell
-    # (or the first cell if that combination was not swept).
-    reference_video = args.reference
-    reference_latents = None
-    if reference_video is None:
-        ref_cell = next(
-            (c for c in cells if c.mode == REFERENCE_MODE and c.decoder == REFERENCE_DECODER),
-            cells[0],
-        )
-        reference_video = ref_cell.video_path
-        reference_latents = ref_cell.latents
-        print(f"Using internal reference cell: mode={ref_cell.mode} decoder={ref_cell.decoder}")
+    # Resolve one internal reference per prompt. A single external reference, if
+    # supplied, is used for every prompt and only video metrics are computed.
+    reference_by_prompt: dict[str, tuple[Path, np.ndarray | None]] = {}
+    if args.reference is not None:
+        for prompt_case in prompt_cases:
+            reference_by_prompt[prompt_case.id] = (args.reference, None)
+    else:
+        for prompt_case in prompt_cases:
+            prompt_cells = [c for c in cells if c.prompt_id == prompt_case.id]
+            if not prompt_cells:
+                continue
+            ref_cell = next(
+                (c for c in prompt_cells if c.mode == REFERENCE_MODE and c.decoder == REFERENCE_DECODER),
+                prompt_cells[0],
+            )
+            reference_by_prompt[prompt_case.id] = (ref_cell.video_path, ref_cell.latents)
+            print(
+                f"Using internal reference cell for {prompt_case.id}: "
+                f"mode={ref_cell.mode} decoder={ref_cell.decoder}")
 
     lpips_fn = _load_lpips() if args.lpips else None
 
     rows: list[dict] = []
     failures: list[str] = []
     for cell in cells:
+        reference_video, reference_latents = reference_by_prompt[cell.prompt_id]
         ms_ssim = _ms_ssim(Path(reference_video), cell.video_path, required=args.assert_min_ssim is not None)
         cell.metrics["ms_ssim_vs_ref"] = ms_ssim
+        cell.metrics.update(runtime_limits)
         if reference_latents is not None:
             cell.metrics.update(_latent_delta_metrics(cell.latents, reference_latents))
         cell.metrics["lpips_vs_ref"] = (
             _lpips_between(lpips_fn, Path(reference_video), cell.video_path) if lpips_fn else None
         )
         if args.assert_min_ssim is not None and ms_ssim is not None and ms_ssim < args.assert_min_ssim:
-            failures.append(f"{cell.mode}/{cell.decoder}: MS-SSIM {ms_ssim:.4f} < {args.assert_min_ssim}")
+            failures.append(
+                f"{cell.prompt_id}/{cell.mode}/{cell.decoder}: MS-SSIM {ms_ssim:.4f} < {args.assert_min_ssim}")
         rows.append(dict(cell.metrics))
         print(json.dumps(cell.metrics, indent=2))
     rows.extend(unsupported_rows)
@@ -449,8 +692,9 @@ def main() -> None:
     table_path = args.output_dir / "metrics.md"
     table = _markdown_table(rows)
     table_path.write_text(table + "\n")
+    html_path = _write_html_grid(rows, args.output_dir)
     print("\n" + table)
-    print(f"\nWrote {metrics_path} and {table_path}")
+    print(f"\nWrote {metrics_path}, {table_path}, and {html_path}")
 
     if failures:
         raise SystemExit("SSIM regression gate failed:\n  " + "\n  ".join(failures))
