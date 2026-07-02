@@ -240,7 +240,10 @@ Exit criteria:
   fidelity-to-reference alone cannot detect a bad reference.
 - Latency is split into load/denoise/decode with cold-start vs warm-start, and
   sustained vs burst throughput is recorded on laptops (thermal throttling is
-  real on fanless machines).
+  real on fanless machines). Partially landed: the benchmark now records
+  first-step vs steady-step denoise time (exposes `mx.compile` warm-up) and
+  `load_source` (Diffusers conversion vs pre-quantized checkpoint reload via
+  `--mlx-checkpoint-cache`); thermal/sustained measurement remains open.
 - A macOS arm64 CI job runs an MLX-device smoke test on every PR touching
   `fastvideo/mlx_runtime/`. Initial workflow exists; first hosted-run results
   should be recorded before treating this as fully closed.

@@ -89,3 +89,53 @@ def test_html_grid_includes_video_and_sync_controls() -> None:
     assert "Restart + play all" in rendered
     assert "fox/video_int8_taehv.mp4" in rendered
     assert "A fox runs." in rendered
+
+
+def test_denoise_dmd_on_device_runs_tiny_dit_and_reports_step_times(distributed_setup) -> None:
+    mx = pytest.importorskip("mlx.core", reason="MLX is required for the on-device denoise test")
+    import numpy as np
+    import torch
+
+    from fastvideo.benchmarks.mlx_fastwan_bench import denoise_dmd_on_device
+    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
+    from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import (
+        FlowMatchEulerDiscreteScheduler,
+    )
+    from fastvideo.tests.mlx.tiny_wan import (
+        build_hf_config,
+        build_inputs,
+        build_tiny_wan_config,
+        build_torch_model,
+        mlx_dit_from_torch_model,
+        mlx_rotary_embeddings,
+    )
+
+    dit = mlx_dit_from_torch_model(build_torch_model(), build_hf_config(build_tiny_wan_config()))
+    hidden_states, encoder_hidden_states, _ = build_inputs()
+    schedule = MLXDMDSchedule.from_torch_scheduler(FlowMatchEulerDiscreteScheduler(shift=8.0))
+
+    timesteps = [1000, 757, 522]
+    generator = torch.Generator(device="cpu").manual_seed(7)
+    latents_seed = torch.randn(hidden_states.shape, generator=generator, dtype=torch.float32).numpy()
+    renoise_by_step = [
+        torch.randn(hidden_states.shape, generator=generator, dtype=torch.float32).numpy()
+        for _ in range(len(timesteps) - 1)
+    ]
+
+    latents_np, step_times = denoise_dmd_on_device(
+        mx=mx,
+        dit=dit,
+        latents=mx.array(latents_seed),
+        encoder_hidden_states=mx.array(encoder_hidden_states.numpy()),
+        freqs_cis=mlx_rotary_embeddings(hidden_states),
+        timesteps=timesteps,
+        renoise_by_step=renoise_by_step,
+        schedule=schedule,
+        dmd_step=dmd_step,
+        mx_dtype=mx.float32,
+    )
+
+    assert latents_np.shape == tuple(hidden_states.shape)
+    assert np.isfinite(latents_np).all()
+    assert len(step_times) == len(timesteps)
+    assert all(t > 0 for t in step_times)

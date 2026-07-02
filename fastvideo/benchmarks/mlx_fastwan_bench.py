@@ -207,13 +207,20 @@ def denoise_dmd_on_device(
     schedule,
     dmd_step,
     mx_dtype,
-) -> "np.ndarray":
+) -> tuple[np.ndarray, list[float]]:
     """Run the FastWan DMD loop entirely on the MLX device.
 
     Mirrors the loop in ``mlx_wan_prompt_to_video.py`` (fp32 affine math, MLX RNG
     re-noise) so the benchmark measures exactly the shipped path.
+
+    Returns the final latents plus per-step wall times. The first step carries
+    one-time costs (mx.compile tracing, kernel warm-up), so first-vs-steady
+    step timing is how the benchmark separates cold-start from steady-state
+    denoise throughput.
     """
+    step_times: list[float] = []
     for step_index, timestep in enumerate(timesteps):
+        step_start = time.perf_counter()
         noise_input_latent = latents
         timestep_mx = mx.array([float(timestep)]).astype(mx.float32)
         noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
@@ -235,7 +242,8 @@ def denoise_dmd_on_device(
             noise=renoise,
         ).astype(mx_dtype)
         mx.eval(latents)
-    return np.array(latents.astype(mx.float32))
+        step_times.append(time.perf_counter() - step_start)
+    return np.array(latents.astype(mx.float32)), step_times
 
 
 def _peak_memory_bytes(mx) -> int:
@@ -413,12 +421,33 @@ def _generate_cell(
     mx.clear_cache()
     mx.reset_peak_memory()
     load_start = time.perf_counter()
-    dit = mlx_dit_from_diffusers_safetensors(
-        checkpoint_path,
-        config_path,
-        dtype=base_dtype,
-        quantization=quantization,
-    )
+    load_source = "diffusers"
+    if args.mlx_checkpoint_cache is not None:
+        from fastvideo.mlx_runtime.checkpoint import (
+            load_mlx_dit_checkpoint,
+            save_mlx_dit_checkpoint,
+        )
+
+        mode_ckpt_dir = args.mlx_checkpoint_cache / mode
+        if (mode_ckpt_dir / "mlx_dit.json").exists():
+            dit = load_mlx_dit_checkpoint(mode_ckpt_dir)
+            load_source = "mlx_checkpoint"
+        else:
+            dit = mlx_dit_from_diffusers_safetensors(
+                checkpoint_path,
+                config_path,
+                dtype=base_dtype,
+                quantization=quantization,
+            )
+            save_mlx_dit_checkpoint(dit, mode_ckpt_dir)
+            load_source = "diffusers_then_saved"
+    else:
+        dit = mlx_dit_from_diffusers_safetensors(
+            checkpoint_path,
+            config_path,
+            dtype=base_dtype,
+            quantization=quantization,
+        )
     load_s = time.perf_counter() - load_start
     load_peak = _peak_memory_bytes(mx)
 
@@ -428,7 +457,7 @@ def _generate_cell(
     latents = mx.array(latents_seed).astype(mx_dtype)
     mx.reset_peak_memory()
     denoise_start = time.perf_counter()
-    latents_np = denoise_dmd_on_device(
+    latents_np, step_times = denoise_dmd_on_device(
         mx=mx,
         dit=dit,
         latents=latents,
@@ -472,7 +501,12 @@ def _generate_cell(
         "status": "ok",
         "video_path": str(video_path.relative_to(args.output_dir)),
         "load_s": load_s,
+        "load_source": load_source,
         "denoise_s": denoise_s,
+        # The first step carries one-time costs (mx.compile tracing, kernel
+        # warm-up); steady-state throughput is the median of the rest.
+        "denoise_first_step_s": step_times[0] if step_times else None,
+        "denoise_steady_step_s": (float(np.median(step_times[1:])) if len(step_times) > 1 else None),
         "decode_s": decode_s,
         "total_s": load_s + denoise_s + decode_s,
         "load_peak_gib": load_peak / (1024**3),
@@ -549,6 +583,15 @@ def main() -> None:
     parser.add_argument("--taehv-source-path", type=Path, default=None)
     parser.add_argument("--taehv-checkpoint-path", type=Path, default=None)
     parser.add_argument("--taehv-parallel", action="store_true")
+    parser.add_argument(
+        "--mlx-checkpoint-cache",
+        type=Path,
+        default=None,
+        help="Directory of per-mode pre-quantized MLX checkpoints. The first cell of a mode "
+        "converts from Diffusers weights and saves here (load_source=diffusers_then_saved); "
+        "later cells and later runs reload without requantizing (load_source=mlx_checkpoint), "
+        "which is also how the checkpoint load-time win is measured.",
+    )
     add_memory_limit_args(
         parser,
         mlx_memory_limit_gib=preset.mlx_memory_limit_gib,

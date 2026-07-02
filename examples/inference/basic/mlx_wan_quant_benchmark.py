@@ -146,7 +146,7 @@ def _run_one_mode(
 
     denoise_start = time.perf_counter()
     mx.reset_peak_memory()
-    latents_np = denoise_dmd_on_device(
+    latents_np, step_times = denoise_dmd_on_device(
         mx=mx,
         dit=dit,
         latents=latents,
@@ -167,6 +167,7 @@ def _run_one_mode(
         "metrics": {
             "mlx_dit_load_s": load_time,
             "mlx_denoise_s": denoise_time,
+            "mlx_denoise_first_step_s": step_times[0] if step_times else None,
             "mlx_load_peak_bytes": int(load_peak_memory),
             "mlx_denoise_peak_bytes": int(denoise_peak_memory),
             "mlx_active_after_denoise_bytes": int(active_memory),
