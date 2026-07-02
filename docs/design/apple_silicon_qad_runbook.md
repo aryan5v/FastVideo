@@ -1,0 +1,134 @@
+# Runbook: Wan2.1-1.3B → 3-step INT8 QAD on the DGX B200
+
+Operator instructions for launching the Mac-targeted quantization-aware DMD
+distillation (roadmap M4 Phase B) on a DGX with B200 GPUs. Everything below
+runs from a clone of `aryan5v/FastVideo` on branch
+`aryan/apple-silicon-fastwan-mlx`. The training recipe is
+`examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml`:
+frozen Wan2.1-T2V-1.3B teacher + critic, trainable student whose linear
+weights are fake-quantized every forward onto MLX's exact affine INT8 deploy
+grid (the `mlx_qat` callback; numerics pinned bitwise by
+`fastvideo/tests/mlx/test_mlx_affine_qat_parity.py`), distilled to the
+3-step FastWan schedule `[1000, 757, 522]`.
+
+Use **4 GPUs** (the recipe default) — do not grab all 8 unless told to.
+Expected wall time for the full run is roughly 4–8 hours on 4×B200, but run
+the smoke test first and extrapolate from its measured seconds/step.
+
+## 0. Preflight
+
+```bash
+nvidia-smi          # expect B200s; confirm >= 4 idle
+python3 --version   # 3.10–3.12
+```
+
+Verify credentials are present (both are expected to be preconfigured on the
+box — do not write them into the repo):
+
+```bash
+test -n "$WANDB_API_KEY" && echo "wandb ok"
+hf auth whoami || huggingface-cli whoami   # HF auth for model + dataset pulls
+```
+
+## 1. Clone and install
+
+```bash
+git clone https://github.com/aryan5v/FastVideo.git && cd FastVideo
+git checkout aryan/apple-silicon-fastwan-mlx
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -e ".[dev]"
+```
+
+B200 is sm_100: torch must be a recent CUDA build (the pinned deps are).
+If any attention backend fails to import or pick a kernel at startup, force
+the portable one — correctness is identical, it is only somewhat slower:
+
+```bash
+export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
+```
+
+Sanity-check the QAT machinery on this box before spending GPU time:
+
+```bash
+pytest fastvideo/tests/training/test_mlx_qat_callback.py -q   # expect 5 passed
+```
+
+## 2. Dataset
+
+```bash
+python scripts/huggingface/download_hf.py \
+  --repo_id "FastVideo/Wan-Syn_77x448x832_600k" \
+  --local_dir "data/Wan-Syn_77x448x832_600k" \
+  --repo_type "dataset"
+```
+
+This is large (order of a terabyte) — start it in `tmux` early and check free
+disk first (`df -h .`). The recipe reads it from
+`data/Wan-Syn_77x448x832_600k` relative to the repo root.
+
+## 3. Smoke run (mandatory, ~30–60 min)
+
+```bash
+tmux new -s qad-smoke
+NUM_GPUS=4 bash examples/train/run.sh \
+  examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml \
+  --training.loop.max_train_steps 100 \
+  --training.checkpoint.output_dir outputs/smoke_mlx_int8 \
+  --training.tracker.run_name wan2.1_qad_int8_smoke \
+  --callbacks.validation.every_steps 50
+```
+
+What to verify before proceeding:
+
+1. The log contains a line like `mlx_qat: fake-quantizing N weights (int8,
+   group_size=64, ...)` with N in the hundreds — that is the QAT callback
+   arming. If instead it raises `mlx_qat matched no weights`, stop and
+   report.
+2. No crash referencing `parametrizations` together with FSDP/HSDP/DTensor.
+   The QAT callback wraps weights with torch parametrizations after model
+   setup; a sharding interaction here is the one known integration risk. If
+   it crashes, capture the full traceback and stop — do not work around it
+   by removing the callback (that silently turns the run into plain DMD).
+3. Loss values are finite, W&B run `wan2.1_qad_int8_smoke` is logging under
+   project `distillation_wan`, and the step-50/100 validation clips are not
+   black/NaN garbage (blurry is fine at step 100).
+4. Note the steady seconds/step from the log and extrapolate: full run =
+   4000 × s/step. Report that number back.
+
+## 4. Full run
+
+```bash
+tmux new -s qad-full
+NUM_GPUS=4 bash examples/train/run.sh \
+  examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml \
+  --callbacks.validation.every_steps 200
+```
+
+Output/checkpoints land in `outputs/wan2.1_dmd2_3steps_mlx_int8`
+(checkpoint every 20 steps, last 3 kept), W&B run
+`wan2.1_dmd2_3steps_mlx_int8`. The job is resumable:
+`--training.checkpoint.resume_from_checkpoint <output_dir>/checkpoint-<step>`.
+Monitor W&B; the DMD generator loss is noisy by nature — judge by the
+validation clips trending sharper/more coherent, not by the loss curve alone.
+
+## 5. Export (1 GPU)
+
+```bash
+python -m fastvideo.train.entrypoint.dcp_to_diffusers \
+  --checkpoint outputs/wan2.1_dmd2_3steps_mlx_int8 \
+  --output-dir outputs/wan2.1_qad_int8_diffusers \
+  --role student
+```
+
+This auto-picks the latest checkpoint and writes a Diffusers-style model dir.
+(EMA export is a follow-up; the raw student is what we evaluate first.)
+
+## 6. Deliverables
+
+Report back: (a) the W&B run URL, (b) measured seconds/step and total wall
+time, (c) the path to `outputs/wan2.1_qad_int8_diffusers`, and (d) 2–3
+validation clips from late in training. Mac-side evaluation then happens per
+`docs/design/apple_silicon_fastvideo.md` (M4 exit criteria): load the export
+through the MLX runtime, quantize INT8 on load (the grid the student trained
+on), `--save-mlx-checkpoint`, and run the benchmark suite against the
+INT8-PTQ baseline.
