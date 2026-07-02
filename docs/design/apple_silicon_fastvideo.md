@@ -292,9 +292,15 @@ Phase A — numerics first:
   biases, and dequantized values **bitwise** against `mx.quantize` /
   `mx.dequantize` for int8 and int4, fp32 and fp16, plus an STE gradient test
   and a quantized-matmul tolerance check. This was the gate before GPU spend.
-- Remaining Phase A: the training-method wrapper in `fastvideo/train/` that
-  applies `fake_quantize_mlx_affine` to the student's linear weights each
-  forward, composable with `DMD2Method`/`KDMethod`.
+- **[landed]** The training-side wrapper: `mlx_qat` is a builtin callback
+  (`fastvideo/train/callbacks/mlx_qat.py`) that registers a weight
+  parametrization on the student transformer — every forward sees the exact
+  MLX deploy grid, gradients flow straight-through to master weights — and
+  composes with any method via YAML. A ready-to-run recipe exists at
+  `examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml`
+  (Wan2.1-1.3B teacher → 3-step INT8 student, FastWan timesteps
+  [1000, 757, 522], 4 GPUs). First multi-GPU smoke run must verify the
+  parametrizations interact cleanly with HSDP sharding.
 
 Phase B — the run:
 
