@@ -217,19 +217,27 @@ def denoise_dmd_on_device(
     one-time costs (mx.compile tracing, kernel warm-up), so first-vs-steady
     step timing is how the benchmark separates cold-start from steady-state
     denoise throughput.
+
+    All host-side tensors (timesteps, re-noise draws) are uploaded before the
+    loop starts, so the per-step body performs no bulk host->device transfers
+    and step timings measure device work rather than staging copies.
     """
+    timesteps_mx = [mx.array([float(timestep)]).astype(mx.float32) for timestep in timesteps]
+    renoise_mx = [mx.array(renoise).astype(mx.float32) for renoise in renoise_by_step]
+    if timesteps_mx or renoise_mx:
+        mx.eval(*timesteps_mx, *renoise_mx)
+
     step_times: list[float] = []
     for step_index, timestep in enumerate(timesteps):
         step_start = time.perf_counter()
         noise_input_latent = latents
-        timestep_mx = mx.array([float(timestep)]).astype(mx.float32)
-        noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
+        noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timesteps_mx[step_index], freqs_cis)
 
         noise_input_f32 = noise_input_latent.astype(mx.float32)
         pred_noise_f32 = noise_pred.astype(mx.float32)
         if step_index < len(timesteps) - 1:
             next_ts: float | None = float(timesteps[step_index + 1])
-            renoise = mx.array(renoise_by_step[step_index]).astype(mx.float32)
+            renoise = renoise_mx[step_index]
         else:
             next_ts, renoise = None, None
         latents = dmd_step(
