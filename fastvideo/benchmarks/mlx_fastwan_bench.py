@@ -46,6 +46,7 @@ from examples.inference.basic.mlx_wan_prompt_to_video import (
     encode_prompt,
     make_rotary_embeddings,
 )
+from fastvideo.mlx_runtime.memory import add_memory_limit_args, apply_memory_limits
 
 # The highest-fidelity cell; used as the default SSIM reference when no external
 # reference video is supplied.
@@ -62,6 +63,19 @@ class PromptCase:
     prompt: str
 
 
+@dataclass(frozen=True)
+class BenchmarkPreset:
+    height: int
+    width: int
+    num_frames: int
+    modes: str
+    decoders: str
+    mlx_memory_limit_gib: float | None = None
+    mlx_disable_cache: bool = False
+    torch_mps_high_watermark_ratio: float | None = None
+    torch_mps_low_watermark_ratio: float | None = None
+
+
 PROMPT_SETS = {
     "motion7": (
         PromptCase("beach-sunset", "A slow cinematic sunset over ocean waves at a quiet beach."),
@@ -71,6 +85,42 @@ PROMPT_SETS = {
         PromptCase("burning-clock", "A vintage table clock burns on a wooden desk, flames flickering realistically."),
         PromptCase("forest-walk", "Video game style footage of a man walking through a dense forest path."),
         PromptCase("sea-dock-yachts", "Several yachts are parked at a sea dock while water ripples around them."),
+    ),
+}
+
+
+BENCHMARK_PRESETS = {
+    "default": BenchmarkPreset(
+        height=480,
+        width=832,
+        num_frames=81,
+        modes="fp16,bf16,int8,int4",
+        decoders="taehv,wan-vae",
+    ),
+    "mac-16gb": BenchmarkPreset(
+        height=448,
+        width=832,
+        num_frames=61,
+        modes="int8",
+        decoders="taehv",
+        mlx_memory_limit_gib=16.0,
+        mlx_disable_cache=True,
+        torch_mps_high_watermark_ratio=0.57,
+        torch_mps_low_watermark_ratio=0.0,
+    ),
+    "mac-32gb": BenchmarkPreset(
+        height=480,
+        width=832,
+        num_frames=81,
+        modes="int8,fp16",
+        decoders="taehv",
+    ),
+    "mac-64gb": BenchmarkPreset(
+        height=480,
+        width=832,
+        num_frames=81,
+        modes="int8,fp16",
+        decoders="taehv,wan-vae",
     ),
 }
 
@@ -143,49 +193,6 @@ def _load_prompt_cases(prompt: str, prompt_file: Path | None, prompt_set: str = 
     if not cases:
         raise ValueError(f"No prompts found in {prompt_file}")
     return cases
-
-
-def _gib_to_bytes(value: float | None) -> int | None:
-    if value is None:
-        return None
-    if value <= 0:
-        raise ValueError("memory limits must be positive GiB values")
-    return int(value * 1024**3)
-
-
-def _apply_runtime_limits(args, mx) -> dict[str, int | float | str | None]:
-    """Apply optional MLX/MPS memory caps for memory-tier benchmark runs.
-
-    MLX limits cap the Apple-native DiT path. The PyTorch MPS watermarks are a
-    best-effort cap for the hybrid prompt/decode stages and must be set before
-    importing torch.
-    """
-    applied: dict[str, int | float | str | None] = {}
-    if args.torch_mps_high_watermark_ratio is not None:
-        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = str(args.torch_mps_high_watermark_ratio)
-        applied["torch_mps_high_watermark_ratio"] = args.torch_mps_high_watermark_ratio
-    if args.torch_mps_low_watermark_ratio is not None:
-        os.environ["PYTORCH_MPS_LOW_WATERMARK_RATIO"] = str(args.torch_mps_low_watermark_ratio)
-        applied["torch_mps_low_watermark_ratio"] = args.torch_mps_low_watermark_ratio
-
-    memory_limit = _gib_to_bytes(args.mlx_memory_limit_gib)
-    if memory_limit is not None:
-        applied["mlx_memory_limit_bytes"] = memory_limit
-        applied["mlx_previous_memory_limit_bytes"] = int(mx.set_memory_limit(memory_limit))
-
-    cache_limit = 0 if args.mlx_disable_cache else _gib_to_bytes(args.mlx_cache_limit_gib)
-    if cache_limit is not None:
-        applied["mlx_cache_limit_bytes"] = cache_limit
-        applied["mlx_previous_cache_limit_bytes"] = int(mx.set_cache_limit(cache_limit))
-
-    wired_limit = _gib_to_bytes(args.mlx_wired_limit_gib)
-    if wired_limit is not None:
-        applied["mlx_wired_limit_bytes"] = wired_limit
-        try:
-            applied["mlx_previous_wired_limit_bytes"] = int(mx.set_wired_limit(wired_limit))
-        except Exception as exc:  # noqa: BLE001 - macOS version / system limit dependent.
-            applied["mlx_wired_limit_error"] = f"{type(exc).__name__}: {exc}"
-    return applied
 
 
 def denoise_dmd_on_device(
@@ -459,6 +466,7 @@ def _generate_cell(
     metrics: dict[str, float | int | str | bool | None] = {
         "prompt_id": args.current_prompt_id,
         "prompt": args.current_prompt,
+        "benchmark_preset": args.benchmark_preset,
         "mode": mode,
         "decoder": decoder,
         "status": "ok",
@@ -492,7 +500,14 @@ def _generate_cell(
 
 
 def main() -> None:
+    preset_parser = argparse.ArgumentParser(add_help=False)
+    preset_parser.add_argument("--benchmark-preset", choices=tuple(BENCHMARK_PRESETS), default="default")
+    preset_args, _ = preset_parser.parse_known_args()
+    preset = BENCHMARK_PRESETS[preset_args.benchmark_preset]
+
     parser = argparse.ArgumentParser(description="MLX FastWan prove-out benchmark (latency + quality).")
+    parser.add_argument("--benchmark-preset", choices=tuple(BENCHMARK_PRESETS), default=preset_args.benchmark_preset,
+                        help="Memory-tier benchmark defaults. Explicit CLI flags override preset values.")
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
     parser.add_argument("--prompt", default="A paper boat sails through a shallow stream in a mossy forest.")
     parser.add_argument(
@@ -507,16 +522,16 @@ def main() -> None:
         default="single",
         help="Built-in standard prompt set. Ignored when --prompt-file is supplied.",
     )
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--width", type=int, default=832)
-    parser.add_argument("--num-frames", type=int, default=81)
+    parser.add_argument("--height", type=int, default=preset.height)
+    parser.add_argument("--width", type=int, default=preset.width)
+    parser.add_argument("--num-frames", type=int, default=preset.num_frames)
     parser.add_argument("--dmd-denoising-steps", default="1000,757,522")
     parser.add_argument("--flow-shift", type=float, default=8.0)
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--fps", type=int, default=16)
-    parser.add_argument("--modes", default="fp16,bf16,int8,int4")
-    parser.add_argument("--decoders", default="taehv,wan-vae")
+    parser.add_argument("--modes", default=preset.modes)
+    parser.add_argument("--decoders", default=preset.decoders)
     parser.add_argument("--output-dir", type=Path, default=Path("video_samples/mlx_fastwan_bench"))
     parser.add_argument("--torch-device", default="auto")
     parser.add_argument("--torch-dtype", choices=("fp16", "fp32"), default="fp16")
@@ -534,18 +549,13 @@ def main() -> None:
     parser.add_argument("--taehv-source-path", type=Path, default=None)
     parser.add_argument("--taehv-checkpoint-path", type=Path, default=None)
     parser.add_argument("--taehv-parallel", action="store_true")
-    parser.add_argument("--mlx-memory-limit-gib", type=float, default=None,
-                        help="Set MLX memory limit in GiB for memory-tier testing (DiT path).")
-    parser.add_argument("--mlx-cache-limit-gib", type=float, default=None,
-                        help="Set MLX cache limit in GiB. Use --mlx-disable-cache to force 0.")
-    parser.add_argument("--mlx-disable-cache", action="store_true",
-                        help="Set MLX cache limit to 0 for stricter memory-tier tests.")
-    parser.add_argument("--mlx-wired-limit-gib", type=float, default=None,
-                        help="Set MLX wired-memory limit in GiB where supported by macOS/MLX.")
-    parser.add_argument("--torch-mps-high-watermark-ratio", type=float, default=None,
-                        help="Set PYTORCH_MPS_HIGH_WATERMARK_RATIO before importing torch.")
-    parser.add_argument("--torch-mps-low-watermark-ratio", type=float, default=None,
-                        help="Set PYTORCH_MPS_LOW_WATERMARK_RATIO before importing torch.")
+    add_memory_limit_args(
+        parser,
+        mlx_memory_limit_gib=preset.mlx_memory_limit_gib,
+        mlx_disable_cache=preset.mlx_disable_cache,
+        torch_mps_high_watermark_ratio=preset.torch_mps_high_watermark_ratio,
+        torch_mps_low_watermark_ratio=preset.torch_mps_low_watermark_ratio,
+    )
     args = parser.parse_args()
 
     if args.compile:
@@ -553,7 +563,15 @@ def main() -> None:
 
     import mlx.core as mx
 
-    runtime_limits = _apply_runtime_limits(args, mx)
+    runtime_limits = apply_memory_limits(
+        mlx_memory_limit_gib=args.mlx_memory_limit_gib,
+        mlx_cache_limit_gib=args.mlx_cache_limit_gib,
+        mlx_disable_cache=args.mlx_disable_cache,
+        mlx_wired_limit_gib=args.mlx_wired_limit_gib,
+        torch_mps_high_watermark_ratio=args.torch_mps_high_watermark_ratio,
+        torch_mps_low_watermark_ratio=args.torch_mps_low_watermark_ratio,
+        mx_module=mx,
+    ).as_metrics()
     import torch
 
     mx.random.seed(args.seed)

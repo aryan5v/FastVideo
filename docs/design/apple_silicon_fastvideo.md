@@ -39,8 +39,8 @@ directly to Macs. The opportunity is to build the Apple-native equivalent:
 
 ## Where we are (July 2026) — honest inventory
 
-The proof of concept is real and measurable. It lives as a five-commit stack on
-top of upstream main and consists of:
+The proof of concept is real and measurable. It lives as an active Apple
+Silicon branch on top of upstream main and consists of:
 
 **Mature and tested**
 
@@ -67,9 +67,11 @@ top of upstream main and consists of:
   64), INT4, and MXFP8/MXFP4/NVFP4-style modes where the installed MLX supports
   them. INT8 is currently the most reliable quality/memory point.
 - A benchmark harness (`fastvideo/benchmarks/mlx_fastwan_bench.py`) sweeping
-  quantization mode × decoder, measuring load/denoise/decode latency, MLX peak
-  memory, MS-SSIM (optionally LPIPS) against an FP16 reference, with an
-  `--assert-min-ssim` regression gate and `metrics.json`/`metrics.md` outputs.
+  quantization mode × decoder × memory tier, measuring load/denoise/decode
+  latency, MLX peak memory, MS-SSIM (optionally LPIPS) against an FP16
+  reference, with an `--assert-min-ssim` regression gate,
+  `mac-16gb`/`mac-32gb`/`mac-64gb` presets, `metrics.json`/`metrics.md`, and
+  side-by-side HTML outputs.
 - Opt-in `mx.compile` of the DiT forward and fused MLX norm kernels, both off
   by default and gated behind environment variables.
 
@@ -78,20 +80,24 @@ top of upstream main and consists of:
 - Prompt-encoding isolation: encode, move embeds to CPU, free the text encoder
   before the DiT loads — inline, or in a separate subprocess so the OS reclaims
   everything, plus an on-disk embedding cache.
+- Shared memory-tier controls for benchmarks and one-off generation:
+  MLX allocator/cache/wired-memory caps plus PyTorch MPS watermark settings.
 - TAEHV tiny-VAE decode as the low-memory alternative to the full Wan VAE.
 - Only matrix weights are quantized; norms and modulation tables stay fp16.
 
 **Fragile or thin**
 
-- MXFP8/MXFP4/NVFP4 modes pass mode strings straight to `mx.quantize` with no
-  capability detection or fallback; on older MLX versions they raise.
-- `taehv_decode.py` downloads and executes TAEHV source from GitHub raw URLs at
-  runtime.
-- `mlx_wan_quant_benchmark.py` still uses the legacy MLX→torch→MLX round-trip
-  denoise loop instead of the on-device sampler.
-- No MLX-device tests run in CI; all current MLX tests are CPU/NumPy-based.
-  There is no automated correctness gate on the full DiT forward beyond the
-  benchmark's SSIM check.
+- MXFP8/MXFP4/NVFP4 support still depends on the installed MLX build and Apple
+  hardware, but unsupported modes now fail early with an actionable message
+  instead of raising deep inside model load.
+- TAEHV code is vendored, but the checkpoint download/cache path still needs
+  the same fresh-machine polish as the rest of the installer story.
+- CI coverage is still mostly CPU-golden. We have MLX correctness tests, but
+  we still need a macOS arm64 on-device smoke job for PRs touching
+  `fastvideo/mlx_runtime/`.
+- The public user surface is still example/benchmark driven; the production
+  `fastvideo generate --preset mac-*` CLI should wait until the MLX path is
+  wired through the normal pipeline abstractions.
 
 **Explicitly missing**
 
@@ -180,6 +186,8 @@ Exit criteria:
 - One command sweeps quantization modes × decoders × memory tiers over a
   standard prompt set (prompts with visible motion and physics) and emits the
   MP4s, a side-by-side HTML grid, and `metrics.json`/`metrics.md`.
+  Initial benchmark presets exist; the next step is checking in baseline
+  reports from real 16 GB / 32 GB / 64 GB machines.
 - Quality is measured two ways: fidelity to the FP16 reference (MS-SSIM/LPIPS)
   and a reference-free score (a VBench-style subset), because
   fidelity-to-reference alone cannot detect a bad reference.

@@ -4,7 +4,7 @@ import pytest
 
 from fastvideo.benchmarks.mlx_fastwan_bench import (
     ALLOWED_MODES,
-    _gib_to_bytes,
+    BENCHMARK_PRESETS,
     _html_grid,
     _load_prompt_cases,
     _mode_to_dtype_quant,
@@ -63,11 +63,11 @@ def test_load_builtin_prompt_set() -> None:
     assert cases[0].id == "beach-sunset"
 
 
-def test_gib_to_bytes_rejects_non_positive_values() -> None:
-    assert _gib_to_bytes(None) is None
-    assert _gib_to_bytes(1.5) == int(1.5 * 1024**3)
-    with pytest.raises(ValueError, match="positive"):
-        _gib_to_bytes(0)
+def test_benchmark_presets_include_memory_tiers() -> None:
+    assert BENCHMARK_PRESETS["mac-16gb"].modes == "int8"
+    assert BENCHMARK_PRESETS["mac-16gb"].decoders == "taehv"
+    assert BENCHMARK_PRESETS["mac-16gb"].mlx_memory_limit_gib == 16.0
+    assert BENCHMARK_PRESETS["mac-64gb"].decoders == "taehv,wan-vae"
 
 
 def test_html_grid_includes_video_and_sync_controls() -> None:

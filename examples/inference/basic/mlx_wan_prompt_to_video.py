@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
+from fastvideo.mlx_runtime.memory import add_memory_limit_args, apply_memory_limits
+
 
 DEFAULT_MODEL_ROOT = (
     Path.home()
@@ -294,8 +296,18 @@ def main() -> None:
     parser.add_argument("--taehv-parallel", action="store_true", help="Decode all TAEHV frames at once; faster but higher memory.")
     parser.add_argument("--prompt-encode-mode", choices=("inline", "subprocess"), default="inline")
     parser.add_argument("--prompt-embeds-cache", type=Path, default=None)
+    add_memory_limit_args(parser)
     parser.add_argument("--encode-prompt-only", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    runtime_limits = apply_memory_limits(
+        mlx_memory_limit_gib=args.mlx_memory_limit_gib,
+        mlx_cache_limit_gib=args.mlx_cache_limit_gib,
+        mlx_disable_cache=args.mlx_disable_cache,
+        mlx_wired_limit_gib=args.mlx_wired_limit_gib,
+        torch_mps_high_watermark_ratio=args.torch_mps_high_watermark_ratio,
+        torch_mps_low_watermark_ratio=args.torch_mps_low_watermark_ratio,
+    ).as_metrics()
 
     if args.encode_prompt_only is not None:
         prompt_embeds = encode_prompt(
@@ -482,6 +494,7 @@ def main() -> None:
             "mlx_denoise_peak_bytes": int(denoise_peak_memory),
             "mlx_active_after_denoise_bytes": int(active_memory),
             "output_path": str(args.output_path),
+            **runtime_limits,
         }
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_json.write_text(json.dumps(metrics, indent=2))

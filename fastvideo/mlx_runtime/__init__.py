@@ -20,16 +20,26 @@ from fastvideo.mlx_runtime.fastwan import (
     mlx_block_weights_from_diffusers_safetensors,
     quantization_support_error,
 )
+from fastvideo.mlx_runtime.memory import (
+    AppliedMemoryLimits,
+    add_memory_limit_args,
+    apply_memory_limits,
+    gib_to_bytes,
+)
 
 __all__ = [
+    "AppliedMemoryLimits",
     "FastWanShape",
     "MLXQuantizationSpec",
     "MLXWanDiT",
     "MLXWanTransformerBlock",
     "UnsupportedMLXQuantizationError",
+    "add_memory_limit_args",
+    "apply_memory_limits",
     "ensure_quantization_supported",
     "fastwan_shape",
     "fastwan_shape_from_config",
+    "gib_to_bytes",
     "mlx_dit_from_diffusers_safetensors",
     "mlx_block_weights_from_diffusers_safetensors",
     "mlx_block_weights_from_torch",

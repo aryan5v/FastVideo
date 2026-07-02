@@ -162,6 +162,7 @@ nav:
   - Design:
     - Overview: design/overview.md
     - FastVideo on Apple Silicon: design/apple_silicon_fastvideo.md
+    - Apple Silicon Benchmark Baseline: design/apple_silicon_benchmark_baseline.md
     - Training Architecture: design/training_architecture.md
     - Server Contracts:
       - Overview: design/server_contracts/index.md
