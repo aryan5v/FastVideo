@@ -76,6 +76,7 @@ jobs:
             fastvideo/tests/mlx/test_quant_capability.py \
             fastvideo/tests/mlx/test_mlx_dit_parity.py \
             fastvideo/tests/mlx/test_mlx_checkpoint.py \
+            fastvideo/tests/mlx/test_mlx_affine_qat_parity.py \
             -q
 
   # Same tests on MLX's CPU backend. Hosted macOS runners are scarce and
@@ -119,4 +120,5 @@ jobs:
             fastvideo/tests/mlx/test_quant_capability.py \
             fastvideo/tests/mlx/test_mlx_dit_parity.py \
             fastvideo/tests/mlx/test_mlx_checkpoint.py \
+            fastvideo/tests/mlx/test_mlx_affine_qat_parity.py \
             -q

@@ -283,10 +283,18 @@ Runs on NVIDIA cloud GPUs in parallel with M3.
 
 Phase A — numerics first:
 
-- A portable INT8 fake-quant module (a new quantization config plus a training
-  method wrapper in `fastvideo/train/`, composable with `DMD2Method`/`KDMethod`)
-  whose forward bit-matches MLX `mx.quantize`/`mx.quantized_matmul` (affine
-  INT8, group size 64). The parity test is the gate before any GPU spend.
+- **[numerics gate passed]** A portable INT8 fake-quant module whose forward
+  bit-matches MLX's quantizer (affine INT8, group size 64). Landed as
+  `fastvideo/layers/quantization/mlx_affine_qat.py` — a pure-torch transcription
+  of MLX's CPU `quantize` kernel (v0.31.2), including the negative-scale
+  anchoring and integer zero-point re-fit — with
+  `fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` pinning codes, scales,
+  biases, and dequantized values **bitwise** against `mx.quantize` /
+  `mx.dequantize` for int8 and int4, fp32 and fp16, plus an STE gradient test
+  and a quantized-matmul tolerance check. This was the gate before GPU spend.
+- Remaining Phase A: the training-method wrapper in `fastvideo/train/` that
+  applies `fake_quantize_mlx_affine` to the student's linear weights each
+  forward, composable with `DMD2Method`/`KDMethod`.
 
 Phase B — the run:
 
