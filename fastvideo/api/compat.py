@@ -27,6 +27,24 @@ from fastvideo.api.schema import (
 )
 from fastvideo.api.sampling_param import SamplingParam
 from fastvideo.fastvideo_args import FastVideoArgs
+
+_KNOWN_CONTINUATION_KINDS: set[str] = set()
+
+
+def register_continuation_kind(kind: str) -> None:
+    """Register a :class:`ContinuationState.kind` as recognized.
+
+    PR 7 wires the envelope through; per-kind payload deserializers live
+    with each model family (e.g. ``fastvideo.pipelines.basic.ltx2.
+    continuation.LTX2ContinuationState``). The registry lets the
+    public-API compat layer validate the kind early, before the state
+    reaches the pipeline.
+    """
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("ContinuationState kind must be a non-empty string")
+    _KNOWN_CONTINUATION_KINDS.add(kind)
+
+
 from fastvideo.pipelines.basic.ltx2.stage_overrides import (
     refine_preset_override_fields,
     refine_stage_override_fields,
@@ -580,23 +598,6 @@ def _serialize_generation_request(request: GenerationRequest) -> dict[str, Any]:
 
 
 _SCHEMA_DEFAULT_UPDATES = _extract_request_updates(config_to_dict(GenerationRequest()))
-
-_KNOWN_CONTINUATION_KINDS: set[str] = set()
-
-
-def register_continuation_kind(kind: str) -> None:
-    """Register a :class:`ContinuationState.kind` as recognized.
-
-    PR 7 wires the envelope through; per-kind payload deserializers live
-    with each model family (e.g. ``fastvideo.pipelines.basic.ltx2.
-    continuation.LTX2ContinuationState``). The registry lets the
-    public-API compat layer validate the kind early, before the state
-    reaches the pipeline.
-    """
-    if not isinstance(kind, str) or not kind:
-        raise ValueError("ContinuationState kind must be a non-empty string")
-    _KNOWN_CONTINUATION_KINDS.add(kind)
-
 
 def _validate_continuation_state(state: ContinuationState) -> None:
     if not isinstance(state.kind, str) or not state.kind:

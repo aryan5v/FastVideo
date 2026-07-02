@@ -92,9 +92,11 @@ Silicon branch on top of upstream main and consists of:
   instead of raising deep inside model load.
 - TAEHV code is vendored, but the checkpoint download/cache path still needs
   the same fresh-machine polish as the rest of the installer story.
-- CI coverage is still mostly CPU-golden. We have MLX correctness tests, but
-  we still need a macOS arm64 on-device smoke job for PRs touching
-  `fastvideo/mlx_runtime/`.
+- CI coverage is moving from CPU-golden to on-device: a macOS arm64 MLX smoke
+  workflow now runs the sampler, memory helpers, quantization capability probe,
+  and tiny full-DiT parity tests for PRs touching the MLX runtime. The next
+  step is watching its first upstream PR runs and tightening the test set only
+  after it proves stable on hosted Apple runners.
 - The public user surface is still example/benchmark driven; the production
   `fastvideo generate --preset mac-*` CLI should wait until the MLX path is
   wired through the normal pipeline abstractions.
@@ -195,7 +197,8 @@ Exit criteria:
   sustained vs burst throughput is recorded on laptops (thermal throttling is
   real on fanless machines).
 - A macOS arm64 CI job runs an MLX-device smoke test on every PR touching
-  `fastvideo/mlx_runtime/`.
+  `fastvideo/mlx_runtime/`. Initial workflow exists; first hosted-run results
+  should be recorded before treating this as fully closed.
 - A baseline report for at least one 16 GB and one 64 GB machine is checked
   into the repository.
 

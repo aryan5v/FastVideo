@@ -1,20 +1,45 @@
-from fastvideo.configs.pipelines.base import PipelineConfig
-from fastvideo.configs.pipelines.cosmos import CosmosConfig
-from fastvideo.configs.pipelines.cosmos2_5 import Cosmos25Config
-from fastvideo.configs.pipelines.hunyuan import FastHunyuanConfig, HunyuanConfig
-from fastvideo.configs.pipelines.hunyuan15 import Hunyuan15T2V480PConfig, Hunyuan15T2V720PConfig
-from fastvideo.configs.pipelines.hunyuangamecraft import HunyuanGameCraftPipelineConfig
-from fastvideo.configs.pipelines.hyworld import HYWorldConfig
-from fastvideo.configs.pipelines.matrixgame2 import MatrixGame2I2V480PConfig
-from fastvideo.configs.pipelines.matrixgame3 import MatrixGame3I2V720PConfig
-from fastvideo.pipelines.basic.ltx2.pipeline_configs import LTX2T2VConfig
-from fastvideo.registry import get_pipeline_config_cls_from_name
-from fastvideo.configs.pipelines.wan import (LucyEditDevConfig, SelfForcingWanT2V480PConfig, WanI2V480PConfig,
-                                             WanI2V720PConfig, WanT2V480PConfig, WanT2V720PConfig)
+# SPDX-License-Identifier: Apache-2.0
+"""Pipeline config exports.
 
-__all__ = [
-    "HunyuanConfig", "FastHunyuanConfig", "HunyuanGameCraftPipelineConfig", "PipelineConfig", "Hunyuan15T2V480PConfig",
-    "Hunyuan15T2V720PConfig", "WanT2V480PConfig", "WanI2V480PConfig", "WanT2V720PConfig", "WanI2V720PConfig",
-    "SelfForcingWanT2V480PConfig", "LucyEditDevConfig", "CosmosConfig", "Cosmos25Config", "LTX2T2VConfig",
-    "HYWorldConfig", "MatrixGame2I2V480PConfig", "MatrixGame3I2V720PConfig", "get_pipeline_config_cls_from_name"
-]
+The concrete pipeline config modules register model-family side effects on
+import. Keep this package lazy so importing one config (or the top-level
+``fastvideo`` package) does not eagerly import every model family.
+"""
+
+_EXPORTS = {
+    "CosmosConfig": ("fastvideo.configs.pipelines.cosmos", "CosmosConfig"),
+    "Cosmos25Config": ("fastvideo.configs.pipelines.cosmos2_5", "Cosmos25Config"),
+    "FastHunyuanConfig": ("fastvideo.configs.pipelines.hunyuan", "FastHunyuanConfig"),
+    "Hunyuan15T2V480PConfig": ("fastvideo.configs.pipelines.hunyuan15", "Hunyuan15T2V480PConfig"),
+    "Hunyuan15T2V720PConfig": ("fastvideo.configs.pipelines.hunyuan15", "Hunyuan15T2V720PConfig"),
+    "HunyuanConfig": ("fastvideo.configs.pipelines.hunyuan", "HunyuanConfig"),
+    "HunyuanGameCraftPipelineConfig": (
+        "fastvideo.configs.pipelines.hunyuangamecraft",
+        "HunyuanGameCraftPipelineConfig",
+    ),
+    "HYWorldConfig": ("fastvideo.configs.pipelines.hyworld", "HYWorldConfig"),
+    "LucyEditDevConfig": ("fastvideo.configs.pipelines.wan", "LucyEditDevConfig"),
+    "LTX2T2VConfig": ("fastvideo.pipelines.basic.ltx2.pipeline_configs", "LTX2T2VConfig"),
+    "MatrixGame2I2V480PConfig": ("fastvideo.configs.pipelines.matrixgame2", "MatrixGame2I2V480PConfig"),
+    "MatrixGame3I2V720PConfig": ("fastvideo.configs.pipelines.matrixgame3", "MatrixGame3I2V720PConfig"),
+    "PipelineConfig": ("fastvideo.configs.pipelines.base", "PipelineConfig"),
+    "SelfForcingWanT2V480PConfig": ("fastvideo.configs.pipelines.wan", "SelfForcingWanT2V480PConfig"),
+    "WanI2V480PConfig": ("fastvideo.configs.pipelines.wan", "WanI2V480PConfig"),
+    "WanI2V720PConfig": ("fastvideo.configs.pipelines.wan", "WanI2V720PConfig"),
+    "WanT2V480PConfig": ("fastvideo.configs.pipelines.wan", "WanT2V480PConfig"),
+    "WanT2V720PConfig": ("fastvideo.configs.pipelines.wan", "WanT2V720PConfig"),
+    "get_pipeline_config_cls_from_name": ("fastvideo.registry", "get_pipeline_config_cls_from_name"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _EXPORTS[name]
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value

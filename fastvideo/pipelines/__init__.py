@@ -3,36 +3,52 @@
 Diffusion pipelines for fastvideo.
 
 This package contains diffusion pipelines for generating videos and images.
+Heavy pipeline/registry imports are intentionally lazy so utility modules such
+as ``fastvideo.pipelines.pipeline_batch_info`` can be imported by lightweight
+tests without constructing the full inference stack.
 """
 
-from typing import cast
+from __future__ import annotations
 
-from fastvideo.fastvideo_args import FastVideoArgs
+from typing import Any, cast
+
 from fastvideo.logger import init_logger
-from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
-from fastvideo.pipelines.lora_pipeline import LoRAPipeline
-from fastvideo.pipelines.pipeline_batch_info import ForwardBatch, TrainingBatch
-from fastvideo.pipelines.pipeline_registry import PipelineType
-from fastvideo.registry import get_model_info
-from fastvideo.utils import maybe_download_model
 
 logger = init_logger(__name__)
+_PIPELINE_WITH_LORA_CLS = None
 
 
-class PipelineWithLoRA(LoRAPipeline, ComposedPipelineBase):
-    """Type for a pipeline that has both ComposedPipelineBase and LoRAPipeline functionality."""
-    pass
+def _pipeline_with_lora_cls():
+    global _PIPELINE_WITH_LORA_CLS
+    if _PIPELINE_WITH_LORA_CLS is not None:
+        return _PIPELINE_WITH_LORA_CLS
+
+    from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
+    from fastvideo.pipelines.lora_pipeline import LoRAPipeline
+
+    class PipelineWithLoRA(LoRAPipeline, ComposedPipelineBase):
+        """Type for a pipeline that has both ComposedPipelineBase and LoRAPipeline functionality."""
+        pass
+
+    _PIPELINE_WITH_LORA_CLS = PipelineWithLoRA
+    return _PIPELINE_WITH_LORA_CLS
 
 
-def build_pipeline(fastvideo_args: FastVideoArgs,
-                   pipeline_type: PipelineType | str = PipelineType.BASIC) -> PipelineWithLoRA:
+def build_pipeline(fastvideo_args: Any, pipeline_type: Any | str | None = None):
     """
     Only works with valid hf diffusers configs. (model_index.json)
     We want to build a pipeline based on the inference args mode_path:
     1. download the model from the hub if it's not already downloaded
     2. verify the model config and directory
-    3. based on the config, determine the pipeline class 
+    3. based on the config, determine the pipeline class
     """
+    from fastvideo.pipelines.pipeline_registry import PipelineType
+    from fastvideo.registry import get_model_info
+    from fastvideo.utils import maybe_download_model
+
+    if pipeline_type is None:
+        pipeline_type = PipelineType.BASIC
+
     # Get pipeline type
     model_path = fastvideo_args.model_path
     model_path = maybe_download_model(model_path)
@@ -55,7 +71,29 @@ def build_pipeline(fastvideo_args: FastVideoArgs,
 
     logger.info("Pipelines instantiated")
 
-    return cast(PipelineWithLoRA, pipeline)
+    return cast(_pipeline_with_lora_cls(), pipeline)
+
+
+def __getattr__(name: str):
+    if name == "ComposedPipelineBase":
+        from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
+
+        return ComposedPipelineBase
+    if name == "ForwardBatch":
+        from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
+
+        return ForwardBatch
+    if name == "LoRAPipeline":
+        from fastvideo.pipelines.lora_pipeline import LoRAPipeline
+
+        return LoRAPipeline
+    if name == "PipelineWithLoRA":
+        return _pipeline_with_lora_cls()
+    if name == "TrainingBatch":
+        from fastvideo.pipelines.pipeline_batch_info import TrainingBatch
+
+        return TrainingBatch
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
@@ -63,5 +101,6 @@ __all__ = [
     "ComposedPipelineBase",
     "ForwardBatch",
     "LoRAPipeline",
+    "PipelineWithLoRA",
     "TrainingBatch",
 ]
