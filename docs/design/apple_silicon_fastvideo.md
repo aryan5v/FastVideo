@@ -23,7 +23,9 @@ techniques improve, the Mac path should keep improving with them.
 
 FastWan-QAD showed what is possible when the model, quantization strategy, and
 runtime are co-designed: the recent launch generated a 5-second 480p video in
-1.8 seconds on a single RTX 5090 using quantization-aware distillation.
+1.8 seconds on a single RTX 5090 using a two-stage recipe — a
+quantization-aware finetune that matches the target-precision matmul, followed
+by quantization-aware DMD distillation down to 3 sampling steps.
 
 Apple Silicon will not reach that result by simply copying the NVIDIA path.
 Blackwell tensor cores, CUDA kernels, and NVFP4-specific execution do not map
@@ -35,20 +37,76 @@ directly to Macs. The opportunity is to build the Apple-native equivalent:
 - a distilled/QAT model that is trained with those targets in mind,
 - and benchmarks that make the quality/speed tradeoffs visible.
 
-## Progress so far
+## Where we are (July 2026) — honest inventory
 
-We have established a working proof of concept:
+The proof of concept is real and measurable. It lives as a five-commit stack on
+top of upstream main and consists of:
 
-- FastWan runs locally on macOS through MPS and an experimental MLX DiT path.
-- The path supports FP16 plus MLX quantization experiments including INT8, INT4,
-  MXFP-style modes, and NVFP4-style mode simulation.
-- TAEHV decode is available for lower-memory, faster video reconstruction.
-- Prompt encoding can be isolated so the text encoder is freed before DiT
-  denoising, which matters for 16 GB systems.
-- INT8 is currently the most reliable quantization target: it meaningfully
-  reduces memory while staying much closer to FP16 than INT4-style modes.
-- A benchmark harness now measures latency, peak memory, generated artifacts,
-  and optional quality metrics across mode and decoder combinations.
+**Mature and tested**
+
+- An on-device MLX DMD sampler (`fastvideo/mlx_runtime/sampling.py`) that keeps
+  every large tensor on the MLX device, with unit tests covering the schedule
+  lookup, `pred_noise_to_pred_video`, re-noising, and step semantics.
+- MPS as a first-class inference platform (`fastvideo/platforms/mps.py`):
+  platform resolution tries MPS first, capability gates make CUDA-only FP4/FP8
+  paths skip cleanly, and fp16/eager compatibility overrides are tested.
+- Block-level parity harnesses (synthetic and real FastWan-1.3B blocks) that
+  compare the MLX Wan transformer block against the PyTorch reference within
+  explicit tolerances.
+
+**Functional but experimental**
+
+- A full MLX Wan T2V DiT forward (`fastvideo/mlx_runtime/fastwan.py`): patch
+  embed, condition/time embedding, the transformer block stack with RMSNorm
+  q/k, rotary embeddings and `mx.fast.scaled_dot_product_attention`, and
+  unpatchify — loading Diffusers-format safetensors directly.
+- An end-to-end hybrid pipeline
+  (`examples/inference/basic/mlx_wan_prompt_to_video.py`): UMT5 prompt encoding
+  on torch, MLX DiT denoising with 3-step DMD, torch VAE or TAEHV decode.
+- Load-time weight quantization for the DiT linears: INT8 (affine, group size
+  64), INT4, and MXFP8/MXFP4/NVFP4-style modes where the installed MLX supports
+  them. INT8 is currently the most reliable quality/memory point.
+- A benchmark harness (`fastvideo/benchmarks/mlx_fastwan_bench.py`) sweeping
+  quantization mode × decoder, measuring load/denoise/decode latency, MLX peak
+  memory, MS-SSIM (optionally LPIPS) against an FP16 reference, with an
+  `--assert-min-ssim` regression gate and `metrics.json`/`metrics.md` outputs.
+- Opt-in `mx.compile` of the DiT forward and fused MLX norm kernels, both off
+  by default and gated behind environment variables.
+
+**16 GB memory work already done**
+
+- Prompt-encoding isolation: encode, move embeds to CPU, free the text encoder
+  before the DiT loads — inline, or in a separate subprocess so the OS reclaims
+  everything, plus an on-disk embedding cache.
+- TAEHV tiny-VAE decode as the low-memory alternative to the full Wan VAE.
+- Only matrix weights are quantized; norms and modulation tables stay fp16.
+
+**Fragile or thin**
+
+- MXFP8/MXFP4/NVFP4 modes pass mode strings straight to `mx.quantize` with no
+  capability detection or fallback; on older MLX versions they raise.
+- `taehv_decode.py` downloads and executes TAEHV source from GitHub raw URLs at
+  runtime.
+- `mlx_wan_quant_benchmark.py` still uses the legacy MLX→torch→MLX round-trip
+  denoise loop instead of the on-device sampler.
+- No MLX-device tests run in CI; all current MLX tests are CPU/NumPy-based.
+  There is no automated correctness gate on the full DiT forward beyond the
+  benchmark's SSIM check.
+
+**Explicitly missing**
+
+- Quantization-aware training for any Mac-relevant precision. The repository's
+  only QAT path (`fastvideo/layers/quantization/nvfp4_qat_config.py` and the
+  `attn_qat_*` backends) is NVFP4, flashinfer, and Blackwell-only. There is no
+  INT8 quantization method in the layer registry at all.
+- Sparse attention on Mac. VSA and SLA are CUDA/Triton kernels in
+  `fastvideo-kernel/`; the MPS platform hard-codes dense torch SDPA, and the
+  MLX path uses dense `mx.fast` SDPA. Mac models must target FullAttn/dense
+  variants.
+- Pre-quantized checkpoint distribution or an MLX exporter — every run
+  downloads fp16 weights and re-quantizes at load.
+- Image-to-video, multi-device, and a real CLI surface (the Mac path is driven
+  by example scripts).
 
 The important result is not that the current videos are final quality. They are
 not. The important result is that the pipeline is now real enough to measure,
@@ -71,100 +129,192 @@ Every tier should aim for the same principle: use the available unified memory
 intelligently, keep the runtime responsive, and avoid hiding quality regressions
 behind raw speed numbers.
 
-## Technical direction
+## Strategy pillars
 
-The work should proceed on three tracks.
+1. **Co-design, not port.** FastWan-QAD worked because the model, quantization,
+   and runtime were designed together for Blackwell. The Mac equivalent is a
+   QAT model whose train-time fake-quantization bit-matches the deploy-time MLX
+   quantizer (affine INT8, group size 64, matrix weights only). This numerics
+   parity is a hard, tested requirement — if training simulates a different
+   quantizer than the one MLX applies at load, the QAT gains evaporate at
+   deploy time. No GPU spend on training until the parity test passes.
+2. **Train on NVIDIA, deploy on Mac.** Distillation runs on rented NVIDIA GPUs
+   using the existing modular trainer (`fastvideo/train/`: `DMD2Method`,
+   `KDMethod`, and the working `examples/train/configs/distribution_matching/wan/dmd2_t2v.yaml`
+   config), exported via `fastvideo/train/entrypoint/dcp_to_diffusers.py` into
+   Diffusers safetensors the MLX loader already reads. MPS/MLX training is a
+   non-goal this cycle.
+3. **Dense-first.** No VSA/SLA port to Metal in this window. The Mac targets
+   are the FullAttn model variants. A Metal/MLX sparse-attention kernel is a
+   parked stretch goal, revisited only after the QAT model ships.
+4. **Benchmark-driven.** No optimization lands without a benchmark delta, and
+   the SSIM regression gate is enforced on every runtime change. Speed that
+   breaks quality does not count as progress.
 
-### 1. Runtime
+## Milestones and exit criteria (July–November 2026)
 
-Build a clean MLX runtime for the parts that benefit most from Apple-native
-execution, starting with the DiT denoising loop. Keep MPS/PyTorch where it is
-still the practical bridge, but move performance-critical and memory-critical
-paths toward MLX as they mature.
+Each milestone is done only when every exit criterion is met. Criteria are
+deliberately measurable so "done" is not a judgment call.
 
-Near-term runtime priorities:
+### M1 — Trustworthy baseline (Month 1)
 
-- stabilize the MLX FastWan DiT path,
-- keep DMD sampling on device,
-- benchmark `mx.compile` and fused MLX kernels with quality checks,
-- make TAEHV and VAE decode choices explicit,
-- reduce host/device transfers,
-- and keep the runtime easy to test against FP16 reference behavior.
+Harden what exists so everything after it can be trusted.
 
-### 2. Model
+Exit criteria:
 
-The long-term quality and speed gains will come from a Mac-specific model path,
-not only from runtime optimization.
+- A full-DiT MLX-vs-PyTorch parity test with pinned tolerances exists and is
+  runnable in CI (CPU-golden variant) and on-device.
+- End-to-end prompt→video succeeds on a stock 16 GB M-series Mac at a pinned
+  configuration (3-step DMD, INT8, TAEHV, 448×832×61), with peak memory and
+  wall time recorded in this document.
+- MXFP/NVFP4-style modes detect MLX capability and fail with a clear message
+  (or are marked unsupported) instead of raising deep inside `mx.quantize`.
+- TAEHV is vendored — no downloading and executing remote code at runtime.
+- `mlx_wan_quant_benchmark.py` uses the on-device DMD sampler.
+- The branch is rebased onto current upstream main.
 
-The likely model strategy is:
+### M2 — Benchmark suite as a product surface (Months 1–2)
 
-- start from Wan/FastWan-compatible weights rather than training from scratch,
-- fine-tune or distill with Apple-targeted constraints,
-- use quantization-aware training for the quant modes we actually want to serve
-  on Macs,
-- optimize for a small number of denoising steps,
-- and export checkpoints that are friendly to MLX loading and inference.
+Exit criteria:
 
-The first serious target should be a distilled INT8-oriented model, because INT8
-currently offers the best quality/memory balance. INT4/MXFP-style modes remain
-important, but they likely need QAT/distillation before they become reliable
-quality presets.
+- One command sweeps quantization modes × decoders × memory tiers over a
+  standard prompt set (prompts with visible motion and physics) and emits the
+  MP4s, a side-by-side HTML grid, and `metrics.json`/`metrics.md`.
+- Quality is measured two ways: fidelity to the FP16 reference (MS-SSIM/LPIPS)
+  and a reference-free score (a VBench-style subset), because
+  fidelity-to-reference alone cannot detect a bad reference.
+- Latency is split into load/denoise/decode with cold-start vs warm-start, and
+  sustained vs burst throughput is recorded on laptops (thermal throttling is
+  real on fanless machines).
+- A macOS arm64 CI job runs an MLX-device smoke test on every PR touching
+  `fastvideo/mlx_runtime/`.
+- A baseline report for at least one 16 GB and one 64 GB machine is checked
+  into the repository.
 
-### 3. Benchmarks and model coverage
+### M3 — Runtime hardening and UX (Months 2–3)
 
-We should benchmark the Mac path like a product surface, not a single demo.
+Exit criteria:
 
-Required benchmark coverage:
+- `mx.compile` is on by default, with the SSIM gate proving no quality
+  regression and the step-time improvement published in the benchmark report.
+- Zero host/device transfers inside the denoise loop, asserted by test.
+- Pre-quantized MLX checkpoints can be saved and loaded: 16 GB users download
+  INT8 weights (roughly half the bytes) and skip requantization on every run;
+  load-time and download-size targets recorded.
+- A real CLI replaces the example scripts:
+  `fastvideo generate --preset mac-16gb|mac-32gb|mac-64gb`, wired through the
+  existing pipeline and platform abstractions.
+- The decode story is decided per tier by benchmark: TAEHV vs chunked/tiled Wan
+  VAE (torch-MPS) vs an MLX-native decoder, whichever wins the quality/memory
+  point for that tier.
+- Install docs verified on a fresh machine: under 15 minutes from clone to
+  first video.
 
-- FP16, BF16, INT8, INT4, MXFP-style, and NVFP4-style modes where supported,
-- TAEHV vs full VAE decode,
-- multiple memory tiers,
-- multiple prompts with visible motion and physics,
-- multiple supported FastVideo model families,
-- and both latency and quality metrics.
+### M4 — Mac-targeted QAT distillation, 1.3B (Months 2–4, parallel track)
 
-The benchmark should produce artifacts that are easy to inspect: videos,
-side-by-side HTML grids, JSON metrics, and short markdown summaries. This is how
-we decide what is actually improving.
+Runs on NVIDIA cloud GPUs in parallel with M3.
 
-## Major milestones
+Phase A — numerics first:
 
-1. **Reliable local baseline**
-   - MLX DiT path works consistently on Apple Silicon.
-   - TAEHV and VAE decode paths are benchmarked.
-   - INT8/FP16 are stable enough for repeatable demos.
+- A portable INT8 fake-quant module (a new quantization config plus a training
+  method wrapper in `fastvideo/train/`, composable with `DMD2Method`/`KDMethod`)
+  whose forward bit-matches MLX `mx.quantize`/`mx.quantized_matmul` (affine
+  INT8, group size 64). The parity test is the gate before any GPU spend.
 
-2. **Benchmark suite**
-   - Standard prompts, resolutions, frame counts, and memory tiers.
-   - Side-by-side visual outputs.
-   - Latency, memory, and quality metrics collected in one place.
-   - Coverage for other FastVideo-supported models.
+Phase B — the run:
 
-3. **Runtime hardening**
-   - Fewer CPU/GPU transfers.
-   - On-device scheduler math.
-   - Tested `mx.compile` and fused-kernel paths.
-   - Cleaner install and CLI surface for Mac users.
+- Quantization-aware finetune of FastWan2.1-T2V-1.3B (dense attention),
+  followed by quantization-aware DMD to 3 steps, starting from the existing
+  `dmd2_t2v.yaml` recipe. Reuse upstream Attn-QAT infrastructure landing on
+  main where it is device-portable.
+- Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
+  existing MLX loader, plus the M3 pre-quantized MLX format.
 
-4. **Mac-specific distillation/QAT**
-   - Train or distill from a Wan/FastWan base model.
-   - Target the Mac runtime and quantization modes directly.
-   - Prioritize INT8 first, then evaluate INT4/MXFP-style modes after QAT.
+Exit criteria:
 
-5. **16 GB product preset**
-   - A documented configuration that runs reliably on 16 GB unified memory.
-   - Clear expectations around resolution, frame count, decode mode, and speed.
+- The INT8-QAT model beats INT8 post-training quantization on the full M2
+  benchmark suite and is within thresholds of FP16 quality (thresholds set
+  from M2 baselines before training starts, not after).
+- Weights published on Hugging Face under the FastVideo org.
+- Only after INT8 proves out: evaluate INT4/MXFP4 QAT for the 16 GB tier.
+  Guardrail: INT4 is not attempted before the INT8 exit criteria are met.
 
-6. **Higher-memory quality presets**
-   - Better defaults for 24 GB, 32 GB, 64 GB, and larger systems.
-   - Higher-quality decode and longer clips where the hardware allows it.
+### M5 — 16 GB flagship preset (Month 4)
 
-7. **Public Mac support story**
-   - A reproducible demo.
-   - A benchmark article with honest tradeoffs.
-   - Clear setup docs.
-   - A path for contributors to add models, prompts, metrics, and Apple-specific
-     optimizations.
+Exit criteria:
+
+- A documented preset runs on stock 16 GB M2/M3/M4 machines (not just top-bin
+  development hardware): peak unified memory at or below ~14 GB with no swap
+  collapse, a 5-second 480p-class clip within a stated wall-time budget, using
+  the INT8-QAT model from M4.
+- Reproduced by someone outside the core team following the docs alone.
+
+### M6 — Higher-memory tiers and TI2V-5B (Months 4–5)
+
+Exit criteria:
+
+- The M4 recipe repeated on FastWan2.2-TI2V-5B-FullAttn, adding image-to-video
+  and anchoring the 32 GB+ quality tiers.
+- A per-tier preset table (model, resolution, frame count, decode mode,
+  expected time and peak memory) validated on real 16/32/64 GB hardware.
+- Higher-resolution, longer-clip, and full-VAE-decode presets for 64 GB+.
+
+### M7 — Public Mac support story (Month 5)
+
+Upstreaming starts much earlier — platform and runtime pieces go up for review
+from M1 onward, not as one giant drop at the end.
+
+Exit criteria:
+
+- The work is merged into hao-ai-lab main.
+- A reproducible demo and a benchmark article with honest tradeoffs (the
+  FastWan-QAD launch post is the template).
+- Setup docs and a contributor guide for adding models, prompts, metrics, and
+  Apple-specific optimizations.
+
+## Staying on track
+
+The failure mode for a project like this is months of interesting kernel work
+with no shipped preset. The countermeasures are structural:
+
+- **Weekly benchmark runs** on a fixed hardware pool, with deltas recorded in a
+  running journal (`.agents/memory/experiment-journal/` exists for exactly
+  this and is currently empty).
+- **Every milestone ends with a demo artifact** — a video, a report, a preset a
+  new user can run — not just merged code.
+- **Decision gates are written down, not re-litigated:** INT8 before INT4;
+  dense before sparse; no Mac-training track; no Apple Neural Engine/CoreML
+  detour this cycle.
+  Each non-goal carries a revisit date instead of an open-ended debate.
+- **Risk register**, reviewed monthly:
+  - MLX API churn, especially the MXFP/NVFP4-style quantization modes — pin
+    MLX versions and gate by capability.
+  - Hardware variance (M1 through M4, fanless vs active cooling) — benchmark on
+    the low end, not only the machines we happen to own.
+  - Upstream divergence — main is moving fast (Attn-QAT, FP4 linear paths);
+    rebase on a fixed cadence and upstream early.
+  - GPU spend wasted on wrong numerics — the parity test gates Phase B.
+  - Quality-metric blind spots — SSIM against a reference misses "the reference
+    is bad"; the VBench-style score and a small human evaluation at M4/M5
+    catch it.
+
+## Differentiation
+
+What makes this stand out rather than being "Wan, but slower, on a Mac":
+
+- The first 3-step DMD video generation co-designed for consumer Apple
+  Silicon — quantization-aware training matched to the deploy-time MLX
+  quantizer, the Apple-native analog of FastWan-QAD's NVFP4 co-design.
+- Memory-tier presets as a product surface: a 16 GB MacBook Air owner and a
+  128 GB Mac Studio owner both get a configuration that is honest about what
+  their machine can do.
+- Public, reproducible benchmarks with quality metrics attached to every speed
+  claim.
+
+Parked stretch ideas, with rationale recorded so they are deliberate choices
+rather than forgotten ones: a Metal/MLX sparse-attention kernel (after the QAT
+model ships), step-output caching (TeaCache-style), and packaging (a ComfyUI
+node — the repository already carries `comfyui/` — or a small native app).
 
 ## Operating principle
 
@@ -172,4 +322,3 @@ We should optimize for honest progress. Fast videos that look broken are not the
 goal. Beautiful videos that take too long are also not the goal. The work is to
 find the best quality-speed-memory point for each Mac tier, make it reproducible,
 and keep pushing that frontier forward.
-
