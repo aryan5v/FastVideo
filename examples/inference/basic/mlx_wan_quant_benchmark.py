@@ -102,9 +102,10 @@ def _run_one_mode(
     import mlx.core as mx
     import torch
 
+    from fastvideo.benchmarks.mlx_fastwan_bench import denoise_dmd_on_device
     from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-    from fastvideo.models.utils import pred_noise_to_pred_video
     from fastvideo.mlx_runtime.fastwan import mlx_dit_from_diffusers_safetensors
+    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
 
     mx_dtype = mx.float16 if args.mlx_dtype == "fp16" else mx.float32
     quantization = None if mode == "none" else mode
@@ -125,53 +126,44 @@ def _run_one_mode(
     load_peak_memory = mx.get_peak_memory()
 
     scheduler = FlowMatchEulerDiscreteScheduler(shift=args.flow_shift)
-    timesteps = torch.tensor([int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()])
+    schedule = MLXDMDSchedule.from_torch_scheduler(scheduler)
+    timesteps = [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()]
+    # Same torch generator sequence as the original host-round-trip loop
+    # (initial latents first, then one re-noise draw per intermediate step),
+    # so every mode still shares identical stochasticity.
     generator = torch.Generator(device="cpu").manual_seed(args.seed)
-    latents_torch = torch.randn(
+    latents_seed = torch.randn(
         (1, int(config["in_channels"]), latent_frames, latent_height, latent_width),
         generator=generator,
         dtype=torch.float32,
-    )
-    latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
+    ).numpy()
+    renoise_by_step = [
+        torch.randn(latents_seed.shape, generator=generator, dtype=torch.float32).numpy()
+        for _ in range(max(0, len(timesteps) - 1))
+    ]
+    latents = mx.array(latents_seed).astype(mx_dtype)
     encoder_hidden_states = mx.array(prompt_embeds.numpy()).astype(mx_dtype)
 
     denoise_start = time.perf_counter()
     mx.reset_peak_memory()
-    for step_index, timestep in enumerate(timesteps):
-        noise_latents = latents
-        timestep_mx = mx.array([float(timestep.item())]).astype(mx.float32)
-        noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
-        mx.eval(noise_pred)
-
-        noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
-        latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
-        noise_latents_torch = torch.from_numpy(np.array(noise_latents.astype(mx.float32)))
-        pred_video_btc = pred_noise_to_pred_video(
-            pred_noise=noise_pred_torch.permute(0, 2, 1, 3, 4).flatten(0, 1),
-            noise_input_latent=noise_latents_torch.permute(0, 2, 1, 3, 4).flatten(0, 1),
-            timestep=timestep.repeat(noise_pred_torch.shape[0]),
-            scheduler=scheduler,
-        ).unflatten(0, (noise_pred_torch.shape[0], noise_pred_torch.shape[2]))
-        if step_index < len(timesteps) - 1:
-            next_timestep = timesteps[step_index + 1].reshape(1)
-            noise = torch.randn(latents_torch.shape, generator=generator, dtype=latents_torch.dtype)
-            latents_btc = scheduler.add_noise(
-                pred_video_btc.flatten(0, 1),
-                noise.permute(0, 2, 1, 3, 4).flatten(0, 1),
-                next_timestep,
-            ).unflatten(0, pred_video_btc.shape[:2])
-            latents_torch = latents_btc.permute(0, 2, 1, 3, 4)
-        else:
-            latents_torch = pred_video_btc.permute(0, 2, 1, 3, 4)
-
-        latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
-        mx.eval(latents)
+    latents_np = denoise_dmd_on_device(
+        mx=mx,
+        dit=dit,
+        latents=latents,
+        encoder_hidden_states=encoder_hidden_states,
+        freqs_cis=freqs_cis,
+        timesteps=timesteps,
+        renoise_by_step=renoise_by_step,
+        schedule=schedule,
+        dmd_step=dmd_step,
+        mx_dtype=mx_dtype,
+    )
     denoise_time = time.perf_counter() - denoise_start
     denoise_peak_memory = mx.get_peak_memory()
     active_memory = mx.get_active_memory()
     return {
         "mode": mode,
-        "latents": np.array(latents.astype(mx.float32)),
+        "latents": latents_np,
         "metrics": {
             "mlx_dit_load_s": load_time,
             "mlx_denoise_s": denoise_time,
@@ -235,20 +227,27 @@ def main() -> None:
         latent_width=latent_width,
     )
 
+    from fastvideo.mlx_runtime.fastwan import UnsupportedMLXQuantizationError
+
     baseline_latents = None
     rows = []
     for mode in _parse_modes(args.modes):
         print(f"=== MLX quant mode: {mode} ===")
         mode_start = time.perf_counter()
-        result = _run_one_mode(
-            mode=mode,
-            args=args,
-            config=config,
-            checkpoint_path=checkpoint_path,
-            config_path=config_path,
-            prompt_embeds=prompt_embeds,
-            freqs_cis=freqs_cis,
-        )
+        try:
+            result = _run_one_mode(
+                mode=mode,
+                args=args,
+                config=config,
+                checkpoint_path=checkpoint_path,
+                config_path=config_path,
+                prompt_embeds=prompt_embeds,
+                freqs_cis=freqs_cis,
+            )
+        except UnsupportedMLXQuantizationError as exc:
+            print(f"skipping mode (unsupported by this MLX build): {exc}")
+            rows.append({"mode": mode, "status": "unsupported_by_mlx", "error": str(exc)})
+            continue
         latents = result["latents"]
         if baseline_latents is None:
             baseline_latents = latents
@@ -268,6 +267,7 @@ def main() -> None:
         mlx_active_bytes = int(result["metrics"]["mlx_active_after_denoise_bytes"])
         metrics = {
             "mode": mode,
+            "status": "ok",
             "prompt_encode_shared_s": prompt_time,
             "height": args.height,
             "width": args.width,

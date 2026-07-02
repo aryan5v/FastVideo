@@ -90,7 +90,7 @@ def _parse_list(raw: str, allowed: tuple[str, ...], label: str) -> list[str]:
     return items
 
 
-def _denoise_dmd_on_device(
+def denoise_dmd_on_device(
     *,
     mx,
     dit,
@@ -175,6 +175,7 @@ def _markdown_table(rows: list[dict]) -> str:
     columns = [
         ("mode", "mode"),
         ("decoder", "decoder"),
+        ("status", "status"),
         ("denoise_s", "denoise s"),
         ("decode_s", "decode s"),
         ("total_s", "total s"),
@@ -239,7 +240,7 @@ def _generate_cell(
     latents = mx.array(latents_seed).astype(mx_dtype)
     mx.reset_peak_memory()
     denoise_start = time.perf_counter()
-    latents_np = _denoise_dmd_on_device(
+    latents_np = denoise_dmd_on_device(
         mx=mx,
         dit=dit,
         latents=latents,
@@ -273,6 +274,7 @@ def _generate_cell(
     metrics: dict[str, float | int | str | bool | None] = {
         "mode": mode,
         "decoder": decoder,
+        "status": "ok",
         "load_s": load_s,
         "denoise_s": denoise_s,
         "decode_s": decode_s,
@@ -371,24 +373,45 @@ def main() -> None:
         for _ in range(max(0, len(timesteps) - 1))
     ]
 
+    from fastvideo.mlx_runtime.fastwan import UnsupportedMLXQuantizationError
+
     cells: list[Cell] = []
+    unsupported_rows: list[dict] = []
     for mode in modes:
         for decoder in decoders:
             print(f"=== cell: mode={mode} decoder={decoder} ===")
-            cells.append(
-                _generate_cell(
-                    args=args,
-                    mode=mode,
-                    decoder=decoder,
-                    checkpoint_path=checkpoint_path,
-                    config_path=config_path,
-                    encoder_hidden_states=encoder_hidden_states,
-                    freqs_cis=freqs_cis,
-                    timesteps=timesteps,
-                    latents_seed=latents_seed,
-                    renoise_by_step=renoise_by_step,
+            try:
+                cells.append(
+                    _generate_cell(
+                        args=args,
+                        mode=mode,
+                        decoder=decoder,
+                        checkpoint_path=checkpoint_path,
+                        config_path=config_path,
+                        encoder_hidden_states=encoder_hidden_states,
+                        freqs_cis=freqs_cis,
+                        timesteps=timesteps,
+                        latents_seed=latents_seed,
+                        renoise_by_step=renoise_by_step,
+                    )
                 )
-            )
+            except UnsupportedMLXQuantizationError as exc:
+                # Record the cell as unsupported and keep sweeping: a partial
+                # report on this MLX build beats crashing the whole run.
+                print(f"skipping cell (unsupported by this MLX build): {exc}")
+                unsupported_rows.append({
+                    "mode": mode,
+                    "decoder": decoder,
+                    "status": "unsupported_by_mlx",
+                    "error": str(exc),
+                })
+
+    if not cells:
+        metrics_path = args.output_dir / "metrics.json"
+        metrics_path.write_text(json.dumps(unsupported_rows, indent=2))
+        raise SystemExit(
+            f"No benchmark cell could run: every requested mode is unsupported by this MLX build. "
+            f"Wrote {metrics_path}.")
 
     # Resolve the SSIM/latent reference: external clip, else the fp16+wan-vae cell
     # (or the first cell if that combination was not swept).
@@ -419,6 +442,7 @@ def main() -> None:
             failures.append(f"{cell.mode}/{cell.decoder}: MS-SSIM {ms_ssim:.4f} < {args.assert_min_ssim}")
         rows.append(dict(cell.metrics))
         print(json.dumps(cell.metrics, indent=2))
+    rows.extend(unsupported_rows)
 
     metrics_path = args.output_dir / "metrics.json"
     metrics_path.write_text(json.dumps(rows, indent=2))

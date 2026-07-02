@@ -8,22 +8,30 @@ Wan block parity, then full DiT/runtime support.
 
 from fastvideo.mlx_runtime.fastwan import (
     FastWanShape,
+    MLXQuantizationSpec,
     MLXWanDiT,
     MLXWanTransformerBlock,
+    UnsupportedMLXQuantizationError,
+    ensure_quantization_supported,
     fastwan_shape,
     fastwan_shape_from_config,
     mlx_dit_from_diffusers_safetensors,
     mlx_block_weights_from_torch,
     mlx_block_weights_from_diffusers_safetensors,
+    quantization_support_error,
 )
 
 __all__ = [
     "FastWanShape",
+    "MLXQuantizationSpec",
     "MLXWanDiT",
     "MLXWanTransformerBlock",
+    "UnsupportedMLXQuantizationError",
+    "ensure_quantization_supported",
     "fastwan_shape",
     "fastwan_shape_from_config",
     "mlx_dit_from_diffusers_safetensors",
     "mlx_block_weights_from_diffusers_safetensors",
     "mlx_block_weights_from_torch",
+    "quantization_support_error",
 ]

@@ -33,6 +33,16 @@ class FastWanShape:
     head_dim: int
 
 
+class UnsupportedMLXQuantizationError(ValueError):
+    """A quantization mode the installed MLX build cannot execute.
+
+    Raised by :func:`ensure_quantization_supported` before any model weights
+    are loaded, so callers (CLI flags, benchmark sweeps) can fail fast with an
+    actionable message -- or skip the mode -- instead of crashing deep inside
+    ``mx.quantize`` mid-load.
+    """
+
+
 @dataclass(frozen=True)
 class MLXQuantizationSpec:
     """MLX quantized-matmul configuration for DiT linear weights."""
@@ -216,6 +226,51 @@ def weight_dtype(weight):
     if isinstance(weight, QuantizedMatrix):
         return weight.dequantized_dtype
     return weight.dtype
+
+
+_QUANT_SUPPORT_CACHE: dict[tuple[str, int | None, int | None], str | None] = {}
+
+
+def quantization_support_error(spec: MLXQuantizationSpec) -> str | None:
+    """Probe whether the installed MLX build supports ``spec``.
+
+    Runs a tiny ``mx.quantize`` + ``mx.quantized_matmul`` with exactly the
+    arguments :func:`quantize_matrix` / :func:`linear` use, so the result
+    reflects the real runtime path. The affine (int8/int4) modes are stable
+    across MLX releases, but the ``mxfp8``/``mxfp4``/``nvfp4`` mode strings
+    require newer MLX builds and raise otherwise. Returns ``None`` when the
+    mode works, else the underlying error message. Cached per spec.
+    """
+    key = (spec.mode, spec.bits, spec.group_size)
+    if key not in _QUANT_SUPPORT_CACHE:
+        import mlx.core as mx
+
+        try:
+            probe_dim = max(spec.group_size or 0, 64)
+            weight = mx.zeros((probe_dim, probe_dim), dtype=mx.float16)
+            quantized = quantize_matrix(weight, spec)
+            y = linear(mx.zeros((1, probe_dim), dtype=mx.float16), quantized)
+            mx.eval(y)
+            _QUANT_SUPPORT_CACHE[key] = None
+        except Exception as exc:  # noqa: BLE001 - MLX raises varied error types per backend/version.
+            _QUANT_SUPPORT_CACHE[key] = f"{type(exc).__name__}: {exc}"
+    return _QUANT_SUPPORT_CACHE[key]
+
+
+def ensure_quantization_supported(spec: MLXQuantizationSpec | None) -> None:
+    """Raise :class:`UnsupportedMLXQuantizationError` if ``spec`` cannot run here."""
+    if spec is None:
+        return
+    error = quantization_support_error(spec)
+    if error is None:
+        return
+    import mlx.core as mx
+
+    mlx_version = getattr(mx, "__version__", "unknown")
+    raise UnsupportedMLXQuantizationError(
+        f"MLX quantization mode '{spec.label}' is not supported by the installed mlx "
+        f"({mlx_version}): {error}. Upgrade mlx or pick a supported mode "
+        f"(int8 is currently the most reliable quality/memory target).")
 
 
 def quantize_matrix(weight, spec: MLXQuantizationSpec | None):
@@ -724,6 +779,7 @@ def mlx_block_weights_from_diffusers_safetensors(
     }
 
     spec = MLXQuantizationSpec.from_name(quantization) if (quantization is None or isinstance(quantization, str)) else quantization
+    ensure_quantization_supported(spec)
     matrix_targets = {target for target in key_map.values() if target.endswith(".weight") and "norm" not in target}
     weights = {}
     with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
@@ -753,6 +809,7 @@ def mlx_dit_from_diffusers_safetensors(
         num_blocks = total_blocks
     cast_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[dtype]
     spec = MLXQuantizationSpec.from_name(quantization) if (quantization is None or isinstance(quantization, str)) else quantization
+    ensure_quantization_supported(spec)
 
     top_level_names = [
         "patch_embedding.weight",
