@@ -15,6 +15,23 @@ Use **4 GPUs** (the recipe default) — do not grab all 8 unless told to.
 Expected wall time for the full run is roughly 4–8 hours on 4×B200, but run
 the smoke test first and extrapolate from its measured seconds/step.
 
+**If only N (< 4) GPUs are free:** the run works on any count ≥ 1; the only
+rule is that the HSDP shard dim must equal the GPU count. Add these overrides
+to every launch command below (shown for N=3):
+
+```bash
+NUM_GPUS=3 bash examples/train/run.sh <config> \
+  --training.distributed.num_gpus 3 \
+  --training.distributed.hsdp_shard_dim 3 \
+  ...
+```
+
+Global batch scales with GPU count (1 per GPU), which is fine for DMD at this
+scale; wall time scales inversely (~6–11 h on 3 GPUs). Prefer waiting for a
+4th GPU only if it frees up within the hour; otherwise just run on 3. The
+same rule applies upward: if 8 are genuinely free and idle, `NUM_GPUS=8` with
+`hsdp_shard_dim 8` roughly halves the wall time.
+
 ## 0. Preflight
 
 ```bash
