@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quantization-aware training callback targeting the Apple/MLX runtime.
 
-Registers a weight parametrization on the student transformer's linear
-weights so every forward sees MLX-affine fake-quantized weights (the exact
-deploy-time grid of ``mx.quantize``/``mx.dequantize``; see
+Wraps the student transformer's target modules so every forward computes with
+MLX-affine fake-quantized weights (the exact deploy-time grid of
+``mx.quantize``/``mx.dequantize``; see
 ``fastvideo/layers/quantization/mlx_affine_qat.py`` and its bitwise parity
-tests), while gradients flow straight-through to the master weights. Composes
+tests), while gradients flow straight-through to the real weights. Composes
 with any ``TrainingMethod`` (DMD2, KD, fine-tune) via YAML:
 
 .. code-block:: yaml
@@ -15,16 +15,24 @@ with any ``TrainingMethod`` (DMD2, KD, fine-tune) via YAML:
         group_size: 64
         bits: 8
 
+Mechanism: a forward-scoped weight swap, NOT ``torch.nn.utils.parametrize``.
+Under FSDP2/HSDP the parameters are sharded DTensors *outside* module
+forwards and unsharded plain tensors (already cast to the compute dtype)
+*inside* them. Parametrizations restructure the parameter into a submodule
+and compute from the raw master, which breaks both worlds: dtype sniffing
+sees fp32 masters, and the forward mixes sharded DTensors with plain tensors
+(``aten.convolution.default: got mixed torch.Tensor and DTensor``, observed
+on a DGX B200). Swapping the weight for its fake-quantized version only for
+the duration of each wrapped ``forward`` call means: outside forwards the
+module is untouched (FSDP, optimizers, checkpointing, and export see vanilla
+parameters), and inside forwards the fake-quant operates on exactly the
+unsharded compute-dtype weight the matmul would have used.
+
 Targeting mirrors ``mlx_dit_from_diffusers_safetensors``: 2-D (or reshapable
 conv) ``.weight`` tensors whose grouped dim divides ``group_size``, excluding
-norms and modulation tables. Note that under bf16 autocast the fake-quantized
-values are rounded once more to bf16 for the matmul — the quantization
-*decisions* (codes, scales, biases) still bit-match deploy time, which is
-what QAT needs to learn the deploy grid.
-
-FSDP caveat: parametrizations must be registered before sharding wraps the
-modules; this callback runs in ``on_train_start`` after model setup, so the
-first multi-GPU smoke run should verify parametrized weights shard cleanly.
+norms and modulation tables. The quantization *decisions* (codes, scales,
+biases) bit-match deploy time; under bf16 compute the dequantized values are
+rounded once more to bf16 for the matmul, like any bf16 arithmetic.
 """
 
 from __future__ import annotations
@@ -33,7 +41,6 @@ import re
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.utils.parametrize as parametrize
 
 from fastvideo.layers.quantization.mlx_affine_qat import fake_quantize_mlx_affine
 from fastvideo.logger import init_logger
@@ -49,36 +56,39 @@ DEFAULT_EXCLUDE_PATTERNS = (r"norm", r"scale_shift_table")
 
 _SIMULATE_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
 
+_WRAPPED_MARKER = "_mlx_qat_wrapped"
 
-class _MLXAffineFakeQuantParametrization(torch.nn.Module):
-    """Weight parametrization: master weight -> MLX-affine dequant grid (STE)."""
 
-    def __init__(self, *, group_size: int, bits: int, simulate_dtype: torch.dtype,
-                 compute_dtype: torch.dtype | None) -> None:
-        super().__init__()
-        self.group_size = group_size
-        self.bits = bits
-        self.simulate_dtype = simulate_dtype
-        self.compute_dtype = compute_dtype
+def _fake_quantize_weight(weight: torch.Tensor, *, group_size: int, bits: int,
+                          simulate_dtype: torch.dtype) -> torch.Tensor:
+    original_shape = weight.shape
+    # Conv-style weights (e.g. Wan's patch embedding) quantize over the
+    # flattened non-output dims, matching the MLX loader's (out, -1) reshape.
+    weight2d = weight.reshape(original_shape[0], -1) if weight.dim() > 2 else weight
+    fq = fake_quantize_mlx_affine(weight2d, group_size=group_size, bits=bits, simulate_dtype=simulate_dtype)
+    # Keep the dtype the module was about to compute with (inside FSDP
+    # forwards that is the unsharded compute-dtype weight).
+    return fq.reshape(original_shape).to(weight.dtype)
 
-    def forward(self, weight: torch.Tensor) -> torch.Tensor:
-        original_shape = weight.shape
-        # Conv-style weights (e.g. Wan's patch embedding) quantize over the
-        # flattened non-output dims, matching the MLX loader's (out, -1) reshape.
-        weight2d = weight.reshape(original_shape[0], -1) if weight.dim() > 2 else weight
-        fq = fake_quantize_mlx_affine(
-            weight2d,
-            group_size=self.group_size,
-            bits=self.bits,
-            simulate_dtype=self.simulate_dtype,
-        )
-        # Present the weight in the model's compute dtype. Under FSDP/HSDP
-        # mixed precision the master (`parametrizations.weight.original`) is
-        # stored fp32 and only cast at forward time; without an explicit
-        # compute_dtype, code that reads `module.weight` outside autocast
-        # (validation pipelines, dtype sniffing) would see fp32 weights next
-        # to bf16 buffers/biases and crash with a dtype mismatch.
-        return fq.reshape(original_shape).to(self.compute_dtype or weight.dtype)
+
+def _install_qat_forward(module: torch.nn.Module, *, group_size: int, bits: int,
+                         simulate_dtype: torch.dtype) -> None:
+    inner_forward = module.forward  # bound method of this instance
+
+    def qat_forward(*args, **kwargs):
+        original = module._parameters.pop("weight")
+        try:
+            # Plain-attribute shadow: getattr finds it before _parameters.
+            module.weight = _fake_quantize_weight(
+                original, group_size=group_size, bits=bits, simulate_dtype=simulate_dtype)
+            return inner_forward(*args, **kwargs)
+        finally:
+            if "weight" in module.__dict__:
+                del module.weight
+            module._parameters["weight"] = original
+
+    module.forward = qat_forward
+    setattr(module, _WRAPPED_MARKER, True)
 
 
 class MLXQuantizationAwareCallback(Callback):
@@ -89,12 +99,6 @@ class MLXQuantizationAwareCallback(Callback):
         bits: 8 (deploy target) or 4 (evaluated after INT8 proves out).
         simulate_dtype: precision the deploy path casts weights to before
             quantizing ("fp16" matches the MLX loader).
-        compute_dtype: dtype `module.weight` presents to forwards and to any
-            code that introspects it. Set this to the training precision
-            (e.g. "bf16") whenever the trainer keeps fp32 master weights
-            (FSDP/HSDP mixed precision) — otherwise validation and other
-            non-autocast readers see fp32 weights against bf16 biases.
-            ``None`` presents the master's own dtype.
         exclude_patterns: regex fragments; a weight is skipped when any
             matches its module name.
     """
@@ -105,19 +109,19 @@ class MLXQuantizationAwareCallback(Callback):
         group_size: int = 64,
         bits: int = 8,
         simulate_dtype: str = "fp16",
-        compute_dtype: str | None = None,
         exclude_patterns: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_PATTERNS,
     ) -> None:
         self._group_size = int(group_size)
         self._bits = int(bits)
         self._simulate_dtype = _SIMULATE_DTYPES[simulate_dtype]
-        self._compute_dtype = None if compute_dtype is None else _SIMULATE_DTYPES[compute_dtype]
         self._exclude = [re.compile(pattern) for pattern in exclude_patterns]
         self.quantized_module_names: list[str] = []
 
     def _is_target(self, module_name: str, module: torch.nn.Module) -> bool:
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.nn.Parameter) or weight.dim() < 2:
+        if getattr(module, _WRAPPED_MARKER, False):
+            return False
+        weight = module._parameters.get("weight")
+        if weight is None or weight.dim() < 2:
             return False
         if any(pattern.search(module_name) for pattern in self._exclude):
             return False
@@ -139,16 +143,11 @@ class MLXQuantizationAwareCallback(Callback):
         for module_name, module in student.transformer.named_modules():
             if not self._is_target(module_name, module):
                 continue
-            parametrize.register_parametrization(
+            _install_qat_forward(
                 module,
-                "weight",
-                _MLXAffineFakeQuantParametrization(
-                    group_size=self._group_size,
-                    bits=self._bits,
-                    simulate_dtype=self._simulate_dtype,
-                    compute_dtype=self._compute_dtype,
-                ),
-                unsafe=True,  # the parametrized dtype may differ from the master's.
+                group_size=self._group_size,
+                bits=self._bits,
+                simulate_dtype=self._simulate_dtype,
             )
             self.quantized_module_names.append(module_name)
 
