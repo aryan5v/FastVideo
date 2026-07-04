@@ -304,10 +304,20 @@ Phase A — numerics first:
 
 Phase B — the run:
 
-- Quantization-aware finetune of FastWan2.1-T2V-1.3B (dense attention),
-  followed by quantization-aware DMD to 3 steps, starting from the existing
-  `dmd2_t2v.yaml` recipe. Reuse upstream Attn-QAT infrastructure landing on
-  main where it is device-portable.
+- **[smoke passed on DGX B200, 2026-07]** The QAD smoke run (100 steps,
+  4 GPUs, `dmd2_t2v_mlx_int8.yaml` per `apple_silicon_qad_runbook.md`)
+  trained and validated end to end with the student computing every forward
+  on the INT8 deploy grid; step-100 validation clips show coherent subjects
+  emerging. Getting here surfaced and fixed three real integration bugs:
+  a missing `torch.distributed.checkpoint` import, denoising stages sniffing
+  fp32 FSDP master storage for their target dtype (broke base-recipe
+  validation too), and the QAT weight parametrization mixing sharded
+  DTensors with unsharded tensors (replaced with a forward-scoped weight
+  swap that leaves modules vanilla outside their own forwards).
+- Quantization-aware DMD of Wan2.1-T2V-1.3B (dense attention) to 3 steps
+  via the recipe above; full 4k-step run launches after the smoke. Reuse
+  upstream Attn-QAT infrastructure landing on main where it is
+  device-portable.
 - Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
   existing MLX loader, plus the M3 pre-quantized MLX format.
 
