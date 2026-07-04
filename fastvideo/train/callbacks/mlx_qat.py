@@ -53,11 +53,13 @@ _SIMULATE_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch
 class _MLXAffineFakeQuantParametrization(torch.nn.Module):
     """Weight parametrization: master weight -> MLX-affine dequant grid (STE)."""
 
-    def __init__(self, *, group_size: int, bits: int, simulate_dtype: torch.dtype) -> None:
+    def __init__(self, *, group_size: int, bits: int, simulate_dtype: torch.dtype,
+                 compute_dtype: torch.dtype | None) -> None:
         super().__init__()
         self.group_size = group_size
         self.bits = bits
         self.simulate_dtype = simulate_dtype
+        self.compute_dtype = compute_dtype
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
         original_shape = weight.shape
@@ -70,7 +72,13 @@ class _MLXAffineFakeQuantParametrization(torch.nn.Module):
             bits=self.bits,
             simulate_dtype=self.simulate_dtype,
         )
-        return fq.reshape(original_shape).to(weight.dtype)
+        # Present the weight in the model's compute dtype. Under FSDP/HSDP
+        # mixed precision the master (`parametrizations.weight.original`) is
+        # stored fp32 and only cast at forward time; without an explicit
+        # compute_dtype, code that reads `module.weight` outside autocast
+        # (validation pipelines, dtype sniffing) would see fp32 weights next
+        # to bf16 buffers/biases and crash with a dtype mismatch.
+        return fq.reshape(original_shape).to(self.compute_dtype or weight.dtype)
 
 
 class MLXQuantizationAwareCallback(Callback):
@@ -81,6 +89,12 @@ class MLXQuantizationAwareCallback(Callback):
         bits: 8 (deploy target) or 4 (evaluated after INT8 proves out).
         simulate_dtype: precision the deploy path casts weights to before
             quantizing ("fp16" matches the MLX loader).
+        compute_dtype: dtype `module.weight` presents to forwards and to any
+            code that introspects it. Set this to the training precision
+            (e.g. "bf16") whenever the trainer keeps fp32 master weights
+            (FSDP/HSDP mixed precision) — otherwise validation and other
+            non-autocast readers see fp32 weights against bf16 biases.
+            ``None`` presents the master's own dtype.
         exclude_patterns: regex fragments; a weight is skipped when any
             matches its module name.
     """
@@ -91,11 +105,13 @@ class MLXQuantizationAwareCallback(Callback):
         group_size: int = 64,
         bits: int = 8,
         simulate_dtype: str = "fp16",
+        compute_dtype: str | None = None,
         exclude_patterns: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_PATTERNS,
     ) -> None:
         self._group_size = int(group_size)
         self._bits = int(bits)
         self._simulate_dtype = _SIMULATE_DTYPES[simulate_dtype]
+        self._compute_dtype = None if compute_dtype is None else _SIMULATE_DTYPES[compute_dtype]
         self._exclude = [re.compile(pattern) for pattern in exclude_patterns]
         self.quantized_module_names: list[str] = []
 
@@ -130,7 +146,9 @@ class MLXQuantizationAwareCallback(Callback):
                     group_size=self._group_size,
                     bits=self._bits,
                     simulate_dtype=self._simulate_dtype,
+                    compute_dtype=self._compute_dtype,
                 ),
+                unsafe=True,  # the parametrized dtype may differ from the master's.
             )
             self.quantized_module_names.append(module_name)
 
