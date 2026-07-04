@@ -3,8 +3,13 @@
 
 Torch-only (no MLX needed): the underlying quantizer numerics are pinned
 bitwise against MLX in ``test_mlx_affine_qat_parity.py``; these tests cover
-the callback mechanics — module targeting, parametrization behavior, gradient
-flow to master weights, and re-quantization after optimizer steps.
+the callback mechanics — module targeting, the forward-scoped weight swap,
+gradient flow to the real weights, and requantization after optimizer steps.
+
+The forward-scoped swap (rather than ``torch.nn.utils.parametrize``) is
+deliberate: under FSDP2 the parameters are sharded DTensors outside forwards
+and unsharded plain tensors inside them, so the module must look completely
+vanilla except during its own forward call.
 """
 
 from __future__ import annotations
@@ -43,6 +48,12 @@ def _method_with_student(transformer: torch.nn.Module):
     return types.SimpleNamespace(student=student)
 
 
+def _expected_fq(weight: torch.Tensor) -> torch.Tensor:
+    flat = weight.reshape(weight.shape[0], -1) if weight.dim() > 2 else weight
+    fq = fake_quantize_mlx_affine(flat, group_size=64, bits=8)
+    return fq.reshape(weight.shape).to(weight.dtype)
+
+
 def test_callback_targets_matrix_weights_and_skips_norms_and_indivisible() -> None:
     transformer = _TinyStudentTransformer()
     callback = MLXQuantizationAwareCallback(group_size=64, bits=8)
@@ -50,50 +61,75 @@ def test_callback_targets_matrix_weights_and_skips_norms_and_indivisible() -> No
     callback.on_train_start(_method_with_student(transformer))
 
     assert set(callback.quantized_module_names) == {"to_q", "ffn_fc_in", "patch_embedding"}
-    assert torch.nn.utils.parametrize.is_parametrized(transformer.to_q, "weight")
-    assert not torch.nn.utils.parametrize.is_parametrized(transformer.norm_q, "weight")
-    assert not torch.nn.utils.parametrize.is_parametrized(transformer.tiny, "weight")
+    assert getattr(transformer.to_q, "_mlx_qat_wrapped", False)
+    assert not getattr(transformer.norm_q, "_mlx_qat_wrapped", False)
+    assert not getattr(transformer.tiny, "_mlx_qat_wrapped", False)
 
 
-def test_forward_sees_the_deploy_grid_and_conv_weights_quantize_flattened() -> None:
+def test_module_stays_vanilla_outside_forward() -> None:
     transformer = _TinyStudentTransformer()
-    master_linear = transformer.to_q.weight.detach().clone()
-    master_conv = transformer.patch_embedding.weight.detach().clone()
-
     MLXQuantizationAwareCallback(group_size=64, bits=8).on_train_start(_method_with_student(transformer))
 
-    expected_linear = fake_quantize_mlx_affine(master_linear, group_size=64, bits=8).to(master_linear.dtype)
-    torch.testing.assert_close(transformer.to_q.weight, expected_linear, atol=0, rtol=0)
+    # Outside a forward call the module must look untouched: `weight` is the
+    # real Parameter in _parameters (what FSDP, optimizers, checkpointing,
+    # and dtype sniffing all see).
+    assert isinstance(transformer.to_q.weight, torch.nn.Parameter)
+    assert "weight" in transformer.to_q._parameters
+    assert "weight" not in transformer.to_q.__dict__
+    assert next(transformer.parameters()).dtype == torch.float32
 
-    flattened = master_conv.reshape(master_conv.shape[0], -1)
-    expected_conv = fake_quantize_mlx_affine(flattened, group_size=64,
-                                             bits=8).reshape(master_conv.shape).to(master_conv.dtype)
-    torch.testing.assert_close(transformer.patch_embedding.weight, expected_conv, atol=0, rtol=0)
+
+def test_forward_computes_with_the_deploy_grid() -> None:
+    torch.manual_seed(2)
+    transformer = _TinyStudentTransformer()
+    MLXQuantizationAwareCallback(group_size=64, bits=8).on_train_start(_method_with_student(transformer))
+
+    x = torch.randn(4, 128)
+    out = transformer.to_q(x)
+    expected = x @ _expected_fq(transformer.to_q.weight.detach()).T
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+    # Conv weights quantize over the flattened non-output dims.
+    latent = torch.randn(1, 16, 4, 8, 8)
+    conv = transformer.patch_embedding
+    out_conv = conv(latent)
+    expected_conv = torch.nn.functional.conv3d(
+        latent, _expected_fq(conv.weight.detach()), conv.bias, stride=conv.stride)
+    torch.testing.assert_close(out_conv, expected_conv, atol=0, rtol=0)
 
 
-def test_gradients_flow_to_master_weights_and_requantize_after_step() -> None:
+def test_gradients_flow_to_real_weights_and_requantize_after_step() -> None:
     torch.manual_seed(11)
     transformer = _TinyStudentTransformer()
     MLXQuantizationAwareCallback(group_size=64, bits=8).on_train_start(_method_with_student(transformer))
 
-    master = transformer.to_q.parametrizations.weight.original
+    weight = transformer.to_q.weight
     optimizer = torch.optim.SGD(transformer.parameters(), lr=0.5)
 
     out = transformer(torch.randn(4, 128))
     out.square().mean().backward()
-    assert master.grad is not None and master.grad.abs().sum() > 0
+    assert weight.grad is not None and weight.grad.abs().sum() > 0
 
-    before_master = master.detach().clone()
-    before_effective = transformer.to_q.weight.detach().clone()
+    before_weight = weight.detach().clone()
     optimizer.step()
+    assert not torch.equal(weight.detach(), before_weight)
 
-    assert not torch.equal(master.detach(), before_master)
-    after_effective = transformer.to_q.weight.detach()
-    # The effective weight is re-quantized from the updated master and stays
-    # on the deploy grid.
-    expected = fake_quantize_mlx_affine(master.detach(), group_size=64, bits=8).to(after_effective.dtype)
-    torch.testing.assert_close(after_effective, expected, atol=0, rtol=0)
-    assert not torch.equal(after_effective, before_effective)
+    # The next forward requantizes from the updated weight and stays on the
+    # deploy grid.
+    x = torch.randn(2, 128)
+    torch.testing.assert_close(
+        transformer.to_q(x), x @ _expected_fq(weight.detach()).T, atol=0, rtol=0)
+
+
+def test_wrapping_is_idempotent() -> None:
+    transformer = _TinyStudentTransformer()
+    method = _method_with_student(transformer)
+    first = MLXQuantizationAwareCallback(group_size=64, bits=8)
+    first.on_train_start(method)
+    with pytest.raises(ValueError, match="matched no weights"):
+        # A second callback finds nothing left to wrap instead of
+        # double-quantizing.
+        MLXQuantizationAwareCallback(group_size=64, bits=8).on_train_start(method)
 
 
 def test_no_matching_weights_raises() -> None:
@@ -106,26 +142,13 @@ def test_missing_student_raises() -> None:
         MLXQuantizationAwareCallback().on_train_start(types.SimpleNamespace(student=None))
 
 
-def test_compute_dtype_presents_training_precision_over_fp32_masters() -> None:
-    torch.manual_seed(5)
-    transformer = _TinyStudentTransformer()  # fp32 masters, like HSDP mixed precision
-    callback = MLXQuantizationAwareCallback(group_size=64, bits=8, compute_dtype="bf16")
-    callback.on_train_start(_method_with_student(transformer))
+def test_weight_is_restored_even_when_forward_raises() -> None:
+    transformer = _TinyStudentTransformer()
+    MLXQuantizationAwareCallback(group_size=64, bits=8).on_train_start(_method_with_student(transformer))
 
-    # module.weight presents bf16 to forwards and dtype-sniffing readers even
-    # though the master stays fp32 (the smoke-run validation crash scenario).
-    assert transformer.to_q.weight.dtype == torch.bfloat16
-    assert transformer.to_q.parametrizations.weight.original.dtype == torch.float32
+    with pytest.raises(RuntimeError):
+        transformer.to_q(torch.randn(2, 64))  # wrong input dim -> matmul error
 
-    # Values are the deploy grid, rounded once to the compute dtype.
-    master = transformer.to_q.parametrizations.weight.original.detach()
-    expected = fake_quantize_mlx_affine(master, group_size=64, bits=8).to(torch.bfloat16)
-    torch.testing.assert_close(transformer.to_q.weight, expected, atol=0, rtol=0)
-
-    # Gradients still reach the fp32 master through the bf16 presentation.
-    # (Uses the bias-free module: unlike the real trainer, this tiny model has
-    # no FSDP compute-cast for its fp32 biases.)
-    out = transformer.to_q(torch.randn(2, 128).to(torch.bfloat16))
-    out.float().square().mean().backward()
-    grad = transformer.to_q.parametrizations.weight.original.grad
-    assert grad is not None and grad.dtype == torch.float32 and grad.abs().sum() > 0
+    assert isinstance(transformer.to_q.weight, torch.nn.Parameter)
+    assert "weight" in transformer.to_q._parameters
+    assert "weight" not in transformer.to_q.__dict__

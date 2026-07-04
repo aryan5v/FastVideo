@@ -88,10 +88,6 @@ callbacks:
     group_size: 64
     bits: 8
     simulate_dtype: fp16
-    # HSDP keeps fp32 master weights; module.weight must present the training
-    # precision or validation (outside autocast) sees fp32 weights vs bf16
-    # biases and crashes with a dtype mismatch.
-    compute_dtype: bf16
   grad_clip:
     max_grad_norm: 1.0
   validation:
