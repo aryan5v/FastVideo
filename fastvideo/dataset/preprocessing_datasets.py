@@ -11,6 +11,9 @@ from typing import Any
 
 import numpy as np
 import torch
+# The Stateful base class below needs this submodule loaded; without the
+# explicit import this module only works when something else imported it first.
+import torch.distributed.checkpoint.stateful
 import torchvision
 from einops import rearrange
 from PIL import Image
