@@ -104,3 +104,28 @@ def test_no_matching_weights_raises() -> None:
 def test_missing_student_raises() -> None:
     with pytest.raises(ValueError, match="No student transformer"):
         MLXQuantizationAwareCallback().on_train_start(types.SimpleNamespace(student=None))
+
+
+def test_compute_dtype_presents_training_precision_over_fp32_masters() -> None:
+    torch.manual_seed(5)
+    transformer = _TinyStudentTransformer()  # fp32 masters, like HSDP mixed precision
+    callback = MLXQuantizationAwareCallback(group_size=64, bits=8, compute_dtype="bf16")
+    callback.on_train_start(_method_with_student(transformer))
+
+    # module.weight presents bf16 to forwards and dtype-sniffing readers even
+    # though the master stays fp32 (the smoke-run validation crash scenario).
+    assert transformer.to_q.weight.dtype == torch.bfloat16
+    assert transformer.to_q.parametrizations.weight.original.dtype == torch.float32
+
+    # Values are the deploy grid, rounded once to the compute dtype.
+    master = transformer.to_q.parametrizations.weight.original.detach()
+    expected = fake_quantize_mlx_affine(master, group_size=64, bits=8).to(torch.bfloat16)
+    torch.testing.assert_close(transformer.to_q.weight, expected, atol=0, rtol=0)
+
+    # Gradients still reach the fp32 master through the bf16 presentation.
+    # (Uses the bias-free module: unlike the real trainer, this tiny model has
+    # no FSDP compute-cast for its fp32 biases.)
+    out = transformer.to_q(torch.randn(2, 128).to(torch.bfloat16))
+    out.float().square().mean().backward()
+    grad = transformer.to_q.parametrizations.weight.original.grad
+    assert grad is not None and grad.dtype == torch.float32 and grad.abs().sum() > 0
