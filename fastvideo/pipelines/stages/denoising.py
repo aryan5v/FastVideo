@@ -26,7 +26,7 @@ from fastvideo.pipelines.stages.base import PipelineStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.platforms import AttentionBackendEnum
-from fastvideo.utils import dict_to_3d_list, masks_like
+from fastvideo.utils import dict_to_3d_list, get_compute_dtype, masks_like
 
 try:
     from fastvideo.attention.backends.vmoba import VMOBAAttentionBackend
@@ -42,6 +42,25 @@ except ImportError:
     vsa_available = False
 
 logger = init_logger(__name__)
+
+
+
+def transformer_compute_dtype(transformer) -> torch.dtype:
+    """The dtype denoising inputs must match at the transformer's forwards.
+
+    Under FSDP/HSDP mixed precision the raw parameters are fp32 masters that
+    the policy casts to ``param_dtype`` per-forward, so sniffing
+    ``next(parameters()).dtype`` returns fp32 -- which both leaves the inputs
+    fp32 and disables autocast, crashing against bf16-cast weights (observed
+    in training-time validation). Prefer the registered mixed-precision
+    policy; fall back to parameter sniffing when no policy is set (pure
+    inference, MPS fp16 path).
+    """
+    policy_dtype = get_compute_dtype()
+    if policy_dtype != torch.float32:
+        return policy_dtype
+    module = transformer.module if hasattr(transformer, "module") else transformer
+    return next(module.parameters()).dtype
 
 
 class DenoisingStage(PipelineStage):
@@ -768,11 +787,7 @@ class CosmosDenoisingStage(DenoisingStage):
                 pipeline.add_module("transformer", self.transformer)
             fastvideo_args.model_loaded["transformer"] = True
 
-        if hasattr(self.transformer, "module"):
-            transformer_dtype = next(self.transformer.module.parameters()).dtype
-        else:
-            transformer_dtype = next(self.transformer.parameters()).dtype
-        target_dtype = transformer_dtype
+        target_dtype = transformer_compute_dtype(self.transformer)
         autocast_enabled = (target_dtype != torch.float32 and not fastvideo_args.disable_autocast)
 
         latents = batch.latents
@@ -1245,7 +1260,7 @@ class DmdDenoisingStage(DenoisingStage):
         """
         # Match the loaded DiT instead of assuming CUDA BF16. MPS uses the
         # FP16 compatibility path configured in FastVideoArgs.
-        target_dtype = next(self.transformer.parameters()).dtype
+        target_dtype = transformer_compute_dtype(self.transformer)
         autocast_enabled = (target_dtype != torch.float32) and not fastvideo_args.disable_autocast
 
         # Get timesteps and calculate warmup steps
