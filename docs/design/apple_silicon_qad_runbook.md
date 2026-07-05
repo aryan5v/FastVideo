@@ -128,17 +128,26 @@ Output/checkpoints land in `outputs/wan2.1_dmd2_3steps_mlx_int8`
 Monitor W&B; the DMD generator loss is noisy by nature — judge by the
 validation clips trending sharper/more coherent, not by the loss curve alone.
 
-## 5. Export (1 GPU)
+## 5. Export (1 GPU) — both raw and EMA
+
+Export twice: the raw student, and the EMA shadow weights (usually visibly
+smoother). Both are evaluated on the Mac side; the better one ships.
 
 ```bash
 python -m fastvideo.train.entrypoint.dcp_to_diffusers \
   --checkpoint outputs/wan2.1_dmd2_3steps_mlx_int8 \
   --output-dir outputs/wan2.1_qad_int8_diffusers \
   --role student
+
+python -m fastvideo.train.entrypoint.dcp_to_diffusers \
+  --checkpoint outputs/wan2.1_dmd2_3steps_mlx_int8 \
+  --output-dir outputs/wan2.1_qad_int8_ema_diffusers \
+  --role student --ema
 ```
 
-This auto-picks the latest checkpoint and writes a Diffusers-style model dir.
-(EMA export is a follow-up; the raw student is what we evaluate first.)
+Each auto-picks the latest checkpoint and writes a Diffusers-style model dir.
+If the `--ema` export errors, report the traceback and still deliver the raw
+export — it unblocks Mac evaluation while the EMA path gets fixed.
 
 ## 6. Deliverables
 

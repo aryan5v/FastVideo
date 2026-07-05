@@ -202,8 +202,14 @@ def convert(
     config_path: str | None = None,
     role: str = "student",
     overwrite: bool = False,
+    use_ema: bool = False,
 ) -> str:
     """Load a DCP checkpoint and export as a diffusers model.
+
+    With ``use_ema`` the EMA callback's shadow weights (checkpointed under
+    the DCP ``callbacks`` entry) are swapped into the role's transformer for
+    the export, so the written model carries the EMA weights instead of the
+    raw ones.
 
     Returns the path to the exported model directory.
     """
@@ -265,11 +271,33 @@ def convert(
 
     # -- Load DCP weights into the model --
     states = method.checkpoint_state()
+    ema_cb = None
+    if use_ema:
+        from fastvideo.train.callbacks.callback import CallbackDict
+        from fastvideo.train.callbacks.ema import EMACallback
+        from fastvideo.train.utils.checkpoint import _CallbackStateWrapper
+
+        # Rebuild the callbacks so their state namespace matches what the
+        # CheckpointManager saved, then let the EMA callback allocate its
+        # shadow container before dcp.load fills it.
+        callbacks = CallbackDict(cfg.callbacks or {}, tc)
+        ema_cb = next(
+            (cb for cb in callbacks._callbacks.values() if isinstance(cb, EMACallback)),
+            None,
+        )
+        if ema_cb is None:
+            raise ValueError("--ema requested but the run config declares no EMA callback.")
+        ema_cb.on_train_start(method)
+        states["callbacks"] = _CallbackStateWrapper(callbacks)
     logger.info(
         "Loading DCP checkpoint from %s",
         resolved,
     )
     dcp.load(states, checkpoint_id=str(dcp_dir))
+    if ema_cb is not None and not ema_cb._ema_started:
+        raise ValueError(
+            "--ema requested but the checkpoint contains no started EMA state "
+            "(ema_started is false). Export without --ema instead.")
 
     # -- Export to diffusers format --
     model = method._role_models[role]
@@ -285,13 +313,18 @@ def convert(
         output_dir,
         base_model_path,
     )
-    result = _save_role_pretrained(
-        role=role,
-        base_model_path=base_model_path,
-        output_dir=output_dir,
-        overwrite=overwrite,
-        model=model,
-    )
+    import contextlib
+
+    ema_ctx = (ema_cb.ema_context(model.transformer)
+               if ema_cb is not None else contextlib.nullcontext())
+    with ema_ctx:
+        result = _save_role_pretrained(
+            role=role,
+            base_model_path=base_model_path,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            model=model,
+        )
     logger.info("Export complete: %s", result)
     return result
 
@@ -401,6 +434,11 @@ def main() -> None:
         action="store_true",
         help="Overwrite output-dir if it exists.",
     )
+    parser.add_argument(
+        "--ema",
+        action="store_true",
+        help="Export the EMA shadow weights instead of the raw role weights.",
+    )
     args = parser.parse_args(sys.argv[1:])
 
     convert(
@@ -408,6 +446,7 @@ def main() -> None:
         output_dir=args.output_dir,
         config_path=args.config,
         role=args.role,
+        use_ema=args.ema,
         overwrite=args.overwrite,
     )
 
