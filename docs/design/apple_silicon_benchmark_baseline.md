@@ -70,3 +70,26 @@ Each run writes:
 - It does not prove long-video coherence or 60-second generation.
 - It does not replace the Mac-targeted QAT/distillation track.
 
+
+## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
+
+Three runs on the motion7 prompt set (480×832×81, 3-step DMD, TAEHV decode,
+shared seed; INT8 = affine group-64 quantized at MLX load). `MS-SSIM` scores
+each run's INT8 cells against that run's own FP16 cells, i.e. it isolates
+quantization damage per model:
+
+| model | INT8 mean MS-SSIM vs own FP16 | INT8 steady step | INT8 peak GiB |
+| --- | ---: | ---: | ---: |
+| stock FastWan2.1-1.3B (PTQ) | 0.9069 | 34.2s | 5.62 |
+| QAD raw student | 0.9487 | 35.4s | 5.63 |
+| QAD EMA student | **0.9860** | 35.4s | 5.63 |
+
+Per-prompt, QAD EMA beats stock PTQ on all seven prompts (stock ranges
+0.821–0.974; EMA sits at 0.986 ± 0.0003). Runtime cost of QAT is zero, as
+expected — identical architecture, so step time and peak memory match stock.
+
+Reading: quantization-aware distillation did exactly what it was trained to
+do — the model's weights sit on the INT8 grid, so quantizing them at load is
+nearly lossless, where stock PTQ loses visibly (worst prompt 0.821). The EMA
+weights are the ship candidate pending the side-by-side visual parity check
+against stock FP16 (same-seed HTML grids).

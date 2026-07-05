@@ -319,8 +319,12 @@ Phase B — the run:
   8h52m (~6.8 s/step steady), losses finite throughout, step-4000
   validation clips near teacher-class per frame. Raw and EMA students
   exported to Diffusers format (`dcp_to_diffusers`, incl. the new `--ema`
-  path). Next: Mac-side three-column evaluation per
-  `apple_silicon_qad_runbook.md` §7 — the M4 exit decision.
+  path). **Mac evaluation passed the M4 criterion**: INT8-vs-own-FP16
+  MS-SSIM 0.9860 (QAD EMA) / 0.9487 (raw) vs 0.9069 (stock PTQ), EMA
+  ahead on all seven motion7 prompts at zero runtime cost — see
+  `apple_silicon_benchmark_baseline.md`. Remaining for M4 close-out:
+  visual parity sign-off vs stock FP16, then publish the EMA weights +
+  pre-quantized MLX checkpoint to Hugging Face.
 - Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
   existing MLX loader, plus the M3 pre-quantized MLX format.
 
