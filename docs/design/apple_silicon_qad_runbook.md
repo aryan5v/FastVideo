@@ -67,7 +67,7 @@ export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
 Sanity-check the QAT machinery on this box before spending GPU time:
 
 ```bash
-pytest fastvideo/tests/training/test_mlx_qat_callback.py -q   # expect 5 passed
+pytest fastvideo/tests/training/test_mlx_qat_callback.py -q   # expect 8 passed
 ```
 
 ## 2. Dataset
@@ -158,3 +158,68 @@ validation clips from late in training. Mac-side evaluation then happens per
 through the MLX runtime, quantize INT8 on load (the grid the student trained
 on), `--save-mlx-checkpoint`, and run the benchmark suite against the
 INT8-PTQ baseline.
+
+## 7. Mac-side evaluation (the ship/iterate decision)
+
+Run on the Apple Silicon benchmark machine, repo at the same branch. The
+exports are full Diffusers pipeline trees, but only `transformer/` differs
+from the stock snapshot — transfer just that (~3 GB each) and assemble roots
+locally:
+
+```bash
+STOCK="$(python -c 'from fastvideo.utils import maybe_download_model; print(maybe_download_model("FastVideo/FastWan2.1-T2V-1.3B-Diffusers"))')"
+for name in qad_int8 qad_int8_ema; do
+  mkdir -p ~/models/$name
+  ln -sfn "$STOCK"/* ~/models/$name/ && rm ~/models/$name/transformer
+done
+rsync -avP <dgx>:/raid/arkumar/FastVideo-apple-qad/outputs/wan2.1_qad_int8_diffusers/transformer/ \
+  ~/models/qad_int8/transformer/
+rsync -avP <dgx>:/raid/arkumar/FastVideo-apple-qad/outputs/wan2.1_qad_int8_ema_diffusers/transformer/ \
+  ~/models/qad_int8_ema/transformer/
+```
+
+Then three benchmark runs — identical seed and prompts, so videos are
+directly comparable across runs:
+
+```bash
+COMMON="--prompt-set motion7 --height 480 --width 832 --num-frames 81 \
+  --modes fp16,int8 --decoders taehv --mlx-checkpoint-cache ~/mlx-ckpt-cache"
+
+# A: stock FastWan  -> FP16 reference + PTQ-INT8 (SSIM column = PTQ damage)
+python fastvideo/benchmarks/mlx_fastwan_bench.py $COMMON \
+  --model-root "$STOCK" --output-dir bench/stock
+
+# B: QAD raw        -> SSIM column = quantization damage after QAT
+python fastvideo/benchmarks/mlx_fastwan_bench.py $COMMON \
+  --model-root ~/models/qad_int8 --output-dir bench/qad
+
+# C: QAD EMA
+python fastvideo/benchmarks/mlx_fastwan_bench.py $COMMON \
+  --model-root ~/models/qad_int8_ema --output-dir bench/qad_ema
+```
+
+How to read the results — two orthogonal questions:
+
+1. **Did QAT work?** Within each run, `ms_ssim_vs_ref` scores the int8 cell
+   against that model's own fp16 cell. The M4 claim is that quantization
+   hurts the QAD model *less* than the stock model:
+   `SSIM(B int8 vs B fp16) > SSIM(A int8 vs A fp16)`, with B's ideally near
+   1.0. This is the pass/fail number.
+2. **Is the QAD model as good as stock?** Cross-run, same prompt, same seed:
+   open the three `index.html` grids side by side (and check the
+   two-headed-horse prompt specifically against A's fp16 — if the artifact
+   appears there too, it is a 1.3B/3-step limitation, not a QAT one).
+   Latent SNR between runs is not meaningful across different weights; this
+   comparison is visual.
+
+Also record from `metrics.json`: `load_s` with `load_source=mlx_checkpoint`
+on second runs (the pre-quantized checkpoint win), `denoise_steady_step_s`,
+and `peak_gib` per cell — these numbers go into
+`apple_silicon_benchmark_baseline.md`.
+
+Decision per the roadmap (M4/M5): if (1) passes and (2) shows parity, the
+winner of B-vs-C ships behind the 16 GB preset and gets published to Hugging
+Face (pre-quantized MLX checkpoint included). If (1) passes but (2) shows a
+quality gap vs stock, run 2 applies the queued levers (student+critic init
+from FastWan weights, gradient_accumulation_steps 4) — the training pipeline
+is proven, so run 2 is a YAML edit away.

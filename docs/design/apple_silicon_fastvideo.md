@@ -314,10 +314,13 @@ Phase B — the run:
   validation too), and the QAT weight parametrization mixing sharded
   DTensors with unsharded tensors (replaced with a forward-scoped weight
   swap that leaves modules vanilla outside their own forwards).
-- Quantization-aware DMD of Wan2.1-T2V-1.3B (dense attention) to 3 steps
-  via the recipe above; full 4k-step run launches after the smoke. Reuse
-  upstream Attn-QAT infrastructure landing on main where it is
-  device-portable.
+- **[training complete, 2026-07]** Quantization-aware DMD of
+  Wan2.1-T2V-1.3B (dense attention) to 3 steps: 4,000 steps on 4×B200 in
+  8h52m (~6.8 s/step steady), losses finite throughout, step-4000
+  validation clips near teacher-class per frame. Raw and EMA students
+  exported to Diffusers format (`dcp_to_diffusers`, incl. the new `--ema`
+  path). Next: Mac-side three-column evaluation per
+  `apple_silicon_qad_runbook.md` §7 — the M4 exit decision.
 - Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
   existing MLX loader, plus the M3 pre-quantized MLX format.
 
