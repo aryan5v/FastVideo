@@ -88,8 +88,19 @@ Per-prompt, QAD EMA beats stock PTQ on all seven prompts (stock ranges
 0.821–0.974; EMA sits at 0.986 ± 0.0003). Runtime cost of QAT is zero, as
 expected — identical architecture, so step time and peak memory match stock.
 
-Reading: quantization-aware distillation did exactly what it was trained to
-do — the model's weights sit on the INT8 grid, so quantizing them at load is
-nearly lossless, where stock PTQ loses visibly (worst prompt 0.821). The EMA
-weights are the ship candidate pending the side-by-side visual parity check
-against stock FP16 (same-seed HTML grids).
+**Correction after visual review:** the EMA row is void. The EMA export's
+outputs are noise — and noise quantizes uniformly, which is precisely why its
+INT8-vs-FP16 SSIM was a suspiciously constant 0.986. Within-model SSIM
+measures quantization *consistency*, not absolute quality; it cannot detect a
+broken model. Root cause under investigation: the EMA checkpoint state is
+stored as world-size-dependent local shards (`EMA_FSDP` `local_shard` mode)
+from a 4-GPU run, while `dcp_to_diffusers --ema` forces a 1-GPU world.
+Training-time validation clips (which swap EMA weights via `ema_context`)
+looked good, so the EMA weights themselves were healthy — the export path is
+the suspect.
+
+The **raw student** row stands: 0.9487 vs stock PTQ's 0.9069 passes the
+quantization-robustness criterion, but visual review found motion defects and
+overall quality below stock — so the parity criterion is not met and the
+run-2 levers (FastWan init, larger effective batch) are activated per the
+roadmap's decision tree.
