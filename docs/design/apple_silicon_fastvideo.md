@@ -319,12 +319,15 @@ Phase B — the run:
   8h52m (~6.8 s/step steady), losses finite throughout, step-4000
   validation clips near teacher-class per frame. Raw and EMA students
   exported to Diffusers format (`dcp_to_diffusers`, incl. the new `--ema`
-  path). **Mac evaluation passed the M4 criterion**: INT8-vs-own-FP16
-  MS-SSIM 0.9860 (QAD EMA) / 0.9487 (raw) vs 0.9069 (stock PTQ), EMA
-  ahead on all seven motion7 prompts at zero runtime cost — see
-  `apple_silicon_benchmark_baseline.md`. Remaining for M4 close-out:
-  visual parity sign-off vs stock FP16, then publish the EMA weights +
-  pre-quantized MLX checkpoint to Hugging Face.
+  path). Mac evaluation: the quantization-robustness criterion passed on
+  the raw student (0.9487 INT8-vs-own-FP16 MS-SSIM vs 0.9069 stock PTQ),
+  but **visual review failed the parity criterion** — raw shows motion
+  defects below stock quality, and the EMA export produced noise (its
+  uniform 0.986 SSIM was an artifact of noise quantizing consistently;
+  suspected world-size-dependent EMA shard state in the export path, under
+  diagnosis — training-time EMA validation clips were healthy). Per the
+  decision tree: fix/verify the EMA export, and prepare run 2
+  (student+critic init from FastWan weights, gradient accumulation 4).
 - Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
   existing MLX loader, plus the M3 pre-quantized MLX format.
 
