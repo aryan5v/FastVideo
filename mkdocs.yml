@@ -165,6 +165,10 @@ nav:
     - Apple Silicon Benchmark Baseline: design/apple_silicon_benchmark_baseline.md
     - Apple Silicon QAD Runbook: design/apple_silicon_qad_runbook.md
     - Apple Silicon QAD Blog (draft): design/apple_silicon_qad_blog_draft.md
+    - Apple Silicon Program Plan: design/apple_silicon_program_plan.md
+    - Metal Attention Kernel Guide: design/metal_attention_kernel_guide.md
+    - Mac Streaming/Causal Guide: design/mac_streaming_causal_guide.md
+    - TI2V-5B Port Guide: design/ti2v_5b_port_guide.md
     - Training Architecture: design/training_architecture.md
     - Server Contracts:
       - Overview: design/server_contracts/index.md
