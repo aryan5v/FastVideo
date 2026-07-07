@@ -43,7 +43,7 @@ def _armed_callback(transformer: torch.nn.Module) -> EMACallback:
     return cb
 
 
-def test_state_dict_holds_full_tensors_with_clean_names() -> None:
+def test_state_dict_uses_clean_names_and_dcp_key() -> None:
     torch.manual_seed(0)
     model = _Tiny()
     cb = _armed_callback(model)
@@ -55,10 +55,16 @@ def test_state_dict_holds_full_tensors_with_clean_names() -> None:
 
     state = cb.state_dict()
     assert state["ema_started"] is True
-    full = state["student_ema_full"]
-    assert set(full) == {"to_q.weight", "proj_out.weight", "proj_out.bias"}
+    # New DCP-native key; the legacy plain-shard key must be gone so old
+    # loaders cannot silently accept the new format's shapeless shards.
+    assert "student_ema" not in state
+    sharded = state["student_ema_sharded"]
+    # Names are normalized (AC wrapper stripped) so they match live params.
+    assert set(sharded) == {"to_q.weight", "proj_out.weight", "proj_out.bias"}
+    # On a non-distributed (world_size=1) model the params are plain tensors,
+    # so the shards round-trip at full shape.
     for name, param in model.named_parameters():
-        assert full[name].shape == param.shape  # full tensors, not shards
+        assert sharded[name].shape == param.shape
 
 
 def test_round_trip_restores_shadow_for_current_param_names() -> None:
