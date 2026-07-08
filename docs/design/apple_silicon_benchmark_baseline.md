@@ -70,7 +70,6 @@ Each run writes:
 - It does not prove long-video coherence or 60-second generation.
 - It does not replace the Mac-targeted QAT/distillation track.
 
-
 ## Toolchain and the M4 Phase A numerics gate (2026-07)
 
 Mac install does **not** use `uv pip install -e '.[dev,mlx]'`: the core package
@@ -96,6 +95,41 @@ input fp16:
 This is the house pattern for every deploy-time quantizer/kernel twin (Track A's
 attention-QAT will reuse it): bit-pin the decisions to a CPU/reference spec,
 tolerance-check the Metal deploy path.
+
+## Day-1 runtime measurements (2026-07-08, M4 Max, MLX 0.31.2)
+
+Two roadmap measurements, run at a fast 480×832×**17**-frame / 3-step DMD shape
+(these are relative deltas and a status check, not the 81-frame product shape):
+
+**Checkpoint-cache load-time delta** (`--mlx-checkpoint-cache`):
+
+| Load path | `load_source` | `load_s` | `load_peak` |
+| --- | --- | ---: | ---: |
+| cold (convert Diffusers fp32 → fp16 → `mx.quantize` int8, save) | `diffusers_then_saved` | 4.63s | 1.45 GiB |
+| warm (reload pre-quantized MLX checkpoint) | `mlx_checkpoint` | 0.006s | 0.011 GiB |
+
+The warm path skips the safetensors read, fp16 cast, and int8 requantization,
+saving **~4.62s per load**; it is shape-independent. (The 0.006s is MLX's lazy
+load creating array handles — data materializes during denoise — so the real
+saved work is the requantization, not a literal 800× I/O win.)
+
+**`mx.compile` A/B (`--compile --assert-min-ssim 0.9`): currently BLOCKED.**
+On the FastWan DiT forward with MLX 0.31.2 on Metal, `mx.compile` either raises
+`Attempting to eval an array during function transformations like compile or
+vmap is not allowed` and falls back to eager (`fastwan.py:673-686` handles this
+— no speedup), or it **segfaults the process (exit 139)**, which is uncatchable.
+So there is no compile speedup to record yet; unblocking it (removing the
+eval/graph-break inside the traced `_forward`, and the Metal segfault) is a
+runtime task on the roadmap's `mx.compile` line. Eager baseline the future work
+must beat (steady step / MS-SSIM vs own fp16):
+
+| mode | steady step | first step | MS-SSIM vs fp16 |
+| --- | ---: | ---: | ---: |
+| fp16 | 4.48s | 4.60s | 1.000 (ref) |
+| int8 | 4.62s | 4.70s | 0.974 |
+
+The SSIM gate (`--assert-min-ssim 0.9`) passes: int8 stays at 0.974 vs its own
+fp16 at this shape.
 
 ## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
 
