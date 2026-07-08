@@ -126,11 +126,19 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
   (preallocated rolling cache + sink tokens) and `causal_self_attention_step`
   (rotary at global offset, cache write/evict, windowed dense SDPA). Sampler
   (rung 5) pending.
-- [~] Rung 3 parity + KV-cache tests done in
+- [x] Rung 3 parity + KV-cache tests done in
   `fastvideo/tests/mlx/test_mlx_causal_attention.py`: mask-free cached decode ==
   block-causal masked full pass (no-eviction), == sliding-window masked pass
-  (with eviction), and sink-token preservation. Full-block/full-model parity
-  (rung 4, vs torch) pending.
+  (with eviction), and sink-token preservation.
+- [x] Rung 4 (tiny-config) done: `fastvideo/mlx_runtime/causal_dit.py`
+  (`MLXCausalWanDiT` + causal block with per-frame conditioning, cross-attn
+  cache, text-len padding, chunked `forward_chunk`). Parity test
+  `test_mlx_causal_dit_parity.py` matches the torch `_forward_inference`
+  streaming outputs on a tiny random-weight config. Real-weight smoke on
+  `wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers` and rung 5 (streaming sampler + demo)
+  pending. **Gotcha found:** the causal model pads text to `config.text_len`
+  (512) before the text embedder — the MLX port must replicate this or
+  cross-attention diverges.
 - [ ] Streaming demo script (`examples/inference/basic/mlx_wan_streaming.py`)
 - [ ] Benchmark rows: time-to-first-frame, chunk latency, peak memory
 - [ ] Run-5 handoff (SF+QAD) when gates are green
