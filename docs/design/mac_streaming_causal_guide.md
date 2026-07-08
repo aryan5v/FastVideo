@@ -134,8 +134,12 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
   (`MLXCausalWanDiT` + causal block with per-frame conditioning, cross-attn
   cache, text-len padding, chunked `forward_chunk`). Parity test
   `test_mlx_causal_dit_parity.py` matches the torch `_forward_inference`
-  streaming outputs on a tiny random-weight config. Real-weight smoke on
-  `wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers` and rung 5 (streaming sampler + demo)
+  streaming outputs on a tiny random-weight config.
+- [x] Rung 4 real-weight smoke: `mlx_causal_dit_from_diffusers_safetensors`
+  loads the released `wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers` transformer (reusing
+  the dense Diffusers loader) and streams finite output through the full 30-layer
+  causal forward — `test_mlx_causal_dit_real_weights.py` (skips if the checkpoint
+  is absent; set `FASTVIDEO_SFWAN_ROOT`). Rung 5 (streaming sampler + demo)
   pending. **Gotcha found:** the causal model pads text to `config.text_len`
   (512) before the text embedder — the MLX port must replicate this or
   cross-attention diverges.

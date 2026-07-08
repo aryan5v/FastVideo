@@ -12,6 +12,7 @@ per-frame timestep modulation.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastvideo.mlx_runtime.causal import MLXCausalKVCache, causal_self_attention_step
@@ -19,6 +20,7 @@ from fastvideo.mlx_runtime.fastwan import (
     gelu_tanh,
     layer_norm,
     linear,
+    mlx_dit_from_diffusers_safetensors,
     rms_norm,
     silu,
     timestep_embedding,
@@ -315,3 +317,40 @@ class MLXCausalWanDiT:
                            frame_seqlen=frame_seqlen)
 
         return self._output(hidden, temb_out, batch=batch, frames=frames, height=height, width=width)
+
+
+def mlx_causal_dit_from_diffusers_safetensors(
+    checkpoint_path: str | Path,
+    config_path: str | Path,
+    *,
+    dtype: str = "fp16",
+    num_blocks: int | None = None,
+    quantization=None,
+    local_attn_size: int = -1,
+    sink_size: int = 0,
+    num_frames_per_block: int = 1,
+) -> MLXCausalWanDiT:
+    """Load a causal Wan DiT from a Diffusers checkpoint into ``MLXCausalWanDiT``.
+
+    Reuses the dense Diffusers loader (the causal checkpoint has the same weight
+    layout) and re-wraps its blocks as causal blocks — only the forward differs.
+    """
+    dense = mlx_dit_from_diffusers_safetensors(checkpoint_path,
+                                               config_path,
+                                               dtype=dtype,
+                                               num_blocks=num_blocks,
+                                               quantization=quantization)
+    inner_dim = int(dense.config["num_attention_heads"]) * int(dense.config["attention_head_dim"])
+    blocks = [
+        MLXCausalWanTransformerBlock(block.weights,
+                                     dim=inner_dim,
+                                     ffn_dim=int(dense.config["ffn_dim"]),
+                                     num_heads=int(dense.config["num_attention_heads"]),
+                                     eps=float(dense.config.get("eps", 1e-6))) for block in dense.blocks
+    ]
+    return MLXCausalWanDiT(dense.weights,
+                           blocks,
+                           dense.config,
+                           local_attn_size=local_attn_size,
+                           sink_size=sink_size,
+                           num_frames_per_block=num_frames_per_block)
