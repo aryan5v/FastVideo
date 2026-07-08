@@ -113,23 +113,25 @@ saving **~4.62s per load**; it is shape-independent. (The 0.006s is MLX's lazy
 load creating array handles — data materializes during denoise — so the real
 saved work is the requantization, not a literal 800× I/O win.)
 
-**`mx.compile` A/B (`--compile --assert-min-ssim 0.9`): currently BLOCKED.**
-On the FastWan DiT forward with MLX 0.31.2 on Metal, `mx.compile` either raises
-`Attempting to eval an array during function transformations like compile or
-vmap is not allowed` and falls back to eager (`fastwan.py:673-686` handles this
-— no speedup), or it **segfaults the process (exit 139)**, which is uncatchable.
-So there is no compile speedup to record yet; unblocking it (removing the
-eval/graph-break inside the traced `_forward`, and the Metal segfault) is a
-runtime task on the roadmap's `mx.compile` line. Eager baseline the future work
-must beat (steady step / MS-SSIM vs own fp16):
+**`mx.compile` A/B (`--compile --assert-min-ssim 0.9`): ~1.4× denoise speedup.**
+`mx.compile` on the DiT forward was initially broken — it raised `Attempting to
+eval an array during function transformations like compile or vmap is not
+allowed` (caught at `fastwan.py`, eager fallback, no speedup) or **segfaulted
+(exit 139)**. Root cause: a **NumPy scalar multiplying a traced array** in
+`gelu_tanh` (`np.sqrt(2/pi) * x`) dispatched through NumPy's `__mul__`, which
+evals the traced array — illegal under compile, and the source of the segfault
+too. Fixed by using a Python-`float` constant (`fastwan.py`), guarded by
+`fastvideo/tests/mlx/test_mlx_compile_parity.py`. With the fix, compile traces
+cleanly (no fallback) and is bit-identical to eager:
 
-| mode | steady step | first step | MS-SSIM vs fp16 |
-| --- | ---: | ---: | ---: |
-| fp16 | 4.48s | 4.60s | 1.000 (ref) |
-| int8 | 4.62s | 4.70s | 0.974 |
+| mode | steady step (eager → compiled) | speedup | MS-SSIM vs fp16 |
+| --- | --- | ---: | ---: |
+| fp16 | 4.48s → 3.17s | 1.41× | 1.000 (ref) |
+| int8 | 4.62s → 3.22s | 1.43× | 0.975 |
 
-The SSIM gate (`--assert-min-ssim 0.9`) passes: int8 stays at 0.974 vs its own
-fp16 at this shape.
+The SSIM gate (`--assert-min-ssim 0.9`) passes on the compiled path. Lesson: a
+NumPy scalar times a traced `mx.array` silently breaks `mx.compile` — keep such
+constants as Python floats.
 
 ## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
 

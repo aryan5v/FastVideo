@@ -1,6 +1,15 @@
 # Exploration Log: mx.compile on the FastWan DiT forward
 
-## Status: under_review
+## Status: promoted (resolved 2026-07-08 — see lesson
+`2026-07-08_mlx-compile-numpy-scalar-eval.md`)
+
+## Resolution
+Root-caused and fixed. A NumPy scalar multiplying a *traced* array in
+`gelu_tanh` (`np.sqrt(2/pi) * x`) dispatched through NumPy's `__mul__`, which
+evals the traced array — illegal under compile, and the cause of both the
+catchable error and the segfault. Fixed with a Python-`float` constant; compile
+now traces cleanly (no fallback), bit-identical to eager, **1.41× fp16 / 1.43×
+int8** steady-step speedup. Guarded by `test_mlx_compile_parity.py`.
 
 ## Context
 Day-1 quick win from `docs/design/apple_silicon_program_plan.md` step 1: run the
