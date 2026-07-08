@@ -71,6 +71,32 @@ Each run writes:
 - It does not replace the Mac-targeted QAT/distillation track.
 
 
+## Toolchain and the M4 Phase A numerics gate (2026-07)
+
+Mac install does **not** use `uv pip install -e '.[dev,mlx]'`: the core package
+pulls `fastvideo-kernel` → `triton`, which has no macOS/arm64 wheels. Follow the
+lightweight recipe in `.github/workflows/ci-macos-mlx.yml` instead (CPU torch
+wheels + a short dependency list + `mlx`), importing `fastvideo` from the source
+tree. MLX is pinned to **0.31.2** per the program's "pin the MLX version"
+decision.
+
+The QAT numerics gate (`fastvideo/tests/mlx/test_mlx_affine_qat_parity.py`) is
+now two assertions, because MLX's CPU and Metal kernels are not bit-identical —
+the Metal kernel accumulates the affine math in fp32, the CPU kernel in the
+input fp16:
+
+- **Decisions, bit-pinned on the CPU stream.** Codes/scales/biases match MLX's
+  CPU kernel exactly — the deterministic, machine-independent spec of the
+  quantizer.
+- **Deploy reconstruction, tolerance-pinned on the Metal stream** (with recorded
+  headroom): code-flip rate **0.0147%** (all ±1 LSB), dequant accumulation drift
+  **~1.2e-4**, `mx.quantized_matmul` vs the twin **1.1e-3** against a 2e-2 deploy
+  tolerance (**18× headroom**). All fp32-input paths are exact to ~1e-8.
+
+This is the house pattern for every deploy-time quantizer/kernel twin (Track A's
+attention-QAT will reuse it): bit-pin the decisions to a CPU/reference spec,
+tolerance-check the Metal deploy path.
+
 ## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
 
 Three runs on the motion7 prompt set (480×832×81, 3-step DMD, TAEHV decode,

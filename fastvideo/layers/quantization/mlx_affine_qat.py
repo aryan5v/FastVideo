@@ -9,8 +9,15 @@ rounding rule or zero-point convention silently erases the QAT gains at
 deploy time.
 
 This module transcribes the affine algorithm from MLX's CPU kernel
-(``mlx/backend/cpu/quantized.cpp::quantize`` at v0.31.2), whose non-obvious
-details are:
+(``mlx/backend/cpu/quantized.cpp::quantize`` at v0.31.2). The quantizer's
+*decisions* — the integer code, scale, and bias per group — are what QAT must
+reproduce, and the twin matches MLX's CPU stream on those bit-for-bit. MLX's
+*Metal* kernels accumulate ``(w - bias) / scale`` and ``code * scale + bias``
+in fp32 rather than the input's fp16, so on Metal a vanishingly small fraction
+of boundary weights round to a neighbouring code (measured 0.0147%, all +/-1
+LSB) and the dequantized reconstruction drifts by ~1e-4. That deploy-time drift
+is tolerance-checked, not bit-pinned; see the parity test's two-assertion
+design. The CPU-kernel details the twin reproduces are:
 
 - per-group min/max is computed in fp32 regardless of the input dtype,
 - the scale is *negative* when ``|w_max| >= |w_min|`` (the quantizer anchors
@@ -38,9 +45,8 @@ _EPS = 1e-7
 
 def _group(w: torch.Tensor, group_size: int) -> torch.Tensor:
     if w.shape[-1] % group_size != 0:
-        raise ValueError(
-            f"Last dim {w.shape[-1]} is not divisible by group_size {group_size}; "
-            "MLX affine quantization groups along the last axis.")
+        raise ValueError(f"Last dim {w.shape[-1]} is not divisible by group_size {group_size}; "
+                         "MLX affine quantization groups along the last axis.")
     return w.reshape(*w.shape[:-1], w.shape[-1] // group_size, group_size)
 
 
@@ -82,8 +88,10 @@ def mlx_affine_dequantize_reference(
     *,
     out_shape: torch.Size | None = None,
 ) -> torch.Tensor:
-    """Dequantize exactly like MLX's kernels: ``code * scale + bias`` in the
-    scales' dtype (elementwise, no fp32 upcast of the fused expression)."""
+    """Dequantize like MLX's *CPU* kernel: ``code * scale + bias`` in the
+    scales' dtype (elementwise, no fp32 upcast of the fused expression). MLX's
+    Metal kernel upcasts to fp32, so this matches the CPU stream bit-for-bit and
+    the Metal stream only within tolerance (~1e-4 for fp16)."""
     dtype = scales.dtype
     deq = codes.to(dtype) * scales.unsqueeze(-1) + biases.unsqueeze(-1)
     if out_shape is not None:
