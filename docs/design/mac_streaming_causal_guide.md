@@ -75,6 +75,31 @@ Key mechanics to reproduce:
    benchmark cells: time-to-first-frame, per-chunk steady latency, peak
    memory with rolling cache. These are the demo's headline numbers.
 
+## Rung 1 — architecture diff (completed 2026-07-08)
+
+`causal_wanvideo.py` vs `wanvideo.py`, enumerating every difference the MLX
+port (`fastvideo/mlx_runtime/causal.py`) must reproduce on top of the existing
+dense port (`fastvideo/mlx_runtime/fastwan.py`). The weight layout is identical
+(`CausalWanTransformer3DModel` reuses `WanVideoConfig().param_names_mapping`),
+so **the loader is unchanged — only the forward/attention differs.**
+
+| Aspect | Non-causal `wanvideo.py` | Causal `causal_wanvideo.py` | MLX port implication |
+| --- | --- | --- | --- |
+| Forward modes | single `forward` (full sequence) | `_forward_inference` (KV-cached, per-chunk) + `_forward_train` (block-causal flex mask); `forward` dispatches on `kv_cache` presence | Port only `_forward_inference`; the train mask path is CUDA-only and not needed |
+| Attention masking | none (dense bidirectional over whole seq) | train: flex-attention `BlockMask` (`_prepare_blockwise_causal_attn_mask`); inference: **mask-free**, chunk Q attends dense over `cache[0:end]` | No mask at MLX inference. Core parity claim (Rung 3): mask-free cached decode == block-causal masked full pass |
+| Self-attn op | `LocalAttention` dense SDPA, done inline in block | `CausalWanSelfAttention` dense SDPA (`causal=False`) over the cached K/V window | Dense `mx.fast` SDPA suffices — **no new kernel** |
+| KV cache | none | dict `{k, v, global_end_index, local_end_index}`, preallocated buffer; new K/V written at `local_start:local_end` (`causal_wanvideo.py:143-193`) | Preallocated `mx.array` K/V buffers per block; write-at-index |
+| Rolling eviction + sinks | n/a | on overflow, shift cache left after the first `sink_tokens`, evicting oldest (`:160-171`); `max_attention_size = local_attn_size*frame_seqlen`, or `21*frame_seqlen` when `local_attn_size==-1` (`GLOBAL_ATTN_COMPAT_MAX_LATENT_FRAMES`) | Replicate shift/sink arithmetic exactly; KV-cache unit tests gate it |
+| Rotary | `get_rotary_pos_embed((F,H,W), …)`, positions from 0 | same, plus `start_frame=start_frame` global offset; rope applied to Q/K **before** cache write, at global positions | Apply rope at global offset per chunk (Q/K roped, then cached) |
+| Cross-attention | recomputed every pass | `crossattn_cache` `{is_init, k, v}` — context K/V computed once, reused across chunks (`wanvideo.py:167-176`) | Compute cross-attn K/V once per generation, cache |
+| Timestep conditioning | one `temb` for whole sequence (`[B,6,dim]` or `[B,seq,6,dim]`) | per-chunk: `timestep_proj` → `(6, hidden)`; block reshapes norm by `temb_seq_len`/`tokens_per_temb` (`causal_wanvideo.py:285-304`) | Per-chunk temb; norm unflatten by tokens-per-temb-frame |
+| Chunk loop | full sequence at once | `_forward_inference` runs per frame-block; `current_start`/`cache_start` advance each call (CausVid Alg. 2) | Streaming sampler drives the per-chunk loop |
+| QK norm | `RMSNorm(dim)` inside attn | block-level `norm_q/norm_k` = `RMSNorm(dim)` (`rms_norm_across_heads`), `forward_native` | Same norm; reuse MLX rms |
+| New config fields | — | `num_frames_per_block` (≤3), `local_attn_size`, `sink_size`, `independent_first_frame` | Thread through MLX config |
+
+Reference SF weights exist (`SFWan2.1-T2V-1.3B` family), so Rungs 2–5 need no
+training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
+
 ## Gates
 
 - Rung 3/4 parity tests in `fastvideo/tests/mlx/`, running in both CI jobs.
@@ -96,7 +121,7 @@ Key mechanics to reproduce:
 
 ## Deliverables checklist
 
-- [ ] Architecture diff table (rung 1) appended to this doc
+- [x] Architecture diff table (rung 1) appended to this doc
 - [ ] `fastvideo/mlx_runtime/causal.py` (cache + chunked attention + sampler)
 - [ ] Causal block + full-model parity tests, KV-cache unit tests
 - [ ] Streaming demo script (`examples/inference/basic/mlx_wan_streaming.py`)
