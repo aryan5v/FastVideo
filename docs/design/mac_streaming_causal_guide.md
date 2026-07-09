@@ -134,6 +134,10 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
   cache, text-len padding, chunked `forward_chunk`). Parity test
   `test_mlx_causal_dit_parity.py` matches the torch `_forward_inference`
   streaming outputs on a tiny random-weight config.
+- [x] Rung 4 CUDA cross-check (Modal, hao-ai-lab L40S): `causal_cuda_reference.py`
+  dumps the torch `_forward_inference` outputs on a real GPU; the MLX port
+  replayed on Metal matches to **max|Δ| = 1.35e-3** (atol 5e-3). Verifies the
+  port against the actual CUDA numerics, not just torch-CPU.
 - [x] Rung 4 real-weight smoke: `mlx_causal_dit_from_diffusers_safetensors`
   loads the released `wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers` transformer (reusing
   the dense Diffusers loader) and streams finite output through the full 30-layer
