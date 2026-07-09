@@ -88,9 +88,48 @@ modal run fastvideo/tests/modal/launch_l40s_job.py \
   --commit-volume
 ```
 
-`hardware_tier.FIVE_B_MODEL_REPO` is set to
-`FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers` so 32/64 GB auto-tier prefers
-5B int8 / 5B fp16 once this PR merges with the tiering stack.
+### I2V (Track D Rung 4)
+
+TI2V-5B image conditioning needs **no DiT architecture change**: replace latent
+frame 0 with the VAE-encoded image and set the per-token timestep so frame-0
+tokens are `t=0` (clean) while the rest stay at the denoise level. Helpers live
+in `fastvideo/mlx_runtime/wan22_i2v.py`; DiT-level parity (tiny config, no VAE)
+is `test_mlx_wan22_i2v.py` (atol 2e-3). Token order is **frame-major** (first
+`tokens_per_frame` entries = image frame).
+
+End-to-end I2V still needs the Wan2.2 VAE (z_dim=48) on torch-MPS for encode +
+decode — TAEHV `taew2_1.pth` is Wan2.1-only.
+
+### 5B QAD arming (run-6 gate)
+
+Cheap arming check (no training loop): load the 5B FullAttn transformer, apply
+`MLXQuantizationAwareCallback`, assert ≥300 fake-quantized weights.
+
+```bash
+# Modal (CUDA) — preferred for HF download onto the volume
+modal run fastvideo/tests/modal/launch_l40s_job.py \
+  --command "python fastvideo/tests/modal/wan22_5b_qad_arming.py" \
+  --gpu-type L40S --num-gpus 1 --install-extra dev --pr-number <PR#> \
+  --env-vars "MASTER_ADDR=localhost,MASTER_PORT=29561,FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA" \
+  --commit-volume
+```
+
+Look for: `mlx_qat: fake-quantizing N weights (int8, ...)` with N ≥ 300, no
+`matched no weights`, no FSDP/DTensor/parametrizations Traceback.
+
+**Measured (local, FullAttn 5B transformer, 2026-07-08):** `mlx_qat` armed
+with **307** weights (int8, group_size=64); no Traceback.
+
+### Hardware tiering (PR #6)
+
+Once PR #6 (`hardware_tier.py`) and this 5B stack (#8/#9 + I2V) are merged, set:
+
+```python
+FIVE_B_MODEL_REPO = "FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers"
+```
+
+Do **not** set this on #6 alone — the tier would recommend a model the runtime
+cannot load until the port lands. INT8 5B denoise peak ~6.6 GiB fits 32 GB.
 
 ## Commands
 

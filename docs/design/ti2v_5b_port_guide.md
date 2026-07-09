@@ -89,9 +89,9 @@ extrapolating; 8 GPUs halves it if the box is idle).
 
 ## Gates and deliverables
 
-- [ ] Rung-1 findings table appended here (conditioning mechanism, VAE, ops gaps)
-- [ ] Per-token-timestep support in `fastvideo/mlx_runtime/fastwan.py` + tiny-arch parity test (CI)
-- [ ] Real-weight full parity + first T2V clips on Mac (fp16/int8 cells)
-- [ ] I2V path + benchmark cells
-- [ ] Preset updates + baseline-doc rows (32 GB/64 GB tiers)
-- [ ] Run-6 handoff: recipe YAML + dataset decision + smoke checklist
+- [x] Rung-1 findings (conditioning = first-latent replace + per-token t=0; no CLIP image emb; VAE z_dim=48)
+- [x] Per-token-timestep support in `fastvideo/mlx_runtime/wan22.py` + tiny-arch parity (`test_mlx_wan22_parity.py`)
+- [x] Real-weight full parity + T2V denoise bench on Mac (fp16/int8 cells in baseline doc)
+- [x] I2V DiT-level path (`wan22_i2v.py` + `test_mlx_wan22_i2v.py`); e2e VAE still optional
+- [ ] Preset updates + baseline-doc rows wired through PR #6 hardware tiers (`FIVE_B_MODEL_REPO`)
+- [x] Run-6 arming gate: `wan22_5b_qad_arming.py` (mlx_qat ≥300 weights); full recipe/dataset still open
