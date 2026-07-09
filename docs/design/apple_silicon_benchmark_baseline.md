@@ -117,8 +117,9 @@ modal run fastvideo/tests/modal/launch_l40s_job.py \
 Look for: `mlx_qat: fake-quantizing N weights (int8, ...)` with N ≥ 300, no
 `matched no weights`, no FSDP/DTensor/parametrizations Traceback.
 
-**Measured (local, FullAttn 5B transformer, 2026-07-08):** `mlx_qat` armed
-with **307** weights (int8, group_size=64); no Traceback.
+**Measured (local Mac + Modal L40S, FullAttn 5B transformer, 2026-07-08/09):**
+`mlx_qat` armed with **307** weights (int8, group_size=64); no Traceback; unit
+callback suite **8 passed** on CUDA.
 
 ### Hardware tiering (PR #6)
 
