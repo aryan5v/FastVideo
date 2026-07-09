@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import time
 from dataclasses import dataclass
@@ -399,10 +400,15 @@ def apply_rotary_emb(x, cos, sin, *, is_neox_style: bool = False):
     return mx.stack([o1, o2], axis=-1).reshape(*x.shape).astype(x.dtype)
 
 
+# This must be a Python float. A NumPy scalar multiplying a traced mx.array
+# dispatches through NumPy, which evaluates the array and breaks mx.compile.
+_GELU_TANH_COEF = math.sqrt(2.0 / math.pi)
+
+
 def gelu_tanh(x):
     import mlx.core as mx
 
-    return 0.5 * x * (1.0 + mx.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * mx.power(x, 3.0))))
+    return 0.5 * x * (1.0 + mx.tanh(_GELU_TANH_COEF * (x + 0.044715 * mx.power(x, 3.0))))
 
 
 def silu(x):
@@ -415,7 +421,7 @@ def timestep_embedding(t, dim: int, max_period: int = 10000):
     import mlx.core as mx
 
     half = dim // 2
-    freqs = mx.exp(-np.log(max_period) * mx.arange(0, half, dtype=mx.float32) / half)
+    freqs = mx.exp(-math.log(max_period) * mx.arange(0, half, dtype=mx.float32) / half)
     args = t[:, None].astype(mx.float32) * freqs[None]
     embedding = mx.concatenate([mx.cos(args), mx.sin(args)], axis=-1)
     if dim % 2:
