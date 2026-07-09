@@ -25,6 +25,64 @@ useful stress test for the DiT/runtime path, but it is not a substitute for
 testing on an actual 16 GB Mac because macOS does not expose a perfect
 process-wide unified-memory simulator.
 
+## Hardware tiers
+
+FastVideo auto-selects a practical MLX model + quant + allocator cap from the
+Mac's unified-memory size via `fastvideo/mlx_runtime/hardware_tier.py`. The
+goal is the north-star product behaviour: a 16 GB Mac gets a small INT8 model
+that fits; 32/64 GB Macs get higher fidelity without the user hand-picking
+flags.
+
+| Unified memory | Tier | Model (today) | Quant | Decoder | MLX cap | Benchmark preset |
+| --- | --- | --- | --- | --- | ---: | --- |
+| ≤ 18 GiB | `small` | FastWan 1.3B | int8 | TAEHV | 12 GiB | `mac-16gb` |
+| ≤ 40 GiB | `medium` | 1.3B fp16 *(5B int8 when Track D lands)* | none / int8 | TAEHV | 24 GiB | `mac-32gb` |
+| > 40 GiB | `large` | 1.3B fp16 *(5B fp16 when Track D lands)* | none | Wan-VAE | 48 GiB | `mac-64gb` |
+
+Thresholds (`TIER_SMALL_MAX_GIB = 18`, `TIER_MEDIUM_MAX_GIB = 40`) and caps are
+module constants so they are easy to retune. Detection order:
+
+1. macOS `sysctl -n hw.memsize` (true unified memory)
+2. MLX `device_info()["memory_size"]` when Metal is available
+3. Linux `/proc/meminfo` MemTotal
+4. Safe default **16 GiB** → `small` tier (non-Mac / undetectable)
+
+**Track D / 5B:** `FIVE_B_MODEL_REPO` is `None` until the 5B MLX port is
+parity-green. Medium/large tiers fall back to 1.3B fp16 while that constant is
+unset. Set the repo id and keep `prefer_5b=True` (the default) to switch.
+
+### `--auto-tier` on the benchmark
+
+```bash
+# Detect this Mac's memory and apply recommended modes + MLX cap.
+PYTHONPATH=$PWD python -m fastvideo.benchmarks.mlx_fastwan_bench \
+  --auto-tier \
+  --prompt "A fox runs through a mossy forest." \
+  --output-dir video_samples/mlx_fastwan_bench_auto_tier
+```
+
+What `--auto-tier` does:
+
+- Calls `recommend_tier(prefer_5b=...)` (override with `--no-prefer-5b`).
+- Seeds height/width/frames from the matching `mac-16gb` / `mac-32gb` /
+  `mac-64gb` preset.
+- Forces `modes`, `decoders`, `mlx_memory_limit_gib`, and `mlx_disable_cache`
+  from the tier (printed as `[auto-tier] ...` and recorded in `metrics.json`).
+- Does **not** rewrite `--model-root` (local path vs HF id); the recommended
+  HF repo is in metrics as `auto_tier_model_repo`.
+
+Static presets remain available without detection:
+
+| Preset | Shape | Modes | Decoders | MLX cap |
+| --- | --- | --- | --- | ---: |
+| `mac-16gb` | 448×832×61 | int8 | taehv | 16 GiB (stress) |
+| `mac-32gb` | 480×832×81 | int8,fp16 | taehv | 24 GiB |
+| `mac-64gb` | 480×832×81 | int8,fp16 | taehv,wan-vae | 48 GiB |
+
+Note the 16 GB *stress* preset still pins a 16 GiB allocator cap to exercise
+tight memory; the auto-tier *product* recommendation for ≤18 GiB uses a 12 GiB
+cap to leave headroom for the OS and torch/MPS encode/decode.
+
 ## Commands
 
 The benchmark harness now exposes memory-tier flags and presets. A fast smoke

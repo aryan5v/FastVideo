@@ -37,6 +37,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -88,16 +89,17 @@ PROMPT_SETS = {
     ),
 }
 
-
 BENCHMARK_PRESETS = {
-    "default": BenchmarkPreset(
+    "default":
+    BenchmarkPreset(
         height=480,
         width=832,
         num_frames=81,
         modes="fp16,bf16,int8,int4",
         decoders="taehv,wan-vae",
     ),
-    "mac-16gb": BenchmarkPreset(
+    "mac-16gb":
+    BenchmarkPreset(
         height=448,
         width=832,
         num_frames=61,
@@ -108,19 +110,31 @@ BENCHMARK_PRESETS = {
         torch_mps_high_watermark_ratio=0.57,
         torch_mps_low_watermark_ratio=0.0,
     ),
-    "mac-32gb": BenchmarkPreset(
+    # 32 GB class: higher-fidelity shapes, 24 GiB MLX cap (matches hardware_tier medium).
+    "mac-32gb":
+    BenchmarkPreset(
         height=480,
         width=832,
         num_frames=81,
         modes="int8,fp16",
         decoders="taehv",
+        mlx_memory_limit_gib=24.0,
+        mlx_disable_cache=True,
+        torch_mps_high_watermark_ratio=0.70,
+        torch_mps_low_watermark_ratio=0.0,
     ),
-    "mac-64gb": BenchmarkPreset(
+    # 64 GB class: full decoder sweep, 48 GiB MLX cap (matches hardware_tier large).
+    "mac-64gb":
+    BenchmarkPreset(
         height=480,
         width=832,
         num_frames=81,
         modes="int8,fp16",
         decoders="taehv,wan-vae",
+        mlx_memory_limit_gib=48.0,
+        mlx_disable_cache=True,
+        torch_mps_high_watermark_ratio=0.80,
+        torch_mps_low_watermark_ratio=0.0,
     ),
 }
 
@@ -278,11 +292,9 @@ def _ms_ssim(reference_video: Path, candidate_video: Path, *, required: bool = F
     try:
         from fastvideo.tests.utils import compute_video_ssim_torchvision
     except ImportError as exc:
-        message = (
-            "MS-SSIM is unavailable because `pytorch-msssim` is not installed. "
-            "Install FastVideo with the test extra, e.g. `uv pip install -e '.[mlx,test]'`, "
-            "or run without an SSIM assertion."
-        )
+        message = ("MS-SSIM is unavailable because `pytorch-msssim` is not installed. "
+                   "Install FastVideo with the test extra, e.g. `uv pip install -e '.[mlx,test]'`, "
+                   "or run without an SSIM assertion.")
         if required:
             raise RuntimeError(message) from exc
         print(f"{message} Skipping MS-SSIM.")
@@ -347,26 +359,20 @@ def _html_grid(rows: list[dict]) -> str:
                 media = f'<video src="{html.escape(str(video_path))}" muted loop controls playsinline></video>'
             else:
                 media = f'<div class="missing">No video<br>{html.escape(str(row.get("error", "")))}</div>'
-            metrics = (
-                f"status={status} · total={_format_metric(row.get('total_s'))}s · "
-                f"denoise={_format_metric(row.get('denoise_s'))}s · "
-                f"decode={_format_metric(row.get('decode_s'))}s · "
-                f"peak={_format_metric(row.get('peak_gib'))}GiB"
-            )
-            cards.append(
-                "<article>"
-                f"<h3>{html.escape(title)}</h3>"
-                f"{media}"
-                f"<p>{html.escape(metrics)}</p>"
-                "</article>"
-            )
-        sections.append(
-            "<section>"
-            f"<h2>{html.escape(prompt_id)}</h2>"
-            f"<p class=\"prompt\">{html.escape(prompt)}</p>"
-            f"<div class=\"grid\">{''.join(cards)}</div>"
-            "</section>"
-        )
+            metrics = (f"status={status} · total={_format_metric(row.get('total_s'))}s · "
+                       f"denoise={_format_metric(row.get('denoise_s'))}s · "
+                       f"decode={_format_metric(row.get('decode_s'))}s · "
+                       f"peak={_format_metric(row.get('peak_gib'))}GiB")
+            cards.append("<article>"
+                         f"<h3>{html.escape(title)}</h3>"
+                         f"{media}"
+                         f"<p>{html.escape(metrics)}</p>"
+                         "</article>")
+        sections.append("<section>"
+                        f"<h2>{html.escape(prompt_id)}</h2>"
+                        f"<p class=\"prompt\">{html.escape(prompt)}</p>"
+                        f"<div class=\"grid\">{''.join(cards)}</div>"
+                        "</section>")
 
     return """<!doctype html>
 <html lang="en">
@@ -480,11 +486,8 @@ def _generate_cell(
     denoise_s = time.perf_counter() - denoise_start
     denoise_peak = _peak_memory_bytes(mx)
 
-    video_path = (
-        args.output_dir
-        / f"{args.current_prompt_id}"
-        / f"video_{mode}_{decoder}_{args.height}x{args.width}x{args.num_frames}.mp4"
-    )
+    video_path = (args.output_dir / f"{args.current_prompt_id}" /
+                  f"video_{mode}_{decoder}_{args.height}x{args.width}x{args.num_frames}.mp4")
     decode_start = time.perf_counter()
     decode_latents_to_video(
         model_root=args.model_root,
@@ -544,19 +547,57 @@ def _generate_cell(
 def main() -> None:
     preset_parser = argparse.ArgumentParser(add_help=False)
     preset_parser.add_argument("--benchmark-preset", choices=tuple(BENCHMARK_PRESETS), default="default")
+    preset_parser.add_argument(
+        "--auto-tier",
+        action="store_true",
+        default=False,
+        help="Detect unified memory and apply hardware_tier.recommend_tier() modes/caps "
+        "(overrides --benchmark-preset defaults for modes/decoders/MLX memory limit).",
+    )
+    preset_parser.add_argument(
+        "--prefer-5b",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --auto-tier is set, prefer a 5B checkpoint on medium/large tiers if "
+        "Track D has published a repo id (see hardware_tier.FIVE_B_MODEL_REPO).",
+    )
     preset_args, _ = preset_parser.parse_known_args()
-    preset = BENCHMARK_PRESETS[preset_args.benchmark_preset]
+
+    auto_tier_info = None
+    if preset_args.auto_tier:
+        from fastvideo.mlx_runtime.hardware_tier import recommend_tier
+
+        auto_tier_info = recommend_tier(prefer_5b=preset_args.prefer_5b)
+        # Seed defaults from the matching mac-* preset, then apply tier caps/modes.
+        preset = BENCHMARK_PRESETS[auto_tier_info.benchmark_preset]
+    else:
+        preset = BENCHMARK_PRESETS[preset_args.benchmark_preset]
 
     parser = argparse.ArgumentParser(description="MLX FastWan prove-out benchmark (latency + quality).")
-    parser.add_argument("--benchmark-preset", choices=tuple(BENCHMARK_PRESETS), default=preset_args.benchmark_preset,
+    parser.add_argument("--benchmark-preset",
+                        choices=tuple(BENCHMARK_PRESETS),
+                        default=preset_args.benchmark_preset,
                         help="Memory-tier benchmark defaults. Explicit CLI flags override preset values.")
+    parser.add_argument(
+        "--auto-tier",
+        action="store_true",
+        default=preset_args.auto_tier,
+        help="Detect unified memory and apply recommend_tier() modes/decoders/MLX caps.",
+    )
+    parser.add_argument(
+        "--prefer-5b",
+        action=argparse.BooleanOptionalAction,
+        default=preset_args.prefer_5b,
+        help="With --auto-tier, prefer 5B on medium/large tiers when FIVE_B_MODEL_REPO is set.",
+    )
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
     parser.add_argument("--prompt", default="A paper boat sails through a shallow stream in a mossy forest.")
     parser.add_argument(
         "--prompt-file",
         type=Path,
         default=None,
-        help="Optional prompt set. Plain text uses one prompt per non-empty line; .jsonl accepts prompt/text/caption plus optional id/name.",
+        help=
+        "Optional prompt set. Plain text uses one prompt per non-empty line; .jsonl accepts prompt/text/caption plus optional id/name.",
     )
     parser.add_argument(
         "--prompt-set",
@@ -583,9 +624,12 @@ def main() -> None:
         default=None,
         help="External reference mp4 to score every cell against. Defaults to the fp16+wan-vae cell.",
     )
-    parser.add_argument("--assert-min-ssim", type=float, default=None,
+    parser.add_argument("--assert-min-ssim",
+                        type=float,
+                        default=None,
                         help="Fail if any cell's MS-SSIM vs the reference falls below this value.")
-    parser.add_argument("--compile", action="store_true",
+    parser.add_argument("--compile",
+                        action="store_true",
                         help="Enable mx.compile on the DiT forward (sets FASTVIDEO_MLX_COMPILE=1).")
     parser.add_argument("--lpips", action="store_true", help="Also compute LPIPS (needs the `lpips` package).")
     parser.add_argument("--taehv-source-path", type=Path, default=None)
@@ -614,6 +658,21 @@ def main() -> None:
 
     import mlx.core as mx
 
+    # Re-resolve with Metal available so device_info can corroborate sysctl, and
+    # apply tier modes/caps after argparse defaults (auto-tier wins over preset).
+    if args.auto_tier:
+        from fastvideo.mlx_runtime.hardware_tier import apply_tier_to_namespace, recommend_tier
+
+        tier = recommend_tier(prefer_5b=args.prefer_5b, mx_module=mx)
+        apply_tier_to_namespace(args, tier)
+        auto_tier_info = tier
+        print(
+            f"[auto-tier] memory-driven recommendation: name={tier.name} "
+            f"model={tier.model_repo} quant={tier.quantization} decoder={tier.decoder} "
+            f"mlx_cap_gib={tier.mlx_memory_limit_gib} preset={tier.benchmark_preset}",
+            flush=True,
+        )
+
     runtime_limits = apply_memory_limits(
         mlx_memory_limit_gib=args.mlx_memory_limit_gib,
         mlx_cache_limit_gib=args.mlx_cache_limit_gib,
@@ -623,6 +682,13 @@ def main() -> None:
         torch_mps_low_watermark_ratio=args.torch_mps_low_watermark_ratio,
         mx_module=mx,
     ).as_metrics()
+    if auto_tier_info is not None:
+        runtime_limits["auto_tier_name"] = auto_tier_info.name
+        runtime_limits["auto_tier_model_repo"] = auto_tier_info.model_repo
+        runtime_limits["auto_tier_quantization"] = auto_tier_info.quantization
+        runtime_limits["auto_tier_decoder"] = auto_tier_info.decoder
+        runtime_limits["auto_tier_benchmark_preset"] = auto_tier_info.benchmark_preset
+        runtime_limits["auto_tier_uses_5b"] = auto_tier_info.uses_5b
     import torch
 
     mx.random.seed(args.seed)
@@ -657,7 +723,8 @@ def main() -> None:
     # samples instead of only quantization or decoder differences.
     renoise_by_step = [
         torch.randn(latents_seed.shape, generator=generator, dtype=torch.float32).numpy()
-        for _ in range(max(0, len(timesteps) - 1))
+        for _ in range(max(0,
+                           len(timesteps) - 1))
     ]
 
     from fastvideo.mlx_runtime.fastwan import UnsupportedMLXQuantizationError
@@ -693,8 +760,7 @@ def main() -> None:
                             timesteps=timesteps,
                             latents_seed=latents_seed,
                             renoise_by_step=renoise_by_step,
-                        )
-                    )
+                        ))
                 except UnsupportedMLXQuantizationError as exc:
                     # Record the cell as unsupported and keep sweeping: a partial
                     # report on this MLX build beats crashing the whole run.
@@ -711,9 +777,8 @@ def main() -> None:
     if not cells:
         metrics_path = args.output_dir / "metrics.json"
         metrics_path.write_text(json.dumps(unsupported_rows, indent=2))
-        raise SystemExit(
-            f"No benchmark cell could run: every requested mode is unsupported by this MLX build. "
-            f"Wrote {metrics_path}.")
+        raise SystemExit(f"No benchmark cell could run: every requested mode is unsupported by this MLX build. "
+                         f"Wrote {metrics_path}.")
 
     # Resolve one internal reference per prompt. A single external reference, if
     # supplied, is used for every prompt and only video metrics are computed.
@@ -731,9 +796,8 @@ def main() -> None:
                 prompt_cells[0],
             )
             reference_by_prompt[prompt_case.id] = (ref_cell.video_path, ref_cell.latents)
-            print(
-                f"Using internal reference cell for {prompt_case.id}: "
-                f"mode={ref_cell.mode} decoder={ref_cell.decoder}")
+            print(f"Using internal reference cell for {prompt_case.id}: "
+                  f"mode={ref_cell.mode} decoder={ref_cell.decoder}")
 
     lpips_fn = _load_lpips() if args.lpips else None
 
@@ -746,9 +810,8 @@ def main() -> None:
         cell.metrics.update(runtime_limits)
         if reference_latents is not None:
             cell.metrics.update(_latent_delta_metrics(cell.latents, reference_latents))
-        cell.metrics["lpips_vs_ref"] = (
-            _lpips_between(lpips_fn, Path(reference_video), cell.video_path) if lpips_fn else None
-        )
+        cell.metrics["lpips_vs_ref"] = (_lpips_between(lpips_fn, Path(reference_video), cell.video_path)
+                                        if lpips_fn else None)
         if args.assert_min_ssim is not None and ms_ssim is not None and ms_ssim < args.assert_min_ssim:
             failures.append(
                 f"{cell.prompt_id}/{cell.mode}/{cell.decoder}: MS-SSIM {ms_ssim:.4f} < {args.assert_min_ssim}")
@@ -769,7 +832,7 @@ def main() -> None:
         raise SystemExit("SSIM regression gate failed:\n  " + "\n  ".join(failures))
 
 
-def _load_lpips():
+def _load_lpips() -> Any | None:
     """Return an LPIPS model, or ``None`` if the optional dep is unavailable."""
     try:
         import lpips  # noqa: PLC0415 - optional dependency.

@@ -30,16 +30,23 @@ from fastvideo.mlx_runtime.memory import (
     apply_memory_limits,
     gib_to_bytes,
 )
+from fastvideo.mlx_runtime.hardware_tier import (
+    HardwareTier,
+    detect_unified_memory_gib,
+    recommend_tier,
+)
 
 __all__ = [
     "AppliedMemoryLimits",
     "FastWanShape",
+    "HardwareTier",
     "MLXQuantizationSpec",
     "MLXWanDiT",
     "MLXWanTransformerBlock",
     "UnsupportedMLXQuantizationError",
     "add_memory_limit_args",
     "apply_memory_limits",
+    "detect_unified_memory_gib",
     "ensure_quantization_supported",
     "fastwan_shape",
     "fastwan_shape_from_config",
@@ -49,5 +56,6 @@ __all__ = [
     "mlx_block_weights_from_diffusers_safetensors",
     "mlx_block_weights_from_torch",
     "quantization_support_error",
+    "recommend_tier",
     "save_mlx_dit_checkpoint",
 ]
