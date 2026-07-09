@@ -76,6 +76,9 @@ class EMACallback(Callback):
             decay=self._decay,
             mode="local_shard",
         )
+        # Kept for checkpoint (de)serialization: converting between local
+        # shards and full tensors needs the live params' DTensor placements.
+        self._transformer = student.transformer
         logger.info(
             "EMA callback enabled (decay=%s, "
             "start_iter=%d).",
@@ -136,11 +139,64 @@ class EMACallback(Callback):
     # Checkpoint state
     # ----------------------------------------------------------
 
+    # The EMA shadow is a dict of each rank's *local parameter shards* keyed
+    # by live module names (including activation-checkpointing wrapper
+    # prefixes). Checkpointing the plain shards directly is broken twice
+    # over: DCP deduplicates plain tensors as "replicated" so only rank 0's
+    # shard survives a multi-GPU save, and a checkpoint written at one world
+    # size cannot be loaded at another. Gathering full tensors at save time
+    # is also wrong: DTensor.full_tensor() is a collective, and issuing
+    # collectives from inside DCP's save path deadlocks (observed as a
+    # 10-minute NCCL timeout at the first checkpoint of the run-2 smoke).
+    #
+    # The correct mechanism is DCP's own: present each shard *as a DTensor*
+    # (DTensor.from_local is metadata-only, no communication). DCP then saves
+    # every rank's shard and reshards natively on load at any world size —
+    # exactly how the model weights under ``roles.*`` are handled.
+
+    _AC_WRAPPER = "._checkpoint_wrapped_module"
+
+    @classmethod
+    def _clean_name(cls, name: str) -> str:
+        return name.replace(cls._AC_WRAPPER, "")
+
+    @staticmethod
+    def _as_dcp_tensor(shard: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
+        from torch.distributed.tensor import DTensor
+
+        if isinstance(param, DTensor):
+            return DTensor.from_local(
+                shard.to(device=param.device),
+                device_mesh=param.device_mesh,
+                placements=param.placements,
+            )
+        return shard.detach().clone()
+
+    @staticmethod
+    def _to_local_cpu(value: torch.Tensor) -> torch.Tensor:
+        from torch.distributed.tensor import DTensor
+
+        if isinstance(value, DTensor):
+            value = value.to_local()
+        return value.detach().float().cpu()
+
     def state_dict(self) -> dict[str, Any]:
         if self.student_ema is None:
             return {}
+        params = {
+            self._clean_name(name): param
+            for name, param in self._transformer.named_parameters()
+        }
+        shadow_dcp: dict[str, torch.Tensor] = {}
+        for name, shard in self.student_ema.shadow.items():
+            clean = self._clean_name(name)
+            param = params.get(clean)
+            if param is None:
+                logger.warning("EMA shadow key %r has no matching parameter; dropping from checkpoint.", name)
+                continue
+            shadow_dcp[clean] = self._as_dcp_tensor(shard, param)
         return {
-            "student_ema": self.student_ema.state_dict(),
+            "student_ema_sharded": shadow_dcp,
             "ema_started": self._ema_started,
         }
 
@@ -148,7 +204,22 @@ class EMACallback(Callback):
         self,
         state_dict: dict[str, Any],
     ) -> None:
-        ema_state = state_dict.get("student_ema")
-        if (ema_state is not None and self.student_ema is not None):
-            self.student_ema.load_state_dict(ema_state)
+        if self.student_ema is not None:
+            sharded = state_dict.get("student_ema_sharded")
+            if sharded is not None:
+                shadow: dict[str, torch.Tensor] = {}
+                for name, _param in self._transformer.named_parameters():
+                    clean = self._clean_name(name)
+                    if clean in sharded:
+                        shadow[name] = self._to_local_cpu(sharded[clean])
+                self.student_ema.shadow = shadow
+            elif state_dict.get("student_ema") is not None:
+                # Legacy plain-shard state: world-size-dependent and, on
+                # multi-GPU saves, missing every rank but 0. Refuse to load
+                # silently-corrupt weights.
+                raise ValueError(
+                    "This checkpoint holds legacy per-shard EMA state, which is only valid "
+                    "on the exact world size that wrote it and loses all non-rank-0 shards "
+                    "on multi-GPU saves. The EMA in this checkpoint cannot be trusted; "
+                    "resume without the EMA state or re-train with the portable format.")
         self._ema_started = bool(state_dict.get("ema_started", False), )
