@@ -25,6 +25,72 @@ useful stress test for the DiT/runtime path, but it is not a substitute for
 testing on an actual 16 GB Mac because macOS does not expose a perfect
 process-wide unified-memory simulator.
 
+## Wan2.2-TI2V-5B (Track D Rung 3)
+
+Real-weight MLX port of `FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers`
+(30 layers, 24×128 heads, hidden 3072, ffn 14336, VAE z_dim=48 / DiT
+`in_channels=48`). Per-token timestep conditioning
+(`expand_timesteps`: frame-0 tokens at t=0, remaining at the denoise level).
+
+### Real-weight parity (M4 Max, MLX 0.31.2)
+
+| Gate | Result |
+| --- | --- |
+| Tiny-config per-token (fp32) | max\|Δ\| within **2e-3** (`test_mlx_wan22_parity.py`) |
+| CUDA/CPU tiny dump→Metal compare | max\|Δ\| **1.6e-5** (`wan22_cuda_reference.py`) |
+| Full 5B fp16 MLX vs torch-fp16 | max\|Δ\| **9.8e-2**, mean **6.2e-3**, cosine **0.99995** |
+
+Full 5B fp16 drifts more than the tiny gate because 30 layers of Metal vs
+torch SDPA accumulate in half precision; cosine 0.99995 confirms the port is
+structurally correct. Measured budgets are asserted in
+`test_mlx_wan22_real_weights.py` (Metal + local weights).
+
+### Memory / latency (denoise-only, 3-step DMD, flow_shift=5.0)
+
+Shape: pixel 480×832×33 → latent `1×48×9×30×52`, random text embeds.
+
+| Mode | Weight size | Load peak | Denoise peak | Steady step | Total denoise |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fp16 | **9.31 GiB** | 9.31 GiB | **10.94 GiB** | **3.79 s** | 11.4 s |
+| int8 | **4.95 GiB** | 5.03 GiB | **6.60 GiB** | **3.97 s** | 11.9 s |
+
+**Does 5B fit in 32 GB?** Yes. INT8 denoise peaks at ~6.6 GiB; fp16 at ~11 GiB
+— both leave headroom for the OS, torch/MPS encode, and (later) decode on a
+32 GB Mac. INT8 is the practical default for the medium hardware tier.
+
+Steady step is ~4× a 1.3B INT8 denoise step at similar shapes (1.3B INT8 was
+~1 s-class on denser paths; exact cross-model comparison depends on latent
+token count — 5B uses 48 channels and 16× spatial VAE).
+
+### Decode note
+
+The 5B VAE is **z_dim=48** (Wan2.2). TAEHV `taew2_1.pth` is built for the
+Wan2.1 VAE and is **not** a drop-in. Until a 2.2-compatible TAE lands upstream,
+full Wan2.2 VAE decode on torch-MPS is the decode path; chunked/tiled decode
+may be required on 32 GB once the decoder is wired.
+
+### Harness
+
+```bash
+# Memory/latency (needs ~/models/fastwan22_5b or --model-root)
+PYTHONPATH=$PWD python -m fastvideo.benchmarks.mlx_wan22_5b_bench \
+  --model-root ~/models/fastwan22_5b --modes fp16,int8
+
+# Real-weight parity (Metal + weights)
+pytest fastvideo/tests/mlx/test_mlx_wan22_real_weights.py -q -s
+
+# CUDA reference (dump on Modal L40S, compare on Mac)
+modal run fastvideo/tests/modal/launch_l40s_job.py \
+  --command "python fastvideo/tests/modal/wan22_cuda_reference.py dump --path /root/data/wan22_ref/ref.npz" \
+  --gpu-type L40S --num-gpus 1 --install-extra dev --pr-number <PR#> \
+  --env-vars "MASTER_ADDR=localhost,MASTER_PORT=29551,FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA" \
+  --commit-volume
+```
+
+`hardware_tier.FIVE_B_MODEL_REPO` is set to
+`FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers` so 32/64 GB auto-tier prefers
+5B int8 / 5B fp16 once this PR merges with the tiering stack.
+
 ## Commands
 
 The benchmark harness now exposes memory-tier flags and presets. A fast smoke
