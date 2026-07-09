@@ -21,6 +21,9 @@ TAEW2_1_CHECKPOINT_URL = "https://raw.githubusercontent.com/madebyollin/taehv/ma
 # (fetched 2026-07-02). If upstream publishes a new checkpoint, revalidate the
 # decode path and update this pin.
 TAEW2_1_CHECKPOINT_SHA256 = "d26151e76cdc2c9424bef988de874b33d9a53f30ef3060cd556c429c469c797e"
+# Wan2.2 5B (z_dim=48) — see madebyollin/taehv taew2_2.pth; prefer
+# ``fastvideo.mlx_runtime.wan_vae.ensure_taehv_checkpoint(z_dim=48)`` for new code.
+TAEW2_2_CHECKPOINT_URL = "https://raw.githubusercontent.com/madebyollin/taehv/main/taew2_2.pth"
 
 
 def _default_cache_dir() -> Path:
@@ -38,11 +41,10 @@ def _sha256(path: Path) -> str:
 def _verify_checkpoint(path: Path) -> None:
     actual = _sha256(path)
     if actual != TAEW2_1_CHECKPOINT_SHA256:
-        raise RuntimeError(
-            f"TAEHV checkpoint at {path} failed sha256 verification "
-            f"(expected {TAEW2_1_CHECKPOINT_SHA256}, got {actual}). "
-            "Delete the file to re-download it, or pass --taehv-checkpoint-path "
-            "pointing at a checkpoint you trust.")
+        raise RuntimeError(f"TAEHV checkpoint at {path} failed sha256 verification "
+                           f"(expected {TAEW2_1_CHECKPOINT_SHA256}, got {actual}). "
+                           "Delete the file to re-download it, or pass --taehv-checkpoint-path "
+                           "pointing at a checkpoint you trust.")
 
 
 def ensure_taew2_1_checkpoint(checkpoint_path: Path | None = None) -> Path:
@@ -61,7 +63,8 @@ def ensure_taew2_1_checkpoint(checkpoint_path: Path | None = None) -> Path:
     if not checkpoint_path.exists():
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Downloading {TAEW2_1_CHECKPOINT_URL} -> {checkpoint_path}")
-        urllib.request.urlretrieve(TAEW2_1_CHECKPOINT_URL, checkpoint_path)  # noqa: S310 - pinned public artifact, hash-verified below.
+        urllib.request.urlretrieve(TAEW2_1_CHECKPOINT_URL,
+                                   checkpoint_path)  # noqa: S310 - pinned public artifact, hash-verified below.
     _verify_checkpoint(checkpoint_path)
     return checkpoint_path
 

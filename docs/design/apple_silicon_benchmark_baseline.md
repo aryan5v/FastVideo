@@ -63,12 +63,32 @@ Steady step is ~4× a 1.3B INT8 denoise step at similar shapes (1.3B INT8 was
 ~1 s-class on denser paths; exact cross-model comparison depends on latent
 token count — 5B uses 48 channels and 16× spatial VAE).
 
-### Decode note
+### Decode (MLX TAEHV — fully on-device)
 
-The 5B VAE is **z_dim=48** (Wan2.2). TAEHV `taew2_1.pth` is built for the
-Wan2.1 VAE and is **not** a drop-in. Until a 2.2-compatible TAE lands upstream,
-full Wan2.2 VAE decode on torch-MPS is the decode path; chunked/tiled decode
-may be required on 32 GB once the decoder is wired.
+| Path | Backend | Wall-clock (M4 Max) | Notes |
+| --- | --- | ---: | --- |
+| Wan2.2 full VAE (prior) | torch/MPS AutoencoderKLWan | **~211 s** | product shape 480×832×81 |
+| Wan2.2 TAEHV `taew2_2` | **MLX** Conv2d | **~1.2–1.6 s** | same shape; MLX vs torch TAEHV max\|Δ\| ~1e-6 |
+| Wan2.1 TAEHV `taew2_1` | **MLX** | **~0.1 s** (smoke) | still works; z_dim=16 |
+
+Helpers: `fastvideo/mlx_runtime/wan_vae.py` (`decode_latents_taehv_mlx`,
+`decode_latents_to_video`). Full 3D Wan VAE MLX port remains optional (causal
+feat-cache + residual up blocks); product path is TAEHV.
+
+### 5B DMD sampler A/B (warped schedule)
+
+Early demos used raw step indices `[1000,757,522]` as continuous timesteps
+**without** `set_timesteps` warping. FastWan2.2 config sets
+`warp_denoising_step=True` + `flow_shift=5.0` → warped continuous timesteps
+≈ `[1000, 940, 846]`.
+
+| Check | Result |
+| --- | --- |
+| MLX vs torch-CUDA multi-step DMD (L40S dump, 256×448, seed 1234) | max\|Δ\| **3.8e-2**, mean **6.9e-3**, **cosine 0.99992** |
+| Verdict | **Sampler matches torch** — softness is the 3-step distilled model, not a loop bug |
+
+`fastvideo/mlx_runtime/wan22_sample.py` implements the warped schedule;
+`examples/inference/basic/mlx_wan22_generate.py` is the e2e script.
 
 ### Harness
 
