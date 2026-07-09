@@ -37,7 +37,8 @@ Real-weight MLX port of `FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers`
 | Gate | Result |
 | --- | --- |
 | Tiny-config per-token (fp32) | max\|Δ\| within **2e-3** (`test_mlx_wan22_parity.py`) |
-| CUDA/CPU tiny dump→Metal compare | max\|Δ\| **1.6e-5** (`wan22_cuda_reference.py`) |
+| CUDA tiny dump→Metal compare | max\|Δ\| **1.15e-3** (`wan22_cuda_reference.py`, L40S dump) |
+| Local CPU dump→Metal compare | max\|Δ\| **1.6e-5** (same harness) |
 | Full 5B fp16 MLX vs torch-fp16 | max\|Δ\| **9.8e-2**, mean **6.2e-3**, cosine **0.99995** |
 
 Full 5B fp16 drifts more than the tiny gate because 30 layers of Metal vs
