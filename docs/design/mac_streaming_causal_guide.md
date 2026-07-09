@@ -122,10 +122,9 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
 ## Deliverables checklist
 
 - [x] Architecture diff table (rung 1) appended to this doc
-- [~] `fastvideo/mlx_runtime/causal.py` — rung 2 done: `MLXCausalKVCache`
+- [x] `fastvideo/mlx_runtime/causal.py` — rung 2: `MLXCausalKVCache`
   (preallocated rolling cache + sink tokens) and `causal_self_attention_step`
-  (rotary at global offset, cache write/evict, windowed dense SDPA). Sampler
-  (rung 5) pending.
+  (rotary at global offset, cache write/evict, windowed dense SDPA).
 - [x] Rung 3 parity + KV-cache tests done in
   `fastvideo/tests/mlx/test_mlx_causal_attention.py`: mask-free cached decode ==
   block-causal masked full pass (no-eviction), == sliding-window masked pass
@@ -139,10 +138,22 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
   loads the released `wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers` transformer (reusing
   the dense Diffusers loader) and streams finite output through the full 30-layer
   causal forward — `test_mlx_causal_dit_real_weights.py` (skips if the checkpoint
-  is absent; set `FASTVIDEO_SFWAN_ROOT`). Rung 5 (streaming sampler + demo)
-  pending. **Gotcha found:** the causal model pads text to `config.text_len`
-  (512) before the text embedder — the MLX port must replicate this or
-  cross-attention diverges.
-- [ ] Streaming demo script (`examples/inference/basic/mlx_wan_streaming.py`)
-- [ ] Benchmark rows: time-to-first-frame, chunk latency, peak memory
+  is absent; set `FASTVIDEO_SFWAN_ROOT`). **Gotcha found:** the causal model
+  pads text to `config.text_len` (512) before the text embedder — the MLX port
+  must replicate this or cross-attention diverges.
+- [x] Rung 5 streaming sampler: `fastvideo/mlx_runtime/causal_sampler.py`
+  (`stream_causal_latents` — per-block few-step DMD with the clean-context KV
+  update, yields each block as it finalizes; `build_dmd_schedule` with the SF
+  warp). Unit test `test_mlx_causal_sampler.py` (tiny config, control-flow +
+  shapes). The context-update-writes-clean-K/V pattern is the crux — the same
+  `causal_self_attention_step` handles repeated same-position writes.
+- [x] Rung 5 demo script `examples/inference/basic/mlx_wan_streaming.py`
+  (loads real weights, streams block-by-block, falls back to random prompt
+  embeds for latency-only when no text encoder is present).
+- [x] Rung 6 INT8 + benchmark rows: INT8 works through the dense
+  `quantize_matrix` path (loader passthrough); time-to-first-frame / per-block
+  latency / peak memory recorded in `apple_silicon_benchmark_baseline.md`
+  (FP16: 2.70s / 3.30s / 9.34 GiB; INT8: 2.20s / 3.34s / 8.19 GiB at 480×832).
+- [ ] Decode wiring (per-chunk TAEHV/VAE) + visual quality vs CUDA SF reference
+  (needs VAE/TAEHV weights + reference clips — a DGX ask).
 - [ ] Run-5 handoff (SF+QAD) when gates are green

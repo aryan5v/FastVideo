@@ -133,6 +133,25 @@ The SSIM gate (`--assert-min-ssim 0.9`) passes on the compiled path. Lesson: a
 NumPy scalar times a traced `mx.array` silently breaks `mx.compile` — keep such
 constants as Python floats.
 
+## Causal streaming (Track C, 2026-07-08, M4 Max, MLX 0.31.2)
+
+Block-autoregressive streaming of `wlsaidhi/SFWan2.1-T2V-1.3B` via
+`MLXCausalWanDiT` + `stream_causal_latents` (4-step DMD per block,
+`num_frames_per_block=1`, 480×832 → 1560 tokens/frame). Latency is denoise-side
+(decode not included — VAE/TAEHV weights not required for these numbers):
+
+| mode | load | time-to-first-frame | steady per-block | peak |
+| --- | ---: | ---: | ---: | ---: |
+| FP16 | 5.2s | 2.70s | 3.30s | 9.34 GiB |
+| INT8 | 2.0s | 2.20s | 3.34s | 8.19 GiB |
+
+INT8 (affine group-64, via the same `quantize_matrix` path as the dense port)
+cuts time-to-first-frame and peak memory; steady per-block latency is comparable
+and grows slowly as the attention window fills (2.7s→3.8s over 6 blocks). These
+are latency/plumbing numbers on the verified causal forward — visual quality vs
+the CUDA SF reference is a separate eyeball check (a DGX ask). Reproduce with
+`examples/inference/basic/mlx_wan_streaming.py`.
+
 ## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
 
 Three runs on the motion7 prompt set (480×832×81, 3-step DMD, TAEHV decode,
