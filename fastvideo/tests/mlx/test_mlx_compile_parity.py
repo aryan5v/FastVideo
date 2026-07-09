@@ -18,11 +18,19 @@ import pytest
 
 mx = pytest.importorskip("mlx.core", reason="MLX is required for the compile-parity tests")
 
-from fastvideo.mlx_runtime.fastwan import MLXWanTransformerBlock, gelu_tanh  # noqa: E402
+from fastvideo.mlx_runtime.fastwan import (  # noqa: E402
+    MLXWanTransformerBlock,
+    gelu_tanh,
+    timestep_embedding,
+)
+
+# One module-level generator so successive _rand calls of the same shape get
+# distinct values (re-seeding per call made every (dim, dim) weight identical).
+_RNG = np.random.default_rng(0)
 
 
 def _rand(*shape: int, scale: float = 1.0) -> "mx.array":
-    return mx.array((np.random.default_rng(0).standard_normal(shape) * scale).astype(np.float32))
+    return mx.array((_RNG.standard_normal(shape) * scale).astype(np.float32))
 
 
 def test_gelu_tanh_compiles_and_matches_eager() -> None:
@@ -32,7 +40,23 @@ def test_gelu_tanh_compiles_and_matches_eager() -> None:
     mx.eval(eager)
     compiled = mx.compile(gelu_tanh)(x)
     mx.eval(compiled)
+    # Bit-identical on the same device is the compile-parity contract (not allclose).
     np.testing.assert_array_equal(np.array(eager), np.array(compiled))
+
+
+def test_timestep_embedding_compiles_and_matches_eager() -> None:
+    """``timestep_embedding`` (math.log fix sibling of gelu_tanh) compiles cleanly.
+
+    Unlike gelu_tanh, the exp/sin/cos chain can reassociate under compile, so
+    we allow a tight tolerance rather than bit-identity.
+    """
+    t = mx.array(np.array([0.0, 250.0, 500.0, 1000.0], dtype=np.float32))
+    dim = 64
+    eager = timestep_embedding(t, dim)
+    mx.eval(eager)
+    compiled = mx.compile(lambda steps: timestep_embedding(steps, dim))(t)
+    mx.eval(compiled)
+    np.testing.assert_allclose(np.array(eager), np.array(compiled), rtol=1e-4, atol=1e-4)
 
 
 def _tiny_block_weights(dim: int, ffn: int) -> dict:

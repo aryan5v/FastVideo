@@ -116,6 +116,47 @@ def test_cached_matches_sliding_window_with_eviction() -> None:
     assert cache.local_end_index == window
 
 
+def test_cached_matches_sliding_window_overlapping_eviction() -> None:
+    """window > 2*chunk: eviction shifts overlapping source/dest regions.
+
+    The adjacent-window case (window == 2*chunk) only moves non-overlapping
+    slices; production windows are larger, so this exercises the overlapping
+    shift path that would corrupt K/V if the rolled copy were not materialised.
+    """
+    frame_seqlen, local_attn_size, num_frames, num_heads, head_dim = 4, 3, 6, 2, 8
+    chunk = frame_seqlen  # 4
+    n = num_frames * chunk  # 24
+    window = local_attn_size * frame_seqlen  # 12 (> 2*chunk, overlapping shift)
+    q, k, v, cos, sin = _qkv_cos_sin(n, num_heads, head_dim)
+    scale = head_dim**-0.5
+
+    cached, cache = _run_cached(q, k, v, cos, sin, chunk_tokens=chunk, local_attn_size=local_attn_size,
+                                frame_seqlen=frame_seqlen, kv_cache_size=window)
+    ref = _block_causal_masked_reference(q, k, v, cos, sin, chunk_tokens=chunk, window=window, scale=scale)
+    mx.eval(cached, ref)
+    np.testing.assert_allclose(np.array(cached), np.array(ref), atol=2e-4, rtol=2e-4)
+    assert cache.global_end_index == n
+    assert cache.local_end_index == window
+
+
+def test_chunk_exceeding_cache_capacity_raises() -> None:
+    """Reject chunks larger than the non-sink cache capacity (would clobber sinks)."""
+    frame_seqlen, num_heads, head_dim, sink_tokens = 4, 1, 8, 2
+    # Capacity after sinks is 2; a 4-token chunk cannot fit without overwriting sinks.
+    kv_cache_size = sink_tokens + 2
+    cache = MLXCausalKVCache.allocate(
+        batch=1, max_tokens=kv_cache_size, num_heads=num_heads, head_dim=head_dim,
+        sink_tokens=sink_tokens, dtype=mx.float32)
+    # Fill past the cache so the next write triggers overflow eviction.
+    q0, k0, v0, cos0, sin0 = _qkv_cos_sin(2, num_heads, head_dim)
+    causal_self_attention_step(
+        q0, k0, v0, cos0, sin0, cache, current_start=0, local_attn_size=2, frame_seqlen=frame_seqlen)
+    q1, k1, v1, cos1, sin1 = _qkv_cos_sin(4, num_heads, head_dim)
+    with pytest.raises(ValueError, match="exceeds available cache capacity"):
+        causal_self_attention_step(
+            q1, k1, v1, cos1, sin1, cache, current_start=2, local_attn_size=2, frame_seqlen=frame_seqlen)
+
+
 def test_sink_tokens_preserved_across_eviction() -> None:
     """The first ``sink_tokens`` cache slots survive rolling eviction unchanged."""
     frame_seqlen, local_attn_size, num_frames, num_heads, head_dim = 4, 3, 6, 1, 8
@@ -127,15 +168,18 @@ def test_sink_tokens_preserved_across_eviction() -> None:
 
     cache = MLXCausalKVCache.allocate(batch=1, max_tokens=window, num_heads=num_heads, head_dim=head_dim,
                                       sink_tokens=sink_tokens, dtype=mx.float32)
-    sink_after_first = None
+    sink_k_after_first = None
+    sink_v_after_first = None
     for i, start in enumerate(range(0, n, chunk)):
         end = start + chunk
         causal_self_attention_step(
             q[:, start:end], k[:, start:end], v[:, start:end], cos[start:end], sin[start:end], cache,
             current_start=start, local_attn_size=local_attn_size, frame_seqlen=frame_seqlen)
         if i == 0:
-            sink_after_first = np.array(cache.k[:, :sink_tokens])
-    mx.eval(cache.k)
+            sink_k_after_first = np.array(cache.k[:, :sink_tokens])
+            sink_v_after_first = np.array(cache.v[:, :sink_tokens])
+    mx.eval(cache.k, cache.v)
     # After many chunks (and at least one eviction), the sink region is untouched.
     assert cache.global_end_index == n
-    np.testing.assert_array_equal(np.array(cache.k[:, :sink_tokens]), sink_after_first)
+    np.testing.assert_array_equal(np.array(cache.k[:, :sink_tokens]), sink_k_after_first)
+    np.testing.assert_array_equal(np.array(cache.v[:, :sink_tokens]), sink_v_after_first)

@@ -120,6 +120,13 @@ def causal_self_attention_step(
         # Discard the oldest tokens after the sinks by shifting content left.
         num_evicted = num_new + local_end_prev - kv_cache_size
         num_rolled = local_end_prev - num_evicted - sink_tokens
+        # Chunk larger than the non-sink capacity would make num_rolled negative and
+        # the subsequent local_start:local_end write would clobber the sink region.
+        if num_rolled < 0:
+            raise ValueError(
+                f"Chunk size ({num_new}) exceeds available cache capacity "
+                f"({kv_cache_size - sink_tokens} after sinks); cannot evict "
+                f"without overwriting sink tokens.")
         # Copy the source slice first (mx slices are new arrays, so no aliasing).
         rolled_k = cache.k[:, sink_tokens + num_evicted:sink_tokens + num_evicted + num_rolled]
         rolled_v = cache.v[:, sink_tokens + num_evicted:sink_tokens + num_evicted + num_rolled]
