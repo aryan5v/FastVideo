@@ -33,7 +33,9 @@ dependencies = [
     "torch==2.12.0",
     "torchvision",
     "torchaudio",
-    "flashinfer-python",
+    # FlashInfer ships CUDA kernels and is not needed by the Apple-native MLX
+    # release path (which uses MLX for the DiT and PyTorch MPS for encode/decode).
+    "flashinfer-python; platform_system != 'Darwin'",
 
     # Acceleration & Optimization
     "accelerate==1.0.1",
@@ -71,7 +73,10 @@ dependencies = [
     "remote-pdb",
 
     # Kernel & Packaging
-    "fastvideo-kernel==0.3.2",
+    # The MLX release does not load FastVideo's CUDA kernel package. Keeping it
+    # out of macOS resolution makes `uv pip install -e '.[mlx]'` a source-only
+    # Apple Silicon install rather than a CUDA-wheel lookup.
+    "fastvideo-kernel==0.3.2; platform_system != 'Darwin'",
     "wheel",
 
     # Training Dependencies
@@ -189,6 +194,12 @@ dreamverse = [
 
 rocm = [
     "amdsmi",
+]
+
+# Apple Silicon FastWan release runtime. The range is intentionally pinned to
+# the MLX version used for the checked-in parity and checkpoint tests.
+mlx = [
+    "mlx>=0.31.2,<0.32; platform_system == 'Darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
