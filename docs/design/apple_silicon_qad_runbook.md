@@ -3,11 +3,12 @@
 Operator instructions for launching the Mac-targeted quantization-aware DMD
 distillation (roadmap M4 Phase B) on a DGX with B200 GPUs. Everything below
 runs from a clone of `aryan5v/FastVideo` on branch
-`aryan/apple-silicon-fastwan-mlx`. The training recipe is
+the approved future QAD integration branch. The training recipe is
 `examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml`:
 frozen Wan2.1-T2V-1.3B teacher + critic, trainable student whose linear
-weights are fake-quantized every forward onto MLX's exact affine INT8 deploy
-grid (the `mlx_qat` callback; numerics pinned bitwise by
+weights are fake-quantized every forward onto MLX's affine INT8 deploy
+grid (the `mlx_qat` callback; serialized quantizer state is pinned exactly and
+the Metal/PyTorch forward representation is bounded to one source-dtype epsilon by
 `fastvideo/tests/mlx/test_mlx_affine_qat_parity.py`), distilled to the
 3-step FastWan schedule `[1000, 757, 522]`.
 
@@ -51,9 +52,9 @@ hf auth whoami || huggingface-cli whoami   # HF auth for model + dataset pulls
 
 ```bash
 git clone https://github.com/aryan5v/FastVideo.git && cd FastVideo
-git checkout aryan/apple-silicon-fastwan-mlx
+git checkout aryan/future/fastwan-qad-5b-i2v
 uv venv --python 3.12 && source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev,mlx]"
 ```
 
 B200 is sm_100: torch must be a recent CUDA build (the pinned deps are).
@@ -67,7 +68,8 @@ export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
 Sanity-check the QAT machinery on this box before spending GPU time:
 
 ```bash
-pytest fastvideo/tests/training/test_mlx_qat_callback.py -q   # expect 5 passed
+pytest fastvideo/tests/mlx/test_mlx_affine_qat_parity.py -q
+pytest fastvideo/tests/training/test_mlx_qat_callback.py -q
 ```
 
 ## 2. Dataset

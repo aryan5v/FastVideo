@@ -16,8 +16,8 @@ details are:
 - the scale is *negative* when ``|w_max| >= |w_min|`` (the quantizer anchors
   at the endpoint with the larger magnitude),
 - the anchor endpoint is re-expressed as an exact integer multiple of the
-  scale (``q0 = rint(edge / scale); scale = edge / q0; bias = edge``), so the
-  extreme value round-trips exactly,
+  scale (``q0 = rint(edge / scale); scale = edge / q0; bias = edge``), and
+  MLX uses that adjusted scale to produce the integer codes,
 - rounding is ``rint`` (round-half-to-even), matching ``torch.round``,
 - codes are clamped to ``[0, 2^bits - 1]`` and scales/biases are cast to the
   input dtype at the end.
@@ -38,9 +38,8 @@ _EPS = 1e-7
 
 def _group(w: torch.Tensor, group_size: int) -> torch.Tensor:
     if w.shape[-1] % group_size != 0:
-        raise ValueError(
-            f"Last dim {w.shape[-1]} is not divisible by group_size {group_size}; "
-            "MLX affine quantization groups along the last axis.")
+        raise ValueError(f"Last dim {w.shape[-1]} is not divisible by group_size {group_size}; "
+                         "MLX affine quantization groups along the last axis.")
     return w.reshape(*w.shape[:-1], w.shape[-1] // group_size, group_size)
 
 
@@ -62,14 +61,18 @@ def mlx_affine_quantize_reference(
     w_min = grouped.min(dim=-1).values
     w_max = grouped.max(dim=-1).values
     mask = w_min.abs() > w_max.abs()
-    scale = ((w_max - w_min) / n_bins).clamp_min(_EPS)
-    scale = torch.where(mask, scale, -scale)
+    quant_scale = ((w_max - w_min) / n_bins).clamp_min(_EPS)
+    quant_scale = torch.where(mask, quant_scale, -quant_scale)
     edge = torch.where(mask, w_min, w_max)
-    q0 = torch.round(edge / scale)
-    nonzero_q0 = q0 != 0
-    scale = torch.where(nonzero_q0, edge / torch.where(nonzero_q0, q0, torch.ones_like(q0)), scale)
-    bias = torch.where(nonzero_q0, edge, torch.zeros_like(edge))
 
+    q0 = torch.round(edge / quant_scale)
+    nonzero_q0 = q0 != 0
+    scale = torch.where(
+        nonzero_q0,
+        edge / torch.where(nonzero_q0, q0, torch.ones_like(q0)),
+        quant_scale,
+    )
+    bias = torch.where(nonzero_q0, edge, torch.zeros_like(edge))
     codes = torch.round((grouped - bias.unsqueeze(-1)) / scale.unsqueeze(-1))
     codes = codes.clamp(min=0.0, max=n_bins)
     return codes.to(torch.int32), scale.to(w.dtype), bias.to(w.dtype)
