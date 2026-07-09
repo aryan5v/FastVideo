@@ -25,6 +25,70 @@ useful stress test for the DiT/runtime path, but it is not a substitute for
 testing on an actual 16 GB Mac because macOS does not expose a perfect
 process-wide unified-memory simulator.
 
+## Long-video streaming
+
+The causal MLX runtime (`stream_causal_latents` + rolling KV cache) is the path
+to videos longer than ~5s on a Mac. With a positive `local_attn_size`, each
+attention layer keeps a fixed-size K/V window
+(`local_attn_size * frame_seqlen` tokens) and evicts older tokens past the first
+`sink_size` frames — so **per-block memory stays bounded independent of length**.
+
+### Unit gate (backend-agnostic)
+
+```bash
+pytest fastvideo/tests/mlx/test_mlx_causal_long_rollout.py -q
+```
+
+Tiny random-weight DiT, 28 blocks, `local_attn_size=2`, `sink_size=1`. Asserts
+finite block shapes, `k.shape[1] == window` after every block, `global_end_index`
+advances, and `local_end_index` saturates at the window.
+
+### Real-weight gate (Metal + local SFWan)
+
+```bash
+# requires ~/models/sfwan_t2v_1.3b or FASTVIDEO_SFWAN_ROOT
+pytest fastvideo/tests/mlx/test_mlx_causal_long_rollout_real.py -q -s
+```
+
+### Measured on M4 Max (2026-07-08, MLX 0.31.2)
+
+SFWan-1.3B causal fp16, latent **32×32**, **24** latent frames (blocks),
+`local_attn_size=6`, `sink_size=1`, 4-step DMD, random text embeds (latency path):
+
+| Metric | Value |
+| --- | ---: |
+| Time-to-first-block | **0.40 s** |
+| Steady per-block latency (median) | **0.48 s** |
+| Total stream | **11.5 s** |
+| KV window | 1536 tokens (`6 × 256`) |
+| Peak MLX memory (block 0) | 3.378 GiB |
+| Peak MLX memory (blocks 1–23) | **3.408 GiB flat** |
+
+`peak_gib_by_block` is constant after the first block — no O(T) growth as the
+clip lengthens past the window. `global_end_index` finished at 6144 tokens;
+`local_end_index` saturated at 1536 (the window).
+
+Product-shape (480×832) latency + optional live TAEHV decode:
+
+```bash
+PYTHONPATH=$PWD python examples/inference/basic/mlx_wan_streaming.py \
+  --model-root ~/models/sfwan_t2v_1.3b \
+  --local-attn-size 6 --sink-size 1 \
+  --num-frames 24 \
+  --metrics-out video_samples/long_stream_metrics.json
+
+# live frames (needs taew2_1.pth + imageio-ffmpeg):
+PYTHONPATH=$PWD python examples/inference/basic/mlx_wan_streaming.py \
+  --model-root ~/models/sfwan_t2v_1.3b \
+  --local-attn-size 6 --sink-size 1 --decode \
+  --taehv-checkpoint-path /path/to/taew2_1.pth \
+  --output-video video_samples/stream_long.mp4 \
+  --num-frames 24
+```
+
+Without `--decode` the demo is unchanged latency-only behaviour (plus the new
+optional flags defaulting to the previous global-attn settings).
+
 ## Commands
 
 The benchmark harness now exposes memory-tier flags and presets. A fast smoke

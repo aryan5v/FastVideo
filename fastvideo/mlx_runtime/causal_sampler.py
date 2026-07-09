@@ -64,11 +64,18 @@ def stream_causal_latents(
     frame_seqlen: int,
     context_noise: float = 0.0,
     seed: int = 0,
+    kv_caches: list | None = None,
+    crossattn_caches: list | None = None,
 ) -> Iterator[tuple[int, mx.array]]:
     """Yield ``(block_index, clean_block_latents)`` as each block finalizes.
 
     ``noise_latents`` is ``[B, C, T, H, W]`` pure noise; ``cos_full``/``sin_full``
     are the rotary tables for the whole clip (frame-major), sliced per block.
+
+    Optional ``kv_caches`` / ``crossattn_caches`` let callers pre-allocate (or
+    inspect) the rolling caches — e.g. long-rollout tests that assert the K/V
+    tensor length stays equal to the attention window. When either is omitted
+    the sampler allocates both via ``model.allocate_caches`` (unchanged default).
     """
     import mlx.core as mx
 
@@ -79,7 +86,10 @@ def stream_causal_latents(
     if total_frames % nfb != 0:
         raise ValueError(f"total latent frames {total_frames} not divisible by num_frames_per_block {nfb}")
 
-    kv_caches, crossattn_caches = model.allocate_caches(batch=batch, frame_seqlen=frame_seqlen, dtype=dtype)
+    if (kv_caches is None) ^ (crossattn_caches is None):
+        raise ValueError("kv_caches and crossattn_caches must both be provided or both omitted")
+    if kv_caches is None:
+        kv_caches, crossattn_caches = model.allocate_caches(batch=batch, frame_seqlen=frame_seqlen, dtype=dtype)
     block_tokens = nfb * frame_seqlen
     last = len(timesteps) - 1
 
