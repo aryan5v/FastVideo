@@ -104,3 +104,32 @@ quantization-robustness criterion, but visual review found motion defects and
 overall quality below stock — so the parity criterion is not met and the
 run-2 levers (FastWan init, larger effective batch) are activated per the
 roadmap's decision tree.
+
+## QAD-INT8 run 2 (FastWan init + effective batch 16, 2026-07)
+
+Run 2 re-trained from the already-distilled FastWan weights with
+`gradient_accumulation_steps 4`. The EMA export is now healthy — the
+DTensor-native EMA checkpoint fix worked; run 2's EMA is a real model, not
+the noise run 1's export produced.
+
+| model | INT8-vs-own-FP16 MS-SSIM (mean / min) | INT8 step | peak GiB |
+| --- | ---: | ---: | ---: |
+| stock FastWan2.1-1.3B (PTQ) | 0.9069 / 0.8214 | 34.2s | 5.62 |
+| QAD v2 raw | 0.9360 / 0.8848 | 37.8s | 5.63 |
+| QAD v2 EMA | 0.9331 / 0.8875 | 37.3s | 5.60 |
+
+Both beat stock PTQ → the quantization-robustness criterion passes again. Do
+**not** read v2 raw (0.9360) < v1 raw (0.9487) as a regression: this metric
+scores INT8 against the model's *own* FP16 output, so it measures
+quantization consistency only, and it is non-monotonic with quality — a
+sharper model has more high-frequency detail, which quantization perturbs
+more, lowering the relative score. (v1's 0.986 "EMA" was the reductio: noise
+quantizes near-perfectly.) Absolute quality — did FastWan-init + larger batch
+fix v1's motion defects — is a visual-grid question this table cannot answer.
+
+**Ship decision pending:** (a) visual sign-off raw vs EMA on the HTML grids,
+and (b) a cross-model check scoring QAD-v2-INT8 against **stock FP16** (not
+its own FP16) via `--reference` — meaningful here because the v2 student was
+initialized from the same FastWan weights stock *is*, so same-seed outputs
+are comparable, and this directly measures "does the shippable INT8 model
+match the gold-standard original?"
