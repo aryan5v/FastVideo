@@ -219,7 +219,11 @@ and `peak_gib` per cell — these numbers go into
 
 Decision per the roadmap (M4/M5): if (1) passes and (2) shows parity, the
 winner of B-vs-C ships behind the 16 GB preset and gets published to Hugging
-Face (pre-quantized MLX checkpoint included). If (1) passes but (2) shows a
-quality gap vs stock, run 2 applies the queued levers (student+critic init
-from FastWan weights, gradient_accumulation_steps 4) — the training pipeline
-is proven, so run 2 is a YAML edit away.
+Face (pre-quantized MLX checkpoint included).
+
+Current status after run 2 (2026-07): the queued levers (student+critic init
+from FastWan weights, `gradient_accumulation_steps=4`) have been run and
+Mac-side motion7 evaluation is complete. The QAT metric improved over stock
+PTQ: stock FastWan PTQ averaged 0.9069 MS-SSIM against its own FP16 reference,
+QAD v2 raw averaged 0.9360, and QAD v2 EMA averaged 0.9331. Use the raw/EMA
+grids, not this single aggregate, to make the final ship-candidate choice.

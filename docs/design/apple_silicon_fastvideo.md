@@ -328,6 +328,16 @@ Phase B — the run:
   diagnosis — training-time EMA validation clips were healthy). Per the
   decision tree: fix/verify the EMA export, and prepare run 2
   (student+critic init from FastWan weights, gradient accumulation 4).
+- **[run-2 evaluated on Mac, 2026-07]** The second 4,000-step run used the
+  queued quality levers (FastWan student/critic init and
+  `gradient_accumulation_steps=4`) and completed the Mac-side MLX motion7
+  evaluation. Against each model's own FP16 reference, INT8 fidelity improved
+  over stock PTQ: stock FastWan PTQ averaged 0.9069 MS-SSIM (worst 0.8214),
+  QAD v2 raw averaged 0.9360 (worst 0.8848), and QAD v2 EMA averaged 0.9331
+  (worst 0.8875). Raw is marginally sharper by mean SSIM; EMA has the better
+  worst-case score and slightly lower peak memory. The current launch-candidate
+  call is therefore visual: use the grid review to choose raw vs EMA, then
+  publish the winner with the pre-quantized MLX checkpoint.
 - Export: DCP checkpoint → `dcp_to_diffusers.py` → Diffusers safetensors →
   existing MLX loader, plus the M3 pre-quantized MLX format.
 
@@ -372,6 +382,38 @@ Exit criteria:
   FastWan-QAD launch post is the template).
 - Setup docs and a contributor guide for adding models, prompts, metrics, and
   Apple-specific optimizations.
+
+### Launch-blog evidence pack
+
+The launch post should keep the claim narrow and reproducible: this is a
+Mac-targeted, 3-step Wan2.1-1.3B INT8 QAD model running through the MLX fast
+lane, not a general claim about every FastVideo model on Mac.
+
+Evidence already on disk for the post:
+
+- Motion7 benchmark grids: `bench/apple_qad_v2/qad/index.html` and
+  `bench/apple_qad_v2/qad_ema/index.html`.
+- QAD-vs-stock FP16 metric outputs:
+  `bench/qad_v2_vs_stockfp16/metrics.json` and
+  `bench/qad_v2_ema_vs_stockfp16/metrics.json`.
+- Screenshot-style qualitative grid:
+  `bench/qad_v2_picture_prompts/gallery.html`. This uses seven
+  launch-style prompts selected to match the qualitative comparison table;
+  keep the blog focused on the grid and do not enumerate the prompt text.
+
+Blog points that are supported by current evidence:
+
+- QAT worked on the metric it was designed to improve: INT8 hurts the
+  QAD-trained model less than stock post-training quantization on motion7.
+- The MLX runtime path is the product path being evaluated: torch/MPS prompt
+  encode, MLX DiT denoise, INT8 deploy-grid weights, and TAEHV decode.
+- The quality decision is still visual, not only numeric. Raw has a slight
+  mean-SSIM edge; EMA has a slightly better worst case and should be checked
+  for temporal smoothness and lower artifact rate in the grids.
+- The honest caveat remains: absolute quality is bounded by Wan2.1-1.3B at
+  three DMD steps. If the final grids disappoint, the next meaningful quality
+  lever is a larger model or a different product axis, not another small
+  wording tweak.
 
 ## Staying on track
 

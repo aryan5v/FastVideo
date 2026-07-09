@@ -9,12 +9,13 @@
 **TL;DR:** A 5-second 480p video, generated entirely on a Mac — no cloud, no
 NVIDIA GPU, no discrete graphics card. FastVideo now runs its 3-step
 distilled FastWan models natively on Apple Silicon through an MLX runtime,
-and we are releasing **FastWan-QAD-INT8-1.3B**, a model trained with
-Quantization-Aware Distillation against MLX's own INT8 quantizer — so
-quantizing it for your Mac is nearly lossless (0.986 MS-SSIM vs its FP16
-weights) where standard post-training quantization visibly degrades (0.907,
-dropping to 0.821 on hard prompts). The whole pipeline fits in under 6 GB of
-unified memory: 16 GB MacBooks included.
+and we are preparing **FastWan-QAD-INT8-1.3B**, a model trained with
+Quantization-Aware Distillation against MLX's own INT8 quantizer. On the
+motion7 benchmark, INT8 QAD tracks each model's own FP16 output better than
+standard post-training quantization: 0.936 mean MS-SSIM for the raw student
+and 0.933 for EMA, vs 0.907 for stock PTQ. The whole DiT+TAEHV path fits
+around 5.6 GiB of MLX peak memory on the M4 Max measurement, with a 16 GiB
+cap stress run passing at 4.7 GiB.
 
 [FastWan-QAD](https://haoailab.com/blogs/fastwan-qad/) pushed a single RTX
 5090 to generate a 5-second video in 1.8 seconds by co-designing the model,
@@ -31,9 +32,10 @@ video generation actually becomes local.
 
 - **FastWan-QAD-INT8-1.3B** `[TODO: HF link]` — Wan2.1-T2V-1.3B distilled to
   3 sampling steps with quantization-aware DMD against MLX's affine INT8
-  quantizer (EMA weights). Published in two formats: Diffusers-style
-  safetensors, and a **pre-quantized MLX checkpoint** that halves the
-  download and skips requantization at load.
+  quantizer. Raw and EMA exports are both valid candidates; the final release
+  pick is the one that wins the visual grid review. It will ship in two
+  formats: Diffusers-style safetensors, and a **pre-quantized MLX checkpoint**
+  that halves the download and skips requantization at load.
 - **The MLX runtime** — a native Apple-Silicon implementation of the Wan DiT
   (patch embed → transformer stack → unpatchify) with an on-device 3-step
   DMD sampler, pinned against the PyTorch reference by bitwise/tolerance
@@ -101,10 +103,11 @@ evaporate at load; ours cannot disagree, by construction.
 The recipe is quantization-aware DMD: a frozen Wan2.1-1.3B teacher, a critic,
 and a student whose every forward computes on the INT8 deploy grid
 (gradients pass straight through to the real weights), distilled to the
-3-step schedule the runtime ships. Training ran on 4×B200 for just under 9
-hours — the entire run costs a fraction of what the quality gain would cost
-in runtime engineering. We release the EMA weights: they proved the most
-quantization-robust by a wide margin.
+3-step schedule the runtime ships. The second training run used FastWan
+student/critic initialization and `gradient_accumulation_steps=4`; it is the
+current launch candidate. Raw and EMA are close on the metric, so the final
+choice is visual: raw is slightly sharper by mean fidelity, while EMA has
+the better worst-case score and may suppress temporal artifacts.
 
 ## Results
 
@@ -115,24 +118,24 @@ less quantization damage):
 | Model | mean MS-SSIM (INT8 vs own FP16) | worst prompt |
 | --- | ---: | ---: |
 | stock FastWan2.1-1.3B (post-training quantization) | 0.9069 | 0.8214 |
-| FastWan-QAD-INT8 (raw student) | 0.9487 | 0.8884 |
-| **FastWan-QAD-INT8 (EMA, released)** | **0.9860** | **0.9858** |
+| FastWan-QAD-INT8 v2 (raw student) | 0.9360 | 0.8848 |
+| FastWan-QAD-INT8 v2 (EMA) | 0.9331 | 0.8875 |
 
-The released model is not just better on average — its worst prompt
-quantizes as cleanly as its best, because the weights already live on the
-INT8 grid. QAT costs nothing at inference: step time and peak memory are
-identical to stock.
+Both QAD v2 students beat stock post-training quantization on this metric.
+This score is intentionally narrow: it measures quantization robustness, not
+absolute video quality. We use the HTML grids to make the ship decision
+because they reveal temporal smoothness, fine detail, and artifacts that a
+single fidelity number cannot.
 
 **Speed and memory** (Apple M4 Max, 480×832×81, 3-step DMD, TAEHV decode):
 
 | Config | Denoise | Decode | Total | MLX peak |
 | --- | ---: | ---: | ---: | ---: |
-| INT8 + TAEHV | ~106s (3 × 35.4s) | ~2s | ~2 min | 5.6 GiB |
+| INT8 + TAEHV | ~112-115s | ~2s | ~2 min | 5.6 GiB |
 | INT8 + TAEHV, 16 GiB hard cap | — | — | passes | 4.7 GiB |
 | FP16 + full Wan VAE | ~114s | ~122s | ~4 min | 6.9 GiB |
 
-`[TODO: refresh totals from final bench metrics.json; add mx.compile row
-once the A/B lands; add a stock 16 GB machine row]`
+`[TODO: add mx.compile row once the A/B lands; add a stock 16 GB machine row]`
 
 Two minutes is not 1.8 seconds — and that is the honest headline. It is
 also a 5-second, 480p, text-to-video clip generated on battery-powered
@@ -142,8 +145,15 @@ is the same ladder we are now climbing on Metal, and the first rungs
 (`mx.compile`, fused kernels) are already in the harness behind quality
 gates.
 
-`[TODO: 3-way qualitative video grid — stock FP16 vs stock INT8-PTQ vs
-QAD-INT8-EMA, same seeds, from the benchmark HTML grids]`
+Visual review artifacts:
+
+- Motion7 raw grid: `bench/apple_qad_v2/qad/index.html`
+- Motion7 EMA grid: `bench/apple_qad_v2/qad_ema/index.html`
+- Screenshot-style qualitative grid:
+  `bench/qad_v2_picture_prompts/gallery.html`
+
+`[TODO: convert the qualitative grid into the final blog figure. Do not list
+all prompt text in the post; keep it as a visual comparison.]`
 
 ## How to Run
 

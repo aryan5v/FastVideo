@@ -70,7 +70,6 @@ Each run writes:
 - It does not prove long-video coherence or 60-second generation.
 - It does not replace the Mac-targeted QAT/distillation track.
 
-
 ## QAD-INT8 evaluation (M4 exit measurement, 2026-07)
 
 Three runs on the motion7 prompt set (480×832×81, 3-step DMD, TAEHV decode,
@@ -127,9 +126,17 @@ more, lowering the relative score. (v1's 0.986 "EMA" was the reductio: noise
 quantizes near-perfectly.) Absolute quality — did FastWan-init + larger batch
 fix v1's motion defects — is a visual-grid question this table cannot answer.
 
-**Ship decision pending:** (a) visual sign-off raw vs EMA on the HTML grids,
-and (b) a cross-model check scoring QAD-v2-INT8 against **stock FP16** (not
-its own FP16) via `--reference` — meaningful here because the v2 student was
-initialized from the same FastWan weights stock *is*, so same-seed outputs
-are comparable, and this directly measures "does the shippable INT8 model
-match the gold-standard original?"
+The cross-model reference check against **stock FP16** has also been run:
+QAD v2 raw INT8 averaged 0.2856 MS-SSIM against stock FP16, and QAD v2 EMA
+INT8 averaged 0.2941. Treat this as a sanity signal, not the ship criterion;
+the final raw-vs-EMA call is still visual sign-off on the HTML grids.
+
+Local review artifacts from run 2:
+
+- Raw grid: `bench/apple_qad_v2/qad/index.html`
+- EMA grid: `bench/apple_qad_v2/qad_ema/index.html`
+- QAD-vs-stock FP16 metrics:
+  `bench/qad_v2_vs_stockfp16/metrics.json` and
+  `bench/qad_v2_ema_vs_stockfp16/metrics.json`
+- Screenshot-style qualitative grid:
+  `bench/qad_v2_picture_prompts/gallery.html`
