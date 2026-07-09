@@ -75,6 +75,9 @@ def replace_first_latent_frame(noise_latents: Any, image_latent_frame: Any) -> A
                 img = img[:, :, None, :, :]
             if int(img.shape[2]) != 1:
                 raise ValueError(f"image_latent_frame must be a single frame, got {img.shape}")
+            frame0_shape = tuple(noise_latents[:, :, :1, :, :].shape)
+            if tuple(img.shape) != frame0_shape:
+                raise ValueError(f"image frame shape {tuple(img.shape)} != latent frame 0 shape {frame0_shape}")
             rest = noise_latents[:, :, 1:, :, :]
             return mx.concatenate([img.astype(noise_latents.dtype), rest], axis=2)
 
