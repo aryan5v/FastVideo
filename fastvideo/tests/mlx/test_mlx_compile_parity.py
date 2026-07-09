@@ -85,3 +85,4 @@ def test_transformer_block_compiles_and_matches_eager() -> None:
     mx.eval(eager, compiled)
 
     np.testing.assert_allclose(np.array(eager), np.array(compiled), rtol=1e-5, atol=1e-5)
+

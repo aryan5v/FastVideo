@@ -918,3 +918,4 @@ def torch_block_state_from_diffusers_safetensors(
         for source_name, target_name in key_map.items():
             state[target_name] = handle.get_tensor(prefix + source_name).float()
     return state
+
