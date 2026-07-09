@@ -208,11 +208,14 @@ def main() -> None:
         if taehv is None:
             print("[decode] continuing in latency-only mode (no per-block frames).")
 
+    # Ensure the repo root is importable (for `examples...` / `fastvideo...`)
+    # regardless of which branch below runs or how the script was invoked.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
     # Prompt embeddings: encode if a text encoder is present, else random (latency is content-independent).
     text_len = int(config.get("text_len", 512))
     if (args.model_root / "text_encoder").exists() and (args.model_root / "tokenizer").exists():
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
         from examples.inference.basic.mlx_wan_prompt_to_video import encode_prompt
         embeds = encode_prompt(model_root=args.model_root, prompt=args.prompt,
                                max_sequence_length=text_len, device_arg="auto", dtype_arg="fp16")

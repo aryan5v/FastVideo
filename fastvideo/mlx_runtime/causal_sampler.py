@@ -135,5 +135,9 @@ def stream_causal_latents(
                             kv_caches,
                             crossattn_caches,
                             current_start=current_start)
-        mx.eval(current)
+        # Force the context-update K/V writes now (in-place cache mutations that
+        # `current` does not depend on). Without evaluating the caches, MLX's lazy
+        # graph accumulates them across blocks — O(T) memory, defeating the
+        # bounded-memory design and mis-attributing per-block latency.
+        mx.eval(current, *[c.k for c in kv_caches], *[c.v for c in kv_caches])
         yield block_index, current
