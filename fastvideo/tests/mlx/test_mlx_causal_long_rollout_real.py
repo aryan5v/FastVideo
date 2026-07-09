@@ -162,4 +162,3 @@ def test_real_long_stream_peak_memory_plateaus(tmp_path: Path) -> None:
     # Also print so a local `pytest -s` run captures pasteable numbers for the baseline doc.
     print("\n=== long-video streaming metrics (real SFWan) ===")
     print(json.dumps(metrics, indent=2))
-

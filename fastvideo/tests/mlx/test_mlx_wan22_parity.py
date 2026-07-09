@@ -82,4 +82,3 @@ def test_wan22_per_token_timestep_matches_torch() -> None:
     mlx_out = np.array(out.astype(mx.float32))
 
     np.testing.assert_allclose(mlx_out, ref, atol=2e-3, rtol=2e-3)
-

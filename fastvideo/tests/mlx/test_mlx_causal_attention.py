@@ -183,4 +183,3 @@ def test_sink_tokens_preserved_across_eviction() -> None:
     assert cache.global_end_index == n
     np.testing.assert_array_equal(np.array(cache.k[:, :sink_tokens]), sink_k_after_first)
     np.testing.assert_array_equal(np.array(cache.v[:, :sink_tokens]), sink_v_after_first)
-

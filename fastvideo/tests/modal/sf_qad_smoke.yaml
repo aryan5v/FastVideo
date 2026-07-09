@@ -93,4 +93,3 @@ pipeline:
   dit_config:
     local_attn_size: -1
     sink_size: 0
-

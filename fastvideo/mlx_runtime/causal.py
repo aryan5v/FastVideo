@@ -154,4 +154,3 @@ def causal_self_attention_step(
     cache.global_end_index = current_end
     cache.local_end_index = local_end
     return attn
-

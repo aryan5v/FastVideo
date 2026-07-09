@@ -127,4 +127,3 @@ def test_mlx_causal_dit_matches_torch_streaming() -> None:
     torch_all = np.concatenate(torch_outs, axis=2)
     mlx_all = np.concatenate(mlx_outs, axis=2)
     np.testing.assert_allclose(mlx_all, torch_all, atol=2e-3, rtol=2e-3)
-

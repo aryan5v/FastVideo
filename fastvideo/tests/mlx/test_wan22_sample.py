@@ -17,4 +17,3 @@ def test_warped_dmd_timesteps_differ_from_raw_indices() -> None:
     # Sigmas are monotone-ish decreasing along the schedule.
     sigmas = [schedule.sigma_for(t) for t in warped]
     assert sigmas[0] >= sigmas[1] >= sigmas[2]
-

@@ -89,4 +89,3 @@ def sample_wan22_dmd(
             latents = pred_noise_to_pred_video(pn, ni, schedule.sigma_for(float(t))).astype(latents.dtype)
         mx.eval(latents)
     return latents
-

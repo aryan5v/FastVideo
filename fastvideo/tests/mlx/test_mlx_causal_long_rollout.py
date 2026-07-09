@@ -116,4 +116,3 @@ def test_long_rollout_kv_cache_bounded_independent_of_length() -> None:
     assert crossattn_caches[0]["is_init"] is True
     # Many more tokens generated than the window → eviction path was used.
     assert expected_global > window
-

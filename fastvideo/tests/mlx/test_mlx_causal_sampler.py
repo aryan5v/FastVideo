@@ -49,4 +49,3 @@ def test_streaming_sampler_yields_finite_blocks() -> None:
         arr = np.array(latent.astype(mx.float32))
         assert arr.shape == (1, ARCH["out_channels"], 1, height, width)
         assert np.isfinite(arr).all(), f"block {index} produced non-finite latents"
-

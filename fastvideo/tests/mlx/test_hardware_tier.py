@@ -165,4 +165,3 @@ def test_threshold_boundaries() -> None:
     assert recommend_tier(TIER_SMALL_MAX_GIB + 1e-9).name == "medium"
     assert recommend_tier(TIER_MEDIUM_MAX_GIB).name == "medium"
     assert recommend_tier(TIER_MEDIUM_MAX_GIB + 1e-9).name == "large"
-

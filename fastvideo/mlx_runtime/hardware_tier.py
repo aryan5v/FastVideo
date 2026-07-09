@@ -284,4 +284,3 @@ def apply_tier_to_namespace(args: Any, tier: HardwareTier) -> HardwareTier:
     args.auto_tier_quantization = tier.quantization
     args.auto_tier_benchmark_preset = tier.benchmark_preset
     return tier
-

@@ -76,4 +76,3 @@ def test_real_causal_dit_streams_finite_output() -> None:
     # The KV cache accumulated all chunks; cross-attn cache was populated once.
     assert kv_caches[0].global_end_index == num_chunks * frame_seqlen
     assert crossattn_caches[0]["is_init"] is True
-
