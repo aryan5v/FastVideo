@@ -94,4 +94,8 @@ def test_transformer_block_compiles_and_matches_eager() -> None:
     compiled = mx.compile(lambda h, e, t, c, s: block(h, e, t, (c, s)))(hidden, context, temb, cos, sin)
     mx.eval(compiled)
 
-    np.testing.assert_array_equal(np.array(eager), np.array(compiled))
+    # The block's matmuls/SDPA can reassociate under compile (fusion/scheduling),
+    # so pin a tight tolerance rather than bit-identity — still catches the
+    # eval-fallback regression (which produced ~2.5 abs error), robust across
+    # MLX/hardware versions.
+    np.testing.assert_allclose(np.array(eager), np.array(compiled), rtol=1e-5, atol=1e-5)

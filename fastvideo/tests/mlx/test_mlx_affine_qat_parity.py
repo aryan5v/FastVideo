@@ -91,7 +91,7 @@ def test_quantizer_decisions_bitmatch_mlx_cpu(dtype: torch.dtype, bits: int, sha
     q_mlx, scales_mlx, biases_mlx, _ = _mlx_quantize(w_np, group_size=64, bits=bits, device=mx.cpu)
 
     codes_mlx = _unpack_uint32_codes(q_mlx, bits=bits, out_cols=shape[-1])
-    codes_flat = codes.reshape(shape[0], -1).numpy()
+    codes_flat = codes.reshape(shape).numpy()
 
     np.testing.assert_array_equal(codes_flat, codes_mlx)
     np.testing.assert_array_equal(scales.float().numpy(), np.asarray(scales_mlx, dtype=np.float32))
@@ -151,7 +151,7 @@ def test_metal_deploy_drift_within_budget(bits: int, shape: tuple[int, int]) -> 
 
     codes, scales, biases = mlx_affine_quantize_reference(w, group_size=64, bits=bits)
     deq_ref = mlx_affine_dequantize_reference(codes, scales, biases, out_shape=w.shape).float().numpy()
-    codes_ref = codes.reshape(shape[0], -1).numpy()
+    codes_ref = codes.reshape(shape).numpy()
 
     q_mlx, _, _, deq_mlx = _mlx_quantize(w.numpy(), group_size=64, bits=bits, device=mx.gpu)
     codes_mlx = _unpack_uint32_codes(q_mlx, bits=bits, out_cols=shape[-1])

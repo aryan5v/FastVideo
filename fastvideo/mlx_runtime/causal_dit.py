@@ -208,6 +208,9 @@ class MLXCausalWanDiT:
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
         self.num_frames_per_block = num_frames_per_block
+        if num_frames_per_block % self.patch_size[0] != 0:
+            raise ValueError(f"num_frames_per_block ({num_frames_per_block}) must be divisible by the "
+                             f"temporal patch size ({self.patch_size[0]}).")
 
     def allocate_caches(self, *, batch: int, frame_seqlen: int, dtype=None) -> tuple:
         """One KV cache + cross-attn cache per block, sized to the window."""
@@ -249,7 +252,7 @@ class MLXCausalWanDiT:
                                self.weights["condition_embedder.time_proj.bias"])
         timestep_proj = timestep_proj.reshape(batch, frames, 6, self.hidden_size)
 
-        # Pad the text sequence to text_len with zeros, exactly like the torch
+        # Pad (or truncate) the text sequence to text_len, exactly like the torch
         # causal model does before the text embedder (causal_wanvideo.py).
         pad = self.text_len - encoder_hidden_states.shape[1]
         if pad > 0:
@@ -259,6 +262,8 @@ class MLXCausalWanDiT:
                          dtype=encoder_hidden_states.dtype)
             ],
                                                    axis=1)
+        elif pad < 0:
+            encoder_hidden_states = encoder_hidden_states[:, :self.text_len]
 
         ehs = linear(encoder_hidden_states, self.weights["condition_embedder.text_embedder.linear_1.weight"],
                      self.weights["condition_embedder.text_embedder.linear_1.bias"])
