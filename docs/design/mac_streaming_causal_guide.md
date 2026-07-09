@@ -160,4 +160,10 @@ training run. Next: Rung 2 — `causal.py` cached chunked-attention wrapper.
   (FP16: 2.70s / 3.30s / 9.34 GiB; INT8: 2.20s / 3.34s / 8.19 GiB at 480×832).
 - [ ] Decode wiring (per-chunk TAEHV/VAE) + visual quality vs CUDA SF reference
   (needs VAE/TAEHV weights + reference clips — a DGX ask).
-- [ ] Run-5 handoff (SF+QAD) when gates are green
+- [x] Run-5 (SF+QAD) path validated on Modal (hao-ai-lab H100): the
+  self-forcing + INT8 `mlx_qat` recipe assembles, arms (fake-quantizing 307
+  student weights, int8/group-64), and runs a few steps with finite loss
+  (~1.2s/step) — no NaN and, crucially, no FSDP/DTensor/parametrization crash
+  (the runbook's known integration risk). Smoke config + synthetic-data
+  generator in `fastvideo/tests/modal/` (14B teacher swapped to 1.3B, 2 steps).
+  A real run-5 launch (full data, 14B teacher, 4000 steps) is a DGX job.
