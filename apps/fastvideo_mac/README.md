@@ -6,18 +6,27 @@ Swift owns setup, generation state, history, playback, Finder export, the macOS
 Share Sheet, notifications, and sleep prevention. Python owns one narrow JSONL
 bridge to the existing MLX inference entrypoint.
 
+On macOS 26 and newer, navigation and primary controls use SwiftUI's native
+Liquid Glass APIs (`glassEffect`, `GlassEffectContainer`, `.glass`, and
+`.glassProminent`). Older supported systems retain a material-backed fallback.
+The content and media layers stay deliberately dark and quiet so glass remains
+a functional hierarchy rather than decoration on every card.
+
 ## Product flow
 
-1. The first-run Setup screen creates a Python 3.12 environment with
+1. A four-step, skippable onboarding introduces local inference, lets people
+   choose a starter prompt, demonstrates live x0 preview, and checks the Mac.
+   Downloads are deferred so people can explore first.
+2. The first-run Setup screen creates a Python 3.12 environment with
    `uv pip install -e '.[mlx]'`, installs ffmpeg through Homebrew, and downloads
    the configured Hugging Face model into `~/Models`.
-2. Create offers RAW and EMA as peer candidates. A candidate is selectable only
+3. Create offers RAW and EMA as peer candidates. A candidate is selectable only
    when its MLX checkpoint is present; the app does not designate a release
    winner.
-3. Generate starts the three-step DMD lane. After every non-final step, the full
+4. Generate starts the three-step DMD lane. After every non-final step, the full
    x0 prediction is decoded with TAEHV and atomically published as a rough MP4.
    The native player swaps to that preview while MLX continues denoising.
-4. The final MP4 replaces the preview and is stored with prompt, settings, time,
+5. The final MP4 replaces the preview and is stored with prompt, settings, time,
    and metrics in `~/Library/Application Support/FastVideo/Generations`.
 
 The release-validated default remains 832x480, 81 frames, 16 fps, INT8 MLX DiT,

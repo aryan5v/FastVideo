@@ -1,7 +1,7 @@
 import AVKit
 import SwiftUI
 
-private enum FVTheme {
+enum FVTheme {
     static let background = Color(red: 0.027, green: 0.031, blue: 0.028)
     static let sidebar = Color(red: 0.045, green: 0.051, blue: 0.046)
     static let surface = Color.white.opacity(0.045)
@@ -17,22 +17,32 @@ private enum FVTheme {
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("fastvideo.onboarding.completed") private var onboardingCompleted = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            SidebarView()
-                .frame(width: 184)
-            Rectangle()
-                .fill(FVTheme.line)
-                .frame(width: 1)
-            Group {
-                switch model.section {
-                case .create: CreateView()
-                case .library: LibraryView()
-                case .setup: SetupView()
+        Group {
+            if onboardingCompleted {
+                HStack(spacing: 0) {
+                    SidebarView()
+                        .frame(width: 184)
+                    Rectangle()
+                        .fill(FVTheme.line)
+                        .frame(width: 1)
+                    Group {
+                        switch model.section {
+                        case .create: CreateView()
+                        case .library: LibraryView()
+                        case .setup: SetupView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                OnboardingView { destination in
+                    model.section = destination
+                    onboardingCompleted = true
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(FVTheme.background)
         .preferredColorScheme(.dark)
@@ -127,12 +137,11 @@ private struct SidebarView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(16)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.black.opacity(0.16)))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(FVTheme.line, lineWidth: 1))
+            .fvLiquidGlass(cornerRadius: 14, tint: statusColor.opacity(0.08))
             .padding(12)
         }
         .foregroundStyle(FVTheme.text)
-        .background(FVTheme.sidebar)
+        .background(PlatformSidebarMaterial())
     }
 
     private var statusColor: Color {
@@ -249,7 +258,7 @@ private struct HeroStat: View {
     }
 }
 
-private struct ASCIIFieldView: View {
+struct ASCIIFieldView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -782,6 +791,7 @@ private struct LibraryRow: View {
 
 private struct SetupView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("fastvideo.onboarding.completed") private var onboardingCompleted = true
 
     var body: some View {
         ScrollView {
@@ -882,6 +892,8 @@ private struct SetupView: View {
                             .font(.system(size: 10.5))
                             .foregroundStyle(FVTheme.faint)
                         Spacer()
+                        Button("Replay welcome") { onboardingCompleted = false }
+                            .buttonStyle(FVSecondaryButtonStyle())
                         Button("Save and re-check") { model.saveConfiguration() }
                             .buttonStyle(FVSecondaryButtonStyle())
                     }
