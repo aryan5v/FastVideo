@@ -338,6 +338,19 @@ def main() -> None:
                         "Disable with --no-mlx-compile.")
     parser.add_argument("--metrics-json", type=Path, default=None)
     parser.add_argument("--save-latents", action="store_true")
+    parser.add_argument(
+        "--preview-dir",
+        type=Path,
+        default=None,
+        help=("Write an atomic TAEHV x0 preview after each non-final DMD step. "
+              "This is opt-in and intended for interactive local applications."),
+    )
+    parser.add_argument(
+        "--preview-every",
+        type=int,
+        default=1,
+        help="Preview every N non-final DMD steps when --preview-dir is set (default: 1).",
+    )
     parser.add_argument("--decode-backend", choices=("wan-vae", "taehv"), default="taehv",
                         help="taehv (default): fast, low-memory tiny decoder. "
                         "wan-vae: full Wan VAE in bf16 — slower and heavier but higher fidelity.")
@@ -386,7 +399,11 @@ def main() -> None:
 
     from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
     from fastvideo.mlx_runtime.fastwan import mlx_dit_from_diffusers_safetensors
-    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
+    from fastvideo.mlx_runtime.sampling import (
+        MLXDMDSchedule,
+        dmd_step,
+        pred_noise_to_pred_video,
+    )
 
     mx.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -495,6 +512,47 @@ def main() -> None:
                 next_timestep=next_ts,
                 noise=renoise,
             ).astype(mx_dtype)
+
+            should_preview = (
+                args.preview_dir is not None
+                and step_index < len(timesteps) - 1
+                and args.preview_every > 0
+                and (step_index + 1) % args.preview_every == 0
+            )
+            if should_preview:
+                # DMD produces a full x0 prediction at every step. TAEHV can
+                # turn that prediction into a rough MP4 quickly enough to make
+                # a multi-minute local generation feel progressive. Decode to
+                # a hidden temporary file and rename only after export so UI
+                # clients never observe a partially-written video.
+                pred_video_f32 = pred_noise_to_pred_video(
+                    pred_noise_f32,
+                    noise_input_f32,
+                    dmd_schedule.sigma_for(ts_val),
+                )
+                mx.eval(pred_video_f32)
+                preview_latents = np.array(pred_video_f32)
+                args.preview_dir.mkdir(parents=True, exist_ok=True)
+                preview_path = args.preview_dir / f"preview-step-{step_index + 1}.mp4"
+                preview_tmp_path = args.preview_dir / f".preview-step-{step_index + 1}.tmp.mp4"
+                decode_latents_to_video(
+                    model_root=args.model_root,
+                    latents_np=preview_latents,
+                    output_path=preview_tmp_path,
+                    fps=args.fps,
+                    device_arg=args.torch_device,
+                    dtype_arg=args.torch_dtype,
+                    backend="taehv",
+                    taehv_source_path=args.taehv_source_path,
+                    taehv_checkpoint_path=args.taehv_checkpoint_path,
+                    taehv_parallel=args.taehv_parallel,
+                )
+                preview_tmp_path.replace(preview_path)
+                del preview_latents, pred_video_f32
+                print(
+                    f"Preview written to: {preview_path} "
+                    f"(step {step_index + 1}/{len(timesteps)})"
+                )
         else:
             mx.eval(noise_pred)
             noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))

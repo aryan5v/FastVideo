@@ -1,0 +1,97 @@
+# FastVideo for Mac
+
+FastVideo for Mac is a native SwiftUI front end for the Apple Silicon
+FastWan-QAD 1.3B MLX runtime. It is intentionally not a local web server:
+Swift owns setup, generation state, history, playback, Finder export, the macOS
+Share Sheet, notifications, and sleep prevention. Python owns one narrow JSONL
+bridge to the existing MLX inference entrypoint.
+
+## Product flow
+
+1. The first-run Setup screen creates a Python 3.12 environment with
+   `uv pip install -e '.[mlx]'`, installs ffmpeg through Homebrew, and downloads
+   the configured Hugging Face model into `~/Models`.
+2. Create offers RAW and EMA as peer candidates. A candidate is selectable only
+   when its MLX checkpoint is present; the app does not designate a release
+   winner.
+3. Generate starts the three-step DMD lane. After every non-final step, the full
+   x0 prediction is decoded with TAEHV and atomically published as a rough MP4.
+   The native player swaps to that preview while MLX continues denoising.
+4. The final MP4 replaces the preview and is stored with prompt, settings, time,
+   and metrics in `~/Library/Application Support/FastVideo/Generations`.
+
+The release-validated default remains 832x480, 81 frames, 16 fps, INT8 MLX DiT,
+TAEHV decode, and DMD timesteps `1000,757,522`. Smaller frame sizes are exposed
+for iteration, but are not presented as release validation evidence.
+
+## Run from source
+
+Only Apple Command Line Tools are needed to compile the UI:
+
+```console
+cd apps/fastvideo_mac
+swift run FastVideoMac
+```
+
+The app will locate the enclosing FastVideo checkout automatically. Use Setup
+to choose another checkout, Python executable, model folder, or explicit RAW
+and EMA checkpoint directories.
+
+## Build an app bundle
+
+```console
+cd apps/fastvideo_mac
+./scripts/package_app.sh
+open dist/FastVideo.app
+```
+
+The packaging script embeds the FastVideo Python source required by this lane,
+but not the Python environment or model weights. It applies an ad-hoc signature
+for local testing. Public distribution still requires a Developer ID signature,
+Hardened Runtime review, notarization, and a release model with final checksums.
+
+## Model layout
+
+The model folder contains the shared Diffusers tokenizer, text encoder, and
+transformer config. The app auto-detects either of these variant layouts:
+
+```text
+mlx_dit_raw/        mlx_dit_ema/
+mlx_dit/raw/        mlx_dit/ema/
+raw/mlx_dit/        ema/mlx_dit/
+```
+
+Each checkpoint directory must contain `manifest.json` and at least one
+`.safetensors` shard. Explicit paths in Setup override auto-detection.
+
+## Verify
+
+The test script works with lightweight Apple Command Line Tools and does not
+require XCTest:
+
+```console
+./scripts/test.sh
+```
+
+It compiles the app, runs a Swift Foundation self-test for durable history and
+preview-to-final playback selection, and runs bridge tests for checkpoint
+detection and live-preview command construction.
+
+## Architecture
+
+```text
+SwiftUI app
+  ├── Setup + runtime diagnosis
+  ├── Generation library (JSON + local MP4s)
+  ├── AVKit preview/final player
+  └── ProcessDriver
+         │ JSON lines
+         ▼
+fastvideo_mlx_bridge.py
+  ├── Hugging Face snapshot download
+  └── mlx_wan_prompt_to_video.py
+         ├── MPS prompt encode
+         ├── MLX INT8 DMD denoise
+         ├── per-step x0 → TAEHV preview
+         └── final TAEHV MP4
+```
