@@ -237,7 +237,7 @@ struct OnboardingView: View {
                     .tracking(-2.1)
                     .lineSpacing(-3)
                     .padding(.top, 16)
-                Text("Setup creates a managed Python environment, checks Metal and ffmpeg, and downloads only the model artifacts you choose. You can explore the app first.")
+                Text("Setup creates a managed Python environment, checks Metal and ffmpeg, and connects to model artifacts already on this Mac. Public downloads can be enabled at release.")
                     .font(.system(size: 14.5))
                     .foregroundStyle(FVTheme.muted)
                     .frame(maxWidth: 520, alignment: .leading)
@@ -259,8 +259,8 @@ struct OnboardingView: View {
                 )
                 OnboardingCheckRow(
                     symbol: "film",
-                    label: "FastWan-QAD 1.3B",
-                    detail: model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable ? "Checkpoint ready" : "Choose RAW or EMA",
+                    label: "FastWan-QAD v2 1.3B",
+                    detail: model.runtimeHealth.emaAvailable ? "EMA ready · RAW optional" : "Choose local artifacts",
                     ready: model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable
                 )
                 OnboardingCheckRow(

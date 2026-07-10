@@ -64,7 +64,22 @@ def resolve_checkpoint(model_root: Path, variant: str, explicit: str | None = No
 def checkpoint_is_valid(path: Path | None) -> bool:
     if path is None or not path.is_dir():
         return False
-    return (path / "manifest.json").is_file() and any(path.glob("*.safetensors"))
+    return (path / "mlx_dit.json").is_file() and (path / "mlx_dit.safetensors").is_file()
+
+
+def resolve_ffmpeg() -> str | None:
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        executable = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+    if not executable:
+        return None
+    return executable if Path(executable).is_file() and os.access(executable, os.X_OK) else None
 
 
 def model_components_present(model_root: Path) -> bool:
@@ -100,7 +115,7 @@ def command_diagnose(args: argparse.Namespace) -> int:
         "mlx_available": mlx_available,
         "torch_available": torch_available,
         "mps_available": mps_available,
-        "ffmpeg_available": shutil.which("ffmpeg") is not None,
+        "ffmpeg_available": resolve_ffmpeg() is not None,
         "model_root": str(model_root),
         "model_components_present": model_components_present(model_root),
         "raw_checkpoint": str(raw) if raw else None,
@@ -274,6 +289,10 @@ def command_generate(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("FASTVIDEO_ATTENTION_BACKEND", "TORCH_SDPA")
+    ffmpeg = resolve_ffmpeg()
+    if ffmpeg:
+        env.setdefault("IMAGEIO_FFMPEG_EXE", ffmpeg)
+        env["PATH"] = f"{Path(ffmpeg).parent}{os.pathsep}{env.get('PATH', '')}"
 
     try:
         _child = subprocess.Popen(

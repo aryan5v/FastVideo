@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 BRIDGE_PATH = Path(__file__).parents[1] / "bridge" / "fastvideo_mlx_bridge.py"
+VIEWS_PATH = Path(__file__).parents[1] / "Sources" / "FastVideoMac" / "Views.swift"
 SPEC = importlib.util.spec_from_file_location("fastvideo_mlx_bridge", BRIDGE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 BRIDGE = importlib.util.module_from_spec(SPEC)
@@ -42,6 +43,26 @@ class BridgeTest(unittest.TestCase):
             preview_index = command.index("--preview-dir") + 1
             self.assertEqual(command[preview_index], str(output.parent / "previews"))
             self.assertEqual(command[command.index("--preview-every") + 1], "1")
+
+    def test_checkpoint_validation_matches_native_mlx_checkpoint_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp)
+            (checkpoint / "mlx_dit.json").write_text("{}")
+            (checkpoint / "mlx_dit.safetensors").write_bytes(b"test")
+            self.assertTrue(BRIDGE.checkpoint_is_valid(checkpoint))
+            (checkpoint / "mlx_dit.json").unlink()
+            self.assertFalse(BRIDGE.checkpoint_is_valid(checkpoint))
+
+    def test_ffmpeg_falls_back_to_imageio_binary(self) -> None:
+        executable = BRIDGE.resolve_ffmpeg()
+        if executable is not None:
+            self.assertTrue(Path(executable).is_file())
+
+    def test_video_surface_avoids_swiftui_videoplayer_on_macos_27(self) -> None:
+        source = VIEWS_PATH.read_text()
+        self.assertIn("private struct VideoSurface: NSViewRepresentable", source)
+        self.assertIn("AVPlayerView()", source)
+        self.assertNotIn("VideoPlayer(", source)
 
     def test_preview_event_shape_is_json_line_safe(self) -> None:
         event = {

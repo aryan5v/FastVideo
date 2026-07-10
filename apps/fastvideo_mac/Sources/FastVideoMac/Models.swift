@@ -48,7 +48,7 @@ enum GenerationStatus: String, Codable {
 }
 
 struct GenerationSettings: Codable, Equatable {
-    var variant: ModelVariant = .raw
+    var variant: ModelVariant = .ema
     var width = 832
     var height = 480
     var frames = 81
@@ -212,7 +212,7 @@ struct RuntimeConfiguration: Codable, Equatable {
         let repositoryRoot = discoverRepositoryRoot()
         let managedPython = managedEnvironmentRoot().appendingPathComponent("bin/python").path
         let venvPython = URL(fileURLWithPath: repositoryRoot).appendingPathComponent(".venv/bin/python").path
-        return RuntimeConfiguration(
+        var configuration = RuntimeConfiguration(
             repositoryRoot: repositoryRoot,
             pythonExecutable: FileManager.default.isExecutableFile(atPath: managedPython)
                 ? managedPython
@@ -223,6 +223,44 @@ struct RuntimeConfiguration: Codable, Equatable {
             modelRoot: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Models/FastWan-QAD-INT8-1.3B").path
         )
+        configuration.adoptDetectedLocalArtifacts()
+        return configuration
+    }
+
+    mutating func adoptDetectedLocalArtifacts() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let legacyModelRoots = [
+            home.appendingPathComponent("models/qad_int8_ema", isDirectory: true).path,
+            home.appendingPathComponent("models/qad_int8", isDirectory: true).path,
+        ]
+        if !Self.modelComponentsPresent(at: modelRoot) || legacyModelRoots.contains(modelRoot) {
+            let modelCandidates = [
+                "models/qad_int8_v2_ema",
+                "models/qad_int8_v2",
+                "models/qad_int8_ema",
+                "models/qad_int8",
+            ].map { home.appendingPathComponent($0, isDirectory: true).path }
+            if let detected = modelCandidates.first(where: Self.modelComponentsPresent) {
+                modelRoot = detected
+            }
+        }
+
+        let legacyRaw = home.appendingPathComponent("mlx-ckpt-cache-qad/int8", isDirectory: true).path
+        if !Self.mlxCheckpointPresent(at: rawCheckpoint) || rawCheckpoint == legacyRaw {
+            rawCheckpoint = Self.firstMLXCheckpoint(in: [
+                home.appendingPathComponent("mlx-ckpt-cache-qad-v2/int8", isDirectory: true).path,
+                URL(fileURLWithPath: modelRoot).appendingPathComponent("mlx_dit_raw", isDirectory: true).path,
+                legacyRaw,
+            ]) ?? ""
+        }
+        let legacyEMA = home.appendingPathComponent("mlx-ckpt-cache-qad-ema/int8", isDirectory: true).path
+        if !Self.mlxCheckpointPresent(at: emaCheckpoint) || emaCheckpoint == legacyEMA {
+            emaCheckpoint = Self.firstMLXCheckpoint(in: [
+                home.appendingPathComponent("mlx-ckpt-cache-qad-v2-ema/int8", isDirectory: true).path,
+                URL(fileURLWithPath: modelRoot).appendingPathComponent("mlx_dit_ema", isDirectory: true).path,
+                legacyEMA,
+            ]) ?? ""
+        }
     }
 
     static func managedEnvironmentRoot() -> URL {
@@ -258,5 +296,24 @@ struct RuntimeConfiguration: Codable, Equatable {
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
         return nil
+    }
+
+    private static func modelComponentsPresent(at path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        return FileManager.default.fileExists(atPath: root.appendingPathComponent("tokenizer", isDirectory: true).path)
+            && FileManager.default.fileExists(atPath: root.appendingPathComponent("text_encoder", isDirectory: true).path)
+            && FileManager.default.fileExists(atPath: root.appendingPathComponent("transformer/config.json").path)
+    }
+
+    private static func mlxCheckpointPresent(at path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        return FileManager.default.fileExists(atPath: root.appendingPathComponent("mlx_dit.json").path)
+            && FileManager.default.fileExists(atPath: root.appendingPathComponent("mlx_dit.safetensors").path)
+    }
+
+    private static func firstMLXCheckpoint(in candidates: [String]) -> String? {
+        candidates.first(where: mlxCheckpointPresent)
     }
 }

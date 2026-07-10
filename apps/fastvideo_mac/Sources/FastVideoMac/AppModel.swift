@@ -40,6 +40,10 @@ final class AppModel: ObservableObject {
         } else {
             configuration = .defaults()
         }
+        configuration.adoptDetectedLocalArtifacts()
+        if let data = try? JSONEncoder().encode(configuration) {
+            defaults.set(data, forKey: "fastvideo.runtime.configuration")
+        }
         do {
             records = try library.load()
             selectedRecordID = records.first?.id
@@ -177,6 +181,10 @@ final class AppModel: ObservableObject {
         guard !isInstallingModel else { return }
         guard FileManager.default.isExecutableFile(atPath: configuration.pythonExecutable) else {
             alertMessage = "Install the MLX runtime before downloading the model."
+            return
+        }
+        guard configuration.modelRepository != "FastVideo/FastWan-QAD-INT8-1.3B-Diffusers" else {
+            alertMessage = "The public model repository is not live yet. Choose the existing local model folder and checkpoints below."
             return
         }
         isInstallingModel = true

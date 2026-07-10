@@ -621,20 +621,40 @@ private struct OutputPanel: View {
     }
 }
 
-private struct VideoSurface: View {
-    @State private var player: AVPlayer
+private struct VideoSurface: NSViewRepresentable {
+    let url: URL
 
-    init(url: URL) {
-        _player = State(initialValue: AVPlayer(url: url))
+    final class Coordinator {
+        var url: URL?
     }
 
-    var body: some View {
-        VideoPlayer(player: player)
-            .onAppear {
-                player.isMuted = true
-                player.play()
-            }
-            .onDisappear { player.pause() }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        updatePlayer(in: view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        updatePlayer(in: view, context: context)
+    }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: Coordinator) {
+        view.player?.pause()
+        view.player = nil
+        coordinator.url = nil
+    }
+
+    private func updatePlayer(in view: AVPlayerView, context: Context) {
+        guard context.coordinator.url != url else { return }
+        view.player?.pause()
+        let player = AVPlayer(url: url)
+        player.isMuted = true
+        view.player = player
+        context.coordinator.url = url
+        player.play()
     }
 }
 
@@ -838,7 +858,7 @@ private struct SetupView: View {
                     )
                     SetupCard(
                         index: "03",
-                        title: "FastWan 1.3B",
+                        title: "FastWan-QAD v2 1.3B",
                         detail: "Shared model files plus RAW and/or EMA MLX checkpoints",
                         ready: model.runtimeHealth.modelComponentsPresent && (model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable),
                         actionTitle: model.isInstallingModel ? "Downloading…" : "Download model",
@@ -888,7 +908,7 @@ private struct SetupView: View {
                         }
                     }
                     HStack {
-                        Text("RAW and EMA remain peer candidates. This app does not silently designate either one as the release winner.")
+                        Text("EMA is the release default. RAW remains available for direct A/B comparison when its local checkpoint is connected.")
                             .font(.system(size: 10.5))
                             .foregroundStyle(FVTheme.faint)
                         Spacer()

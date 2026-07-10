@@ -54,7 +54,9 @@ struct CoreSelfTest {
     private static func defaultConfigurationPointsAtBridgeInsideRepository() {
         let configuration = RuntimeConfiguration.defaults()
         precondition(configuration.bridgePath.hasSuffix("apps/fastvideo_mac/bridge/fastvideo_mlx_bridge.py"))
-        precondition(configuration.modelRoot.hasSuffix("Models/FastWan-QAD-INT8-1.3B"))
+        precondition(!configuration.modelRoot.isEmpty)
+        precondition(configuration.rawCheckpoint.isEmpty || configuration.rawCheckpoint.hasSuffix("mlx-ckpt-cache-qad-v2/int8"))
+        precondition(configuration.emaCheckpoint.isEmpty || configuration.emaCheckpoint.hasSuffix("mlx-ckpt-cache-qad-v2-ema/int8"))
     }
 
     private static func processDriverCapturesFastFinalLine() async throws {

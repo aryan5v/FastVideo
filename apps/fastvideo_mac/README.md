@@ -16,13 +16,14 @@ a functional hierarchy rather than decoration on every card.
 
 1. A four-step, skippable onboarding introduces local inference, lets people
    choose a starter prompt, demonstrates live x0 preview, and checks the Mac.
-   Downloads are deferred so people can explore first.
+   Downloads are deferred so people can explore first; unreleased builds can
+   connect directly to model artifacts already on the Mac.
 2. The first-run Setup screen creates a Python 3.12 environment with
-   `uv pip install -e '.[mlx]'`, installs ffmpeg through Homebrew, and downloads
-   the configured Hugging Face model into `~/Models`.
-3. Create offers RAW and EMA as peer candidates. A candidate is selectable only
-   when its MLX checkpoint is present; the app does not designate a release
-   winner.
+   `uv pip install -e '.[mlx]'`, discovers imageio's bundled ffmpeg or a system
+   ffmpeg, and connects to local shared model files and MLX checkpoints.
+3. Create defaults to the release-selected EMA weights while keeping RAW
+   available for direct A/B comparison. A candidate is selectable only when its
+   MLX checkpoint is present.
 4. Generate starts the three-step DMD lane. After every non-final step, the full
    x0 prediction is decoded with TAEHV and atomically published as a rough MP4.
    The native player swaps to that preview while MLX continues denoising.
@@ -70,8 +71,12 @@ mlx_dit/raw/        mlx_dit/ema/
 raw/mlx_dit/        ema/mlx_dit/
 ```
 
-Each checkpoint directory must contain `manifest.json` and at least one
-`.safetensors` shard. Explicit paths in Setup override auto-detection.
+Each checkpoint directory must contain `mlx_dit.json` and
+`mlx_dit.safetensors`. On this development Mac, the app also discovers
+`~/models/qad_int8_v2_ema`, `~/mlx-ckpt-cache-qad-v2-ema/int8`, and
+`~/mlx-ckpt-cache-qad-v2/int8`. The earlier v1 EMA export is intentionally
+skipped because its generated videos collapse to noise. Explicit paths in Setup
+override auto-detection.
 
 ## Verify
 
