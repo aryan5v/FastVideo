@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import statistics
 import time
 from dataclasses import dataclass
@@ -521,12 +522,23 @@ class MLXWanTransformerBlock:
             query = apply_rotary_emb(query, cos, sin, is_neox_style=False)
             key = apply_rotary_emb(key, cos, sin, is_neox_style=False)
 
-        attn_output = mx.fast.scaled_dot_product_attention(
-            query.transpose(0, 2, 1, 3),
-            key.transpose(0, 2, 1, 3),
-            value.transpose(0, 2, 1, 3),
-            scale=self.head_dim**-0.5,
-        ).transpose(0, 2, 1, 3)
+        # Self-attention only. FASTVIDEO_MLX_WINDOW=0/unset → full SDPA (byte-identical
+        # to the historical path). When >0, use chunked symmetric sliding-window
+        # attention (see windowed_attention.py). Cross-attn (attn2) stays full.
+        # Optional FASTVIDEO_MLX_WINDOW_SINK (default 0) adds global sink tokens.
+        q_bh = query.transpose(0, 2, 1, 3)  # (B, H, S, D)
+        k_bh = key.transpose(0, 2, 1, 3)
+        v_bh = value.transpose(0, 2, 1, 3)
+        scale = self.head_dim**-0.5
+        window = int(os.environ.get("FASTVIDEO_MLX_WINDOW", "0") or "0")
+        if window > 0:
+            from fastvideo.mlx_runtime.windowed_attention import windowed_attention
+
+            sink = int(os.environ.get("FASTVIDEO_MLX_WINDOW_SINK", "0") or "0")
+            attn_output = windowed_attention(q_bh, k_bh, v_bh, window=window, sink=sink, scale=scale)
+        else:
+            attn_output = mx.fast.scaled_dot_product_attention(q_bh, k_bh, v_bh, scale=scale)
+        attn_output = attn_output.transpose(0, 2, 1, 3)
         attn_output = attn_output.reshape(hidden_states.shape[0], -1, self.dim)
         attn_output = linear(attn_output, self.weights["to_out.weight"], self.weights.get("to_out.bias"))
 
