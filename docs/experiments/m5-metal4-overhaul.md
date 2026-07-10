@@ -35,8 +35,17 @@ had to be reset). I merge grok branches into the integration branch.
 2. **Do NOT hand-write a flash-attention kernel**: MLX fused SDPA already runs at 6.32 TFLOP/s ≥ the 5.97 TFLOP/s fp16 GEMM peak — already saturated.
 3. **compile + fast_norm**: free ~6% (int8 32.6→30.5 s/step), no quality change.
 4. **Weight quant = memory win, not speed** here (only touches the negligible FFN). Keep for fitting 5B.
-5. **Windowed attention = 7–21× on the dominant cost** — but cosine error on *random* data is low (worst case). Real quality only knowable end-to-end → task #11.
-6. **M5 is the hardware bet**: FLUX 4-bit is 3.8× faster M5-vs-M4; our denoise is the same compute-bound class. Open question the probe answers: does the M5 accelerate SDPA/attention specifically?
+5. **Windowed attention microbench = 7–21×** on the isolated attention call.
+6. **1D windowing FAILS end-to-end (task #11, negative result)**: wired into the DiT self-attention (flag-gated, default-off verified byte-identical), it gave only **1.4–1.5× end-to-end** (not 7–21×) AND destroyed quality — **ms_ssim_vs_full ≈ 0.22, "abstract color mush," no fox**. Two lessons: (a) the sequence is a flattened (frame×H×W) grid, so a 1D window is the wrong receptive field → needs a **3D-aware local window** to have any chance; (b) the microbench speedup doesn't survive integration because chunked windowed attention is **dispatch-bound** (many small SDPA calls × 30 layers × 3 steps) — the real win would need native sliding-window support in the fused kernel, which MLX doesn't expose. Flag left default-off; harness kept for the 3D follow-up.
+7. **M5 is the hardware bet**: FLUX 4-bit is 3.8× faster M5-vs-M4; our denoise is the same compute-bound class. Open question the probe answers: does the M5 accelerate SDPA/attention specifically?
+
+## Revised priorities (post task #11)
+Windowing is parked (needs 3D-aware window + ideally a fused kernel; uncertain payoff given the 1.4× dispatch-bound ceiling). The highest-confidence speed levers are now:
+1. **Fewer denoise steps (1–2 step distill)** — ~linear (~3× at 1 step), in our training control, no quality-collapse or dispatch ceiling. Re-elevated to top speed lever.
+2. **M5 Neural Accelerator** on the fused full SDPA (hardware bet; probe+runbook ready).
+3. **compile + fast_norm** — banked, +8–9%, ships everywhere.
+4. **Weight quant** — memory (fit 5B), not speed.
+5. **3D-aware windowing** — research follow-up, reuse the task-#11 harness.
 
 ## How to run
 - Local A/B (distilled model): `scripts/m5_validation.sh m4_max`
