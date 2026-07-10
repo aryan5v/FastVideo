@@ -288,7 +288,18 @@ def _ms_ssim(reference_video: Path, candidate_video: Path, *, required: bool = F
         print(f"{message} Skipping MS-SSIM.")
         return None
 
-    ssim_values = compute_video_ssim_torchvision(str(reference_video), str(candidate_video), use_ms_ssim=True)
+    try:
+        ssim_values = compute_video_ssim_torchvision(str(reference_video), str(candidate_video), use_ms_ssim=True)
+    except ImportError as exc:
+        message = (
+            "MS-SSIM is unavailable because `pytorch-msssim` is not installed. "
+            "Install FastVideo with the test extra, e.g. `uv pip install -e '.[mlx,test]'`, "
+            "or run without an SSIM assertion."
+        )
+        if required:
+            raise RuntimeError(message) from exc
+        print(f"{message} Skipping MS-SSIM.")
+        return None
     return float(ssim_values[0])
 
 
