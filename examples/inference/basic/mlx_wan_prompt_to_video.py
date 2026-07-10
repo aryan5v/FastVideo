@@ -1,13 +1,16 @@
-"""Generate a small FastWan video with the experimental MLX FP16 DiT runtime.
+"""Generate a FastWan text-to-video clip with the Apple Silicon MLX runtime.
 
-This is intentionally a hybrid proof of concept:
+This is the supported source-tree entrypoint for the FastWan-QAD-INT8-1.3B
+Apple release:
 
-- Hugging Face/torch encodes the prompt with UMT5.
-- MLX runs the FastWan DiT denoising loop in FP16.
-- Diffusers/torch decodes the final latents with AutoencoderKLWan.
+- Hugging Face/torch encodes the prompt with UMT5 (bf16 by default: fp32
+  exponent range without fp16 overflow risk, at fp16 memory cost).
+- MLX runs the FastWan DiT denoising loop (INT8 by default, compiled with
+  ``mx.compile`` unless ``--no-mlx-compile``).
+- TAEHV (default, fast/low-memory) or the full Wan VAE (``--decode-backend
+  wan-vae``, higher fidelity, bf16) decodes the final latents.
 
-That makes it the first real prompt -> scheduler -> MLX DiT -> VAE -> MP4 path,
-while keeping the initial MLX milestone focused on the denoiser runtime.
+Defaults produce the validated release shape: 480x832, 81 frames, 3-step DMD.
 """
 
 from __future__ import annotations
@@ -26,11 +29,31 @@ import numpy as np
 from fastvideo.mlx_runtime.memory import add_memory_limit_args, apply_memory_limits
 
 
+DEFAULT_MODEL_ID = "FastVideo/FastWan2.1-T2V-1.3B-Diffusers"
+
+# Legacy pinned-snapshot location, kept for callers that import it (the MLX
+# benchmark harness). New code should prefer resolve_model_root(None), which
+# resolves whatever snapshot the local HF cache has (downloading if needed).
 DEFAULT_MODEL_ROOT = (
     Path.home()
     / ".cache/huggingface/hub/models--FastVideo--FastWan2.1-T2V-1.3B-Diffusers/"
     "snapshots/25e7ed7f41fd8ce2fdd108688c65e8caf0ce3aef"
 )
+
+
+def resolve_model_root(model_root: Path | None, *, model_id: str = DEFAULT_MODEL_ID) -> Path:
+    """Return a usable model directory, resolving via the HF cache if unset.
+
+    A user-supplied ``model_root`` is returned as-is. Otherwise the model is
+    resolved through ``huggingface_hub.snapshot_download``, which reuses the
+    local cache when present and downloads the current snapshot when not —
+    no hardcoded snapshot hash.
+    """
+    if model_root is not None:
+        return model_root
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(model_id))
 
 
 def _torch_device(device_arg: str):
@@ -39,6 +62,12 @@ def _torch_device(device_arg: str):
     if device_arg == "auto":
         return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     return torch.device(device_arg)
+
+
+def _torch_dtype(dtype_arg: str):
+    import torch
+
+    return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[dtype_arg]
 
 
 def _cleanup_torch() -> None:
@@ -61,7 +90,7 @@ def encode_prompt(
     from transformers import AutoTokenizer, UMT5EncoderModel
 
     device = _torch_device(device_arg)
-    dtype = torch.float16 if dtype_arg == "fp16" else torch.float32
+    dtype = _torch_dtype(dtype_arg)
     tokenizer = AutoTokenizer.from_pretrained(model_root / "tokenizer", local_files_only=True)
     text_encoder = UMT5EncoderModel.from_pretrained(
         model_root / "text_encoder",
@@ -94,6 +123,10 @@ def encode_prompt(
         ],
         dim=0,
     )
+    if prompt_embeds.dtype == torch.bfloat16:
+        # NumPy (and the .npy cache/subprocess transport) has no bfloat16;
+        # fp32 is exact for every bf16 value.
+        prompt_embeds = prompt_embeds.float()
     prompt_embeds = prompt_embeds.cpu().contiguous()
     del text_encoder, tokenizer, text_inputs, text_input_ids, mask
     _cleanup_torch()
@@ -124,7 +157,7 @@ def encode_prompt_subprocess(
                 str(max_sequence_length),
                 "--torch-device",
                 device_arg,
-                "--torch-dtype",
+                "--text-encoder-dtype",
                 dtype_arg,
                 "--encode-prompt-only",
                 str(output_path),
@@ -224,7 +257,7 @@ def decode_latents_to_video(
     from diffusers.utils import export_to_video
 
     device = _torch_device(device_arg)
-    dtype = torch.float16 if dtype_arg == "fp16" else torch.float32
+    dtype = _torch_dtype(dtype_arg)
     if backend == "taehv":
         from fastvideo.mlx_runtime.taehv_decode import decode_latents_to_video_taehv
 
@@ -266,13 +299,15 @@ def decode_latents_to_video(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Hybrid prompt-to-video FastWan generation using MLX for the DiT")
-    parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
+    parser = argparse.ArgumentParser(description="Prompt-to-video FastWan generation using MLX for the DiT")
+    parser.add_argument("--model-root", type=Path, default=None,
+                        help=f"Model directory. Defaults to the local HF cache for {DEFAULT_MODEL_ID} "
+                        "(downloading it if missing).")
     parser.add_argument("--prompt", default="A paper boat sails through a shallow stream in a mossy forest.")
     parser.add_argument("--output-path", type=Path, default=Path("video_samples/mlx_fastwan_prompt_to_video.mp4"))
-    parser.add_argument("--height", type=int, default=256)
-    parser.add_argument("--width", type=int, default=448)
-    parser.add_argument("--num-frames", type=int, default=33)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=832)
+    parser.add_argument("--num-frames", type=int, default=81)
     parser.add_argument("--num-inference-steps", type=int, default=3)
     parser.add_argument("--dmd-denoising-steps", default="1000,757,522")
     parser.add_argument("--denoising-mode", choices=("dmd", "scheduler"), default="dmd")
@@ -281,16 +316,31 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--fps", type=int, default=16)
     parser.add_argument("--torch-device", default="auto", help="'auto', 'mps', or 'cpu' for text/VAE components.")
-    parser.add_argument("--torch-dtype", choices=("fp16", "fp32"), default="fp16")
+    parser.add_argument("--torch-dtype", choices=("fp16", "bf16", "fp32"), default="fp16",
+                        help="Dtype for the TAEHV decode path (and legacy callers).")
+    parser.add_argument("--text-encoder-dtype", choices=("bf16", "fp16", "fp32"), default="bf16",
+                        help="UMT5 prompt-encode dtype. bf16 keeps the fp32 exponent range "
+                        "(no fp16 overflow risk in the T5 stack) at fp16 memory cost; the "
+                        "reference CUDA pipeline encodes in fp32. Pass fp16 if your "
+                        "macOS/torch build lacks bf16 on MPS.")
+    parser.add_argument("--vae-decode-dtype", choices=("bf16", "fp16", "fp32"), default="bf16",
+                        help="Wan VAE decode dtype (wan-vae backend only). bf16 matches the "
+                        "reference pipeline's effectively-lossless decode default.")
     parser.add_argument("--mlx-dtype", choices=("fp16", "bf16", "fp32"), default="fp16")
     parser.add_argument(
         "--mlx-quantization",
         choices=("none", "int8", "int4", "mxfp8", "mxfp4", "nvfp4"),
-        default="none",
+        default="int8",
     )
+    parser.add_argument("--mlx-compile", action=argparse.BooleanOptionalAction, default=True,
+                        help="Compile the DiT forward with mx.compile (bit-identical to eager, "
+                        "~1.4x faster denoise; falls back to eager if tracing fails). "
+                        "Disable with --no-mlx-compile.")
     parser.add_argument("--metrics-json", type=Path, default=None)
     parser.add_argument("--save-latents", action="store_true")
-    parser.add_argument("--decode-backend", choices=("wan-vae", "taehv"), default="wan-vae")
+    parser.add_argument("--decode-backend", choices=("wan-vae", "taehv"), default="taehv",
+                        help="taehv (default): fast, low-memory tiny decoder. "
+                        "wan-vae: full Wan VAE in bf16 — slower and heavier but higher fidelity.")
     parser.add_argument("--taehv-source-path", type=Path, default=None)
     parser.add_argument("--taehv-checkpoint-path", type=Path, default=None)
     parser.add_argument("--taehv-parallel", action="store_true", help="Decode all TAEHV frames at once; faster but higher memory.")
@@ -316,13 +366,15 @@ def main() -> None:
         torch_mps_low_watermark_ratio=args.torch_mps_low_watermark_ratio,
     ).as_metrics()
 
+    model_root = resolve_model_root(args.model_root)
+
     if args.encode_prompt_only is not None:
         prompt_embeds = encode_prompt(
-            model_root=args.model_root,
+            model_root=model_root,
             prompt=args.prompt,
             max_sequence_length=args.max_sequence_length,
             device_arg=args.torch_device,
-            dtype_arg=args.torch_dtype,
+            dtype_arg=args.text_encoder_dtype,
         )
         args.encode_prompt_only.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.encode_prompt_only, prompt_embeds.cpu().numpy())
@@ -339,8 +391,8 @@ def main() -> None:
     mx.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    config_path = args.model_root / "transformer/config.json"
-    checkpoint_path = args.model_root / "transformer/diffusion_pytorch_model.safetensors"
+    config_path = model_root / "transformer/config.json"
+    checkpoint_path = model_root / "transformer/diffusion_pytorch_model.safetensors"
     config = json.loads(config_path.read_text())
     latent_frames = (args.num_frames - 1) // 4 + 1
     latent_height = args.height // 8
@@ -351,11 +403,11 @@ def main() -> None:
     total_start = time.perf_counter()
     prompt_start = time.perf_counter()
     prompt_embeds = get_prompt_embeds(
-        model_root=args.model_root,
+        model_root=model_root,
         prompt=args.prompt,
         max_sequence_length=args.max_sequence_length,
         device_arg=args.torch_device,
-        dtype_arg=args.torch_dtype,
+        dtype_arg=args.text_encoder_dtype,
         encode_mode=args.prompt_encode_mode,
         cache_path=args.prompt_embeds_cache,
     )
@@ -367,7 +419,7 @@ def main() -> None:
     if args.mlx_checkpoint is not None:
         from fastvideo.mlx_runtime.checkpoint import load_mlx_dit_checkpoint
 
-        dit = load_mlx_dit_checkpoint(args.mlx_checkpoint)
+        dit = load_mlx_dit_checkpoint(args.mlx_checkpoint, compile=args.mlx_compile)
         config = dit.config
     else:
         dit = mlx_dit_from_diffusers_safetensors(
@@ -375,6 +427,7 @@ def main() -> None:
             config_path,
             dtype=args.mlx_dtype,
             quantization=quantization,
+            compile=args.mlx_compile,
         )
     load_time = time.perf_counter() - load_start
     load_peak_memory = mx.get_peak_memory()
@@ -389,7 +442,7 @@ def main() -> None:
         denoising_steps = [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()]
         timesteps = torch.tensor(denoising_steps, dtype=torch.long)
     else:
-        scheduler = UniPCMultistepScheduler.from_pretrained(args.model_root / "scheduler", local_files_only=True)
+        scheduler = UniPCMultistepScheduler.from_pretrained(model_root / "scheduler", local_files_only=True)
         scheduler.set_timesteps(args.num_inference_steps, device="cpu")
         scheduler.set_begin_index(0)
         timesteps = scheduler.timesteps
@@ -464,12 +517,12 @@ def main() -> None:
 
     decode_start = time.perf_counter()
     decode_latents_to_video(
-        model_root=args.model_root,
+        model_root=model_root,
         latents_np=latents_np,
         output_path=args.output_path,
         fps=args.fps,
         device_arg=args.torch_device,
-        dtype_arg=args.torch_dtype,
+        dtype_arg=(args.vae_decode_dtype if args.decode_backend == "wan-vae" else args.torch_dtype),
         backend=args.decode_backend,
         taehv_source_path=args.taehv_source_path,
         taehv_checkpoint_path=args.taehv_checkpoint_path,
@@ -498,6 +551,10 @@ def main() -> None:
             "dmd_denoising_steps": [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()],
             "mlx_dtype": args.mlx_dtype,
             "mlx_quantization": args.mlx_quantization,
+            "mlx_compile": args.mlx_compile,
+            "text_encoder_dtype": args.text_encoder_dtype,
+            "vae_decode_dtype": args.vae_decode_dtype if args.decode_backend == "wan-vae" else None,
+            "model_root": str(model_root),
             "decode_backend": args.decode_backend,
             "taehv_parallel": args.taehv_parallel if args.decode_backend == "taehv" else None,
             "prompt_encode_mode": args.prompt_encode_mode,

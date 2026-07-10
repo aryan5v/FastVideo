@@ -805,6 +805,7 @@ def mlx_dit_from_diffusers_safetensors(
     dtype: str = "fp16",
     num_blocks: int | None = None,
     quantization: str | MLXQuantizationSpec | None = None,
+    compile: bool = False,
 ) -> MLXWanDiT:
     import mlx.core as mx
     from safetensors import safe_open
@@ -871,7 +872,7 @@ def mlx_dit_from_diffusers_safetensors(
                 eps=float(config["eps"]),
             )
         )
-    return MLXWanDiT(weights, blocks, config)
+    return MLXWanDiT(weights, blocks, config, compile=compile)
 
 
 def torch_block_state_from_diffusers_safetensors(
