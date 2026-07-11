@@ -88,12 +88,12 @@ struct OnboardingView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(FVTheme.lime)
-                    Text("FV")
+                    Text("FQ")
                         .font(.system(size: 10, weight: .black, design: .monospaced))
                         .foregroundStyle(.black)
                 }
                 .frame(width: 30, height: 30)
-                Text("FASTVIDEO")
+                Text("FASTWAN QAD")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .tracking(1.4)
             }
@@ -133,13 +133,13 @@ struct OnboardingView: View {
     private var welcomePage: some View {
         HStack(spacing: 58) {
             VStack(alignment: .leading, spacing: 0) {
-                OnboardingEyebrow(text: "WELCOME TO LOCAL MOTION")
+                OnboardingEyebrow(text: "WELCOME TO FASTWAN QAD")
                 Text("A video model that\nlives on your Mac.")
                     .font(.system(size: 55, weight: .medium, design: .rounded))
                     .tracking(-2.5)
                     .lineSpacing(-4)
                     .padding(.top, 17)
-                Text("No queue. No API key. No prompt leaving the machine. FastWan-QAD runs through MLX and Metal, then hands you a real MP4.")
+                Text("No queue. No API key. No prompt leaving the machine. FastWan QAD runs through MLX and Metal, then gives you a real MP4.")
                     .font(.system(size: 15))
                     .foregroundStyle(FVTheme.muted)
                     .frame(maxWidth: 530, alignment: .leading)
@@ -202,7 +202,7 @@ struct OnboardingView: View {
                 Text("Private by architecture.")
                     .font(.system(size: 49, weight: .medium, design: .rounded))
                     .tracking(-2)
-                Text("The app is a native window around a local process, not a cloud account wearing a desktop costume.")
+                Text("Prompts and videos stay on this Mac. The model runs locally through MLX and Metal.")
                     .font(.system(size: 14.5))
                     .foregroundStyle(FVTheme.muted)
             }
@@ -237,11 +237,48 @@ struct OnboardingView: View {
                     .tracking(-2.1)
                     .lineSpacing(-3)
                     .padding(.top, 16)
-                Text("Setup creates a managed Python environment, checks Metal and ffmpeg, and connects to model artifacts already on this Mac. Public downloads can be enabled at release.")
+                Text("Install the recommended EMA model with one click. FastWan QAD manages the model, runtime, and video exporter for you.")
                     .font(.system(size: 14.5))
                     .foregroundStyle(FVTheme.muted)
                     .frame(maxWidth: 520, alignment: .leading)
                     .padding(.top, 20)
+                if model.runtimeHealth.emaAvailable {
+                    Label("EMA model installed", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(FVTheme.lime)
+                        .padding(.top, 26)
+                } else if model.isInstallingRuntime {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Preparing the local runtime…")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(FVTheme.muted)
+                    }
+                    .padding(.top, 26)
+                } else if model.installingVariant == .ema {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: model.modelInstallProgress)
+                            .tint(FVTheme.lime)
+                            .frame(width: 300)
+                        Text("Downloading the EMA model…")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(FVTheme.muted)
+                    }
+                    .padding(.top, 26)
+                } else {
+                    Button {
+                        model.installModelWithRuntime(.ema)
+                    } label: {
+                        Label("Download EMA model", systemImage: "arrow.down.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.black.opacity(0.84))
+                            .padding(.horizontal, 18)
+                            .frame(height: 42)
+                            .background(Capsule().fill(FVTheme.lime))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 26)
+                }
             }
             Spacer(minLength: 12)
             VStack(spacing: 9) {
@@ -254,19 +291,19 @@ struct OnboardingView: View {
                 OnboardingCheckRow(
                     symbol: "cpu",
                     label: "MLX + Metal runtime",
-                    detail: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable ? "Ready" : "Install in Setup",
+                    detail: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable ? "Ready" : "Install in Models & Runtime",
                     ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable
                 )
                 OnboardingCheckRow(
                     symbol: "film",
-                    label: "FastWan-QAD v2 1.3B",
-                    detail: model.runtimeHealth.emaAvailable ? "EMA ready · RAW optional" : "Choose local artifacts",
+                    label: "FastWan QAD 1.3B",
+                    detail: model.runtimeHealth.emaAvailable ? "EMA installed · RAW optional" : "Download EMA to begin",
                     ready: model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable
                 )
                 OnboardingCheckRow(
                     symbol: "shippingbox",
                     label: "ffmpeg export",
-                    detail: model.runtimeHealth.ffmpegAvailable ? "Ready" : "Install in Setup",
+                    detail: model.runtimeHealth.ffmpegAvailable ? "Ready" : "Install in Models & Runtime",
                     ready: model.runtimeHealth.ffmpegAvailable
                 )
             }
@@ -298,11 +335,14 @@ struct OnboardingView: View {
             }
             Spacer()
             if page == pageCount - 1 {
-                onboardingButton(title: "Explore first", symbol: nil, prominent: false, useNativeGlass: useNativeGlass) {
-                    onFinish(.create)
-                }
-                onboardingButton(title: "Open setup", symbol: "arrow.right", prominent: true, useNativeGlass: useNativeGlass) {
-                    onFinish(.setup)
+                if model.runtimeHealth.emaAvailable {
+                    onboardingButton(title: "Start creating", symbol: "arrow.right", prominent: true, useNativeGlass: useNativeGlass) {
+                        onFinish(.create)
+                    }
+                } else {
+                    onboardingButton(title: "Open Models & Runtime", symbol: "arrow.right", prominent: true, useNativeGlass: useNativeGlass) {
+                        onFinish(.setup)
+                    }
                 }
             } else {
                 onboardingButton(title: "Continue", symbol: "arrow.right", prominent: true, useNativeGlass: useNativeGlass) {

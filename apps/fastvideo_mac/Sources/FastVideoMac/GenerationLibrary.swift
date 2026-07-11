@@ -25,7 +25,7 @@ final class GenerationLibrary {
         for index in records.indices where records[index].status == .running || records[index].status == .queued {
             records[index].status = .failed
             records[index].phase = "Interrupted"
-            records[index].error = "FastVideo closed before this generation finished."
+            records[index].error = "FastWan QAD closed before this generation finished."
             records[index].finishedAt = Date()
         }
         try save(records)

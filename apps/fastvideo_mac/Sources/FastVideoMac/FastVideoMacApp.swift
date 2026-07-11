@@ -15,7 +15,7 @@ struct FastVideoMacApp: App {
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Generation") {
-                    model.section = .create
+                    model.startNewGeneration()
                 }
                 .keyboardShortcut("n", modifiers: .command)
                 Button("Generate") { model.generate() }

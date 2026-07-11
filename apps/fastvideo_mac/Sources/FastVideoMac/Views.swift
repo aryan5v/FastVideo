@@ -2,17 +2,17 @@ import AVKit
 import SwiftUI
 
 enum FVTheme {
-    static let background = Color(red: 0.027, green: 0.031, blue: 0.028)
-    static let sidebar = Color(red: 0.045, green: 0.051, blue: 0.046)
-    static let surface = Color.white.opacity(0.045)
-    static let surfaceStrong = Color.white.opacity(0.075)
-    static let line = Color.white.opacity(0.105)
+    static let background = Color(red: 0.025, green: 0.028, blue: 0.026)
+    static let sidebar = Color(red: 0.045, green: 0.049, blue: 0.046)
+    static let surface = Color.white.opacity(0.052)
+    static let surfaceStrong = Color.white.opacity(0.085)
+    static let line = Color.white.opacity(0.11)
     static let text = Color.white.opacity(0.94)
-    static let muted = Color.white.opacity(0.52)
-    static let faint = Color.white.opacity(0.28)
-    static let lime = Color(red: 0.72, green: 1.0, blue: 0.42)
-    static let amber = Color(red: 1.0, green: 0.73, blue: 0.34)
-    static let red = Color(red: 1.0, green: 0.38, blue: 0.32)
+    static let muted = Color.white.opacity(0.58)
+    static let faint = Color.white.opacity(0.32)
+    static let lime = Color(red: 0.69, green: 0.96, blue: 0.42)
+    static let amber = Color(red: 0.96, green: 0.70, blue: 0.32)
+    static let red = Color(red: 0.96, green: 0.36, blue: 0.32)
 }
 
 struct RootView: View {
@@ -22,21 +22,7 @@ struct RootView: View {
     var body: some View {
         Group {
             if onboardingCompleted {
-                HStack(spacing: 0) {
-                    SidebarView()
-                        .frame(width: 184)
-                    Rectangle()
-                        .fill(FVTheme.line)
-                        .frame(width: 1)
-                    Group {
-                        switch model.section {
-                        case .create: CreateView()
-                        case .library: LibraryView()
-                        case .setup: SetupView()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                AppShellView()
             } else {
                 OnboardingView { destination in
                     model.section = destination
@@ -47,7 +33,7 @@ struct RootView: View {
         .background(FVTheme.background)
         .preferredColorScheme(.dark)
         .alert(
-            "FastVideo",
+            "FastWan QAD",
             isPresented: Binding(
                 get: { model.alertMessage != nil },
                 set: { if !$0 { model.alertMessage = nil } }
@@ -60,35 +46,56 @@ struct RootView: View {
     }
 }
 
+private struct AppShellView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        NavigationSplitView {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 188, ideal: 212, max: 236)
+        } detail: {
+            Group {
+                switch model.section {
+                case .create: CreateView()
+                case .library: LibraryView()
+                case .setup: SetupView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(FVTheme.background)
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+}
+
 private struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(FVTheme.lime)
-                    Text("FV")
-                        .font(.system(size: 10, weight: .black, design: .monospaced))
-                        .foregroundStyle(.black)
-                }
-                .frame(width: 28, height: 28)
+            HStack(spacing: 11) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(FVTheme.lime)
+                    .frame(width: 32, height: 32)
+                    .overlay {
+                        Text("FQ")
+                            .font(.system(size: 10, weight: .black, design: .rounded))
+                            .foregroundStyle(Color.black.opacity(0.82))
+                    }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("FASTVIDEO")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .tracking(1.4)
-                    Text("APPLE / MLX")
-                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    Text("FastWan QAD")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text("On-device video")
+                        .font(.system(size: 10))
                         .foregroundStyle(FVTheme.faint)
-                        .tracking(1.1)
                 }
+                .lineLimit(1)
             }
-            .padding(.top, 38)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 34)
+            .padding(.horizontal, 17)
+            .padding(.top, 50)
+            .padding(.bottom, 28)
 
-            VStack(spacing: 6) {
+            VStack(spacing: 5) {
                 ForEach(AppSection.allCases) { section in
                     Button {
                         model.section = section
@@ -99,19 +106,19 @@ private struct SidebarView: View {
                                 .frame(width: 18)
                             Text(section.label)
                                 .font(.system(size: 13, weight: .medium))
-                            Spacer()
+                            Spacer(minLength: 8)
                             if section == .library, !model.records.isEmpty {
                                 Text("\(model.records.count)")
-                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .font(.system(size: 10, weight: .medium, design: .rounded))
                                     .foregroundStyle(FVTheme.faint)
                             }
                         }
                         .foregroundStyle(model.section == section ? FVTheme.text : FVTheme.muted)
-                        .padding(.horizontal, 12)
-                        .frame(height: 38)
+                        .padding(.horizontal, 11)
+                        .frame(height: 40)
                         .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(model.section == section ? Color.white.opacity(0.075) : .clear)
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(model.section == section ? Color.white.opacity(0.085) : .clear)
                         )
                     }
                     .buttonStyle(.plain)
@@ -119,26 +126,24 @@ private struct SidebarView: View {
             }
             .padding(.horizontal, 9)
 
-            Spacer()
+            Spacer(minLength: 16)
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 6, height: 6)
-                        .shadow(color: statusColor.opacity(0.65), radius: 5)
-                    Text(statusText)
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .tracking(0.8)
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: statusColor.opacity(0.6), radius: 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(statusTitle)
+                        .font(.system(size: 11, weight: .medium))
+                    Text(statusDetail)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(FVTheme.faint)
+                        .lineLimit(1)
                 }
-                Text("Your prompts and videos stay on this Mac.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(FVTheme.faint)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(16)
-            .fvLiquidGlass(cornerRadius: 14, tint: statusColor.opacity(0.08))
-            .padding(12)
+            .padding(.horizontal, 17)
+            .padding(.vertical, 16)
         }
         .foregroundStyle(FVTheme.text)
         .background(PlatformSidebarMaterial())
@@ -152,108 +157,779 @@ private struct SidebarView: View {
         }
     }
 
-    private var statusText: String {
+    private var statusTitle: String {
         switch model.runtimeHealth.state {
-        case .ready: "METAL READY"
-        case .checking: "CHECKING"
-        case .needsSetup: "SETUP NEEDED"
-        case .error: "CHECK FAILED"
+        case .ready: "Ready on this Mac"
+        case .checking: "Checking this Mac"
+        case .needsSetup: "Setup required"
+        case .error: "Check failed"
+        }
+    }
+
+    private var statusDetail: String {
+        switch model.runtimeHealth.state {
+        case .ready: "MLX and Metal available"
+        case .checking: "Verifying local runtime"
+        case .needsSetup: "Open Models & Runtime"
+        case .error: "Review runtime details"
         }
     }
 }
 
 private struct CreateView: View {
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                HeroView()
-                ComposerView()
-                    .padding(.horizontal, 34)
-                    .padding(.top, 18)
-                    .padding(.bottom, 54)
-            }
-        }
-        .scrollIndicators(.hidden)
-        .background(FVTheme.background)
-    }
-}
-
-private struct HeroView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack {
+            FVTheme.background.ignoresSafeArea()
             ASCIIFieldView()
-                .opacity(0.62)
+                .opacity(model.createRecord == nil ? 0.34 : 0.12)
                 .mask(
-                    LinearGradient(
-                        colors: [.clear, .white.opacity(0.75), .white, .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                    RadialGradient(
+                        colors: [.white, .white.opacity(0.7), .clear],
+                        center: model.createRecord == nil ? .center : .topTrailing,
+                        startRadius: 20,
+                        endRadius: 700
                     )
                 )
-            LinearGradient(
-                colors: [.clear, FVTheme.background.opacity(0.32), FVTheme.background],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 9) {
-                    Circle().fill(FVTheme.lime).frame(width: 6, height: 6)
-                    Text("LOCAL TEXT-TO-VIDEO / APPLE SILICON")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .tracking(1.4)
-                        .foregroundStyle(FVTheme.muted)
-                }
-                .padding(.bottom, 18)
-
-                Text("Five seconds of motion.\nNo cloud in the middle.")
-                    .font(.system(size: 52, weight: .medium, design: .rounded))
-                    .tracking(-2.3)
-                    .foregroundStyle(FVTheme.text)
-                    .lineSpacing(-3)
-                Text("FastWan-QAD 1.3B runs through MLX and Metal on your Mac. The first rough cut appears while the model is still refining it.")
-                    .font(.system(size: 14.5, weight: .regular))
-                    .foregroundStyle(FVTheme.muted)
-                    .frame(maxWidth: 660, alignment: .leading)
-                    .padding(.top, 18)
-
-                HStack(spacing: 28) {
-                    HeroStat(value: "3", label: "DMD STEPS")
-                    HeroStat(value: "~40s", label: "FIRST LIGHT")
-                    HeroStat(value: "0", label: "UPLOADS")
-                    HeroStat(value: "1.3B", label: "PARAMETERS")
-                }
-                .padding(.top, 25)
+                .ignoresSafeArea()
+            if let record = model.createRecord {
+                GenerationWorkspace(record: record)
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+            } else {
+                PromptHome()
+                    .transition(.opacity)
             }
-            .padding(.horizontal, 42)
-            .padding(.bottom, 34)
         }
-        .frame(height: 432)
-        .overlay(alignment: .topTrailing) {
-            Text("FASTWAN / QAD / INT8 / \(model.generationSettings.variant.label)")
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .tracking(1.2)
-                .foregroundStyle(FVTheme.faint)
-                .padding(.top, 36)
-                .padding(.trailing, 38)
+        .animation(.easeInOut(duration: 0.32), value: model.createRecord?.id)
+    }
+}
+
+private struct PromptHome: View {
+    @EnvironmentObject private var model: AppModel
+    @FocusState private var promptFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 80)
+            VStack(spacing: 12) {
+                Text("FastWan QAD")
+                    .font(.system(size: 58, weight: .medium, design: .rounded))
+                    .tracking(-2.6)
+                    .foregroundStyle(FVTheme.text)
+                Text("Create video locally on Apple silicon.")
+                    .font(.system(size: 15, weight: .regular, design: .rounded))
+                    .foregroundStyle(FVTheme.muted)
+            }
+            .padding(.bottom, 32)
+
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Describe a scene and how it moves…", text: $model.prompt, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16, weight: .regular, design: .rounded))
+                    .lineLimit(1...5)
+                    .focused($promptFocused)
+                    .padding(.leading, 6)
+                    .padding(.vertical, 10)
+
+                GenerationOptionsMenu()
+
+                Button {
+                    model.generate()
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color.black.opacity(0.82))
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(FVTheme.lime))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .opacity(model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.42 : 1)
+                .help("Generate video")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: 760, minHeight: 64)
+            .fvLiquidGlass(cornerRadius: 22, tint: Color.white.opacity(0.015), interactive: true)
+            .shadow(color: Color.black.opacity(0.25), radius: 30, y: 16)
+
+            Spacer(minLength: 120)
+        }
+        .padding(.horizontal, 48)
+        .onAppear { promptFocused = true }
+    }
+}
+
+private struct GenerationOptionsMenu: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Menu {
+            Section("Model") {
+                ForEach(ModelVariant.allCases) { variant in
+                    Button {
+                        model.generationSettings.variant = variant
+                    } label: {
+                        Label(
+                            variant == .ema ? "EMA (Recommended)" : "RAW",
+                            systemImage: model.generationSettings.variant == variant ? "checkmark" : "circle"
+                        )
+                    }
+                    .disabled(!model.runtimeHealth.variantAvailable(variant))
+                }
+            }
+            Section("Format") {
+                Button("832 × 480 · 5 seconds") {
+                    model.generationSettings.width = 832
+                    model.generationSettings.height = 480
+                    model.generationSettings.frames = 81
+                    model.generationSettings.fps = 16
+                }
+                Button("448 × 256 · 2 seconds") {
+                    model.generationSettings.width = 448
+                    model.generationSettings.height = 256
+                    model.generationSettings.frames = 33
+                    model.generationSettings.fps = 16
+                }
+            }
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(FVTheme.muted)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(Color.white.opacity(0.065)))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help("Generation options")
+    }
+}
+
+private struct GenerationWorkspace: View {
+    @EnvironmentObject private var model: AppModel
+    let record: GenerationRecord
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Button {
+                    model.startNewGeneration()
+                } label: {
+                    Label("New video", systemImage: "plus")
+                }
+                .buttonStyle(FVQuietButtonStyle())
+
+                Text(record.prompt)
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .foregroundStyle(FVTheme.muted)
+                    .lineLimit(1)
+                Spacer()
+                StatusPill(record: record)
+            }
+            .padding(.horizontal, 30)
+            .padding(.top, 42)
+            .padding(.bottom, 20)
+
+            VStack(spacing: 18) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.black.opacity(0.48))
+                    if let url = record.playbackURL, FileManager.default.fileExists(atPath: url.path) {
+                        VideoSurface(url: url)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .id(url.path)
+                    } else if record.status == .failed {
+                        FailureView(record: record)
+                    } else {
+                        GeneratingPlaceholder(record: record)
+                    }
+                    if record.status == .running, record.previewPath != nil {
+                        VStack {
+                            HStack {
+                                LiveBadge()
+                                Spacer()
+                            }
+                            Spacer()
+                        }
+                        .padding(16)
+                    }
+                }
+                .aspectRatio(832.0 / 480.0, contentMode: .fit)
+                .frame(maxWidth: 1040)
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(FVTheme.line))
+                .shadow(color: Color.black.opacity(0.34), radius: 34, y: 18)
+
+                GenerationFooter(record: record)
+                    .frame(maxWidth: 1040)
+            }
+            .padding(.horizontal, 30)
+            .padding(.bottom, 28)
+            Spacer(minLength: 0)
         }
     }
 }
 
-private struct HeroStat: View {
-    let value: String
-    let label: String
+private struct GenerationFooter: View {
+    @EnvironmentObject private var model: AppModel
+    let record: GenerationRecord
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(value)
-                .font(.system(size: 19, weight: .medium, design: .monospaced))
-                .foregroundStyle(FVTheme.text)
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(footerTitle)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                if record.status == .running {
+                    ProgressView(value: record.progress)
+                        .tint(FVTheme.lime)
+                        .frame(maxWidth: 320)
+                } else if let seconds = record.metrics?.totalSeconds {
+                    Text("Completed in \(seconds.formatted(.number.precision(.fractionLength(1)))) seconds")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(FVTheme.faint)
+                }
+            }
+            Spacer()
+            if record.status == .running {
+                Button(role: .destructive) { model.cancelGeneration() } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(FVQuietButtonStyle(danger: true))
+            } else if record.status == .completed, let url = record.outputURL {
+                Button { model.reveal(record) } label: { Label("Show in Finder", systemImage: "folder") }
+                    .buttonStyle(FVQuietButtonStyle())
+                Button { model.export(record) } label: { Label("Export", systemImage: "arrow.down.to.line") }
+                    .buttonStyle(FVQuietButtonStyle())
+                ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(FVProminentButtonStyle())
+            }
+        }
+        .frame(minHeight: 46)
+    }
+
+    private var footerTitle: String {
+        switch record.status {
+        case .running: record.previewPath == nil ? "Preparing your first preview" : "Refining the final video"
+        case .completed: "Your video is ready"
+        case .failed: "Generation stopped"
+        case .cancelled: "Generation cancelled"
+        case .queued: "Waiting to begin"
+        }
+    }
+}
+
+private struct StatusPill: View {
+    let record: GenerationRecord
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle().fill(color).frame(width: 6, height: 6)
             Text(label)
-                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                .tracking(1.1)
+                .font(.system(size: 10.5, weight: .medium))
+        }
+        .foregroundStyle(FVTheme.muted)
+        .padding(.horizontal, 11)
+        .frame(height: 28)
+        .background(Capsule().fill(Color.white.opacity(0.06)))
+    }
+
+    private var color: Color {
+        switch record.status {
+        case .running, .queued: FVTheme.amber
+        case .completed: FVTheme.lime
+        case .failed, .cancelled: FVTheme.red
+        }
+    }
+
+    private var label: String {
+        switch record.status {
+        case .running: record.phase
+        case .completed: "Complete"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case .queued: "Queued"
+        }
+    }
+}
+
+private struct LibraryView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PageTitle(
+                title: "Library",
+                detail: model.records.isEmpty ? "Your finished videos will appear here." : "\(model.records.count) local generations"
+            ) {
+                Button { model.startNewGeneration() } label: { Label("New video", systemImage: "plus") }
+                    .buttonStyle(FVProminentButtonStyle())
+            }
+
+            if model.records.isEmpty {
+                ContentUnavailableView {
+                    Label("No videos yet", systemImage: "film.stack")
+                } description: {
+                    Text("Create your first FastWan QAD video.")
+                } actions: {
+                    Button("Create video") { model.startNewGeneration() }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 245), spacing: 16)], spacing: 20) {
+                            ForEach(model.records) { record in
+                                LibraryCard(record: record, selected: model.selectedRecordID == record.id) {
+                                    model.selectedRecordID = record.id
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 8)
+                        .padding(.bottom, 30)
+                    }
+                    Divider().overlay(FVTheme.line)
+                    LibraryDetail(record: model.activeRecord)
+                        .frame(minWidth: 330, idealWidth: 390, maxWidth: 430)
+                }
+            }
+        }
+    }
+}
+
+private struct LibraryCard: View {
+    let record: GenerationRecord
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 11) {
+                VideoThumbnailView(url: record.outputURL)
+                    .aspectRatio(832.0 / 480.0, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(alignment: .topTrailing) {
+                        Text(record.settings.variant.displayName)
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .frame(height: 23)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(8)
+                    }
+                Text(record.prompt)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(FVTheme.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack {
+                    Text(record.createdAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    Spacer()
+                    Text(record.status == .completed ? "\(record.settings.frames) frames" : record.status.rawValue.capitalized)
+                }
+                .font(.system(size: 10.5))
                 .foregroundStyle(FVTheme.faint)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(selected ? FVTheme.surfaceStrong : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(selected ? FVTheme.lime.opacity(0.45) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct VideoThumbnailView: View {
+    let url: URL?
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color.white.opacity(0.045))
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "film")
+                    .font(.system(size: 24, weight: .light))
+                    .foregroundStyle(FVTheme.faint)
+            }
+        }
+        .clipped()
+        .task(id: url) { await loadThumbnail() }
+    }
+
+    private func loadThumbnail() async {
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return }
+        let result = await Task.detached(priority: .utility) { () -> NSImage? in
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 640, height: 360)
+            guard let cgImage = try? generator.copyCGImage(at: CMTime(seconds: 0.35, preferredTimescale: 600), actualTime: nil)
+            else { return nil }
+            return NSImage(cgImage: cgImage, size: .zero)
+        }.value
+        image = result
+    }
+}
+
+private struct LibraryDetail: View {
+    @EnvironmentObject private var model: AppModel
+    let record: GenerationRecord?
+
+    var body: some View {
+        Group {
+            if let record {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if let url = record.playbackURL, FileManager.default.fileExists(atPath: url.path) {
+                            VideoSurface(url: url)
+                                .aspectRatio(832.0 / 480.0, contentMode: .fit)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        } else {
+                            VideoThumbnailView(url: record.outputURL)
+                                .aspectRatio(832.0 / 480.0, contentMode: .fit)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        Text(record.prompt)
+                            .font(.system(size: 17, weight: .medium, design: .rounded))
+                            .lineLimit(7)
+                            .textSelection(.enabled)
+                        Divider().overlay(FVTheme.line)
+                        DetailRow(label: "Created", value: record.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        DetailRow(label: "Model", value: record.settings.variant == .ema ? "EMA · Recommended" : "RAW")
+                        DetailRow(label: "Format", value: "\(record.settings.resolutionLabel) · \(record.settings.frames) frames")
+                        if let seconds = record.metrics?.totalSeconds {
+                            DetailRow(label: "Render time", value: "\(seconds.formatted(.number.precision(.fractionLength(1)))) seconds")
+                        }
+                        if record.status == .completed, let url = record.outputURL {
+                            HStack(spacing: 8) {
+                                Button { model.showInCreate(record) } label: { Label("Open", systemImage: "arrow.up.left.and.arrow.down.right") }
+                                    .buttonStyle(FVProminentButtonStyle())
+                                Button { model.reveal(record) } label: { Label("Finder", systemImage: "folder") }
+                                    .buttonStyle(FVQuietButtonStyle())
+                                Button { model.export(record) } label: { Label("Export", systemImage: "arrow.down.to.line") }
+                                    .buttonStyle(FVQuietButtonStyle())
+                                ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
+                                    .buttonStyle(FVQuietButtonStyle())
+                            }
+                        }
+                        Button(role: .destructive) { model.delete(record) } label: {
+                            Label("Delete generation", systemImage: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(FVTheme.red)
+                    }
+                    .padding(24)
+                }
+            } else {
+                Text("Select a video")
+                    .foregroundStyle(FVTheme.faint)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Color.black.opacity(0.12))
+    }
+}
+
+private struct DetailRow: View {
+    let label: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(FVTheme.faint)
+            Spacer()
+            Text(value).foregroundStyle(FVTheme.muted).multilineTextAlignment(.trailing)
+        }
+        .font(.system(size: 11.5))
+    }
+}
+
+private struct SetupView: View {
+    @EnvironmentObject private var model: AppModel
+    @AppStorage("fastvideo.onboarding.completed") private var onboardingCompleted = true
+    @State private var showDeveloperOptions = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 30) {
+                PageTitle(
+                    title: "Models & Runtime",
+                    detail: "Everything FastWan QAD needs to create video on this Mac."
+                ) {
+                    Button { Task { await model.refreshRuntime() } } label: {
+                        Label("Check again", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(FVQuietButtonStyle())
+                }
+
+                if case let .error(message) = model.runtimeHealth.state {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(FVTheme.red)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Runtime check failed")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(message)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(FVTheme.faint)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 13).fill(FVTheme.red.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(FVTheme.red.opacity(0.24)))
+                }
+
+                SettingsSection(title: "Models", detail: "EMA is recommended for most videos. Add RAW only when you want to compare checkpoints.") {
+                    ModelInstallRow(variant: .ema, recommended: true)
+                    Divider().overlay(FVTheme.line)
+                    ModelInstallRow(variant: .raw, recommended: false)
+                }
+
+                SettingsSection(title: "This Mac", detail: "The runtime stays local and uses Apple silicon directly.") {
+                    RuntimeRow(
+                        symbol: "apple.logo",
+                        title: "Apple silicon",
+                        detail: model.runtimeHealth.platformSupported ? "Supported" : "An Apple silicon Mac is required",
+                        ready: model.runtimeHealth.platformSupported
+                    )
+                    Divider().overlay(FVTheme.line)
+                    RuntimeRow(
+                        symbol: "cpu",
+                        title: "MLX and Metal",
+                        detail: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable
+                            ? "Ready for local generation"
+                            : "Install the local runtime",
+                        ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable,
+                        actionTitle: "Install",
+                        action: model.installRuntime
+                    )
+                    Divider().overlay(FVTheme.line)
+                    RuntimeRow(
+                        symbol: "film",
+                        title: "Video export",
+                        detail: model.runtimeHealth.ffmpegAvailable ? "Ready" : "Install the video exporter",
+                        ready: model.runtimeHealth.ffmpegAvailable,
+                        actionTitle: "Install",
+                        action: model.installFFmpeg
+                    )
+                }
+
+                DisclosureGroup("Developer options", isExpanded: $showDeveloperOptions) {
+                    VStack(spacing: 14) {
+                        PathRow(label: "FastVideo source", value: $model.configuration.repositoryRoot, choose: model.chooseRepositoryRoot)
+                        PathRow(label: "Python", value: $model.configuration.pythonExecutable, choose: model.choosePython)
+                        PathRow(label: "Shared model", value: $model.configuration.modelRoot, choose: model.chooseModelRoot)
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("RAW checkpoint").font(.system(size: 10.5)).foregroundStyle(FVTheme.faint)
+                                TextField("Auto-detect", text: $model.configuration.rawCheckpoint).textFieldStyle(FVTextFieldStyle())
+                            }
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("EMA checkpoint").font(.system(size: 10.5)).foregroundStyle(FVTheme.faint)
+                                TextField("Auto-detect", text: $model.configuration.emaCheckpoint).textFieldStyle(FVTextFieldStyle())
+                            }
+                        }
+                        HStack {
+                            Button("Replay onboarding") { onboardingCompleted = false }
+                                .buttonStyle(FVQuietButtonStyle())
+                            Spacer()
+                            Button("Save changes") { model.saveConfiguration() }
+                                .buttonStyle(FVProminentButtonStyle())
+                        }
+                    }
+                    .padding(.top, 18)
+                }
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(FVTheme.muted)
+                .padding(20)
+                .background(RoundedRectangle(cornerRadius: 16).fill(FVTheme.surface))
+
+                if !model.setupLog.isEmpty {
+                    DisclosureGroup("Installation details") {
+                        Text(model.setupLog.suffix(100).joined(separator: "\n"))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(FVTheme.faint)
+                            .textSelection(.enabled)
+                            .padding(.top, 12)
+                    }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(FVTheme.faint)
+                }
+            }
+            .frame(maxWidth: 900)
+            .padding(.horizontal, 38)
+            .padding(.bottom, 50)
+        }
+    }
+}
+
+private struct ModelInstallRow: View {
+    @EnvironmentObject private var model: AppModel
+    let variant: ModelVariant
+    let recommended: Bool
+
+    var body: some View {
+        HStack(spacing: 15) {
+            Image(systemName: variant == .ema ? "waveform.path.ecg" : "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(installed ? FVTheme.lime : FVTheme.muted)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("\(variant.displayName) model")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                    if recommended {
+                        Text("RECOMMENDED")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .tracking(0.7)
+                            .foregroundStyle(Color.black.opacity(0.78))
+                            .padding(.horizontal, 7)
+                            .frame(height: 19)
+                            .background(Capsule().fill(FVTheme.lime))
+                    }
+                }
+                Text(variant.detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(FVTheme.faint)
+            }
+            Spacer()
+            if model.installingVariant == variant {
+                VStack(alignment: .trailing, spacing: 5) {
+                    ProgressView(value: model.modelInstallProgress)
+                        .frame(width: 120)
+                        .tint(FVTheme.lime)
+                    Text("Downloading…")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(FVTheme.faint)
+                }
+            } else if installed {
+                Label("Installed", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(FVTheme.lime)
+            } else {
+                if recommended {
+                    Button("Download EMA") { model.installModelWithRuntime(variant) }
+                        .buttonStyle(FVProminentButtonStyle())
+                        .disabled(model.isInstallingModel || model.isInstallingRuntime)
+                } else {
+                    Button("Download RAW") { model.installModelWithRuntime(variant) }
+                        .buttonStyle(FVQuietButtonStyle())
+                        .disabled(model.isInstallingModel || model.isInstallingRuntime)
+                }
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var installed: Bool { model.runtimeHealth.variantAvailable(variant) }
+}
+
+private struct RuntimeRow: View {
+    let symbol: String
+    let title: String
+    let detail: String
+    let ready: Bool
+    var actionTitle: String?
+    var action: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 15) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(ready ? FVTheme.lime : FVTheme.muted)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 14, weight: .medium, design: .rounded))
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(FVTheme.faint)
+            }
+            Spacer()
+            if ready {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(FVTheme.lime)
+            } else if let actionTitle, let action {
+                Button(actionTitle, action: action).buttonStyle(FVQuietButtonStyle())
+            }
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder let content: Content
+
+    init(title: String, detail: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.detail = detail
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 18, weight: .semibold, design: .rounded))
+                Text(detail).font(.system(size: 12)).foregroundStyle(FVTheme.faint)
+            }
+            VStack(spacing: 12) { content }
+                .padding(20)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(FVTheme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(FVTheme.line))
+        }
+    }
+}
+
+private struct PageTitle<Actions: View>: View {
+    let title: String
+    let detail: String
+    @ViewBuilder let actions: Actions
+
+    init(title: String, detail: String, @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.detail = detail
+        self.actions = actions()
+    }
+
+    var body: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 31, weight: .semibold, design: .rounded))
+                    .tracking(-0.8)
+                Text(detail)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(FVTheme.faint)
+            }
+            Spacer()
+            actions
+        }
+        .padding(.horizontal, 30)
+        .padding(.top, 45)
+        .padding(.bottom, 24)
+    }
+}
+
+private struct PathRow: View {
+    let label: String
+    @Binding var value: String
+    let choose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(.system(size: 10.5)).foregroundStyle(FVTheme.faint)
+            HStack(spacing: 8) {
+                TextField(label, text: $value).textFieldStyle(FVTextFieldStyle())
+                Button("Choose…", action: choose).buttonStyle(FVQuietButtonStyle())
+            }
         }
     }
 }
@@ -262,12 +938,12 @@ struct ASCIIFieldView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: reduceMotion ? 2 : 0.14)) { timeline in
+        TimelineView(.periodic(from: .now, by: reduceMotion ? 2 : 0.16)) { timeline in
             GeometryReader { proxy in
                 Text(field(for: timeline.date.timeIntervalSinceReferenceDate, size: proxy.size))
                     .font(.system(size: 8, weight: .regular, design: .monospaced))
                     .lineSpacing(0.8)
-                    .foregroundStyle(FVTheme.lime.opacity(0.52))
+                    .foregroundStyle(FVTheme.lime.opacity(0.48))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipped()
             }
@@ -276,358 +952,28 @@ struct ASCIIFieldView: View {
     }
 
     private func field(for time: TimeInterval, size: CGSize) -> String {
-        let width = max(48, min(130, Int(size.width / 7.3)))
-        let height = max(20, min(48, Int(size.height / 9.0)))
+        let width = max(48, min(150, Int(size.width / 7.2)))
+        let height = max(20, min(70, Int(size.height / 9.0)))
         let glyphs = Array("  ..::--==++**##%@")
-        let t = reduceMotion ? 0.3 : time * 0.34
-        var rows: [String] = []
-        rows.reserveCapacity(height)
-        for row in 0..<height {
-            var characters: [Character] = []
-            characters.reserveCapacity(width)
-            for column in 0..<width {
+        let t = reduceMotion ? 0.3 : time * 0.31
+        return (0..<height).map { row in
+            String((0..<width).map { column in
                 let x = Double(column) / Double(width) * 6.4 - 3.2
                 let y = Double(row) / Double(height) * 3.0 - 1.5
                 let wave = sin(x * 1.7 + t) + cos(y * 3.1 - t * 0.72)
-                let dx = x - sin(t)
-                let dy = y - cos(t * 0.8)
-                let orbit = sin(sqrt(dx * dx + dy * dy) * 4.4 - t * 2)
+                let orbit = sin(hypot(x - sin(t), y - cos(t * 0.8)) * 4.4 - t * 2)
                 let vignette = max(0, 1 - (x * x / 13 + y * y / 3.2))
                 let value = max(0, min(0.999, (wave + orbit + 3) / 6 * vignette))
-                characters.append(glyphs[Int(value * Double(glyphs.count))])
-            }
-            rows.append(String(characters))
-        }
-        return rows.joined(separator: "\n")
-    }
-}
-
-private struct ComposerView: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if !model.runtimeHealth.canGenerate {
-                SetupBanner()
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    PromptPanel().frame(minWidth: 380)
-                    OutputPanel(record: model.activeRecord).frame(minWidth: 410)
-                }
-                VStack(spacing: 14) {
-                    PromptPanel()
-                    OutputPanel(record: model.activeRecord)
-                }
-            }
-        }
-    }
-}
-
-private struct SetupBanner: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 13) {
-            Image(systemName: "wrench.and.screwdriver")
-                .foregroundStyle(FVTheme.amber)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("One-time setup is not finished")
-                    .font(.system(size: 12.5, weight: .semibold))
-                Text("Connect the MLX runtime, ffmpeg, and at least one model checkpoint.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(FVTheme.muted)
-            }
-            Spacer()
-            Button("Open setup") { model.section = .setup }
-                .buttonStyle(FVSecondaryButtonStyle())
-        }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 9).fill(FVTheme.amber.opacity(0.075)))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(FVTheme.amber.opacity(0.25)))
-    }
-}
-
-private struct PromptPanel: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var showAdvanced = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            PanelHeader(index: "01", title: "Direct the shot", trailing: "TEXT → VIDEO")
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $model.prompt)
-                    .font(.system(size: 15, weight: .regular, design: .rounded))
-                    .scrollContentBackground(.hidden)
-                    .padding(12)
-                    .frame(minHeight: 142)
-                    .background(Color.black.opacity(0.18))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(FVTheme.line))
-                if model.prompt.isEmpty {
-                    Text("Describe the subject, motion, camera, and light…")
-                        .font(.system(size: 14))
-                        .foregroundStyle(FVTheme.faint)
-                        .padding(18)
-                        .allowsHitTesting(false)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                SectionLabel("WEIGHTS")
-                HStack(spacing: 8) {
-                    ForEach(ModelVariant.allCases) { variant in
-                        VariantButton(
-                            variant: variant,
-                            selected: model.generationSettings.variant == variant,
-                            available: model.runtimeHealth.variantAvailable(variant)
-                        ) {
-                            model.generationSettings.variant = variant
-                        }
-                    }
-                }
-            }
-
-            HStack(spacing: 9) {
-                SettingMenu(
-                    label: "FRAME",
-                    value: model.generationSettings.resolutionLabel,
-                    options: [("832 × 480", (832, 480)), ("672 × 384", (672, 384)), ("448 × 256", (448, 256))]
-                ) { size in
-                    model.generationSettings.width = size.0
-                    model.generationSettings.height = size.1
-                }
-                SettingMenu(
-                    label: "LENGTH",
-                    value: String(format: "%.1f sec", model.generationSettings.duration),
-                    options: [("2.1 sec", 33), ("3.1 sec", 49), ("5.1 sec", 81)]
-                ) { model.generationSettings.frames = $0 }
-                SettingMenu(
-                    label: "FPS",
-                    value: "\(model.generationSettings.fps)",
-                    options: [("16 fps", 16), ("24 fps", 24)]
-                ) { model.generationSettings.fps = $0 }
-            }
-
-            DisclosureGroup(isExpanded: $showAdvanced) {
-                VStack(alignment: .leading, spacing: 13) {
-                    HStack {
-                        Text("Seed")
-                        Spacer()
-                        TextField("Seed", value: $model.generationSettings.seed, format: .number)
-                            .textFieldStyle(.plain)
-                            .multilineTextAlignment(.trailing)
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(width: 90)
-                    }
-                    Toggle("Parallel TAEHV decode", isOn: $model.generationSettings.parallelDecode)
-                    Toggle(
-                        "Cap MLX memory",
-                        isOn: Binding(
-                            get: { model.generationSettings.memoryLimitGiB != nil },
-                            set: { model.generationSettings.memoryLimitGiB = $0 ? 16 : nil }
-                        )
-                    )
-                    if model.generationSettings.memoryLimitGiB != nil {
-                        HStack {
-                            Slider(
-                                value: Binding(
-                                    get: { model.generationSettings.memoryLimitGiB ?? 16 },
-                                    set: { model.generationSettings.memoryLimitGiB = $0 }
-                                ),
-                                in: 8...48,
-                                step: 1
-                            )
-                            Text("\(Int(model.generationSettings.memoryLimitGiB ?? 16)) GiB")
-                                .font(.system(size: 10, design: .monospaced))
-                                .frame(width: 46)
-                        }
-                    }
-                }
-                .font(.system(size: 11.5))
-                .foregroundStyle(FVTheme.muted)
-                .padding(.top, 12)
-            } label: {
-                Text("ADVANCED CONTROLS")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(1)
-                    .foregroundStyle(FVTheme.faint)
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    model.isGenerating ? model.cancelGeneration() : model.generate()
-                } label: {
-                    HStack {
-                        Image(systemName: model.isGenerating ? "stop.fill" : "play.fill")
-                        Text(model.isGenerating ? "Stop generation" : "Generate on this Mac")
-                        Spacer()
-                        Text(model.isGenerating ? "" : "⌘↩")
-                            .font(.system(size: 10, design: .monospaced))
-                            .opacity(0.55)
-                    }
-                }
-                .buttonStyle(FVPrimaryButtonStyle(danger: model.isGenerating))
-                .disabled(!model.isGenerating && !model.runtimeHealth.canGenerate)
-            }
-        }
-        .panelStyle()
-    }
-}
-
-private struct VariantButton: View {
-    let variant: ModelVariant
-    let selected: Bool
-    let available: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(variant.label)
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    Text(variant.detail)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(selected ? Color.black.opacity(0.62) : FVTheme.faint)
-                }
-                Spacer()
-                Circle()
-                    .fill(available ? (selected ? Color.black.opacity(0.72) : FVTheme.lime) : FVTheme.faint)
-                    .frame(width: 6, height: 6)
-            }
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, minHeight: 50)
-            .foregroundStyle(selected ? Color.black : FVTheme.text)
-            .background(RoundedRectangle(cornerRadius: 7).fill(selected ? FVTheme.lime : Color.black.opacity(0.16)))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? .clear : FVTheme.line))
-        }
-        .buttonStyle(.plain)
-        .disabled(!available)
-        .opacity(available ? 1 : 0.44)
-    }
-}
-
-private struct SettingMenu<Value>: View {
-    let label: String
-    let value: String
-    let options: [(String, Value)]
-    let select: (Value) -> Void
-
-    var body: some View {
-        Menu {
-            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                Button(option.0) { select(option.1) }
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(label)
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .tracking(0.9)
-                    .foregroundStyle(FVTheme.faint)
-                HStack(spacing: 5) {
-                    Text(value)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(FVTheme.faint)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 11)
-            .frame(height: 50)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.15)))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(FVTheme.line))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-    }
-}
-
-private struct OutputPanel: View {
-    @EnvironmentObject private var model: AppModel
-    let record: GenerationRecord?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            PanelHeader(index: "02", title: "Watch it emerge", trailing: record?.status.rawValue.uppercased() ?? "WAITING")
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.black.opacity(0.36))
-                if let url = record?.playbackURL,
-                   FileManager.default.fileExists(atPath: url.path) {
-                    VideoSurface(url: url)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .id(url.path)
-                    if record?.status == .running {
-                        VStack {
-                            HStack {
-                                LiveBadge()
-                                Spacer()
-                            }
-                            Spacer()
-                        }
-                        .padding(12)
-                    }
-                } else if let record, record.status == .running {
-                    GeneratingPlaceholder(record: record)
-                } else {
-                    EmptyOutputView()
-                }
-            }
-            .aspectRatio(832.0 / 480.0, contentMode: .fit)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(FVTheme.line))
-
-            if let record {
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(record.phase.uppercased())
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .tracking(1)
-                            .foregroundStyle(record.status == .failed ? FVTheme.red : FVTheme.muted)
-                        if record.status == .running {
-                            ProgressView(value: record.progress)
-                                .progressViewStyle(.linear)
-                                .tint(FVTheme.lime)
-                                .frame(maxWidth: 260)
-                        } else if let metrics = record.metrics, let total = metrics.totalSeconds {
-                            Text("Finished in \(total.formatted(.number.precision(.fractionLength(1)))) seconds")
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(FVTheme.faint)
-                        }
-                    }
-                    Spacer()
-                    if record.status == .completed, let url = record.outputURL {
-                        HStack(spacing: 7) {
-                            Button { model.reveal(record) } label: { Image(systemName: "folder") }
-                                .buttonStyle(FVIconButtonStyle())
-                                .help("Reveal in Finder")
-                            Button { model.export(record) } label: { Image(systemName: "arrow.down.to.line") }
-                                .buttonStyle(FVIconButtonStyle())
-                                .help("Export a copy")
-                            ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
-                                .buttonStyle(FVIconButtonStyle())
-                                .help("Share")
-                        }
-                    }
-                }
-            } else {
-                Text("The first x0 preview appears after DMD step 1. The final video replaces it automatically.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(FVTheme.faint)
-            }
-        }
-        .panelStyle()
+                return glyphs[Int(value * Double(glyphs.count))]
+            })
+        }.joined(separator: "\n")
     }
 }
 
 private struct VideoSurface: NSViewRepresentable {
     let url: URL
 
-    final class Coordinator {
-        var url: URL?
-    }
-
+    final class Coordinator { var url: URL? }
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> AVPlayerView {
@@ -637,9 +983,7 @@ private struct VideoSurface: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        updatePlayer(in: view, context: context)
-    }
+    func updateNSView(_ view: AVPlayerView, context: Context) { updatePlayer(in: view, context: context) }
 
     static func dismantleNSView(_ view: AVPlayerView, coordinator: Coordinator) {
         view.player?.pause()
@@ -658,441 +1002,68 @@ private struct VideoSurface: NSViewRepresentable {
     }
 }
 
-private struct LiveBadge: View {
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle().fill(FVTheme.lime).frame(width: 5, height: 5)
-            Text("LIVE X0 PREVIEW")
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .tracking(0.8)
-        }
-        .foregroundStyle(Color.black.opacity(0.82))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(FVTheme.lime))
-    }
-}
-
 private struct GeneratingPlaceholder: View {
     let record: GenerationRecord
-
     var body: some View {
-        VStack(spacing: 17) {
-            ZStack {
-                Circle().stroke(FVTheme.line, lineWidth: 3)
-                Circle()
-                    .trim(from: 0, to: max(0.03, record.progress))
-                    .stroke(FVTheme.lime, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Text("\(Int(record.progress * 100))")
-                    .font(.system(size: 17, weight: .medium, design: .monospaced))
-            }
-            .frame(width: 64, height: 64)
-            VStack(spacing: 5) {
-                Text(record.phase)
-                    .font(.system(size: 12, weight: .semibold))
-                Text("The first rough cut will begin playing here.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(FVTheme.faint)
-            }
-        }
-    }
-}
-
-private struct EmptyOutputView: View {
-    var body: some View {
-        VStack(spacing: 13) {
-            Text("┌─────────────────┐\n│  YOUR NEXT SHOT │\n│     · · ·       │\n└─────────────────┘")
-                .font(.system(size: 11, design: .monospaced))
+        VStack(spacing: 18) {
+            ProgressView(value: record.progress)
+                .progressViewStyle(.circular)
+                .tint(FVTheme.lime)
+                .scaleEffect(1.2)
+            Text(record.phase)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+            Text("The first preview will appear here while the model keeps refining.")
+                .font(.system(size: 11.5))
                 .foregroundStyle(FVTheme.faint)
-                .multilineTextAlignment(.center)
-            Text("Ready when you are")
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(FVTheme.muted)
         }
     }
 }
 
-private struct LibraryView: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PageHeader(
-                eyebrow: "LOCAL ARCHIVE",
-                title: "Every generation, still yours.",
-                detail: "Outputs, settings, timing, and interrupted attempts live here on this Mac."
-            )
-            if model.records.isEmpty {
-                Spacer()
-                VStack(spacing: 14) {
-                    Image(systemName: "film.stack")
-                        .font(.system(size: 34, weight: .thin))
-                        .foregroundStyle(FVTheme.faint)
-                    Text("No generations yet")
-                        .font(.system(size: 16, weight: .semibold))
-                    Button("Create the first one") { model.section = .create }
-                        .buttonStyle(FVSecondaryButtonStyle())
-                }
-                .frame(maxWidth: .infinity)
-                Spacer()
-            } else {
-                HStack(alignment: .top, spacing: 14) {
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(model.records) { record in
-                                LibraryRow(record: record, selected: model.selectedRecordID == record.id)
-                                    .onTapGesture { model.selectedRecordID = record.id }
-                            }
-                        }
-                    }
-                    .frame(width: 320)
-                    OutputPanel(record: model.activeRecord)
-                        .frame(maxWidth: .infinity)
-                }
-                .padding(.horizontal, 34)
-                .padding(.bottom, 34)
-            }
-        }
-        .foregroundStyle(FVTheme.text)
-        .background(FVTheme.background)
-    }
-}
-
-private struct LibraryRow: View {
-    @EnvironmentObject private var model: AppModel
+private struct FailureView: View {
     let record: GenerationRecord
-    let selected: Bool
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(record.settings.variant.label)
-                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(statusColor)
-                Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(FVTheme.faint)
-                Spacer()
-                Circle().fill(statusColor).frame(width: 6, height: 6)
-            }
-            Text(record.prompt)
-                .font(.system(size: 12.5, weight: .medium))
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            HStack {
-                Text("\(record.settings.resolutionLabel) · \(record.settings.frames)f")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(FVTheme.faint)
-                Spacer()
-                if selected, record.status != .running {
-                    Button(role: .destructive) { model.delete(record) } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(FVTheme.faint)
-                }
-            }
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundStyle(FVTheme.red)
+            Text("Generation could not finish").font(.system(size: 15, weight: .medium))
+            Text(record.error ?? "Review Models & Runtime, then try again.")
+                .font(.system(size: 11.5)).foregroundStyle(FVTheme.faint).multilineTextAlignment(.center)
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 9).fill(selected ? FVTheme.surfaceStrong : FVTheme.surface))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? FVTheme.lime.opacity(0.42) : FVTheme.line))
-        .contentShape(Rectangle())
-    }
-
-    private var statusColor: Color {
-        switch record.status {
-        case .completed: FVTheme.lime
-        case .running, .queued: FVTheme.amber
-        case .failed, .cancelled: FVTheme.red
-        }
+        .padding(30)
     }
 }
 
-private struct SetupView: View {
-    @EnvironmentObject private var model: AppModel
-    @AppStorage("fastvideo.onboarding.completed") private var onboardingCompleted = true
-
+private struct LiveBadge: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                PageHeader(
-                    eyebrow: "ONE-TIME SETUP",
-                    title: "Make this Mac a video machine.",
-                    detail: "The app manages a local Python environment and model folder. Nothing here starts a cloud service."
-                )
-                if case let .error(message) = model.runtimeHealth.state {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(FVTheme.red)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Runtime check failed")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(message)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(FVTheme.muted)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .padding(13)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(FVTheme.red.opacity(0.08)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(FVTheme.red.opacity(0.25)))
-                }
-                HStack(alignment: .top, spacing: 12) {
-                    SetupCard(
-                        index: "01",
-                        title: "Apple runtime",
-                        detail: "Python 3.12, FastVideo, MLX 0.31, PyTorch MPS",
-                        ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable,
-                        actionTitle: model.isInstallingRuntime ? "Installing…" : "Install runtime",
-                        action: model.installRuntime
-                    )
-                    SetupCard(
-                        index: "02",
-                        title: "Video tools",
-                        detail: "ffmpeg for the final local MP4 export",
-                        ready: model.runtimeHealth.ffmpegAvailable,
-                        actionTitle: "Install ffmpeg",
-                        action: model.installFFmpeg
-                    )
-                    SetupCard(
-                        index: "03",
-                        title: "FastWan-QAD v2 1.3B",
-                        detail: "Shared model files plus RAW and/or EMA MLX checkpoints",
-                        ready: model.runtimeHealth.modelComponentsPresent && (model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable),
-                        actionTitle: model.isInstallingModel ? "Downloading…" : "Download model",
-                        action: model.installModel
-                    )
-                }
-
-                if model.isInstallingModel {
-                    VStack(alignment: .leading, spacing: 7) {
-                        HStack {
-                            Text("MODEL DOWNLOAD")
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .tracking(1)
-                            Spacer()
-                            if let progress = model.modelInstallProgress {
-                                Text("\(Int(progress * 100))%")
-                                    .font(.system(size: 9, design: .monospaced))
-                            }
-                        }
-                        ProgressView(value: model.modelInstallProgress)
-                            .tint(FVTheme.lime)
-                    }
-                    .padding(14)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(FVTheme.surface))
-                }
-
-                VStack(alignment: .leading, spacing: 14) {
-                    PanelHeader(index: "04", title: "Paths and release source", trailing: "ADVANCED")
-                    PathRow(label: "FASTVIDEO SOURCE", value: $model.configuration.repositoryRoot, choose: model.chooseRepositoryRoot)
-                    PathRow(label: "PYTHON", value: $model.configuration.pythonExecutable, choose: model.choosePython)
-                    PathRow(label: "MODEL FOLDER", value: $model.configuration.modelRoot, choose: model.chooseModelRoot)
-                    VStack(alignment: .leading, spacing: 6) {
-                        SectionLabel("HUGGING FACE REPOSITORY")
-                        TextField("Repository", text: $model.configuration.modelRepository)
-                            .textFieldStyle(FVTextFieldStyle())
-                    }
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            SectionLabel("RAW CHECKPOINT OVERRIDE")
-                            TextField("Auto-detect", text: $model.configuration.rawCheckpoint)
-                                .textFieldStyle(FVTextFieldStyle())
-                        }
-                        VStack(alignment: .leading, spacing: 6) {
-                            SectionLabel("EMA CHECKPOINT OVERRIDE")
-                            TextField("Auto-detect", text: $model.configuration.emaCheckpoint)
-                                .textFieldStyle(FVTextFieldStyle())
-                        }
-                    }
-                    HStack {
-                        Text("EMA is the release default. RAW remains available for direct A/B comparison when its local checkpoint is connected.")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(FVTheme.faint)
-                        Spacer()
-                        Button("Replay welcome") { onboardingCompleted = false }
-                            .buttonStyle(FVSecondaryButtonStyle())
-                        Button("Save and re-check") { model.saveConfiguration() }
-                            .buttonStyle(FVSecondaryButtonStyle())
-                    }
-                }
-                .panelStyle()
-
-                if !model.setupLog.isEmpty {
-                    VStack(alignment: .leading, spacing: 9) {
-                        SectionLabel("SETUP LOG")
-                        ScrollView {
-                            Text(model.setupLog.suffix(120).joined(separator: "\n"))
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(FVTheme.muted)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxHeight: 180)
-                    }
-                    .padding(14)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.28)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(FVTheme.line))
-                }
-            }
-            .padding(.horizontal, 34)
-            .padding(.bottom, 44)
-        }
-        .foregroundStyle(FVTheme.text)
-        .background(FVTheme.background)
+        Label("Live preview", systemImage: "sparkles")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.black.opacity(0.82))
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Capsule().fill(FVTheme.lime))
     }
 }
 
-private struct SetupCard: View {
-    let index: String
-    let title: String
-    let detail: String
-    let ready: Bool
-    let actionTitle: String
-    let action: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text(index)
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(FVTheme.faint)
-                Spacer()
-                HStack(spacing: 5) {
-                    Circle().fill(ready ? FVTheme.lime : FVTheme.amber).frame(width: 6, height: 6)
-                    Text(ready ? "READY" : "NEEDED")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                }
-                .foregroundStyle(ready ? FVTheme.lime : FVTheme.amber)
-            }
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-            Text(detail)
-                .font(.system(size: 10.5))
-                .foregroundStyle(FVTheme.muted)
-                .frame(maxWidth: .infinity, minHeight: 32, alignment: .topLeading)
-            Button(ready ? "Reinstall" : actionTitle, action: action)
-                .buttonStyle(FVSecondaryButtonStyle())
-                .disabled(actionTitle.hasSuffix("…"))
-        }
-        .padding(15)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 9).fill(FVTheme.surface))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(ready ? FVTheme.lime.opacity(0.22) : FVTheme.line))
+private struct FVProminentButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(Color.black.opacity(0.84))
+            .padding(.horizontal, 14)
+            .frame(minHeight: 34)
+            .background(Capsule().fill(FVTheme.lime.opacity(configuration.isPressed ? 0.72 : 1)))
     }
 }
 
-private struct PathRow: View {
-    let label: String
-    @Binding var value: String
-    let choose: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(label)
-            HStack(spacing: 8) {
-                TextField(label, text: $value)
-                    .textFieldStyle(FVTextFieldStyle())
-                Button("Choose…", action: choose)
-                    .buttonStyle(FVSecondaryButtonStyle())
-            }
-        }
-    }
-}
-
-private struct PageHeader: View {
-    let eyebrow: String
-    let title: String
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(eyebrow)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.3)
-                .foregroundStyle(FVTheme.lime)
-            Text(title)
-                .font(.system(size: 31, weight: .medium, design: .rounded))
-                .tracking(-1)
-            Text(detail)
-                .font(.system(size: 12.5))
-                .foregroundStyle(FVTheme.muted)
-        }
-        .padding(.top, 46)
-        .padding(.bottom, 26)
-    }
-}
-
-private struct PanelHeader: View {
-    let index: String
-    let title: String
-    let trailing: String
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(index)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(FVTheme.lime)
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-            Spacer()
-            Text(trailing)
-                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                .tracking(0.9)
-                .foregroundStyle(FVTheme.faint)
-        }
-    }
-}
-
-private struct SectionLabel: View {
-    let value: String
-    init(_ value: String) { self.value = value }
-    var body: some View {
-        Text(value)
-            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-            .tracking(1)
-            .foregroundStyle(FVTheme.faint)
-    }
-}
-
-private struct FVPrimaryButtonStyle: ButtonStyle {
+private struct FVQuietButtonStyle: ButtonStyle {
     var danger = false
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12.5, weight: .semibold))
-            .foregroundStyle(danger ? FVTheme.text : Color.black.opacity(0.88))
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(danger ? FVTheme.red.opacity(configuration.isPressed ? 0.58 : 0.74) : FVTheme.lime.opacity(configuration.isPressed ? 0.72 : 1))
-            )
-            .opacity(configuration.isPressed ? 0.82 : 1)
-    }
-}
-
-private struct FVSecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10.5, weight: .semibold))
-            .foregroundStyle(FVTheme.muted)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 6).fill(configuration.isPressed ? FVTheme.surfaceStrong : FVTheme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(FVTheme.line))
-    }
-}
-
-private struct FVIconButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(FVTheme.muted)
-            .frame(width: 30, height: 30)
-            .background(RoundedRectangle(cornerRadius: 6).fill(configuration.isPressed ? FVTheme.surfaceStrong : FVTheme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(FVTheme.line))
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(danger ? FVTheme.red : FVTheme.muted)
+            .padding(.horizontal, 13)
+            .frame(minHeight: 34)
+            .background(Capsule().fill(configuration.isPressed ? FVTheme.surfaceStrong : FVTheme.surface))
+            .overlay(Capsule().stroke(FVTheme.line))
     }
 }
 
@@ -1102,15 +1073,7 @@ private struct FVTextFieldStyle: TextFieldStyle {
             .font(.system(size: 10.5, design: .monospaced))
             .padding(.horizontal, 11)
             .frame(height: 34)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.18)))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(FVTheme.line))
-    }
-}
-
-private extension View {
-    func panelStyle() -> some View {
-        padding(18)
-            .background(RoundedRectangle(cornerRadius: 11).fill(FVTheme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(FVTheme.line))
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.black.opacity(0.18)))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(FVTheme.line))
     }
 }
