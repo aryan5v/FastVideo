@@ -7,13 +7,15 @@ final class AppModel: ObservableObject {
     @Published var section: AppSection = .create
     @Published var records: [GenerationRecord] = []
     @Published var selectedRecordID: UUID?
-    @Published var prompt = "A fox runs through a misty pine forest, leaves kicking up behind it."
+    @Published var createRecordID: UUID?
+    @Published var prompt = ""
     @Published var generationSettings = GenerationSettings()
     @Published var runtimeHealth = RuntimeHealth()
     @Published var configuration: RuntimeConfiguration
     @Published var setupLog: [String] = []
     @Published var isInstallingRuntime = false
     @Published var isInstallingModel = false
+    @Published var installingVariant: ModelVariant?
     @Published var modelInstallProgress: Double?
     @Published var alertMessage: String?
 
@@ -30,6 +32,11 @@ final class AppModel: ObservableObject {
         return records.first
     }
 
+    var createRecord: GenerationRecord? {
+        guard let createRecordID else { return nil }
+        return records.first { $0.id == createRecordID }
+    }
+
     var isGenerating: Bool { records.contains { $0.status == .running } }
 
     init(library: GenerationLibrary = GenerationLibrary(), defaults: UserDefaults = .standard) {
@@ -40,6 +47,7 @@ final class AppModel: ObservableObject {
         } else {
             configuration = .defaults()
         }
+        configuration.adoptBundledRuntime()
         configuration.adoptDetectedLocalArtifacts()
         if let data = try? JSONEncoder().encode(configuration) {
             defaults.set(data, forKey: "fastvideo.runtime.configuration")
@@ -69,7 +77,7 @@ final class AppModel: ObservableObject {
             return
         }
         guard FileManager.default.fileExists(atPath: configuration.bridgePath) else {
-            runtimeHealth.state = .error("Bridge not found. Select the FastVideo repository in Setup.")
+            runtimeHealth.state = .error("The local runtime is incomplete. Reinstall FastWan QAD or review Developer options.")
             return
         }
         var arguments = [
@@ -109,39 +117,14 @@ final class AppModel: ObservableObject {
     func installRuntime() {
         guard !isInstallingRuntime else { return }
         guard !configuration.uvExecutable.isEmpty else {
-            alertMessage = "uv was not found. Install uv, then return to Setup."
+            alertMessage = "The runtime installer is unavailable. Install uv or select it in Developer options."
             return
         }
         isInstallingRuntime = true
         setupLog = ["Creating a managed Python 3.12 environment…"]
-        let repositoryRoot = configuration.repositoryRoot
-        let venvRoot = RuntimeConfiguration.managedEnvironmentRoot()
-        let venvPython = venvRoot.appendingPathComponent("bin/python").path
         Task {
             do {
-                let venv = try await ProcessDriver.runAndCollect(
-                    executable: configuration.uvExecutable,
-                    arguments: ["venv", "--python", "3.12", "--seed", venvRoot.path],
-                    currentDirectory: repositoryRoot,
-                    onLine: { [weak self] line in Task { @MainActor in self?.setupLog.append(line) } }
-                )
-                guard venv.status == 0 else { throw AppError.commandFailed(venv.output) }
-                setupLog.append("Installing FastVideo with the Apple MLX extra…")
-                var installArguments = ["pip", "install", "--python", venvPython]
-                let bundledSource = Bundle.main.resourceURL?
-                    .appendingPathComponent("fastvideo-source", isDirectory: true).standardizedFileURL.path
-                if bundledSource != URL(fileURLWithPath: repositoryRoot).standardizedFileURL.path {
-                    installArguments.append("-e")
-                }
-                installArguments.append("\(repositoryRoot)[mlx]")
-                let install = try await ProcessDriver.runAndCollect(
-                    executable: configuration.uvExecutable,
-                    arguments: installArguments,
-                    currentDirectory: repositoryRoot,
-                    onLine: { [weak self] line in Task { @MainActor in self?.setupLog.append(line) } }
-                )
-                guard install.status == 0 else { throw AppError.commandFailed(install.output) }
-                configuration.pythonExecutable = venvPython
+                try await installRuntimeComponents()
                 saveConfiguration()
             } catch {
                 alertMessage = "Runtime installation failed: \(error.localizedDescription)"
@@ -151,12 +134,67 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func installModelWithRuntime(_ variant: ModelVariant) {
+        guard !isInstallingRuntime, !isInstallingModel else { return }
+        if FileManager.default.isExecutableFile(atPath: configuration.pythonExecutable) {
+            installModel(variant)
+            return
+        }
+        guard !configuration.uvExecutable.isEmpty else {
+            alertMessage = "The bundled runtime installer is missing. Reinstall FastWan QAD."
+            return
+        }
+        isInstallingRuntime = true
+        setupLog = ["Preparing the local Apple silicon runtime…"]
+        Task {
+            do {
+                try await installRuntimeComponents()
+                saveConfiguration()
+                isInstallingRuntime = false
+                await refreshRuntime()
+                installModel(variant)
+            } catch {
+                isInstallingRuntime = false
+                alertMessage = "Setup could not finish: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func installRuntimeComponents() async throws {
+        let repositoryRoot = configuration.repositoryRoot
+        let venvRoot = RuntimeConfiguration.managedEnvironmentRoot()
+        let venvPython = venvRoot.appendingPathComponent("bin/python").path
+        let venv = try await ProcessDriver.runAndCollect(
+            executable: configuration.uvExecutable,
+            arguments: ["venv", "--python", "3.12", "--seed", venvRoot.path],
+            currentDirectory: repositoryRoot,
+            onLine: { [weak self] line in Task { @MainActor in self?.setupLog.append(line) } }
+        )
+        guard venv.status == 0 else { throw AppError.commandFailed(venv.output) }
+        setupLog.append("Installing the FastWan QAD MLX runtime…")
+        var installArguments = ["pip", "install", "--python", venvPython]
+        let bundledSource = Bundle.main.resourceURL?
+            .appendingPathComponent("fastvideo-source", isDirectory: true).standardizedFileURL.path
+        if bundledSource != URL(fileURLWithPath: repositoryRoot).standardizedFileURL.path {
+            installArguments.append("-e")
+        }
+        installArguments.append("\(repositoryRoot)[mlx]")
+        let install = try await ProcessDriver.runAndCollect(
+            executable: configuration.uvExecutable,
+            arguments: installArguments,
+            currentDirectory: repositoryRoot,
+            onLine: { [weak self] line in Task { @MainActor in self?.setupLog.append(line) } }
+        )
+        guard install.status == 0 else { throw AppError.commandFailed(install.output) }
+        configuration.pythonExecutable = venvPython
+    }
+
     func installFFmpeg() {
         let brew = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first {
             FileManager.default.isExecutableFile(atPath: $0)
         }
         guard let brew else {
-            alertMessage = "Homebrew was not found. Install ffmpeg manually and refresh Setup."
+            alertMessage = "The video exporter could not be installed automatically. Install ffmpeg or review Developer options."
             return
         }
         isInstallingRuntime = true
@@ -177,31 +215,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func installModel() {
+    func installModel(_ variant: ModelVariant = .ema) {
         guard !isInstallingModel else { return }
+        guard FileManager.default.fileExists(atPath: configuration.modelCatalogPath) else {
+            alertMessage = "The bundled FastWan QAD release catalog is missing. Reinstall the application."
+            return
+        }
         guard FileManager.default.isExecutableFile(atPath: configuration.pythonExecutable) else {
-            alertMessage = "Install the MLX runtime before downloading the model."
+            alertMessage = "Prepare the local runtime before downloading a model."
             return
         }
-        guard configuration.modelRepository != "FastVideo/FastWan-QAD-INT8-1.3B-Diffusers" else {
-            alertMessage = "The public model repository is not live yet. Choose the existing local model folder and checkpoints below."
-            return
-        }
+        let installerPython = configuration.pythonExecutable
+        let checkpointRoot = configuration.prepareInstallDestination(for: variant)
+        saveConfiguration()
         isInstallingModel = true
+        installingVariant = variant
         modelInstallProgress = nil
-        setupLog.append("Preparing model download…")
-        var arguments = [
+        setupLog.append("Preparing the \(variant.displayName) model…")
+        let arguments = [
             configuration.bridgePath,
-            "install-model",
-            "--repo-id", configuration.modelRepository,
+            "install-release",
+            "--catalog", configuration.modelCatalogPath,
+            "--variant", variant.rawValue,
             "--model-root", configuration.modelRoot,
+            "--checkpoint-root", checkpointRoot,
         ]
-        if !configuration.modelRevision.isEmpty {
-            arguments += ["--revision", configuration.modelRevision]
-        }
         do {
             try utilityProcess.start(
-                executable: configuration.pythonExecutable,
+                executable: installerPython,
                 arguments: arguments,
                 currentDirectory: configuration.repositoryRoot,
                 onLine: { [weak self] line in
@@ -211,6 +252,7 @@ final class AppModel: ObservableObject {
                     Task { @MainActor in
                         guard let self else { return }
                         self.isInstallingModel = false
+                        self.installingVariant = nil
                         if status != 0 { self.alertMessage = "Model download stopped with code \(status)." }
                         await self.refreshRuntime()
                     }
@@ -218,6 +260,7 @@ final class AppModel: ObservableObject {
             )
         } catch {
             isInstallingModel = false
+            installingVariant = nil
             alertMessage = "Could not start model download: \(error.localizedDescription)"
         }
     }
@@ -270,11 +313,12 @@ final class AppModel: ObservableObject {
             )
             records.insert(record, at: 0)
             selectedRecordID = id
+            createRecordID = id
             try persist()
             generationCompletedEvent = false
             generationActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled],
-                reason: "FastVideo is generating a local video"
+                reason: "FastWan QAD is generating a local video"
             )
             try generationProcess.start(
                 executable: configuration.pythonExecutable,
@@ -291,6 +335,17 @@ final class AppModel: ObservableObject {
             endGenerationActivity()
             alertMessage = "Could not start generation: \(error.localizedDescription)"
         }
+    }
+
+    func startNewGeneration() {
+        createRecordID = nil
+        prompt = ""
+        section = .create
+    }
+
+    func showInCreate(_ record: GenerationRecord) {
+        createRecordID = record.id
+        section = .create
     }
 
     func cancelGeneration() {
@@ -440,7 +495,7 @@ final class AppModel: ObservableObject {
 
     private func notifyCompletion(record: GenerationRecord) {
         let content = UNMutableNotificationContent()
-        content.title = "Your FastVideo is ready"
+        content.title = "Your FastWan QAD video is ready"
         content.body = String(record.prompt.prefix(110))
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: record.id.uuidString, content: content, trigger: nil))

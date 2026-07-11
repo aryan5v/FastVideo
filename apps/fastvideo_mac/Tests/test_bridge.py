@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +65,60 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("private struct VideoSurface: NSViewRepresentable", source)
         self.assertIn("AVPlayerView()", source)
         self.assertNotIn("VideoPlayer(", source)
+
+    def test_first_party_release_installs_shared_and_ema_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared_payload = root / "shared-payload"
+            (shared_payload / "tokenizer").mkdir(parents=True)
+            (shared_payload / "text_encoder").mkdir()
+            (shared_payload / "transformer").mkdir()
+            (shared_payload / "transformer" / "config.json").write_text("{}")
+            ema_payload = root / "ema-payload"
+            ema_payload.mkdir()
+            (ema_payload / "mlx_dit.json").write_text("{}")
+            (ema_payload / "mlx_dit.safetensors").write_bytes(b"weights")
+
+            shared_archive = root / "shared.tar.gz"
+            ema_archive = root / "ema.tar.gz"
+            with tarfile.open(shared_archive, "w:gz") as archive:
+                archive.add(shared_payload, arcname="shared")
+            with tarfile.open(ema_archive, "w:gz") as archive:
+                archive.add(ema_payload, arcname="ema")
+
+            catalog = root / "catalog.json"
+            catalog.write_text(
+                json.dumps({
+                    "shared": {
+                        "url": shared_archive.as_uri(),
+                        "sha256": "",
+                        "bytes": 0
+                    },
+                    "variants": {
+                        "ema": {
+                            "url": ema_archive.as_uri(),
+                            "sha256": "",
+                            "bytes": 0
+                        },
+                        "raw": {
+                            "url": ema_archive.as_uri(),
+                            "sha256": "",
+                            "bytes": 0
+                        },
+                    },
+                }))
+            model_root = root / "installed-shared"
+            checkpoint_root = root / "installed-ema"
+            result = BRIDGE.command_install_release(
+                argparse.Namespace(
+                    catalog=str(catalog),
+                    variant="ema",
+                    model_root=str(model_root),
+                    checkpoint_root=str(checkpoint_root),
+                ))
+            self.assertEqual(result, 0)
+            self.assertTrue(BRIDGE.model_components_present(model_root))
+            self.assertTrue(BRIDGE.checkpoint_is_valid(checkpoint_root))
 
     def test_preview_event_shape_is_json_line_safe(self) -> None:
         event = {

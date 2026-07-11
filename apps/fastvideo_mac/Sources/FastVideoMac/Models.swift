@@ -11,7 +11,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .create: "Create"
         case .library: "Library"
-        case .setup: "Setup"
+        case .setup: "Models"
         }
     }
 
@@ -19,7 +19,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .create: "sparkles.rectangle.stack"
         case .library: "film.stack"
-        case .setup: "slider.horizontal.3"
+        case .setup: "shippingbox"
         }
     }
 }
@@ -33,10 +33,12 @@ enum ModelVariant: String, Codable, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
-        case .raw: "Direct distilled weights"
-        case .ema: "Averaged training weights"
+        case .raw: "Original distilled checkpoint"
+        case .ema: "Smoother motion and the recommended default"
         }
     }
+
+    var displayName: String { self == .ema ? "EMA" : "RAW" }
 }
 
 enum GenerationStatus: String, Codable {
@@ -198,14 +200,21 @@ struct RuntimeConfiguration: Codable, Equatable {
     var pythonExecutable: String
     var uvExecutable: String
     var modelRoot: String
-    var modelRepository = "FastVideo/FastWan-QAD-INT8-1.3B-Diffusers"
-    var modelRevision = ""
     var rawCheckpoint = ""
     var emaCheckpoint = ""
 
     var bridgePath: String {
         URL(fileURLWithPath: repositoryRoot)
             .appendingPathComponent("apps/fastvideo_mac/bridge/fastvideo_mlx_bridge.py").path
+    }
+
+    var modelCatalogPath: String {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("model-catalog.json"),
+           FileManager.default.fileExists(atPath: bundled.path) {
+            return bundled.path
+        }
+        return URL(fileURLWithPath: repositoryRoot)
+            .appendingPathComponent("apps/fastvideo_mac/Resources/model-catalog.json").path
     }
 
     static func defaults() -> RuntimeConfiguration {
@@ -220,11 +229,31 @@ struct RuntimeConfiguration: Codable, Equatable {
                     ? venvPython
                     : findExecutable(named: "python3") ?? "/usr/bin/python3"),
             uvExecutable: findExecutable(named: "uv") ?? "",
-            modelRoot: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Models/FastWan-QAD-INT8-1.3B").path
+            modelRoot: installBaseRoot().appendingPathComponent("Shared", isDirectory: true).path,
+            rawCheckpoint: installBaseRoot().appendingPathComponent("RAW", isDirectory: true).path,
+            emaCheckpoint: installBaseRoot().appendingPathComponent("EMA", isDirectory: true).path
         )
         configuration.adoptDetectedLocalArtifacts()
         return configuration
+    }
+
+    mutating func prepareInstallDestination(for variant: ModelVariant) -> String {
+        let base = Self.installBaseRoot()
+        if !Self.modelComponentsPresent(at: modelRoot) {
+            modelRoot = base.appendingPathComponent("Shared", isDirectory: true).path
+        }
+        switch variant {
+        case .raw:
+            if !Self.mlxCheckpointPresent(at: rawCheckpoint) {
+                rawCheckpoint = base.appendingPathComponent("RAW", isDirectory: true).path
+            }
+            return rawCheckpoint
+        case .ema:
+            if !Self.mlxCheckpointPresent(at: emaCheckpoint) {
+                emaCheckpoint = base.appendingPathComponent("EMA", isDirectory: true).path
+            }
+            return emaCheckpoint
+        }
     }
 
     mutating func adoptDetectedLocalArtifacts() {
@@ -263,9 +292,26 @@ struct RuntimeConfiguration: Codable, Equatable {
         }
     }
 
+    mutating func adoptBundledRuntime() {
+        guard let resources = Bundle.main.resourceURL else { return }
+        let bundledSource = resources.appendingPathComponent("fastvideo-source", isDirectory: true)
+        if FileManager.default.fileExists(atPath: bundledSource.appendingPathComponent("pyproject.toml").path) {
+            repositoryRoot = bundledSource.path
+        }
+        let bundledUV = resources.appendingPathComponent("bin/uv")
+        if FileManager.default.isExecutableFile(atPath: bundledUV.path) {
+            uvExecutable = bundledUV.path
+        }
+    }
+
     static func managedEnvironmentRoot() -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FastVideo/Runtime/.venv", isDirectory: true)
+    }
+
+    static func installBaseRoot() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FastWan QAD/Models/v2", isDirectory: true)
     }
 
     private static func discoverRepositoryRoot() -> String {
@@ -290,6 +336,10 @@ struct RuntimeConfiguration: Codable, Equatable {
     }
 
     private static func findExecutable(named name: String) -> String? {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/\(name)"),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled.path
+        }
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
         for directory in path.split(separator: ":") {
             let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent(name).path

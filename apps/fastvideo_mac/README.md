@@ -1,108 +1,106 @@
-# FastVideo for Mac
+# FastWan QAD for Mac
 
-FastVideo for Mac is a native SwiftUI front end for the Apple Silicon
-FastWan-QAD 1.3B MLX runtime. It is intentionally not a local web server:
-Swift owns setup, generation state, history, playback, Finder export, the macOS
-Share Sheet, notifications, and sleep prevention. Python owns one narrow JSONL
-bridge to the existing MLX inference entrypoint.
+FastWan QAD is a native SwiftUI application for the Apple silicon FastWan QAD
+1.3B MLX runtime. It is not a local web server. Swift owns onboarding,
+first-party model installation, generation state, history, playback, Finder
+export, the macOS Share Sheet, notifications, and sleep prevention. Python owns
+one narrow JSONL bridge to the existing MLX inference entrypoint.
 
-On macOS 26 and newer, navigation and primary controls use SwiftUI's native
-Liquid Glass APIs (`glassEffect`, `GlassEffectContainer`, `.glass`, and
-`.glassProminent`). Older supported systems retain a material-backed fallback.
-The content and media layers stay deliberately dark and quiet so glass remains
-a functional hierarchy rather than decoration on every card.
+On macOS 26 and newer, navigation and primary controls use SwiftUI Liquid Glass.
+Older supported systems retain a material-backed fallback. The workspace stays
+dark and quiet so the video remains the visual focus.
 
 ## Product flow
 
-1. A four-step, skippable onboarding introduces local inference, lets people
-   choose a starter prompt, demonstrates live x0 preview, and checks the Mac.
-   Downloads are deferred so people can explore first; unreleased builds can
-   connect directly to model artifacts already on the Mac.
-2. The first-run Setup screen creates a Python 3.12 environment with
-   `uv pip install -e '.[mlx]'`, discovers imageio's bundled ffmpeg or a system
-   ffmpeg, and connects to local shared model files and MLX checkpoints.
-3. Create defaults to the release-selected EMA weights while keeping RAW
-   available for direct A/B comparison. A candidate is selectable only when its
-   MLX checkpoint is present.
-4. Generate starts the three-step DMD lane. After every non-final step, the full
-   x0 prediction is decoded with TAEHV and atomically published as a rough MP4.
-   The native player swaps to that preview while MLX continues denoising.
-5. The final MP4 replaces the preview and is stored with prompt, settings, time,
-   and metrics in `~/Library/Application Support/FastVideo/Generations`.
+1. A four-step onboarding introduces local inference, live x0 preview, privacy,
+   and the one-click model setup.
+2. The embedded release catalog installs the recommended EMA model by default.
+   RAW is an optional second download for direct checkpoint comparisons. Users
+   never need to enter a repository, URL, or filesystem path.
+3. The packaged app carries `uv`, which prepares the managed Python 3.12, MLX,
+   MPS, and video-export runtime before the selected model download begins.
+4. Create opens as one centered prompt composer. Model and format options stay
+   behind the composer settings menu. The video workspace appears only after a
+   generation starts.
+5. Every non-final DMD x0 prediction is decoded with TAEHV and atomically
+   published as a playable preview. The final MP4 replaces it automatically.
+6. Library presents local generations as a visual gallery with playback,
+   prompt and render metadata, Finder export, sharing, and deletion.
 
-The release-validated default remains 832x480, 81 frames, 16 fps, INT8 MLX DiT,
-TAEHV decode, and DMD timesteps `1000,757,522`. Smaller frame sizes are exposed
-for iteration, but are not presented as release validation evidence.
+The release default is EMA, 832x480, 81 frames, 16 fps, INT8 MLX DiT, TAEHV
+decode, and DMD timesteps `1000,757,522`.
+
+## First-party model distribution
+
+`Resources/model-catalog.json` is bundled into the application. It points to
+three first-party release archives:
+
+- shared tokenizer, text encoder, scheduler, VAE, and transformer config,
+- prequantized EMA MLX weights,
+- optional prequantized RAW MLX weights.
+
+The installer accepts HTTPS release assets, streams download progress into the
+native UI, verifies SHA-256 when present, rejects unsafe archive paths, and
+installs through a staging directory. Release packaging is gated by
+`FASTWAN_RELEASE_BUILD=1`, which requires all catalog checksums and a bundled
+`uv` executable.
+
+Downloaded files live under:
+
+```text
+~/Library/Application Support/FastWan QAD/Models/v2/
+  Shared/
+  EMA/
+  RAW/
+```
+
+Developer options retain explicit source, Python, shared-model, and checkpoint
+overrides. The app also recognizes the validated local v2 development caches;
+the broken v1 EMA export is intentionally skipped because it produces noise.
 
 ## Run from source
-
-Only Apple Command Line Tools are needed to compile the UI:
 
 ```console
 cd apps/fastvideo_mac
 swift run FastVideoMac
 ```
 
-The app will locate the enclosing FastVideo checkout automatically. Use Setup
-to choose another checkout, Python executable, model folder, or explicit RAW
-and EMA checkpoint directories.
-
 ## Build an app bundle
 
 ```console
 cd apps/fastvideo_mac
 ./scripts/package_app.sh
-open dist/FastVideo.app
+open "dist/FastWan QAD.app"
 ```
 
-The packaging script embeds the FastVideo Python source required by this lane,
-but not the Python environment or model weights. It applies an ad-hoc signature
-for local testing. Public distribution still requires a Developer ID signature,
-Hardened Runtime review, notarization, and a release model with final checksums.
-
-## Model layout
-
-The model folder contains the shared Diffusers tokenizer, text encoder, and
-transformer config. The app auto-detects either of these variant layouts:
-
-```text
-mlx_dit_raw/        mlx_dit_ema/
-mlx_dit/raw/        mlx_dit/ema/
-raw/mlx_dit/        ema/mlx_dit/
-```
-
-Each checkpoint directory must contain `mlx_dit.json` and
-`mlx_dit.safetensors`. On this development Mac, the app also discovers
-`~/models/qad_int8_v2_ema`, `~/mlx-ckpt-cache-qad-v2-ema/int8`, and
-`~/mlx-ckpt-cache-qad-v2/int8`. The earlier v1 EMA export is intentionally
-skipped because its generated videos collapse to noise. Explicit paths in Setup
-override auto-detection.
+The development bundle embeds the FastVideo Python source, model catalog, and a
+local `uv` binary when available. It uses an ad-hoc signature. Public
+distribution still requires Developer ID signing, Hardened Runtime review,
+notarization, published release assets, and final catalog checksums.
 
 ## Verify
-
-The test script works with lightweight Apple Command Line Tools and does not
-require XCTest:
 
 ```console
 ./scripts/test.sh
 ```
 
-It compiles the app, runs a Swift Foundation self-test for durable history and
-preview-to-final playback selection, and runs bridge tests for checkpoint
-detection and live-preview command construction.
+The script compiles the app, runs the Swift history/process/preview self-test,
+and runs Python tests for checkpoint detection, first-party archive installation,
+live-preview command construction, and the macOS 27 AVPlayerView contract.
 
 ## Architecture
 
 ```text
 SwiftUI app
-  ├── Setup + runtime diagnosis
-  ├── Generation library (JSON + local MP4s)
-  ├── AVKit preview/final player
+  ├── Liquid Glass onboarding + one-click EMA setup
+  ├── Prompt-first Create workspace
+  ├── Visual local Library
+  ├── Models & Runtime
   └── ProcessDriver
          │ JSON lines
          ▼
 fastvideo_mlx_bridge.py
-  ├── Hugging Face snapshot download
+  ├── first-party release archive installer
   └── mlx_wan_prompt_to_video.py
          ├── MPS prompt encode
          ├── MLX INT8 DMD denoise

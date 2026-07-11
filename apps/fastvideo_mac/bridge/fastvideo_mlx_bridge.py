@@ -10,6 +10,7 @@ terminal transcript directly.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,7 +20,10 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
+import tarfile
+import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -28,19 +32,6 @@ _child: subprocess.Popen[str] | None = None
 
 def emit(event_type: str, **payload: Any) -> None:
     print(json.dumps({"type": event_type, **payload}, ensure_ascii=False), flush=True)
-
-
-def directory_size(path: Path) -> int:
-    total = 0
-    if not path.exists():
-        return total
-    for item in path.rglob("*"):
-        try:
-            if item.is_file() and not item.is_symlink():
-                total += item.stat().st_size
-        except OSError:
-            continue
-    return total
 
 
 def resolve_checkpoint(model_root: Path, variant: str, explicit: str | None = None) -> Path | None:
@@ -136,70 +127,102 @@ def command_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
-def _model_total_size(repo_id: str, revision: str | None) -> int | None:
-    try:
-        from huggingface_hub import HfApi
+def _download_release_asset(asset: dict[str, Any], archive_path: Path, index: int, count: int) -> None:
+    url = str(asset.get("url") or "")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("https", "file"):
+        raise ValueError("The bundled model catalog contains an invalid download URL.")
 
-        info = HfApi().model_info(repo_id, revision=revision, files_metadata=True)
-        total = 0
-        for sibling in info.siblings or []:
-            size = sibling.size
-            if size is None and sibling.lfs is not None:
-                size = sibling.lfs.get("size")
-            total += int(size or 0)
-        return total or None
-    except Exception as exc:
-        emit("log", level="warning", message=f"Could not query model size: {exc}")
-        return None
-
-
-def command_install_model(args: argparse.Namespace) -> int:
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError:
-        emit("error", message="huggingface_hub is not installed in the selected runtime.")
-        return 2
-
-    destination = Path(args.model_root).expanduser()
-    destination.mkdir(parents=True, exist_ok=True)
-    total_bytes = _model_total_size(args.repo_id, args.revision)
-    stop = threading.Event()
-
-    def report_progress() -> None:
-        while not stop.wait(0.75):
-            downloaded = directory_size(destination)
-            fraction = downloaded / total_bytes if total_bytes else None
+    request = urllib.request.Request(url, headers={"User-Agent": "FastWan-QAD-Mac/1"})
+    with urllib.request.urlopen(request, timeout=60) as response, archive_path.open("wb") as destination:
+        expected_size = int(response.headers.get("Content-Length") or asset.get("bytes") or 0)
+        completed = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            destination.write(chunk)
+            completed += len(chunk)
+            item_fraction = completed / expected_size if expected_size else 0
             emit(
                 "progress",
-                phase="Downloading model",
-                bytes_completed=downloaded,
-                bytes_total=total_bytes,
-                fraction=min(fraction, 0.99) if fraction is not None else None,
+                phase="Downloading FastWan QAD",
+                bytes_completed=completed,
+                bytes_total=expected_size or None,
+                fraction=min((index + item_fraction) / count, 0.98),
             )
 
-    reporter = threading.Thread(target=report_progress, daemon=True)
-    reporter.start()
-    emit("phase", phase="Downloading model", message=f"Fetching {args.repo_id}")
+    expected_sha256 = str(asset.get("sha256") or "").lower()
+    if expected_sha256:
+        digest = hashlib.sha256()
+        with archive_path.open("rb") as downloaded:
+            for chunk in iter(lambda: downloaded.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise ValueError("The downloaded model did not match the release checksum.")
+
+
+def _extract_release_asset(archive_path: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-install-", dir=destination.parent))
     try:
-        snapshot_download(
-            repo_id=args.repo_id,
-            revision=args.revision,
-            local_dir=str(destination),
-        )
+        with tarfile.open(archive_path, "r:*") as archive:
+            root = temporary.resolve()
+            for member in archive.getmembers():
+                member_path = (temporary / member.name).resolve()
+                if root not in member_path.parents and member_path != root:
+                    raise ValueError("The model archive contains an unsafe path.")
+            archive.extractall(temporary, filter="data")
+        entries = list(temporary.iterdir())
+        payload = entries[0] if len(entries) == 1 and entries[0].is_dir() else temporary
+        staged = destination.parent / f".{destination.name}-ready"
+        if staged.exists():
+            shutil.rmtree(staged)
+        if payload == temporary:
+            os.replace(temporary, staged)
+        else:
+            os.replace(payload, staged)
+        if destination.exists():
+            shutil.rmtree(destination)
+        os.replace(staged, destination)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def command_install_release(args: argparse.Namespace) -> int:
+    catalog = json.loads(Path(args.catalog).expanduser().read_text())
+    variant = str(args.variant).lower()
+    if variant not in ("ema", "raw"):
+        emit("error", message="Unknown FastWan QAD model variant.")
+        return 2
+
+    model_root = Path(args.model_root).expanduser()
+    checkpoint_root = Path(args.checkpoint_root).expanduser()
+    assets: list[tuple[str, dict[str, Any], Path]] = []
+    if not model_components_present(model_root):
+        assets.append(("Core model", catalog["shared"], model_root))
+    assets.append((f"{variant.upper()} weights", catalog["variants"][variant], checkpoint_root))
+
+    work_root = Path(tempfile.mkdtemp(prefix="fastwan-qad-download-"))
+    emit("phase", phase="Preparing download", message=f"Installing FastWan QAD {variant.upper()}")
+    try:
+        for index, (label, asset, destination) in enumerate(assets):
+            emit("phase", phase=f"Downloading {label}", message=f"Downloading {label}")
+            archive_path = work_root / f"asset-{index}.tar.gz"
+            _download_release_asset(asset, archive_path, index, len(assets))
+            emit("phase", phase=f"Installing {label}", message=f"Installing {label}")
+            _extract_release_asset(archive_path, destination)
     except Exception as exc:
-        emit("error", message=f"Model download failed: {exc}")
+        emit("error", message=f"Model installation failed: {exc}")
         return 1
     finally:
-        stop.set()
-        reporter.join(timeout=1)
+        shutil.rmtree(work_root, ignore_errors=True)
 
-    downloaded = directory_size(destination)
     emit(
         "complete",
         phase="Model ready",
-        output_path=str(destination),
-        bytes_completed=downloaded,
-        bytes_total=total_bytes,
+        output_path=str(checkpoint_root),
         fraction=1.0,
     )
     return 0
@@ -383,11 +406,12 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--ema-checkpoint")
     diagnose.set_defaults(handler=command_diagnose)
 
-    install = subparsers.add_parser("install-model")
-    install.add_argument("--repo-id", required=True)
-    install.add_argument("--revision")
+    install = subparsers.add_parser("install-release")
+    install.add_argument("--catalog", required=True)
+    install.add_argument("--variant", choices=("ema", "raw"), required=True)
     install.add_argument("--model-root", required=True)
-    install.set_defaults(handler=command_install_model)
+    install.add_argument("--checkpoint-root", required=True)
+    install.set_defaults(handler=command_install_release)
 
     generate = subparsers.add_parser("generate")
     generate.add_argument("--request", required=True)
