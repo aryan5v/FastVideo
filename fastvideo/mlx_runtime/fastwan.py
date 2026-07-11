@@ -801,8 +801,16 @@ def mlx_block_weights_from_diffusers_safetensors(
     matrix_targets = {target for target in key_map.values() if target.endswith(".weight") and "norm" not in target}
     weights = {}
     with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
+        available = set(handle.keys())
         for source_name, target_name in key_map.items():
-            array = _load_mx_array_from_safetensor(handle, prefix + source_name, dtype)
+            full = prefix + source_name
+            if full not in available:
+                # Biases are optional: e.g. Wan2.1-14B has bias-free attention/FFN.
+                # The block forward already fetches biases via ``.get(...)``.
+                if source_name.endswith(".bias"):
+                    continue
+                raise KeyError(f"missing required block weight: {full}")
+            array = _load_mx_array_from_safetensor(handle, full, dtype)
             loaded = quantize_matrix(array, spec) if target_name in matrix_targets else array
             _eval_loaded_weight(loaded)
             weights[target_name] = loaded
@@ -848,7 +856,12 @@ def mlx_dit_from_diffusers_safetensors(
     ]
     weights = {}
     with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
+        available = set(handle.keys())
         for name in top_level_names:
+            if name not in available:
+                if name.endswith(".bias"):
+                    continue
+                raise KeyError(f"missing required weight: {name}")
             array = _load_mx_array_from_safetensor(handle, name, cast_dtype)
             if name == "patch_embedding.weight":
                 array = array.reshape(int(config["num_attention_heads"]) * int(config["attention_head_dim"]), -1)
