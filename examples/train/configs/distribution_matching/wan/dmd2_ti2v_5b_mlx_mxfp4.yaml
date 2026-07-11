@@ -1,0 +1,126 @@
+# Draft 5B MXFP4 QAD recipe for human review before a 4xB200 run.
+#
+# Sources checked:
+# - examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8_v2.yaml
+# - examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/distill_dmd_t2v_5B.sh
+# - examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/README.md
+# - fastvideo/train/models/wan/wan.py and fastvideo/configs/pipelines/wan.py
+#
+# Important draft notes:
+# - Student warm-start uses FastVideo/FastWan2.2-TI2V-5B-Diffusers because the
+#   registry exposes it as the distilled/FastWan TI2V 5B path. The local
+#   examples/distill/Wan2.2-TI2V-5B-Diffusers tree does not itself declare a
+#   finished distilled checkpoint, so reviewer should confirm this HF ID.
+# - "Data-free" here means DMD2 rollout_mode: simulate, which makes the method
+#   create zero latents and simulate generator states instead of consuming
+#   dataset VAE latents. A text-conditioning parquet/prompt source is still
+#   needed by the current modular dataloader; do not use the Wan-Syn latent
+#   dataset because those Wan2.1 16-channel latents are incompatible with the
+#   Wan2.2 TI2V 5B 48-channel VAE.
+# - The 2-step schedule [1000, 500] is a draft fallback; no canonical 2-step
+#   Wan2.2 5B schedule was found in-repo.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.2-TI2V-5B-Diffusers
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+    trainable: true
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  real_score_guidance_scale: 3.0
+  dmd_denoising_steps: [1000, 500]
+
+  # Critic optimizer (required - no fallback to training.optimizer)
+  fake_score_learning_rate: 2.0e-6
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: cosine_with_min_lr
+
+training:
+  dit_precision: fp32
+
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    # Reviewer must replace with the text-conditioning parquet/prompt source
+    # for the data-free run. This must not be Wan-Syn latent data.
+    data_path: data/wan2.2_ti2v_5b_data_free_text_conditioning
+    dataloader_num_workers: 4
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 1000
+    num_latent_t: 31
+    num_height: 704
+    num_width: 1280
+    num_frames: 121
+
+  optimizer:
+    learning_rate: 4.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: cosine_with_min_lr
+    min_lr_ratio: 0.5
+    lr_warmup_steps: 100
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan2.2_ti2v_5b_dmd2_2step_mlx_mxfp4
+    training_state_checkpointing_steps: 500
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: distillation_wan
+    run_name: wan2.2_ti2v_5b_dmd2_2step_mlx_mxfp4
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+callbacks:
+  mlx_qat:
+    mode: mxfp4
+    simulate_dtype: fp16
+  grad_clip:
+    max_grad_norm: 1.0
+  validation:
+    pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_64.json
+    every_steps: 200
+    sampling_steps: [2]
+    sampling_timesteps: [1000, 500]
+    guidance_scale: 6.0
+  validation_3step_reference:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_64.json
+    every_steps: 200
+    sampling_steps: [3]
+    sampling_timesteps: [1000, 757, 522]
+    guidance_scale: 6.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.98
+    start_iter: 0
+
+pipeline:
+  flow_shift: 5
+  dmd_denoising_steps: [1000, 500]
