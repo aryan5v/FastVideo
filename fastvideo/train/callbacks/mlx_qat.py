@@ -2,18 +2,26 @@
 """Quantization-aware training callback targeting the Apple/MLX runtime.
 
 Wraps the student transformer's target modules so every forward computes with
-MLX-affine fake-quantized weights (the exact deploy-time grid of
-``mx.quantize``/``mx.dequantize``; see
-``fastvideo/layers/quantization/mlx_affine_qat.py`` and its bitwise parity
-tests), while gradients flow straight-through to the real weights. Composes
-with any ``TrainingMethod`` (DMD2, KD, fine-tune) via YAML:
+MLX fake-quantized weights (the exact deploy-time grid of ``mx.quantize`` /
+``mx.dequantize``), while gradients flow straight-through to the real weights.
+The default ``mode: affine`` is the INT8 path used by the first Mac QAD runs;
+``mode: mxfp4`` switches to the fixed MXFP4 grid (group size 32, no ``bits``).
+Composes with any ``TrainingMethod`` (DMD2, KD, fine-tune) via YAML:
 
 .. code-block:: yaml
 
     callbacks:
       mlx_qat:
+        mode: affine
         group_size: 64
         bits: 8
+
+.. code-block:: yaml
+
+    callbacks:
+      mlx_qat:
+        mode: mxfp4
+        simulate_dtype: fp16
 
 Mechanism: a forward-scoped weight swap, NOT ``torch.nn.utils.parametrize``.
 Under FSDP2/HSDP the parameters are sharded DTensors *outside* module
@@ -43,6 +51,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from fastvideo.layers.quantization.mlx_affine_qat import fake_quantize_mlx_affine
+from fastvideo.layers.quantization.mlx_mxfp4_qat import (
+    DEFAULT_GROUP_SIZE as MXFP4_GROUP_SIZE,
+    fake_quantize_mlx_mxfp4,
+)
 from fastvideo.logger import init_logger
 from fastvideo.train.callbacks.callback import Callback
 
@@ -59,19 +71,24 @@ _SIMULATE_DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch
 _WRAPPED_MARKER = "_mlx_qat_wrapped"
 
 
-def _fake_quantize_weight(weight: torch.Tensor, *, group_size: int, bits: int,
+def _fake_quantize_weight(weight: torch.Tensor, *, mode: str, group_size: int, bits: int,
                           simulate_dtype: torch.dtype) -> torch.Tensor:
     original_shape = weight.shape
     # Conv-style weights (e.g. Wan's patch embedding) quantize over the
     # flattened non-output dims, matching the MLX loader's (out, -1) reshape.
     weight2d = weight.reshape(original_shape[0], -1) if weight.dim() > 2 else weight
-    fq = fake_quantize_mlx_affine(weight2d, group_size=group_size, bits=bits, simulate_dtype=simulate_dtype)
+    if mode == "affine":
+        fq = fake_quantize_mlx_affine(weight2d, group_size=group_size, bits=bits, simulate_dtype=simulate_dtype)
+    elif mode == "mxfp4":
+        fq = fake_quantize_mlx_mxfp4(weight2d, simulate_dtype=simulate_dtype)
+    else:
+        raise ValueError(f"Unknown MLX QAT mode: {mode!r}")
     # Keep the dtype the module was about to compute with (inside FSDP
     # forwards that is the unsharded compute-dtype weight).
     return fq.reshape(original_shape).to(weight.dtype)
 
 
-def _install_qat_forward(module: torch.nn.Module, *, group_size: int, bits: int,
+def _install_qat_forward(module: torch.nn.Module, *, mode: str, group_size: int, bits: int,
                          simulate_dtype: torch.dtype) -> None:
     inner_forward = module.forward  # bound method of this instance
 
@@ -79,8 +96,11 @@ def _install_qat_forward(module: torch.nn.Module, *, group_size: int, bits: int,
         original = module._parameters.pop("weight")
         try:
             # Plain-attribute shadow: getattr finds it before _parameters.
-            module.weight = _fake_quantize_weight(
-                original, group_size=group_size, bits=bits, simulate_dtype=simulate_dtype)
+            module.weight = _fake_quantize_weight(original,
+                                                  mode=mode,
+                                                  group_size=group_size,
+                                                  bits=bits,
+                                                  simulate_dtype=simulate_dtype)
             return inner_forward(*args, **kwargs)
         finally:
             if "weight" in module.__dict__:
@@ -92,11 +112,14 @@ def _install_qat_forward(module: torch.nn.Module, *, group_size: int, bits: int,
 
 
 class MLXQuantizationAwareCallback(Callback):
-    """Apply MLX-affine fake quantization to the student's weights.
+    """Apply MLX fake quantization to the student's weights.
 
     Args (all YAML-configurable):
-        group_size: quantization group size along the input dim (MLX default 64).
-        bits: 8 (deploy target) or 4 (evaluated after INT8 proves out).
+        mode: ``"affine"`` for affine INT8 (default) or ``"mxfp4"`` for the
+            fixed MXFP4 grid.
+        group_size: quantization group size along the input dim for affine
+            mode (MLX default 64). MXFP4 always uses 32 and ignores this arg.
+        bits: affine bit width. MXFP4 ignores this arg.
         simulate_dtype: precision the deploy path casts weights to before
             quantizing ("fp16" matches the MLX loader).
         exclude_patterns: regex fragments; a weight is skipped when any
@@ -106,12 +129,16 @@ class MLXQuantizationAwareCallback(Callback):
     def __init__(
         self,
         *,
+        mode: str = "affine",
         group_size: int = 64,
         bits: int = 8,
         simulate_dtype: str = "fp16",
         exclude_patterns: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_PATTERNS,
     ) -> None:
-        self._group_size = int(group_size)
+        self._mode = mode.strip().lower()
+        if self._mode not in {"affine", "mxfp4"}:
+            raise ValueError("mlx_qat.mode must be one of {'affine', 'mxfp4'}")
+        self._group_size = MXFP4_GROUP_SIZE if self._mode == "mxfp4" else int(group_size)
         self._bits = int(bits)
         self._simulate_dtype = _SIMULATE_DTYPES[simulate_dtype]
         self._exclude = [re.compile(pattern) for pattern in exclude_patterns]
@@ -129,8 +156,7 @@ class MLXQuantizationAwareCallback(Callback):
         if grouped_dim % self._group_size != 0:
             logger.warning(
                 "mlx_qat: skipping %s — grouped dim %d is not divisible by group_size %d "
-                "(the MLX runtime could not quantize this weight either).",
-                module_name, grouped_dim, self._group_size)
+                "(the MLX runtime could not quantize this weight either).", module_name, grouped_dim, self._group_size)
             return False
         return True
 
@@ -145,6 +171,7 @@ class MLXQuantizationAwareCallback(Callback):
                 continue
             _install_qat_forward(
                 module,
+                mode=self._mode,
                 group_size=self._group_size,
                 bits=self._bits,
                 simulate_dtype=self._simulate_dtype,
@@ -152,11 +179,14 @@ class MLXQuantizationAwareCallback(Callback):
             self.quantized_module_names.append(module_name)
 
         if not self.quantized_module_names:
-            raise ValueError(
-                "mlx_qat matched no weights on the student transformer — check exclude_patterns "
-                "and group_size against the model architecture.")
+            raise ValueError("mlx_qat matched no weights on the student transformer — check exclude_patterns "
+                             "and group_size against the model architecture.")
         logger.info(
-            "mlx_qat: fake-quantizing %d weights (int%d, group_size=%d, simulate=%s), e.g. %s",
-            len(self.quantized_module_names), self._bits, self._group_size, self._simulate_dtype,
+            "mlx_qat: fake-quantizing %d weights (mode=%s, int%d, group_size=%d, simulate=%s), e.g. %s",
+            len(self.quantized_module_names),
+            self._mode,
+            self._bits,
+            self._group_size,
+            self._simulate_dtype,
             self.quantized_module_names[:3],
         )
