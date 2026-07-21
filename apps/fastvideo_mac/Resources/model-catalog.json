@@ -1,0 +1,27 @@
+{
+  "catalog_version": 1,
+  "product": "FastWan QAD 1.3B",
+  "release": "v2-mlx-int8",
+  "shared": {
+    "url": "https://github.com/hao-ai-lab/FastVideo/releases/download/fastwan-qad-macos-v1/fastwan-qad-v2-shared.tar.gz",
+    "sha256": "",
+    "bytes": 0
+  },
+  "fast_mode": {
+    "url": "https://github.com/hao-ai-lab/FastVideo/releases/download/fastwan-qad-macos-v1/fastwan-qad-rife-4.25.tar.gz",
+    "sha256": "",
+    "bytes": 0
+  },
+  "variants": {
+    "ema": {
+      "url": "https://github.com/hao-ai-lab/FastVideo/releases/download/fastwan-qad-macos-v1/fastwan-qad-v2-ema-int8.tar.gz",
+      "sha256": "",
+      "bytes": 0
+    },
+    "raw": {
+      "url": "https://github.com/hao-ai-lab/FastVideo/releases/download/fastwan-qad-macos-v1/fastwan-qad-v2-raw-int8.tar.gz",
+      "sha256": "",
+      "bytes": 0
+    }
+  }
+}
