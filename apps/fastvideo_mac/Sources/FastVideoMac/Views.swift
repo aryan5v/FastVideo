@@ -726,10 +726,8 @@ private struct SetupView: View {
                     RuntimeRow(
                         symbol: "cpu",
                         title: "MLX and Metal",
-                        detail: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable
-                            ? "Ready for local generation"
-                            : "Install the local runtime",
-                        ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable,
+                        detail: runtimeDetail,
+                        ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.torchAvailable,
                         actionTitle: "Install",
                         action: model.installRuntime
                     )
@@ -801,6 +799,15 @@ private struct SetupView: View {
             .padding(.horizontal, 38)
             .padding(.bottom, 50)
         }
+    }
+
+    private var runtimeDetail: String {
+        guard model.runtimeHealth.mlxAvailable && model.runtimeHealth.torchAvailable else {
+            return "Install the local runtime"
+        }
+        return model.runtimeHealth.mpsAvailable
+            ? "MLX Metal ready · MPS auxiliaries"
+            : "MLX Metal ready · CPU auxiliaries"
     }
 }
 

@@ -296,8 +296,8 @@ struct OnboardingView: View {
                 OnboardingCheckRow(
                     symbol: "cpu",
                     label: "MLX + Metal runtime",
-                    detail: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable ? "Ready" : "Install in Models & Runtime",
-                    ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable
+                    detail: runtimeDetail,
+                    ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.torchAvailable
                 )
                 OnboardingCheckRow(
                     symbol: "film",
@@ -324,6 +324,13 @@ struct OnboardingView: View {
         }
         .padding(.horizontal, 52)
         .frame(maxWidth: 1180)
+    }
+
+    private var runtimeDetail: String {
+        guard model.runtimeHealth.mlxAvailable && model.runtimeHealth.torchAvailable else {
+            return "Install in Models & Runtime"
+        }
+        return model.runtimeHealth.mpsAvailable ? "MLX + MPS ready" : "MLX ready · CPU auxiliaries"
     }
 
     @ViewBuilder

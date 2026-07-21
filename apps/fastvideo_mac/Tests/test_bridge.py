@@ -18,6 +18,21 @@ SPEC.loader.exec_module(BRIDGE)
 
 class BridgeTest(unittest.TestCase):
 
+    def test_runtime_readiness_allows_cpu_auxiliaries_when_mps_is_unavailable(self) -> None:
+        payload = {
+            "platform_supported": True,
+            "mlx_available": True,
+            "torch_available": True,
+            "mps_available": False,
+            "ffmpeg_available": True,
+            "model_components_present": True,
+            "raw_available": False,
+            "ema_available": True,
+        }
+        self.assertTrue(BRIDGE.runtime_is_ready(payload))
+        payload["mlx_available"] = False
+        self.assertFalse(BRIDGE.runtime_is_ready(payload))
+
     def test_resolve_checkpoint_prefers_variant_specific_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

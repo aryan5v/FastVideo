@@ -87,6 +87,18 @@ def rife_weights_present(model_root: Path) -> bool:
     return (rife_root / "config.json").is_file() and (rife_root / "model.safetensors").is_file()
 
 
+def runtime_is_ready(payload: dict[str, Any]) -> bool:
+    """MLX owns Metal denoising; PyTorch MPS is an optional auxiliary accelerator."""
+    return all((
+        payload["platform_supported"],
+        payload["mlx_available"],
+        payload["torch_available"],
+        payload["ffmpeg_available"],
+        payload["model_components_present"],
+        payload["raw_available"] or payload["ema_available"],
+    ))
+
+
 def command_diagnose(args: argparse.Namespace) -> int:
     model_root = Path(args.model_root).expanduser()
     raw = resolve_checkpoint(model_root, "raw", args.raw_checkpoint)
@@ -121,15 +133,7 @@ def command_diagnose(args: argparse.Namespace) -> int:
         "ema_checkpoint": str(ema) if ema else None,
         "ema_available": checkpoint_is_valid(ema),
     }
-    payload["ready"] = all((
-        payload["platform_supported"],
-        mlx_available,
-        torch_available,
-        mps_available,
-        payload["ffmpeg_available"],
-        payload["model_components_present"],
-        payload["raw_available"] or payload["ema_available"],
-    ))
+    payload["ready"] = runtime_is_ready(payload)
     emit("diagnosis", **payload)
     return 0
 
