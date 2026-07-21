@@ -307,7 +307,7 @@ def _unsharp(frame: np.ndarray, amount: float) -> np.ndarray:
 
 
 def _rife_interpolate_video(*, video_path: Path, target_frames: int, factor: int,
-                            sharpen: float, fps: int) -> None:
+                            sharpen: float, fps: int, weights_dir: Path | None = None) -> None:
     """Read the reduced-frame mp4, RIFE-interpolate up to ``target_frames`` on
     Apple Silicon, optionally light-sharpen, and rewrite the file in place."""
     import imageio.v3 as iio
@@ -315,7 +315,7 @@ def _rife_interpolate_video(*, video_path: Path, target_frames: int, factor: int
     from fastvideo.mlx_runtime.rife_interp import interpolate as rife_interpolate, load_model
 
     frames = [frame for frame in iio.imread(video_path)]
-    model = load_model()
+    model = load_model(weights_dir=str(weights_dir) if weights_dir else None)
     interp = rife_interpolate(frames, factor=factor, model=model)
     if len(interp) > target_frames:
         interp = interp[:target_frames]
@@ -351,6 +351,8 @@ def main() -> None:
                         help="Fast-mode interpolation factor (2 = generate half the frames).")
     parser.add_argument("--fast-sharpen", type=float, default=0.6,
                         help="Light unsharp strength to counter RIFE softness (0 disables).")
+    parser.add_argument("--fast-rife-weights-dir", type=Path, default=None,
+                        help="Optional local RIFE 4.25 weights directory for offline app builds.")
     parser.add_argument("--torch-device", default="auto", help="'auto', 'mps', or 'cpu' for text/VAE components.")
     parser.add_argument("--torch-dtype", choices=("fp16", "bf16", "fp32"), default="fp16",
                         help="Dtype for the TAEHV decode path (and legacy callers).")
@@ -642,6 +644,7 @@ def main() -> None:
             factor=args.fast_factor,
             sharpen=args.fast_sharpen,
             fps=args.fps,
+            weights_dir=args.fast_rife_weights_dir,
         )
         rife_time = time.perf_counter() - rife_start
         print(f"RIFE fast-mode interpolate time: {rife_time:.2f}s")

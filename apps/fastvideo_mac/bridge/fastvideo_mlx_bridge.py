@@ -82,12 +82,18 @@ def model_components_present(model_root: Path) -> bool:
     return all(path.exists() for path in required)
 
 
+def rife_weights_present(model_root: Path) -> bool:
+    rife_root = model_root / "rife" / "RIFE-4.25"
+    return (rife_root / "config.json").is_file() and (rife_root / "model.safetensors").is_file()
+
+
 def command_diagnose(args: argparse.Namespace) -> int:
     model_root = Path(args.model_root).expanduser()
     raw = resolve_checkpoint(model_root, "raw", args.raw_checkpoint)
     ema = resolve_checkpoint(model_root, "ema", args.ema_checkpoint)
 
     mlx_available = importlib.util.find_spec("mlx") is not None
+    rife_available = importlib.util.find_spec("rife_mlx") is not None and rife_weights_present(model_root)
     torch_available = importlib.util.find_spec("torch") is not None
     mps_available = False
     if torch_available:
@@ -104,6 +110,7 @@ def command_diagnose(args: argparse.Namespace) -> int:
         "macos": platform.mac_ver()[0],
         "python": sys.version.split()[0],
         "mlx_available": mlx_available,
+        "rife_available": rife_available,
         "torch_available": torch_available,
         "mps_available": mps_available,
         "ffmpeg_available": resolve_ffmpeg() is not None,
@@ -202,6 +209,8 @@ def command_install_release(args: argparse.Namespace) -> int:
     assets: list[tuple[str, dict[str, Any], Path]] = []
     if not model_components_present(model_root):
         assets.append(("Core model", catalog["shared"], model_root))
+    if not rife_weights_present(model_root):
+        assets.append(("Fast generation", catalog["fast_mode"], model_root / "rife" / "RIFE-4.25"))
     assets.append((f"{variant.upper()} weights", catalog["variants"][variant], checkpoint_root))
 
     work_root = Path(tempfile.mkdtemp(prefix="fastwan-qad-download-"))
@@ -225,6 +234,34 @@ def command_install_release(args: argparse.Namespace) -> int:
         output_path=str(checkpoint_root),
         fraction=1.0,
     )
+    return 0
+
+
+def command_install_fast_mode(args: argparse.Namespace) -> int:
+    catalog = json.loads(Path(args.catalog).expanduser().read_text())
+    model_root = Path(args.model_root).expanduser()
+    destination = model_root / "rife" / "RIFE-4.25"
+    if rife_weights_present(model_root):
+        emit("complete", phase="Fast generation ready", output_path=str(destination), fraction=1.0)
+        return 0
+
+    work_root = Path(tempfile.mkdtemp(prefix="fastwan-qad-fast-mode-"))
+    emit("phase", phase="Preparing fast generation", message="Installing MLX-native RIFE")
+    try:
+        archive_path = work_root / "rife-4.25.tar.gz"
+        _download_release_asset(catalog["fast_mode"], archive_path, 0, 1)
+        emit("phase", phase="Installing fast generation", message="Installing RIFE 4.25")
+        _extract_release_asset(archive_path, destination)
+    except Exception as exc:
+        emit("error", message=f"Fast generation installation failed: {exc}")
+        return 1
+    finally:
+        shutil.rmtree(work_root, ignore_errors=True)
+
+    if not rife_weights_present(model_root):
+        emit("error", message="The Fast generation archive is incomplete.")
+        return 1
+    emit("complete", phase="Fast generation ready", output_path=str(destination), fraction=1.0)
     return 0
 
 
@@ -293,6 +330,11 @@ def _generation_command(request: dict[str, Any], request_path: Path) -> list[str
         command.extend(("--mlx-memory-limit-gib", str(float(memory_limit))))
     if request.get("taehv_parallel"):
         command.append("--taehv-parallel")
+    if request.get("fast"):
+        command.append("--fast")
+        rife_weights = model_root / "rife" / "RIFE-4.25"
+        if rife_weights.is_dir():
+            command.extend(("--fast-rife-weights-dir", str(rife_weights)))
     return command
 
 
@@ -308,7 +350,12 @@ def command_generate(args: argparse.Namespace) -> int:
     output_path = Path(request["output_path"]).expanduser()
     metrics_path = output_path.with_suffix(".metrics.json")
 
-    emit("phase", phase="Preparing", message="Starting the Apple-native runtime")
+    fast_mode = bool(request.get("fast"))
+    emit(
+        "phase",
+        phase="Preparing fast generation" if fast_mode else "Preparing",
+        message="Starting the Apple-native runtime",
+    )
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("FASTVIDEO_ATTENTION_BACKEND", "TORCH_SDPA")
@@ -360,10 +407,19 @@ def command_generate(args: argparse.Namespace) -> int:
                 fraction=0.12 + 0.76 * current / total,
                 message=line,
             )
+        elif fast_mode and line.startswith("[fast] generating"):
+            emit("phase", phase="Fast mode · fewer source frames", fraction=0.08, message=line)
+        elif fast_mode and "[fast] RIFE" in line:
+            emit("progress", phase="Finishing motion", fraction=0.97, message=line)
         elif "Downloading" in line:
             emit("phase", phase="Preparing decoder", message=line)
         elif "Output written to:" in line:
-            emit("phase", phase="Saving video", message=line)
+            emit(
+                "phase",
+                phase="Interpolating motion" if fast_mode else "Saving video",
+                fraction=0.9 if fast_mode else None,
+                message=line,
+            )
         else:
             emit("log", level="info", message=line)
 
@@ -412,6 +468,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--model-root", required=True)
     install.add_argument("--checkpoint-root", required=True)
     install.set_defaults(handler=command_install_release)
+
+    install_fast = subparsers.add_parser("install-fast-mode")
+    install_fast.add_argument("--catalog", required=True)
+    install_fast.add_argument("--model-root", required=True)
+    install_fast.set_defaults(handler=command_install_fast_mode)
 
     generate = subparsers.add_parser("generate")
     generate.add_argument("--request", required=True)

@@ -34,7 +34,11 @@ import json
 import sys
 
 catalog = json.load(open(sys.argv[1]))
-for name, asset in [("shared", catalog["shared"]), *catalog["variants"].items()]:
+for name, asset in [
+    ("shared", catalog["shared"]),
+    ("fast_mode", catalog["fast_mode"]),
+    *catalog["variants"].items(),
+]:
     checksum = asset.get("sha256", "")
     if len(checksum) != 64:
         raise SystemExit(f"release asset {name} needs a SHA-256 checksum")

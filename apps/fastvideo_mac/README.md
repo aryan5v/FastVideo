@@ -19,23 +19,29 @@ dark and quiet so the video remains the visual focus.
    never need to enter a repository, URL, or filesystem path.
 3. The packaged app carries `uv`, which prepares the managed Python 3.12, MLX,
    MPS, and video-export runtime before the selected model download begins.
-4. Create opens as one centered prompt composer. Model and format options stay
-   behind the composer settings menu. The video workspace appears only after a
-   generation starts.
+4. Create opens as one centered prompt composer. Generation mode, model, and
+   format options stay behind the composer settings menu. Fast generation is
+   the recommended default; Full remains available when every frame should be
+   generated natively. The video workspace appears only after generation starts.
 5. Every non-final DMD x0 prediction is decoded with TAEHV and atomically
    published as a playable preview. The final MP4 replaces it automatically.
 6. Library presents local generations as a visual gallery with playback,
-   prompt and render metadata, Finder export, sharing, and deletion.
+   prompt, generation mode, render metadata, Finder export, sharing, and deletion.
 
-The release default is EMA, 832x480, 81 frames, 16 fps, INT8 MLX DiT, TAEHV
-decode, and DMD timesteps `1000,757,522`.
+The release default is EMA, Fast mode, 832x480, 81 output frames, 16 fps, INT8
+MLX DiT, TAEHV decode, and DMD timesteps `1000,757,522`. Fast mode generates 41
+source frames, then uses MLX-native RIFE 2× interpolation and light sharpening
+to restore the requested 81-frame output. The validated 1.3B recipe is about
+2.7× faster at roughly 0.97 reconstruction MS-SSIM.
 
 ## First-party model distribution
 
 `Resources/model-catalog.json` is bundled into the application. It points to
-three first-party release archives:
+four first-party release archives:
 
 - shared tokenizer, text encoder, scheduler, VAE, and transformer config,
+- RIFE 4.25 weights installed under `rife/RIFE-4.25` for offline fast
+  generation,
 - prequantized EMA MLX weights,
 - optional prequantized RAW MLX weights.
 
@@ -105,5 +111,6 @@ fastvideo_mlx_bridge.py
          ├── MPS prompt encode
          ├── MLX INT8 DMD denoise
          ├── per-step x0 → TAEHV preview
-         └── final TAEHV MP4
+         ├── final TAEHV decode
+         └── optional RIFE 2× interpolation → MP4
 ```

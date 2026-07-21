@@ -266,6 +266,23 @@ private struct GenerationOptionsMenu: View {
 
     var body: some View {
         Menu {
+            Section("Generation") {
+                ForEach(GenerationMode.allCases) { mode in
+                    Button {
+                        model.generationSettings.mode = mode
+                    } label: {
+                        Label(
+                            mode == .fast
+                                ? (model.runtimeHealth.rifeAvailable
+                                    ? "Fast · ~2.7× faster"
+                                    : "Fast · Install latest runtime")
+                                : "Full · native frames",
+                            systemImage: model.generationSettings.mode == mode ? "checkmark" : "circle"
+                        )
+                    }
+                    .disabled(mode == .fast && !model.runtimeHealth.rifeAvailable)
+                }
+            }
             Section("Model") {
                 ForEach(ModelVariant.allCases) { variant in
                     Button {
@@ -294,15 +311,15 @@ private struct GenerationOptionsMenu: View {
                 }
             }
         } label: {
-            Image(systemName: "slider.horizontal.3")
+            Image(systemName: model.generationSettings.mode == .fast ? "bolt.fill" : "slider.horizontal.3")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(FVTheme.muted)
+                .foregroundStyle(model.generationSettings.mode == .fast ? FVTheme.lime : FVTheme.muted)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(Color.white.opacity(0.065)))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .help("Generation options")
+        .help(model.generationSettings.mode == .fast ? "Fast mode enabled · about 2.7× faster" : "Generation options")
     }
 }
 
@@ -509,7 +526,9 @@ private struct LibraryCard: View {
                     .aspectRatio(832.0 / 480.0, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay(alignment: .topTrailing) {
-                        Text(record.settings.variant.displayName)
+                        Text(record.settings.mode == .fast
+                            ? "\(record.settings.variant.displayName) · FAST"
+                            : record.settings.variant.displayName)
                             .font(.system(size: 9, weight: .semibold))
                             .padding(.horizontal, 8)
                             .frame(height: 23)
@@ -604,6 +623,7 @@ private struct LibraryDetail: View {
                         Divider().overlay(FVTheme.line)
                         DetailRow(label: "Created", value: record.createdAt.formatted(date: .abbreviated, time: .shortened))
                         DetailRow(label: "Model", value: record.settings.variant == .ema ? "EMA · Recommended" : "RAW")
+                        DetailRow(label: "Generation", value: record.settings.mode == .fast ? "Fast · RIFE 2×" : "Full · Native frames")
                         DetailRow(label: "Format", value: "\(record.settings.resolutionLabel) · \(record.settings.frames) frames")
                         if let seconds = record.metrics?.totalSeconds {
                             DetailRow(label: "Render time", value: "\(seconds.formatted(.number.precision(.fractionLength(1)))) seconds")
@@ -712,6 +732,17 @@ private struct SetupView: View {
                         ready: model.runtimeHealth.mlxAvailable && model.runtimeHealth.mpsAvailable,
                         actionTitle: "Install",
                         action: model.installRuntime
+                    )
+                    Divider().overlay(FVTheme.line)
+                    RuntimeRow(
+                        symbol: "bolt.fill",
+                        title: "Fast generation",
+                        detail: model.runtimeHealth.rifeAvailable
+                            ? "RIFE motion interpolation ready"
+                            : "Install the latest runtime for ~2.7× faster generation",
+                        ready: model.runtimeHealth.rifeAvailable,
+                        actionTitle: "Install",
+                        action: model.installFastMode
                     )
                     Divider().overlay(FVTheme.line)
                     RuntimeRow(

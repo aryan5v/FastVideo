@@ -145,6 +145,11 @@ struct OnboardingView: View {
                     .frame(maxWidth: 530, alignment: .leading)
                     .padding(.top, 20)
 
+                Label("Fast mode uses MLX-native RIFE for about 2.7× faster generation.", systemImage: "bolt.fill")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(FVTheme.lime)
+                    .padding(.top, 16)
+
                 VStack(alignment: .leading, spacing: 9) {
                     Text("PICK A FIRST DIRECTION")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -299,6 +304,12 @@ struct OnboardingView: View {
                     label: "FastWan QAD 1.3B",
                     detail: model.runtimeHealth.emaAvailable ? "EMA installed · RAW optional" : "Download EMA to begin",
                     ready: model.runtimeHealth.rawAvailable || model.runtimeHealth.emaAvailable
+                )
+                OnboardingCheckRow(
+                    symbol: "bolt.fill",
+                    label: "Fast generation",
+                    detail: model.runtimeHealth.rifeAvailable ? "RIFE 2× ready" : "Included with the latest runtime",
+                    ready: model.runtimeHealth.rifeAvailable
                 )
                 OnboardingCheckRow(
                     symbol: "shippingbox",

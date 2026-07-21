@@ -5,6 +5,7 @@ struct CoreSelfTest {
     static func main() async throws {
         try generationLibraryPersistsAndRecoversInterruptedJobs()
         playbackUsesPreviewUntilFinalVideoCompletes()
+        try generationSettingsPreserveLegacyRenderMode()
         defaultConfigurationPointsAtBridgeInsideRepository()
         try await processDriverCapturesFastFinalLine()
         print("FastVideo Mac core self-test passed")
@@ -49,6 +50,13 @@ struct CoreSelfTest {
         precondition(record.playbackURL?.path == "/tmp/preview.mp4")
         record.status = .completed
         precondition(record.playbackURL?.path == "/tmp/final.mp4")
+    }
+
+    private static func generationSettingsPreserveLegacyRenderMode() throws {
+        precondition(GenerationSettings().mode == .fast)
+        let legacy = Data("{\"variant\":\"ema\",\"width\":832,\"height\":480,\"frames\":81,\"fps\":16,\"seed\":1024,\"dmdSteps\":\"1000,757,522\",\"parallelDecode\":false}".utf8)
+        let decoded = try JSONDecoder().decode(GenerationSettings.self, from: legacy)
+        precondition(decoded.mode == .full)
     }
 
     private static func defaultConfigurationPointsAtBridgeInsideRepository() {

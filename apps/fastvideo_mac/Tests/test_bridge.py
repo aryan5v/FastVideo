@@ -45,6 +45,31 @@ class BridgeTest(unittest.TestCase):
             preview_index = command.index("--preview-dir") + 1
             self.assertEqual(command[preview_index], str(output.parent / "previews"))
             self.assertEqual(command[command.index("--preview-every") + 1], "1")
+            self.assertNotIn("--fast", command)
+
+    def test_generation_command_enables_fast_mode_with_first_party_rife_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entrypoint = root / "examples" / "inference" / "basic" / "mlx_wan_prompt_to_video.py"
+            entrypoint.parent.mkdir(parents=True)
+            entrypoint.write_text("# test")
+            model_root = root / "model"
+            rife_weights = model_root / "rife" / "RIFE-4.25"
+            rife_weights.mkdir(parents=True)
+            request = {
+                "repo_root": str(root),
+                "prompt": "A fast paper boat.",
+                "model_root": str(model_root),
+                "checkpoint_path": str(root / "checkpoint"),
+                "output_path": str(root / "video.mp4"),
+                "fast": True,
+            }
+            command = BRIDGE._generation_command(request, root / "request.json")
+            self.assertIn("--fast", command)
+            self.assertEqual(
+                command[command.index("--fast-rife-weights-dir") + 1],
+                str(rife_weights),
+            )
 
     def test_checkpoint_validation_matches_native_mlx_checkpoint_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,19 +103,31 @@ class BridgeTest(unittest.TestCase):
             ema_payload.mkdir()
             (ema_payload / "mlx_dit.json").write_text("{}")
             (ema_payload / "mlx_dit.safetensors").write_bytes(b"weights")
+            rife_payload = root / "rife-payload"
+            rife_payload.mkdir()
+            (rife_payload / "config.json").write_text("{}")
+            (rife_payload / "model.safetensors").write_bytes(b"rife weights")
 
             shared_archive = root / "shared.tar.gz"
             ema_archive = root / "ema.tar.gz"
+            rife_archive = root / "rife.tar.gz"
             with tarfile.open(shared_archive, "w:gz") as archive:
                 archive.add(shared_payload, arcname="shared")
             with tarfile.open(ema_archive, "w:gz") as archive:
                 archive.add(ema_payload, arcname="ema")
+            with tarfile.open(rife_archive, "w:gz") as archive:
+                archive.add(rife_payload, arcname="rife")
 
             catalog = root / "catalog.json"
             catalog.write_text(
                 json.dumps({
                     "shared": {
                         "url": shared_archive.as_uri(),
+                        "sha256": "",
+                        "bytes": 0
+                    },
+                    "fast_mode": {
+                        "url": rife_archive.as_uri(),
                         "sha256": "",
                         "bytes": 0
                     },
@@ -118,6 +155,7 @@ class BridgeTest(unittest.TestCase):
                 ))
             self.assertEqual(result, 0)
             self.assertTrue(BRIDGE.model_components_present(model_root))
+            self.assertTrue(BRIDGE.rife_weights_present(model_root))
             self.assertTrue(BRIDGE.checkpoint_is_valid(checkpoint_root))
 
     def test_preview_event_shape_is_json_line_safe(self) -> None:

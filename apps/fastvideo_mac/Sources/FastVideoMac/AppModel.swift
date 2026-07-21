@@ -109,6 +109,9 @@ final class AppModel: ObservableObject {
                let first = ModelVariant.allCases.first(where: runtimeHealth.variantAvailable) {
                 generationSettings.variant = first
             }
+            if generationSettings.mode == .fast, !runtimeHealth.rifeAvailable {
+                generationSettings.mode = .full
+            }
         } catch {
             runtimeHealth.state = .error(error.localizedDescription)
         }
@@ -128,6 +131,38 @@ final class AppModel: ObservableObject {
                 saveConfiguration()
             } catch {
                 alertMessage = "Runtime installation failed: \(error.localizedDescription)"
+            }
+            isInstallingRuntime = false
+            await refreshRuntime()
+        }
+    }
+
+    func installFastMode() {
+        guard !isInstallingRuntime, !isInstallingModel else { return }
+        guard !configuration.uvExecutable.isEmpty else {
+            alertMessage = "The bundled runtime installer is missing. Reinstall FastWan QAD."
+            return
+        }
+        isInstallingRuntime = true
+        setupLog = ["Preparing Fast generation…"]
+        Task {
+            do {
+                try await installRuntimeComponents()
+                let result = try await ProcessDriver.runAndCollect(
+                    executable: configuration.pythonExecutable,
+                    arguments: [
+                        configuration.bridgePath,
+                        "install-fast-mode",
+                        "--catalog", configuration.modelCatalogPath,
+                        "--model-root", configuration.modelRoot,
+                    ],
+                    currentDirectory: configuration.repositoryRoot,
+                    onLine: { [weak self] line in Task { @MainActor in self?.setupLog.append(line) } }
+                )
+                guard result.status == 0 else { throw AppError.commandFailed(result.output) }
+                saveConfiguration()
+            } catch {
+                alertMessage = "Fast generation setup failed: \(error.localizedDescription)"
             }
             isInstallingRuntime = false
             await refreshRuntime()
@@ -187,6 +222,7 @@ final class AppModel: ObservableObject {
         )
         guard install.status == 0 else { throw AppError.commandFailed(install.output) }
         configuration.pythonExecutable = venvPython
+        generationSettings.mode = .fast
     }
 
     func installFFmpeg() {
@@ -270,6 +306,11 @@ final class AppModel: ObservableObject {
         guard !trimmed.isEmpty else { alertMessage = "Write a prompt first."; return }
         guard runtimeHealth.canGenerate else { section = .setup; return }
         guard !isGenerating else { return }
+        guard generationSettings.mode != .fast || runtimeHealth.rifeAvailable else {
+            alertMessage = "Fast mode needs the latest local runtime. Install it in Models & Runtime, or choose Full generation."
+            section = .setup
+            return
+        }
         guard let checkpoint = runtimeHealth.checkpoint(for: generationSettings.variant) else {
             alertMessage = "The \(generationSettings.variant.label) checkpoint is not installed."
             return
@@ -283,6 +324,7 @@ final class AppModel: ObservableObject {
                 "repo_root": configuration.repositoryRoot,
                 "prompt": trimmed,
                 "variant": generationSettings.variant.rawValue,
+                "fast": generationSettings.mode == .fast,
                 "model_root": configuration.modelRoot,
                 "checkpoint_path": checkpoint,
                 "output_path": outputURL.path,
@@ -507,6 +549,7 @@ final class AppModel: ObservableObject {
         health.mlxAvailable = object["mlx_available"] as? Bool ?? false
         health.torchAvailable = object["torch_available"] as? Bool ?? false
         health.mpsAvailable = object["mps_available"] as? Bool ?? false
+        health.rifeAvailable = object["rife_available"] as? Bool ?? false
         health.ffmpegAvailable = object["ffmpeg_available"] as? Bool ?? false
         health.modelComponentsPresent = object["model_components_present"] as? Bool ?? false
         health.rawAvailable = object["raw_available"] as? Bool ?? false

@@ -49,8 +49,30 @@ enum GenerationStatus: String, Codable {
     case cancelled
 }
 
+enum GenerationMode: String, Codable, CaseIterable, Identifiable {
+    case fast
+    case full
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .fast: "Fast"
+        case .full: "Full"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .fast: "RIFE 2× · about 2.7× faster"
+        case .full: "Generate every frame natively"
+        }
+    }
+}
+
 struct GenerationSettings: Codable, Equatable {
     var variant: ModelVariant = .ema
+    var mode: GenerationMode = .fast
     var width = 832
     var height = 480
     var frames = 81
@@ -62,6 +84,27 @@ struct GenerationSettings: Codable, Equatable {
 
     var duration: Double { Double(frames) / Double(fps) }
     var resolutionLabel: String { "\(width) × \(height)" }
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case variant, mode, width, height, frames, fps, seed, dmdSteps, memoryLimitGiB, parallelDecode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        variant = try container.decodeIfPresent(ModelVariant.self, forKey: .variant) ?? .ema
+        // Records created before fast mode generated every frame natively.
+        mode = try container.decodeIfPresent(GenerationMode.self, forKey: .mode) ?? .full
+        width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 832
+        height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 480
+        frames = try container.decodeIfPresent(Int.self, forKey: .frames) ?? 81
+        fps = try container.decodeIfPresent(Int.self, forKey: .fps) ?? 16
+        seed = try container.decodeIfPresent(Int.self, forKey: .seed) ?? 1024
+        dmdSteps = try container.decodeIfPresent(String.self, forKey: .dmdSteps) ?? "1000,757,522"
+        memoryLimitGiB = try container.decodeIfPresent(Double.self, forKey: .memoryLimitGiB)
+        parallelDecode = try container.decodeIfPresent(Bool.self, forKey: .parallelDecode) ?? false
+    }
 }
 
 struct GenerationMetrics: Codable, Equatable {
@@ -175,6 +218,7 @@ struct RuntimeHealth: Equatable {
     var mlxAvailable = false
     var torchAvailable = false
     var mpsAvailable = false
+    var rifeAvailable = false
     var ffmpegAvailable = false
     var modelComponentsPresent = false
     var rawAvailable = false
