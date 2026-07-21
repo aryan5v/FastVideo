@@ -6,9 +6,10 @@ first-party model installation, generation state, history, playback, Finder
 export, the macOS Share Sheet, notifications, and sleep prevention. Python owns
 one narrow JSONL bridge to the existing MLX inference entrypoint.
 
-On macOS 26 and newer, navigation and primary controls use SwiftUI Liquid Glass.
-Older supported systems retain a material-backed fallback. The workspace stays
-dark and quiet so the video remains the visual focus.
+On macOS 26 and newer, navigation, cards, and controls use tinted SwiftUI
+Liquid Glass. Older supported systems retain a material-backed fallback. Hero
+surfaces carry a subtle aurora of teal and warm light; the workspace otherwise
+stays dark and quiet so the video remains the visual focus.
 
 ## Product flow
 
@@ -27,6 +28,9 @@ dark and quiet so the video remains the visual focus.
    published as a playable preview. The final MP4 replaces it automatically.
 6. Library presents local generations as a visual gallery with playback,
    prompt, generation mode, render metadata, Finder export, sharing, and deletion.
+7. Models & Runtime ends with Uninstall & Reset: delete the models, the
+   runtime environment, the library, or settings individually, or wipe all of
+   it and quit. Only the .app bundle remains to move to the Trash.
 
 The release default is EMA, Fast mode, 832x480, 81 output frames, 16 fps, INT8
 MLX DiT, TAEHV decode, and DMD timesteps `1000,757,522`. Fast mode generates 41

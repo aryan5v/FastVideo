@@ -11,8 +11,34 @@ enum FVTheme {
     static let muted = Color.white.opacity(0.58)
     static let faint = Color.white.opacity(0.32)
     static let lime = Color(red: 0.69, green: 0.96, blue: 0.42)
+    static let mint = Color(red: 0.42, green: 0.87, blue: 0.68)
     static let amber = Color(red: 0.96, green: 0.70, blue: 0.32)
     static let red = Color(red: 0.96, green: 0.36, blue: 0.32)
+
+    // Ambient aurora tones. Deliberately warm/cool natural light — no purple.
+    static let glowTeal = Color(red: 0.24, green: 0.72, blue: 0.64)
+    static let glowWarm = Color(red: 0.91, green: 0.66, blue: 0.36)
+
+    /// Brand gradient: lime easing into mint. Used for marks and key accents.
+    static var accentGradient: LinearGradient {
+        LinearGradient(
+            colors: [lime, mint],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    /// Quiet vertical sheen for hero titles.
+    static var heroGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.white.opacity(0.98),
+                Color(red: 0.80, green: 0.93, blue: 0.82).opacity(0.72),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
 }
 
 struct RootView: View {
@@ -75,13 +101,14 @@ private struct SidebarView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 11) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(FVTheme.lime)
+                    .fill(FVTheme.accentGradient)
                     .frame(width: 32, height: 32)
                     .overlay {
                         Text("FQ")
                             .font(.system(size: 10, weight: .black, design: .rounded))
                             .foregroundStyle(Color.black.opacity(0.82))
                     }
+                    .shadow(color: FVTheme.lime.opacity(0.22), radius: 10, y: 3)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("FastWan QAD")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -116,10 +143,17 @@ private struct SidebarView: View {
                         .foregroundStyle(model.section == section ? FVTheme.text : FVTheme.muted)
                         .padding(.horizontal, 11)
                         .frame(height: 40)
-                        .background(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(model.section == section ? Color.white.opacity(0.085) : .clear)
-                        )
+                        .background {
+                            if model.section == section {
+                                if #available(macOS 26.0, *) {
+                                    Color.clear
+                                        .glassEffect(.regular.tint(Color.white.opacity(0.10)), in: .rect(cornerRadius: 9))
+                                } else {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(Color.white.opacity(0.085))
+                                }
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
                 }
@@ -142,8 +176,11 @@ private struct SidebarView: View {
                         .lineLimit(1)
                 }
             }
-            .padding(.horizontal, 17)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .fvLiquidGlass(cornerRadius: 14, tint: statusColor.opacity(0.05))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 14)
         }
         .foregroundStyle(FVTheme.text)
         .background(PlatformSidebarMaterial())
@@ -181,9 +218,10 @@ private struct CreateView: View {
 
     var body: some View {
         ZStack {
-            FVTheme.background.ignoresSafeArea()
+            FVAmbientBackground(intensity: model.createRecord == nil ? 1 : 0.5)
+                .ignoresSafeArea()
             ASCIIFieldView()
-                .opacity(model.createRecord == nil ? 0.34 : 0.12)
+                .opacity(model.createRecord == nil ? 0.30 : 0.11)
                 .mask(
                     RadialGradient(
                         colors: [.white, .white.opacity(0.7), .clear],
@@ -216,7 +254,7 @@ private struct PromptHome: View {
                 Text("FastWan QAD")
                     .font(.system(size: 58, weight: .medium, design: .rounded))
                     .tracking(-2.6)
-                    .foregroundStyle(FVTheme.text)
+                    .foregroundStyle(FVTheme.heroGradient)
                 Text("Create video locally on Apple silicon.")
                     .font(.system(size: 15, weight: .regular, design: .rounded))
                     .foregroundStyle(FVTheme.muted)
@@ -237,11 +275,19 @@ private struct PromptHome: View {
                 Button {
                     model.generate()
                 } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color.black.opacity(0.82))
-                        .frame(width: 38, height: 38)
-                        .background(Circle().fill(FVTheme.lime))
+                    if #available(macOS 26.0, *) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Color.black.opacity(0.82))
+                            .frame(width: 38, height: 38)
+                            .glassEffect(.regular.tint(FVTheme.lime).interactive(true), in: .circle)
+                    } else {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Color.black.opacity(0.82))
+                            .frame(width: 38, height: 38)
+                            .background(Circle().fill(FVTheme.accentGradient))
+                    }
                 }
                 .buttonStyle(.plain)
                 .disabled(model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -251,13 +297,52 @@ private struct PromptHome: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .frame(maxWidth: 760, minHeight: 64)
-            .fvLiquidGlass(cornerRadius: 22, tint: Color.white.opacity(0.015), interactive: true)
+            .fvLiquidGlass(cornerRadius: 22, tint: FVTheme.lime.opacity(0.02), interactive: true)
             .shadow(color: Color.black.opacity(0.25), radius: 30, y: 16)
+
+            HStack(spacing: 8) {
+                PromptChip(label: "Misty forest", prompt: "A fox runs through a misty pine forest, leaves kicking up behind it.")
+                PromptChip(label: "Neon rain", prompt: "A lone tram glides through neon rain at midnight, reflections stretching across wet asphalt.")
+                PromptChip(label: "Paper world", prompt: "A paper boat sails through a miniature city made from folded maps, warm afternoon light.")
+            }
+            .padding(.top, 16)
+
+            HStack(spacing: 7) {
+                Text("⌘⏎")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(FVTheme.faint)
+                    .padding(.horizontal, 7)
+                    .frame(height: 20)
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.white.opacity(0.055)))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(Color.white.opacity(0.09), lineWidth: 0.5))
+                Text("to generate")
+                Text("·")
+                Text("Fast mode is about 2.7× faster")
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(FVTheme.faint)
+            .padding(.top, 14)
 
             Spacer(minLength: 120)
         }
         .padding(.horizontal, 48)
         .onAppear { promptFocused = true }
+    }
+}
+
+private struct PromptChip: View {
+    @EnvironmentObject private var model: AppModel
+    let label: String
+    let prompt: String
+
+    var body: some View {
+        Button(label) { model.prompt = prompt }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(FVTheme.muted)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .fvLiquidGlass(cornerRadius: 15, interactive: true)
     }
 }
 
@@ -311,11 +396,22 @@ private struct GenerationOptionsMenu: View {
                 }
             }
         } label: {
-            Image(systemName: model.generationSettings.mode == .fast ? "bolt.fill" : "slider.horizontal.3")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(model.generationSettings.mode == .fast ? FVTheme.lime : FVTheme.muted)
-                .frame(width: 36, height: 36)
-                .background(Circle().fill(Color.white.opacity(0.065)))
+            if #available(macOS 26.0, *) {
+                Image(systemName: model.generationSettings.mode == .fast ? "bolt.fill" : "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(model.generationSettings.mode == .fast ? FVTheme.lime : FVTheme.muted)
+                    .frame(width: 36, height: 36)
+                    .glassEffect(
+                        .regular.tint(model.generationSettings.mode == .fast ? FVTheme.lime.opacity(0.35) : nil).interactive(true),
+                        in: .circle
+                    )
+            } else {
+                Image(systemName: model.generationSettings.mode == .fast ? "bolt.fill" : "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(model.generationSettings.mode == .fast ? FVTheme.lime : FVTheme.muted)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.065)))
+            }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -374,7 +470,15 @@ private struct GenerationWorkspace: View {
                 }
                 .aspectRatio(832.0 / 480.0, contentMode: .fit)
                 .frame(maxWidth: 1040)
-                .overlay(RoundedRectangle(cornerRadius: 18).stroke(FVTheme.line))
+                .background(FVVideoGlow(active: record.status == .running))
+                .overlay {
+                    if record.status == .running {
+                        FVProcessingStroke(cornerRadius: 18)
+                    } else {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(FVTheme.line)
+                    }
+                }
                 .shadow(color: Color.black.opacity(0.34), radius: 34, y: 18)
 
                 GenerationFooter(record: record)
@@ -384,6 +488,67 @@ private struct GenerationWorkspace: View {
             .padding(.bottom, 28)
             Spacer(minLength: 0)
         }
+    }
+}
+
+/// Soft aurora breathing behind the video frame while it is being created.
+private struct FVVideoGlow: View {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathe = false
+
+    var body: some View {
+        RadialGradient(
+            colors: [
+                FVTheme.glowTeal.opacity(active ? 0.20 : 0.07),
+                FVTheme.lime.opacity(active ? 0.10 : 0.03),
+                .clear,
+            ],
+            center: .center,
+            startRadius: 80,
+            endRadius: 460
+        )
+        .padding(-70)
+        .blur(radius: 26)
+        .scaleEffect(breathe ? 1.1 : 1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 3.4).repeatForever(autoreverses: true)) {
+                breathe = true
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// A light beam travelling around the frame while generation is in flight.
+private struct FVProcessingStroke: View {
+    let cornerRadius: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spin = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .stroke(
+                AngularGradient(
+                    colors: [
+                        FVTheme.lime.opacity(0),
+                        FVTheme.lime.opacity(0.75),
+                        FVTheme.mint.opacity(0.45),
+                        FVTheme.lime.opacity(0),
+                    ],
+                    center: .center,
+                    angle: .degrees(spin ? 360 : 0)
+                ),
+                lineWidth: 1.6
+            )
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.linear(duration: 5).repeatForever(autoreverses: false)) {
+                    spin = true
+                }
+            }
+            .allowsHitTesting(false)
     }
 }
 
@@ -447,7 +612,7 @@ private struct StatusPill: View {
         .foregroundStyle(FVTheme.muted)
         .padding(.horizontal, 11)
         .frame(height: 28)
-        .background(Capsule().fill(Color.white.opacity(0.06)))
+        .fvGlassCapsule(tint: color.opacity(0.30), fallback: Color.white.opacity(0.06))
     }
 
     private var color: Color {
@@ -515,6 +680,8 @@ private struct LibraryView: View {
 }
 
 private struct LibraryCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
     let record: GenerationRecord
     let selected: Bool
     let action: () -> Void
@@ -525,6 +692,16 @@ private struct LibraryCard: View {
                 VideoThumbnailView(url: record.outputURL)
                     .aspectRatio(832.0 / 480.0, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay {
+                        if hovering {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.94))
+                                .frame(width: 46, height: 46)
+                                .fvLiquidGlass(cornerRadius: 23)
+                                .transition(.opacity.combined(with: .scale(scale: 0.82)))
+                        }
+                    }
                     .overlay(alignment: .topTrailing) {
                         Text(record.settings.mode == .fast
                             ? "\(record.settings.variant.displayName) · FAST"
@@ -532,7 +709,15 @@ private struct LibraryCard: View {
                             .font(.system(size: 9, weight: .semibold))
                             .padding(.horizontal, 8)
                             .frame(height: 23)
-                            .background(.ultraThinMaterial, in: Capsule())
+                            .background {
+                                if #available(macOS 26.0, *) {
+                                    Color.clear
+                                        .glassEffect(.regular, in: .capsule)
+                                } else {
+                                    Capsule()
+                                        .fill(.ultraThinMaterial)
+                                }
+                            }
                             .padding(8)
                     }
                 Text(record.prompt)
@@ -549,16 +734,27 @@ private struct LibraryCard: View {
                 .foregroundStyle(FVTheme.faint)
             }
             .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(selected ? FVTheme.surfaceStrong : Color.clear)
-            )
+            .background {
+                if selected {
+                    if #available(macOS 26.0, *) {
+                        Color.clear
+                            .glassEffect(.regular.tint(FVTheme.lime.opacity(0.10)), in: .rect(cornerRadius: 16))
+                    } else {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(FVTheme.surfaceStrong)
+                    }
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(selected ? FVTheme.lime.opacity(0.45) : Color.clear)
             )
         }
         .buttonStyle(.plain)
+        .scaleEffect(hovering && !reduceMotion ? 1.015 : 1)
+        .shadow(color: Color.black.opacity(hovering ? 0.32 : 0), radius: 18, y: 9)
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: hovering)
     }
 }
 
@@ -676,6 +872,8 @@ private struct SetupView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("fastvideo.onboarding.completed") private var onboardingCompleted = true
     @State private var showDeveloperOptions = false
+    @State private var pendingReset: ResetScope?
+    @State private var showFullResetConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -753,6 +951,38 @@ private struct SetupView: View {
                     )
                 }
 
+                SettingsSection(
+                    title: "Uninstall & Reset",
+                    detail: "Remove anything FastWan QAD has added to this Mac. Nothing outside these folders is ever touched."
+                ) {
+                    ResetRow(scope: .models, sizeText: model.resetSizes[.models] ?? "…") { pendingReset = .models }
+                    Divider().overlay(FVTheme.line)
+                    ResetRow(scope: .runtime, sizeText: model.resetSizes[.runtime] ?? "…") { pendingReset = .runtime }
+                    Divider().overlay(FVTheme.line)
+                    ResetRow(scope: .library, sizeText: model.resetSizes[.library] ?? "…") { pendingReset = .library }
+                    Divider().overlay(FVTheme.line)
+                    ResetRow(scope: .settings, sizeText: model.resetSizes[.settings] ?? "…") { pendingReset = .settings }
+                    Divider().overlay(FVTheme.line)
+                    HStack(spacing: 15) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(FVTheme.red)
+                            .frame(width: 30)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Reset everything")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                            Text("Delete all of the above, then quit. Move FastWan QAD.app to the Trash to finish uninstalling.")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(FVTheme.faint)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Button("Reset & Quit…") { showFullResetConfirmation = true }
+                            .buttonStyle(FVQuietButtonStyle(danger: true))
+                    }
+                    .padding(.vertical, 6)
+                }
+
                 DisclosureGroup("Developer options", isExpanded: $showDeveloperOptions) {
                     VStack(spacing: 14) {
                         PathRow(label: "FastVideo source", value: $model.configuration.repositoryRoot, choose: model.chooseRepositoryRoot)
@@ -781,7 +1011,7 @@ private struct SetupView: View {
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(FVTheme.muted)
                 .padding(20)
-                .background(RoundedRectangle(cornerRadius: 16).fill(FVTheme.surface))
+                .fvGlassSurface(cornerRadius: 16)
 
                 if !model.setupLog.isEmpty {
                     DisclosureGroup("Installation details") {
@@ -798,6 +1028,21 @@ private struct SetupView: View {
             .frame(maxWidth: 900)
             .padding(.horizontal, 38)
             .padding(.bottom, 50)
+        }
+        .onAppear { model.refreshResetSizes() }
+        .alert(item: $pendingReset) { scope in
+            Alert(
+                title: Text(scope.confirmTitle),
+                message: Text(scope.confirmDetail),
+                primaryButton: .destructive(Text(scope.actionLabel)) { model.performReset(scope) },
+                secondaryButton: .cancel()
+            )
+        }
+        .alert("Reset FastWan QAD?", isPresented: $showFullResetConfirmation) {
+            Button("Delete Everything & Quit", role: .destructive) { model.resetEverythingAndQuit() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Models, the runtime environment, your entire library, and all settings will be permanently deleted from this Mac.")
         }
     }
 
@@ -833,7 +1078,7 @@ private struct ModelInstallRow: View {
                             .foregroundStyle(Color.black.opacity(0.78))
                             .padding(.horizontal, 7)
                             .frame(height: 19)
-                            .background(Capsule().fill(FVTheme.lime))
+                            .background(Capsule().fill(FVTheme.accentGradient))
                     }
                 }
                 Text(variant.detail)
@@ -870,6 +1115,35 @@ private struct ModelInstallRow: View {
     }
 
     private var installed: Bool { model.runtimeHealth.variantAvailable(variant) }
+}
+
+private struct ResetRow: View {
+    let scope: ResetScope
+    let sizeText: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 15) {
+            Image(systemName: scope.symbol)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(FVTheme.muted)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(scope.title)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                Text(scope.detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(FVTheme.faint)
+            }
+            Spacer()
+            Text(sizeText)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(FVTheme.faint)
+            Button(scope.actionLabel, action: action)
+                .buttonStyle(FVQuietButtonStyle(danger: true))
+        }
+        .padding(.vertical, 6)
+    }
 }
 
 private struct RuntimeRow: View {
@@ -920,8 +1194,7 @@ private struct SettingsSection<Content: View>: View {
             }
             VStack(spacing: 12) { content }
                 .padding(20)
-                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(FVTheme.surface))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(FVTheme.line))
+                .fvGlassSurface(cornerRadius: 16)
         }
     }
 }
@@ -968,6 +1241,104 @@ private struct PathRow: View {
                 TextField(label, text: $value).textFieldStyle(FVTextFieldStyle())
                 Button("Choose…", action: choose).buttonStyle(FVQuietButtonStyle())
             }
+        }
+    }
+}
+
+/// A tiny diffusion story, told softly: a painted miniature scene that
+/// resolves from a deep blur into clarity, settles, then fades so the loop can
+/// begin again. No flicker, no cells — just blur becoming light.
+struct DenoisePreview: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: reduceMotion ? 3600 : 1.0 / 30.0)) { timeline in
+            let phase = Self.phase(at: timeline.date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion)
+            scene
+                .blur(radius: phase.blur)
+                .scaleEffect(phase.scale)
+                .overlay(Color.black.opacity(phase.dim))
+                .opacity(phase.opacity)
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// One loop: unblur over the first 55%, hold sharp, fade out at the end so
+    /// the restart is never visible.
+    private struct Phase {
+        var blur: CGFloat
+        var scale: CGFloat
+        var dim: Double
+        var opacity: Double
+    }
+
+    private static func phase(at tick: TimeInterval, reduceMotion: Bool) -> Phase {
+        guard !reduceMotion else { return Phase(blur: 0, scale: 1, dim: 0, opacity: 1) }
+        let t = tick.truncatingRemainder(dividingBy: 8.0) / 8.0
+        let resolve = easeInOut(min(1, t / 0.55))
+        let fadeOut = t > 0.88 ? easeInOut((t - 0.88) / 0.12) : 0
+        return Phase(
+            blur: (1 - resolve) * 16,
+            scale: 1.05 - resolve * 0.05,
+            dim: (1 - resolve) * 0.30,
+            opacity: 1 - fadeOut
+        )
+    }
+
+    private static func easeInOut(_ x: Double) -> Double {
+        x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2
+    }
+
+    /// A miniature landscape: teal sky melting into a warm horizon, a low sun,
+    /// and a dark ridge in front.
+    private var scene: some View {
+        Canvas { context, size in
+            let horizon = size.height * 0.62
+            context.fill(
+                Path(CGRect(x: 0, y: 0, width: size.width, height: horizon)),
+                with: .linearGradient(
+                    Gradient(colors: [
+                        Color(red: 0.07, green: 0.23, blue: 0.25),
+                        Color(red: 0.16, green: 0.36, blue: 0.33),
+                        Color(red: 0.83, green: 0.52, blue: 0.28),
+                    ]),
+                    startPoint: .zero,
+                    endPoint: CGPoint(x: 0, y: horizon)
+                )
+            )
+            let sunCenter = CGPoint(x: size.width * 0.68, y: horizon * 0.72)
+            let sunRadius = size.width * 0.075
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: sunCenter.x - sunRadius,
+                    y: sunCenter.y - sunRadius,
+                    width: sunRadius * 2,
+                    height: sunRadius * 2
+                )),
+                with: .radialGradient(
+                    Gradient(colors: [
+                        Color(red: 1.0, green: 0.90, blue: 0.62),
+                        Color(red: 1.0, green: 0.78, blue: 0.45).opacity(0.55),
+                        .clear,
+                    ]),
+                    center: sunCenter,
+                    startRadius: 0,
+                    endRadius: sunRadius
+                )
+            )
+            context.fill(
+                Path(CGRect(x: 0, y: horizon, width: size.width, height: size.height - horizon)),
+                with: .color(Color(red: 0.05, green: 0.09, blue: 0.08))
+            )
+            var ridge = Path()
+            ridge.move(to: CGPoint(x: 0, y: size.height))
+            for x in stride(from: 0, through: size.width, by: 4) {
+                let u = x / size.width
+                ridge.addLine(to: CGPoint(x: x, y: size.height * (0.70 + 0.055 * sin(u * 9 + 1.4))))
+            }
+            ridge.addLine(to: CGPoint(x: size.width, y: size.height))
+            ridge.closeSubpath()
+            context.fill(ridge, with: .color(Color(red: 0.13, green: 0.20, blue: 0.17)))
         }
     }
 }
@@ -1043,16 +1414,26 @@ private struct VideoSurface: NSViewRepresentable {
 private struct GeneratingPlaceholder: View {
     let record: GenerationRecord
     var body: some View {
-        VStack(spacing: 18) {
-            ProgressView(value: record.progress)
-                .progressViewStyle(.circular)
-                .tint(FVTheme.lime)
-                .scaleEffect(1.2)
-            Text(record.phase)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-            Text("The first preview will appear here while the model keeps refining.")
-                .font(.system(size: 11.5))
-                .foregroundStyle(FVTheme.faint)
+        ZStack {
+            DenoisePreview()
+            LinearGradient(
+                colors: [Color.black.opacity(0.10), Color.black.opacity(0.58)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            VStack(spacing: 12) {
+                Spacer()
+                Text(record.phase)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.94))
+                ProgressView(value: record.progress)
+                    .tint(FVTheme.lime)
+                    .frame(maxWidth: 220)
+                Text("First light appears here while the model keeps refining.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+            .padding(.bottom, 24)
         }
     }
 }
@@ -1077,31 +1458,51 @@ private struct LiveBadge: View {
             .foregroundStyle(Color.black.opacity(0.82))
             .padding(.horizontal, 10)
             .frame(height: 28)
-            .background(Capsule().fill(FVTheme.lime))
+            .fvGlassCapsule(tint: FVTheme.lime, fallback: FVTheme.lime)
     }
 }
 
 private struct FVProminentButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11.5, weight: .semibold))
-            .foregroundStyle(Color.black.opacity(0.84))
-            .padding(.horizontal, 14)
-            .frame(minHeight: 34)
-            .background(Capsule().fill(FVTheme.lime.opacity(configuration.isPressed ? 0.72 : 1)))
+        if #available(macOS 26.0, *) {
+            configuration.label
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.black.opacity(0.84))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 34)
+                .glassEffect(.regular.tint(FVTheme.lime).interactive(true), in: .capsule)
+                .opacity(configuration.isPressed ? 0.85 : 1)
+        } else {
+            configuration.label
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.black.opacity(0.84))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 34)
+                .background(Capsule().fill(FVTheme.lime.opacity(configuration.isPressed ? 0.72 : 1)))
+        }
     }
 }
 
 private struct FVQuietButtonStyle: ButtonStyle {
     var danger = false
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(danger ? FVTheme.red : FVTheme.muted)
-            .padding(.horizontal, 13)
-            .frame(minHeight: 34)
-            .background(Capsule().fill(configuration.isPressed ? FVTheme.surfaceStrong : FVTheme.surface))
-            .overlay(Capsule().stroke(FVTheme.line))
+        if #available(macOS 26.0, *) {
+            configuration.label
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(danger ? FVTheme.red : FVTheme.muted)
+                .padding(.horizontal, 13)
+                .frame(minHeight: 34)
+                .glassEffect(.regular.interactive(true), in: .capsule)
+                .opacity(configuration.isPressed ? 0.78 : 1)
+        } else {
+            configuration.label
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(danger ? FVTheme.red : FVTheme.muted)
+                .padding(.horizontal, 13)
+                .frame(minHeight: 34)
+                .background(Capsule().fill(configuration.isPressed ? FVTheme.surfaceStrong : FVTheme.surface))
+                .overlay(Capsule().stroke(FVTheme.line))
+        }
     }
 }
 

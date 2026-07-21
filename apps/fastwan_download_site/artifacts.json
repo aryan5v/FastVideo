@@ -1,0 +1,46 @@
+{
+  "release": "v2-mlx-int8",
+  "minimum_macos": "15.0",
+  "artifacts": {
+    "app": {
+      "key": "releases/v2-mlx-int8/FastWan-QAD-macOS.zip",
+      "filename": "FastWan-QAD-macOS.zip",
+      "label": "FastWan QAD for Mac",
+      "content_type": "application/zip",
+      "bytes": 0,
+      "sha256": ""
+    },
+    "shared": {
+      "key": "releases/v2-mlx-int8/fastwan-qad-v2-shared.tar.gz",
+      "filename": "fastwan-qad-v2-shared.tar.gz",
+      "label": "Core model",
+      "content_type": "application/gzip",
+      "bytes": 0,
+      "sha256": ""
+    },
+    "fast_mode": {
+      "key": "releases/v2-mlx-int8/fastwan-qad-rife-4.25.tar.gz",
+      "filename": "fastwan-qad-rife-4.25.tar.gz",
+      "label": "Fast generation",
+      "content_type": "application/gzip",
+      "bytes": 0,
+      "sha256": ""
+    },
+    "ema": {
+      "key": "releases/v2-mlx-int8/fastwan-qad-v2-ema-int8.tar.gz",
+      "filename": "fastwan-qad-v2-ema-int8.tar.gz",
+      "label": "EMA model",
+      "content_type": "application/gzip",
+      "bytes": 0,
+      "sha256": ""
+    },
+    "raw": {
+      "key": "releases/v2-mlx-int8/fastwan-qad-v2-raw-int8.tar.gz",
+      "filename": "fastwan-qad-v2-raw-int8.tar.gz",
+      "label": "RAW model",
+      "content_type": "application/gzip",
+      "bytes": 0,
+      "sha256": ""
+    }
+  }
+}

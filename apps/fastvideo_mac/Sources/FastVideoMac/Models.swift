@@ -411,3 +411,173 @@ struct RuntimeConfiguration: Codable, Equatable {
         candidates.first(where: mlxCheckpointPresent)
     }
 }
+
+// MARK: - Uninstall & Reset
+//
+// Everything FastWan QAD adds to a Mac lives in exactly three places:
+// `~/Library/Application Support/FastWan QAD` (models), `~/Library/Application
+// Support/FastVideo` (runtime + generations), and two UserDefaults keys.
+// ResetScope/ResetPlan describe those boundaries so the app can delete only
+// what it owns — nothing else on the system is ever touched.
+
+enum ResetScope: String, CaseIterable, Identifiable {
+    case models
+    case runtime
+    case library
+    case settings
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .models: "Downloaded models"
+        case .runtime: "Runtime environment"
+        case .library: "Library & history"
+        case .settings: "App settings"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .models: "Shared weights, EMA and RAW checkpoints, and RIFE"
+        case .runtime: "Managed Python, MLX, and Metal tooling"
+        case .library: "Every generated video, preview, and its history"
+        case .settings: "Configuration and onboarding preferences"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .models: "shippingbox"
+        case .runtime: "cpu"
+        case .library: "film.stack"
+        case .settings: "gearshape"
+        }
+    }
+
+    var actionLabel: String { self == .settings ? "Reset" : "Delete" }
+
+    var confirmTitle: String {
+        switch self {
+        case .models: "Delete all downloaded models?"
+        case .runtime: "Delete the runtime environment?"
+        case .library: "Delete the entire library?"
+        case .settings: "Reset app settings?"
+        }
+    }
+
+    var confirmDetail: String {
+        switch self {
+        case .models: "Shared weights, EMA and RAW checkpoints, and RIFE will be permanently deleted. You can download them again later."
+        case .runtime: "The managed Python, MLX, and Metal environment will be permanently deleted. It can be reinstalled at any time."
+        case .library: "Every generated video and its history will be permanently deleted. This cannot be undone."
+        case .settings: "Paths and preferences return to their defaults, and onboarding will appear the next time FastWan QAD opens."
+        }
+    }
+}
+
+enum ResetPlan {
+    static let defaultsKeys = [
+        "fastvideo.runtime.configuration",
+        "fastvideo.onboarding.completed",
+    ]
+
+    private static func applicationSupport() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Everything the installer downloads lives under this folder.
+    static func appDataRoot(applicationSupportRoot: URL = applicationSupport()) -> URL {
+        applicationSupportRoot.appendingPathComponent("FastWan QAD", isDirectory: true)
+    }
+
+    /// The managed runtime and the generation library share this folder.
+    static func fastvideoDataRoot(applicationSupportRoot: URL = applicationSupport()) -> URL {
+        applicationSupportRoot.appendingPathComponent("FastVideo", isDirectory: true)
+    }
+
+    static func paths(
+        for scope: ResetScope,
+        libraryRoot: URL,
+        applicationSupportRoot: URL = applicationSupport()
+    ) -> [URL] {
+        switch scope {
+        case .models:
+            [appDataRoot(applicationSupportRoot: applicationSupportRoot)]
+        case .runtime:
+            [fastvideoDataRoot(applicationSupportRoot: applicationSupportRoot).appendingPathComponent("Runtime", isDirectory: true)]
+        case .library:
+            [libraryRoot]
+        case .settings:
+            []
+        }
+    }
+
+    static func fullResetPaths(
+        libraryRoot _: URL,
+        applicationSupportRoot: URL = applicationSupport()
+    ) -> [URL] {
+        [
+            appDataRoot(applicationSupportRoot: applicationSupportRoot),
+            fastvideoDataRoot(applicationSupportRoot: applicationSupportRoot),
+        ]
+    }
+
+    @discardableResult
+    static func remove(
+        _ scope: ResetScope,
+        libraryRoot: URL,
+        applicationSupportRoot: URL = applicationSupport()
+    ) throws -> Int64 {
+        try removeTargets(paths(
+            for: scope,
+            libraryRoot: libraryRoot,
+            applicationSupportRoot: applicationSupportRoot
+        ))
+    }
+
+    @discardableResult
+    static func removeEverything(
+        libraryRoot: URL,
+        applicationSupportRoot: URL = applicationSupport()
+    ) throws -> Int64 {
+        try removeTargets(fullResetPaths(
+            libraryRoot: libraryRoot,
+            applicationSupportRoot: applicationSupportRoot
+        ))
+    }
+
+    private static func removeTargets(_ targets: [URL]) throws -> Int64 {
+        let manager = FileManager.default
+        let existing = targets.filter { manager.fileExists(atPath: $0.path) }
+        let freed = existing.reduce(Int64(0)) { $0 + byteCount(at: $1) }
+        for target in existing {
+            try manager.removeItem(at: target)
+            if manager.fileExists(atPath: target.path) {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+        return freed
+    }
+
+    static func byteCount(at url: URL) -> Int64 {
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        if values?.isRegularFile == true { return Int64(values?.fileSize ?? 0) }
+        var total: Int64 = 0
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        for case let file as URL in enumerator {
+            let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            total += Int64(size ?? 0)
+        }
+        return total
+    }
+
+    static func formattedSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}

@@ -411,6 +411,100 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Uninstall & Reset
+
+    @Published var resetSizes: [ResetScope: String] = [:]
+
+    func refreshResetSizes() {
+        let libraryRoot = library.baseURL
+        Task.detached(priority: .utility) { [weak self] in
+            var map: [ResetScope: String] = [:]
+            for scope in ResetScope.allCases {
+                if scope == .settings {
+                    map[scope] = "Preferences"
+                    continue
+                }
+                let bytes = ResetPlan.paths(for: scope, libraryRoot: libraryRoot)
+                    .reduce(Int64(0)) { $0 + ResetPlan.byteCount(at: $1) }
+                map[scope] = ResetPlan.formattedSize(bytes)
+            }
+            await self?.applyResetSizes(map)
+        }
+    }
+
+    private func applyResetSizes(_ map: [ResetScope: String]) {
+        resetSizes = map
+    }
+
+    /// Removes one category of app-owned data. Anything in flight is stopped
+    /// first so no process holds files inside the folders being deleted.
+    func performReset(_ scope: ResetScope) {
+        stopBackgroundWork()
+        if scope == .settings {
+            for key in ResetPlan.defaultsKeys { UserDefaults.standard.removeObject(forKey: key) }
+            configuration = .defaults()
+            configuration.adoptBundledRuntime()
+            alertMessage = "App settings were reset. Onboarding will appear on the next launch."
+            refreshResetSizes()
+            Task { await refreshRuntime() }
+            return
+        }
+        do {
+            let freed = try ResetPlan.remove(scope, libraryRoot: library.baseURL)
+            if scope == .library {
+                records = []
+                selectedRecordID = nil
+                createRecordID = nil
+                try persist()
+            }
+            alertMessage = freed > 0
+                ? "\(scope.title) removed — \(ResetPlan.formattedSize(freed)) freed."
+                : "\(scope.title) removed."
+        } catch {
+            alertMessage = "Could not remove \(scope.title.lowercased()): \(error.localizedDescription)"
+            refreshResetSizes()
+            return
+        }
+        refreshResetSizes()
+        Task { await refreshRuntime() }
+    }
+
+    /// Full clean uninstall: wipe models, runtime, library, and settings, say
+    /// goodbye, then quit. Only the .app bundle remains for the user to trash.
+    func resetEverythingAndQuit() {
+        stopBackgroundWork()
+        for key in ResetPlan.defaultsKeys { UserDefaults.standard.removeObject(forKey: key) }
+        do {
+            try ResetPlan.removeEverything(libraryRoot: library.baseURL)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "FastWan QAD could not be fully removed"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        records = []
+        selectedRecordID = nil
+        createRecordID = nil
+        let alert = NSAlert()
+        alert.messageText = "FastWan QAD has been removed"
+        alert.informativeText = "All models, the runtime, your library, and settings were deleted from this Mac. Move FastWan QAD.app to the Trash to complete the uninstall."
+        alert.addButton(withTitle: "Quit FastWan QAD")
+        alert.runModal()
+        NSApplication.shared.terminate(nil)
+    }
+
+    private func stopBackgroundWork() {
+        if isGenerating { cancelGeneration() }
+        if isInstallingModel || isInstallingRuntime {
+            utilityProcess.cancel()
+            isInstallingModel = false
+            isInstallingRuntime = false
+            installingVariant = nil
+        }
+    }
+
     func export(_ record: GenerationRecord) {
         guard let source = record.outputURL, FileManager.default.fileExists(atPath: source.path) else { return }
         let panel = NSSavePanel()

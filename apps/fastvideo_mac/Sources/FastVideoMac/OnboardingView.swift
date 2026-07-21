@@ -1,39 +1,5 @@
 import SwiftUI
 
-extension View {
-    @ViewBuilder
-    func fvLiquidGlass(
-        cornerRadius: CGFloat = 16,
-        tint: Color? = nil,
-        interactive: Bool = false
-    ) -> some View {
-        if #available(macOS 26.0, *) {
-            glassEffect(
-                .regular.tint(tint).interactive(interactive),
-                in: .rect(cornerRadius: cornerRadius)
-            )
-        } else {
-            background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
-        }
-    }
-}
-
-struct PlatformSidebarMaterial: View {
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            Rectangle()
-                .fill(Color.black.opacity(0.12))
-                .glassEffect(.regular.tint(FVTheme.sidebar.opacity(0.5)), in: .rect)
-        } else {
-            Rectangle().fill(FVTheme.sidebar)
-        }
-    }
-}
-
 struct OnboardingView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -44,9 +10,20 @@ struct OnboardingView: View {
 
     private let pageCount = 4
 
+    /// Each chapter gets its own light: teal welcome, lime preview, warm
+    /// privacy, mint send-off. The aurora cross-fades as pages turn.
+    private var pageAccent: Color {
+        switch page {
+        case 0: FVTheme.glowTeal
+        case 1: FVTheme.lime
+        case 2: FVTheme.glowWarm
+        default: FVTheme.mint
+        }
+    }
+
     var body: some View {
         ZStack {
-            FVTheme.background
+            FVAmbientBackground(tint: pageAccent, drift: true)
                 .ignoresSafeArea()
             ASCIIFieldView()
                 .opacity(0.38)
@@ -87,7 +64,7 @@ struct OnboardingView: View {
             HStack(spacing: 9) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(FVTheme.lime)
+                        .fill(FVTheme.accentGradient)
                     Text("FQ")
                         .font(.system(size: 10, weight: .black, design: .monospaced))
                         .foregroundStyle(.black)
@@ -101,7 +78,7 @@ struct OnboardingView: View {
             HStack(spacing: 7) {
                 ForEach(0..<pageCount, id: \.self) { index in
                     Capsule()
-                        .fill(index == page ? FVTheme.lime : Color.white.opacity(0.16))
+                        .fill(index == page ? AnyShapeStyle(FVTheme.accentGradient) : AnyShapeStyle(Color.white.opacity(0.16)))
                         .frame(width: index == page ? 28 : 8, height: 6)
                         .animation(reduceMotion ? nil : .spring(response: 0.4), value: page)
                 }
@@ -133,11 +110,12 @@ struct OnboardingView: View {
     private var welcomePage: some View {
         HStack(spacing: 58) {
             VStack(alignment: .leading, spacing: 0) {
-                OnboardingEyebrow(text: "WELCOME TO FASTWAN QAD")
+                OnboardingEyebrow(text: "WELCOME TO FASTWAN QAD", accent: pageAccent)
                 Text("A video model that\nlives on your Mac.")
                     .font(.system(size: 55, weight: .medium, design: .rounded))
                     .tracking(-2.5)
                     .lineSpacing(-4)
+                    .foregroundStyle(FVTheme.heroGradient)
                     .padding(.top, 17)
                 Text("No queue. No API key. No prompt leaving the machine. FastWan QAD runs through MLX and Metal, then gives you a real MP4.")
                     .font(.system(size: 15))
@@ -174,11 +152,12 @@ struct OnboardingView: View {
     private var previewPage: some View {
         HStack(spacing: 54) {
             VStack(alignment: .leading, spacing: 0) {
-                OnboardingEyebrow(text: "LIVE X0 PREVIEW")
+                OnboardingEyebrow(text: "LIVE X0 PREVIEW", accent: pageAccent)
                 Text("The render starts\nbefore it ends.")
                     .font(.system(size: 52, weight: .medium, design: .rounded))
                     .tracking(-2.2)
                     .lineSpacing(-4)
+                    .foregroundStyle(FVTheme.heroGradient)
                     .padding(.top, 17)
                 Text("DMD predicts the whole video at every step. After step one, TAEHV turns that rough prediction into a playable clip while MLX keeps refining.")
                     .font(.system(size: 15))
@@ -203,10 +182,11 @@ struct OnboardingView: View {
     private var localPage: some View {
         VStack(spacing: 35) {
             VStack(spacing: 14) {
-                OnboardingEyebrow(text: "YOURS MEANS YOURS")
+                OnboardingEyebrow(text: "YOURS MEANS YOURS", accent: pageAccent)
                 Text("Private by architecture.")
                     .font(.system(size: 49, weight: .medium, design: .rounded))
                     .tracking(-2)
+                    .foregroundStyle(FVTheme.heroGradient)
                 Text("Prompts and videos stay on this Mac. The model runs locally through MLX and Metal.")
                     .font(.system(size: 14.5))
                     .foregroundStyle(FVTheme.muted)
@@ -236,11 +216,12 @@ struct OnboardingView: View {
     private var readyPage: some View {
         HStack(spacing: 58) {
             VStack(alignment: .leading, spacing: 0) {
-                OnboardingEyebrow(text: "ONE LAST THING")
+                OnboardingEyebrow(text: "ONE LAST THING", accent: pageAccent)
                 Text("Ready the machine.\nThen make the shot.")
                     .font(.system(size: 50, weight: .medium, design: .rounded))
                     .tracking(-2.1)
                     .lineSpacing(-3)
+                    .foregroundStyle(FVTheme.heroGradient)
                     .padding(.top, 16)
                 Text("Install the recommended EMA model with one click. FastWan QAD manages the model, runtime, and video exporter for you.")
                     .font(.system(size: 14.5))
@@ -418,9 +399,10 @@ struct OnboardingView: View {
 
 private struct OnboardingEyebrow: View {
     let text: String
+    var accent: Color = FVTheme.lime
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(FVTheme.lime).frame(width: 6, height: 6)
+            Circle().fill(accent).frame(width: 6, height: 6)
             Text(text)
                 .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .tracking(1.25)
@@ -447,14 +429,25 @@ private struct PromptSeedButton: View {
 
 private struct OnboardingModelObject: View {
     @State private var animate = false
+    @State private var spin = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
+            Circle()
+                .stroke(
+                    AngularGradient(
+                        colors: [FVTheme.lime.opacity(0), FVTheme.lime.opacity(0.5), FVTheme.mint.opacity(0.3), FVTheme.lime.opacity(0)],
+                        center: .center,
+                        angle: .degrees(spin ? 360 : 0)
+                    ),
+                    lineWidth: 1.2
+                )
+                .frame(width: 308, height: 308)
             ForEach(0..<5, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 28 + CGFloat(index) * 4, style: .continuous)
                     .stroke(
-                        index == 0 ? FVTheme.lime.opacity(0.7) : Color.white.opacity(0.08 + Double(index) * 0.025),
+                        index == 0 ? AnyShapeStyle(FVTheme.accentGradient) : AnyShapeStyle(Color.white.opacity(0.08 + Double(index) * 0.025)),
                         lineWidth: index == 0 ? 1.5 : 1
                     )
                     .frame(width: 126 + CGFloat(index) * 38, height: 126 + CGFloat(index) * 38)
@@ -463,6 +456,7 @@ private struct OnboardingModelObject: View {
             VStack(spacing: 8) {
                 Text("1.3B")
                     .font(.system(size: 39, weight: .medium, design: .monospaced))
+                    .foregroundStyle(FVTheme.heroGradient)
                 Text("LOCAL PARAMETERS")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .tracking(1.1)
@@ -473,6 +467,7 @@ private struct OnboardingModelObject: View {
         .onAppear {
             guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 4.5).repeatForever(autoreverses: true)) { animate = true }
+            withAnimation(.linear(duration: 16).repeatForever(autoreverses: false)) { spin = true }
         }
     }
 }
@@ -492,50 +487,51 @@ private struct OnboardingMetric: View {
 }
 
 private struct PreviewTimelineDemo: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                HStack(spacing: 6) {
-                    Circle().fill(FVTheme.lime).frame(width: 6, height: 6)
-                    Text("STREAMING LOCALLY")
-                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .tracking(1)
-                }
-                Spacer()
-                Text("DMD / 03")
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundStyle(FVTheme.faint)
-            }
-            ZStack {
-                RoundedRectangle(cornerRadius: 13).fill(Color.black.opacity(0.36))
-                Text("··::--==++**##\n·::--==++**##%\n::--==++**##%@\n:--==++**##%@%\n--==++**##%@%#")
-                    .font(.system(size: 15, design: .monospaced))
-                    .tracking(4)
-                    .lineSpacing(5)
-                    .foregroundStyle(FVTheme.lime.opacity(0.55))
-                    .blur(radius: 0.2)
-                VStack {
-                    Spacer()
-                    HStack {
-                        Text("ROUGH X0 / STEP 1")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 8)
-                            .frame(height: 24)
-                            .fvLiquidGlass(cornerRadius: 12)
-                        Spacer()
+        TimelineView(.periodic(from: .now, by: reduceMotion ? 3600 : 0.25)) { timeline in
+            let step = reduceMotion ? 2 : Int(timeline.date.timeIntervalSinceReferenceDate / 2.4) % 3
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    HStack(spacing: 6) {
+                        Circle().fill(FVTheme.lime).frame(width: 6, height: 6)
+                        Text("STREAMING LOCALLY")
+                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                            .tracking(1)
                     }
-                    .padding(11)
+                    Spacer()
+                    Text("DMD / 0\(step + 1)")
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(FVTheme.faint)
+                }
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.black.opacity(0.36))
+                    DenoisePreview()
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Text(step == 2 ? "FINAL MP4 / READY" : "ROUGH X0 / STEP \(step + 1)")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .frame(height: 24)
+                                .fvLiquidGlass(cornerRadius: 12)
+                            Spacer()
+                        }
+                        .padding(11)
+                    }
+                }
+                .aspectRatio(832.0 / 480.0, contentMode: .fit)
+                HStack(spacing: 6) {
+                    TimelineStep(label: "01", state: "PREVIEW", active: step == 0)
+                    TimelineStep(label: "02", state: "REFINING", active: step == 1)
+                    TimelineStep(label: "03", state: "FINAL", active: step == 2)
                 }
             }
-            .aspectRatio(832.0 / 480.0, contentMode: .fit)
-            HStack(spacing: 6) {
-                TimelineStep(label: "01", state: "PREVIEW", active: true)
-                TimelineStep(label: "02", state: "REFINING", active: false)
-                TimelineStep(label: "03", state: "FINAL", active: false)
-            }
+            .padding(17)
+            .fvLiquidGlass(cornerRadius: 24, tint: FVTheme.lime.opacity(0.035))
         }
-        .padding(17)
-        .fvLiquidGlass(cornerRadius: 24, tint: FVTheme.lime.opacity(0.035))
     }
 }
 
@@ -578,8 +574,7 @@ private struct OnboardingFeature: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 18).fill(Color.white.opacity(0.04)))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.09)))
+        .fvGlassSurface(cornerRadius: 18)
     }
 }
 
