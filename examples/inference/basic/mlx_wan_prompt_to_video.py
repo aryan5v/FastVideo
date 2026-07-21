@@ -298,6 +298,33 @@ def decode_latents_to_video(
     _cleanup_torch()
 
 
+def _unsharp(frame: np.ndarray, amount: float) -> np.ndarray:
+    """Light unsharp mask to counter RIFE's optical-flow softening."""
+    import cv2
+
+    blur = cv2.GaussianBlur(frame, (0, 0), 1.0)
+    return cv2.addWeighted(frame, 1.0 + amount, blur, -amount, 0)
+
+
+def _rife_interpolate_video(*, video_path: Path, target_frames: int, factor: int,
+                            sharpen: float, fps: int) -> None:
+    """Read the reduced-frame mp4, RIFE-interpolate up to ``target_frames`` on
+    Apple Silicon, optionally light-sharpen, and rewrite the file in place."""
+    import imageio.v3 as iio
+
+    from fastvideo.mlx_runtime.rife_interp import interpolate as rife_interpolate, load_model
+
+    frames = [frame for frame in iio.imread(video_path)]
+    model = load_model()
+    interp = rife_interpolate(frames, factor=factor, model=model)
+    if len(interp) > target_frames:
+        interp = interp[:target_frames]
+    if sharpen and sharpen > 0:
+        interp = [_unsharp(frame, sharpen) for frame in interp]
+    iio.imwrite(video_path, np.stack(interp), fps=fps, codec="libx264")
+    print(f"[fast] RIFE {factor}x -> {len(interp)} frames written to {video_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prompt-to-video FastWan generation using MLX for the DiT")
     parser.add_argument("--model-root", type=Path, default=None,
@@ -315,6 +342,15 @@ def main() -> None:
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--fps", type=int, default=16)
+    parser.add_argument("--fast", action=argparse.BooleanOptionalAction, default=False,
+                        help="Fast mode: generate 1/factor of the frames, then RIFE-interpolate up "
+                        "to --num-frames on Apple Silicon (~2.7x faster denoise, reconstruction "
+                        "MS-SSIM ~0.97). Requires the rife-mlx package. See "
+                        "docs/experiments/rife-speedup-summary.md.")
+    parser.add_argument("--fast-factor", type=int, default=2,
+                        help="Fast-mode interpolation factor (2 = generate half the frames).")
+    parser.add_argument("--fast-sharpen", type=float, default=0.6,
+                        help="Light unsharp strength to counter RIFE softness (0 disables).")
     parser.add_argument("--torch-device", default="auto", help="'auto', 'mps', or 'cpu' for text/VAE components.")
     parser.add_argument("--torch-dtype", choices=("fp16", "bf16", "fp32"), default="fp16",
                         help="Dtype for the TAEHV decode path (and legacy callers).")
@@ -369,6 +405,15 @@ def main() -> None:
     add_memory_limit_args(parser)
     parser.add_argument("--encode-prompt-only", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # Fast mode: generate fewer frames now, RIFE-interpolate back up after decode.
+    fast_target_frames = None
+    if args.fast:
+        if args.fast_factor < 2:
+            parser.error("--fast-factor must be >= 2")
+        fast_target_frames = args.num_frames
+        args.num_frames = (fast_target_frames + args.fast_factor - 1) // args.fast_factor
+        print(f"[fast] generating {args.num_frames} frames, RIFE {args.fast_factor}x -> {fast_target_frames}")
 
     runtime_limits = apply_memory_limits(
         mlx_memory_limit_gib=args.mlx_memory_limit_gib,
@@ -587,6 +632,20 @@ def main() -> None:
         taehv_parallel=args.taehv_parallel,
     )
     decode_time = time.perf_counter() - decode_start
+
+    rife_time = 0.0
+    if fast_target_frames is not None:
+        rife_start = time.perf_counter()
+        _rife_interpolate_video(
+            video_path=args.output_path,
+            target_frames=fast_target_frames,
+            factor=args.fast_factor,
+            sharpen=args.fast_sharpen,
+            fps=args.fps,
+        )
+        rife_time = time.perf_counter() - rife_start
+        print(f"RIFE fast-mode interpolate time: {rife_time:.2f}s")
+
     total_time = time.perf_counter() - total_start
 
     print(f"Prompt encode time: {prompt_time:.2f}s")
