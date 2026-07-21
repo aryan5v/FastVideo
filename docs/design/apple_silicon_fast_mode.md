@@ -10,7 +10,7 @@ in for ~1.4 s, and a light unsharp pass counters its softening.
 
 Measured on the 1.3B INT8 QAD model (fox, 480×832×81, M4): generate 41 + RIFE→81
 runs in ~35 s of denoise vs ~90 s full, at reconstruction MS-SSIM **0.97**.
-Full numbers: [rife-speedup-summary.md](../experiments/rife-speedup-summary.md).
+Reproduce with `python -m fastvideo.benchmarks.eval_metalfx_rife --mode int8`.
 
 > **Note:** Apple's *MetalFX* frame interpolation is **not** usable here — it
 > requires game-engine motion vectors + depth, which diffusion output lacks. We
