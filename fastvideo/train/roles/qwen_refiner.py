@@ -245,7 +245,11 @@ class QwenPromptRefinerRole(TrainRoleBase):
         if instructions is None:
             instructions = prompts
         was_training = self.model.training
+        ddp_model = self._ddp_model
+        was_ddp_training = ddp_model.training if ddp_model is not None else None
         self.model.eval()
+        if ddp_model is not None:
+            ddp_model.eval()
         try:
             rendered = [self.render_chat(text) for text in instructions]
             encoded = self.tokenizer(
@@ -281,8 +285,9 @@ class QwenPromptRefinerRole(TrainRoleBase):
             completions = output[:, prompt_length:]
             return self.tokenizer.batch_decode(completions, skip_special_tokens=True)
         finally:
-            if was_training:
-                self.model.train()
+            if ddp_model is not None and was_ddp_training is not None:
+                ddp_model.train(was_ddp_training)
+            self.model.train(was_training)
 
     # ------------------------------------------------------------------
     # Sequence log probabilities
@@ -424,4 +429,3 @@ class QwenPromptRefinerRole(TrainRoleBase):
         set_peft_model_state_dict(self.model, load_file(weights_path))
         self.model.to(self.device)
         logger.info("Loaded refiner adapter from %s", adapter_dir)
-

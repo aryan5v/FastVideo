@@ -65,7 +65,7 @@ def main() -> None:
     # 1. Refine the prompt with the bundled PromptRL refiner.
     refiner = PromptRefiner.from_bundle(args.bundle, device="cuda")
     model_path = args.model_path or refiner.manifest.base_generator_model
-    refinement = refiner.refine(args.prompt, seed=args.refiner_seed or None)
+    refinement = refiner.refine(args.prompt, seed=args.refiner_seed)
     print(f"[promptrl] original : {refinement.original_prompt}")
     print(f"[promptrl] refined  : {refinement.refined_prompt} "
           f"(format_valid={refinement.format_valid})")

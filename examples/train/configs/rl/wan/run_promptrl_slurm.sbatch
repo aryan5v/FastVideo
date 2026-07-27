@@ -7,17 +7,19 @@
 #SBATCH --gres=gpu:4
 #SBATCH --exclusive
 #SBATCH --time=14-00:00:00
-#SBATCH --chdir=/mnt/lustre/vlm-aryan
-#SBATCH --output=/mnt/lustre/vlm-aryan/promptrl_runs/slurm-%j.out
-#SBATCH --error=/mnt/lustre/vlm-aryan/promptrl_runs/slurm-%j.err
+#SBATCH --chdir=.
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
 
 set -euo pipefail
 
-export HOME=/mnt/lustre/vlm-aryan
 export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
-source_dir="${PROMPTRL_SOURCE_DIR:-/mnt/lustre/vlm-aryan/promptrl/staging/source}"
-run_dir="${PROMPTRL_RUN_DIR:-/mnt/lustre/vlm-aryan/promptrl_runs/wan21_prompt_only}"
+work_root="${PROMPTRL_WORK_ROOT:-${SLURM_SUBMIT_DIR:-${PWD}}}"
+export HOME="${PROMPTRL_HOME:-${work_root}}"
+
+source_dir="${PROMPTRL_SOURCE_DIR:-${work_root}/promptrl/staging/source}"
+run_dir="${PROMPTRL_RUN_DIR:-${work_root}/promptrl_runs/wan21_prompt_only}"
 container_image="${PROMPTRL_CONTAINER_IMAGE:-ghcr.io#hao-ai-lab/fastvideo/fastvideo-dev:py3.12-cuda13.0.0-latest}"
 reward_port="${PROMPTRL_REWARD_PORT:-8100}"
 max_train_steps="${PROMPTRL_MAX_TRAIN_STEPS:-1000}"
