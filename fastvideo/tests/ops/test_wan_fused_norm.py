@@ -104,3 +104,22 @@ def test_wan_triton_fusion_matches_module_boundary(monkeypatch):
     torch.testing.assert_close(
         updated, expected_updated_fp32.to(residual.dtype), atol=0, rtol=0
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA"
+)
+def test_wan_triton_fusion_rejects_noncontiguous_inputs():
+    from fastvideo.layers.wan_fusions import (
+        wan_gated_residual_layer_norm, )
+
+    residual = torch.randn(1, 2, 8, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn_like(residual)
+    gate = torch.randn(1, 16, device="cuda")[:, ::2]
+    weight = torch.randn(8, device="cuda")
+    bias = torch.randn(8, device="cuda")
+
+    with pytest.raises(ValueError, match="contiguous"):
+        wan_gated_residual_layer_norm(
+            residual, x, gate, weight, bias, 1e-6
+        )

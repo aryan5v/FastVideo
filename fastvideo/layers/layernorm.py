@@ -292,7 +292,8 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
                 and residual.dtype in (torch.bfloat16, torch.float16) and residual.ndim == 3
                 and x.shape == residual.shape and residual.is_contiguous() and x.is_contiguous() and gate.ndim == 3
                 and gate.shape == (residual.shape[0], 1, residual.shape[2]) and gate.is_contiguous()
-                and residual.shape[2] <= 65536)
+                and self.norm.weight.device == residual.device and self.norm.bias.device == residual.device
+                and self.norm.weight.is_contiguous() and self.norm.bias.is_contiguous() and residual.shape[2] <= 65536)
 
 
 class LayerNormScaleShift(nn.Module):

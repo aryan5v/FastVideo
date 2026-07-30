@@ -17,7 +17,7 @@ def _gated_residual_layer_norm_kernel(
     bias_ptr,
     normalized_ptr,
     updated_ptr,
-    tokens: tl.constexpr,
+    tokens,
     hidden: tl.constexpr,
     eps: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -56,7 +56,22 @@ def wan_gated_residual_layer_norm(
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the promoted Wan self-attention transition in one launch."""
+    if not residual.is_cuda:
+        raise ValueError("Wan fused normalization requires CUDA tensors")
+    if residual.ndim != 3 or x.shape != residual.shape:
+        raise ValueError("residual and x must have matching [B, S, D] shapes")
+    if any(tensor.device != residual.device for tensor in (x, gate, weight, bias)):
+        raise ValueError("all inputs must be on the residual device")
+    if not all(tensor.is_contiguous() for tensor in (residual, x, gate, weight, bias)):
+        raise ValueError("all inputs must be contiguous")
+
     batch, tokens, hidden = residual.shape
+    if gate.shape != (batch, hidden):
+        raise ValueError(f"gate must have shape {(batch, hidden)}")
+    if weight.shape != (hidden, ) or bias.shape != (hidden, ):
+        raise ValueError(f"weight and bias must have shape {(hidden,)}")
+    if hidden > 65536:
+        raise ValueError("hidden dimension exceeds the Triton baseline limit")
     normalized = torch.empty_like(residual)
     updated = torch.empty_like(residual)
     block_size = triton.next_power_of_2(hidden)
