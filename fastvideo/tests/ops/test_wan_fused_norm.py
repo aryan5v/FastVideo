@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
+import torch.nn.functional as F
 
 from fastvideo.layers.layernorm import ScaleResidualLayerNormScaleShift
 
@@ -67,4 +69,38 @@ def test_wan_framewise_gate_retains_native_path(monkeypatch):
     torch.testing.assert_close(updated, expected_updated, rtol=0, atol=0)
     torch.testing.assert_close(
         normalized, layer.norm(expected_updated), rtol=0, atol=0
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA"
+)
+def test_wan_triton_fusion_matches_module_boundary(monkeypatch):
+    monkeypatch.setenv("FASTVIDEO_WAN_FUSED_NORM", "1")
+    layer = _layer(hidden=1537).cuda()
+    residual = torch.randn(
+        2, 17, 1537, device="cuda", dtype=torch.bfloat16
+    )
+    x = torch.randn_like(residual)
+    gate = torch.randn(2, 1, 1537, device="cuda", dtype=torch.float32)
+
+    expected_updated_fp32 = residual.float() + x.float() * gate
+    expected_normalized = F.layer_norm(
+        expected_updated_fp32,
+        (1537,),
+        layer.norm.weight,
+        layer.norm.bias,
+        layer.norm.eps,
+    ).to(residual.dtype)
+
+    with torch.inference_mode():
+        normalized, updated = layer.forward_wan_self_attention(
+            residual, x, gate
+        )
+
+    torch.testing.assert_close(
+        normalized, expected_normalized, atol=2e-2, rtol=2e-2
+    )
+    torch.testing.assert_close(
+        updated, expected_updated_fp32.to(residual.dtype), atol=0, rtol=0
     )
