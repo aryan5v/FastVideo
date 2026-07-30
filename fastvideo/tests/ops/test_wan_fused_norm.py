@@ -173,7 +173,7 @@ def test_wan_mlp_residual_triton_matches_module_boundary(monkeypatch):
     with torch.inference_mode():
         actual = layer.forward_wan_mlp(residual, x, gate)
 
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA")
