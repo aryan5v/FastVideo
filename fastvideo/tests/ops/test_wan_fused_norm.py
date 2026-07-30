@@ -147,6 +147,36 @@ def test_wan_triton_fusion_matches_module_boundary(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA")
+def test_wan_modulated_norm_triton_matches_module_boundary(monkeypatch):
+    monkeypatch.setenv("FASTVIDEO_WAN_FUSIONS", "1")
+    norm = FP32LayerNorm(1537, elementwise_affine=False, eps=1e-6).cuda()
+    inputs = torch.randn(2, 17, 1537, device="cuda", dtype=torch.bfloat16)
+    scale = torch.randn(2, 1, 1537, device="cuda", dtype=torch.float32)
+    shift = torch.randn_like(scale)
+    expected = (norm(inputs.float()) * (1.0 + scale) + shift).to(inputs.dtype)
+
+    with torch.inference_mode():
+        actual = norm.forward_wan_modulated(inputs, scale, shift)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA")
+def test_wan_mlp_residual_triton_matches_module_boundary(monkeypatch):
+    monkeypatch.setenv("FASTVIDEO_WAN_FUSIONS", "1")
+    layer = ScaleResidual()
+    residual = torch.randn(2, 17, 1537, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn_like(residual)
+    gate = torch.randn(2, 1, 1537, device="cuda", dtype=torch.float32)
+    expected = (residual.float() + x.float() * gate).to(residual.dtype)
+
+    with torch.inference_mode():
+        actual = layer.forward_wan_mlp(residual, x, gate)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Wan Triton fusion requires CUDA")
 def test_wan_triton_fusion_rejects_noncontiguous_inputs():
     from fastvideo.layers.wan_fusions import (
         wan_gated_residual_layer_norm, )
