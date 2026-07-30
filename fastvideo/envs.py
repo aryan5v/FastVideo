@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     FASTVIDEO_SERVER_DEV_MODE: bool = False
     FASTVIDEO_STAGE_LOGGING: bool = False
     FASTVIDEO_CFG_GATE_STEP: float = 1.0
+    FASTVIDEO_WAN_FUSED_NORM: bool = False
     FASTVIDEO_HOST_IP: str = ""
     FASTVIDEO_LOOPBACK_IP: str = ""
 
@@ -320,6 +321,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #   - Wan2.2 high/low-noise expert switch invalidates the cache.
     "FASTVIDEO_CFG_GATE_STEP":
     lambda: float(os.getenv("FASTVIDEO_CFG_GATE_STEP", "1.0")),
+
+    # Enable the AutoKernel-derived gated residual + LayerNorm fusion in Wan
+    # inference. Training, non-CUDA devices, unsupported layouts, and missing
+    # Triton installations always retain the native PyTorch path.
+    "FASTVIDEO_WAN_FUSED_NORM":
+    lambda: os.getenv("FASTVIDEO_WAN_FUSED_NORM", "0") != "0",
 }
 
 # end-env-vars-definition

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import fastvideo.envs as envs
 from fastvideo.layers.custom_op import CustomOp
 
 
@@ -211,6 +212,59 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
         else:
             modulated = normalized * (1.0 + scale) + shift
         return modulated, residual_output
+
+    def forward_wan_self_attention(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fast path for Wan's post-self-attention transition.
+
+        The Triton implementation is inference-only and currently covers the
+        channel-wise Wan 2.1 gate layout. Every other execution mode retains
+        the differentiable native PyTorch implementation.
+        """
+        if self._can_use_wan_fusion(residual, x, gate):
+            try:
+                from fastvideo.layers.wan_fusions import (
+                    wan_gated_residual_layer_norm, )
+            except ImportError:
+                pass
+            else:
+                assert isinstance(self.norm, FP32LayerNorm)
+                assert self.norm.weight is not None
+                assert self.norm.bias is not None
+                return wan_gated_residual_layer_norm(
+                    residual,
+                    x,
+                    gate.squeeze(1),
+                    self.norm.weight,
+                    self.norm.bias,
+                    self.norm.eps,
+                )
+
+        if gate.dim() == 4:
+            num_frames = gate.shape[1]
+            frame_seqlen = x.shape[1] // num_frames
+            residual_output = residual + (x.unflatten(1, (num_frames, frame_seqlen)) * gate).flatten(1, 2)
+        else:
+            residual_output = residual + x * gate
+        return self.norm(residual_output), residual_output
+
+    def _can_use_wan_fusion(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> bool:
+        compiling = getattr(torch.compiler, "is_compiling", lambda: False)()
+        return (envs.FASTVIDEO_WAN_FUSED_NORM and residual.is_cuda and not torch.is_grad_enabled() and not compiling
+                and isinstance(self.norm, FP32LayerNorm) and self.norm.weight is not None and self.norm.bias is not None
+                and residual.dtype in (torch.bfloat16, torch.float16) and residual.ndim == 3
+                and x.shape == residual.shape and residual.is_contiguous() and x.is_contiguous() and gate.ndim == 3
+                and gate.shape == (residual.shape[0], 1, residual.shape[2]) and gate.is_contiguous()
+                and residual.shape[2] <= 65536)
 
 
 class LayerNormScaleShift(nn.Module):
