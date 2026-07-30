@@ -225,6 +225,34 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
         channel-wise Wan 2.1 gate layout. Every other execution mode retains
         the differentiable native PyTorch implementation.
         """
+        if (not envs.FASTVIDEO_OPTIMIZATION_CAPTURE or not isinstance(self.norm, FP32LayerNorm)
+                or self.norm.weight is None or self.norm.bias is None or gate.ndim != 3):
+            return self._forward_wan_self_attention_impl(residual, x, gate)
+
+        from fastvideo.optimization import optimization_target
+
+        with optimization_target(
+                name="wan.self_attn_residual_norm",
+                operation="wan_gated_residual_norm",
+                tensors={
+                    "residual": residual,
+                    "x": x,
+                    "gate": gate.squeeze(1),
+                    "weight": self.norm.weight,
+                    "bias": self.norm.bias,
+                },
+                spec_locator="models/wan_gated_residual_norm.py:SPEC",
+                attributes={"model_family": "wan"},
+                tags=("self_attention", "normalization"),
+        ):
+            return self._forward_wan_self_attention_impl(residual, x, gate)
+
+    def _forward_wan_self_attention_impl(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self._can_use_wan_fusion(residual, x, gate):
             try:
                 from fastvideo.layers.wan_fusions import (
