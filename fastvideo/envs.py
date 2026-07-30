@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     FASTVIDEO_STAGE_LOGGING: bool = False
     FASTVIDEO_CFG_GATE_STEP: float = 1.0
     FASTVIDEO_WAN_FUSED_NORM: bool = False
+    FASTVIDEO_WAN_FUSIONS: bool = False
+    FASTVIDEO_AUTOKERNEL_ARTIFACT_DIR: str = ""
     FASTVIDEO_OPTIMIZATION_CAPTURE: str = ""
     FASTVIDEO_HOST_IP: str = ""
     FASTVIDEO_LOOPBACK_IP: str = ""
@@ -328,6 +330,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Triton installations always retain the native PyTorch path.
     "FASTVIDEO_WAN_FUSED_NORM":
     lambda: os.getenv("FASTVIDEO_WAN_FUSED_NORM", "0") != "0",
+    # Enable all promoted Wan fusion points. The older FUSED_NORM switch is
+    # retained as a compatibility alias.
+    "FASTVIDEO_WAN_FUSIONS":
+    lambda: os.getenv(
+        "FASTVIDEO_WAN_FUSIONS",
+        os.getenv("FASTVIDEO_WAN_FUSED_NORM", "0"),
+    ) != "0",
+
+    # Explicitly trusted directory containing MotionKernel's verified
+    # kernel_<operation>_<rank>_optimized.py artifacts.
+    "FASTVIDEO_AUTOKERNEL_ARTIFACT_DIR":
+    lambda: os.getenv("FASTVIDEO_AUTOKERNEL_ARTIFACT_DIR", ""),
 
     # Write an AutoKernel-compatible, metadata-only optimization campaign for
     # one FastVideo pipeline run. Supports <pid> and <rank> placeholders.

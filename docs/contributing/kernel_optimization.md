@@ -41,18 +41,40 @@ uv run campaign.py validate /tmp/wan-campaign.json
 uv run campaign.py rank /tmp/wan-campaign.json
 ```
 
-After reviewing and trusting the campaign and its spec locators:
+After reviewing and trusting the campaign and its spec locators, launch the
+ranked search directly:
 
 ```bash
-uv run campaign.py prepare /tmp/wan-campaign.json --trust-specs
-uv run orchestrate.py plan
+uv run campaign.py run /tmp/wan-campaign.json --budget-hours 10
 ```
 
-This creates ranked candidate kernels, the orchestration plan, and a campaign
-receipt under `workspace/`. Follow AutoKernel's `program.md` to run the
-unattended experiment loop.
+Use `--dry-run` to review the generated instructions or `--resume` after an
+interruption. MotionKernel writes a durable log, terminal receipt, optimized
+artifacts, and `workspace/morning_report.md`.
 
-Wan's first registered boundary is `wan.self_attn_residual_norm`, backed by
-`models/wan_gated_residual_norm.py:SPEC`. Add future model targets with the
-generic `optimization_target` context manager; no changes to the campaign
-schema or AutoKernel ranking path are required.
+Wan currently registers three boundaries: modulated pre-attention LayerNorm,
+the post-self-attention gated residual plus LayerNorm, and the post-MLP gated
+residual. Add future model targets with the generic `optimization_target`
+context manager; no changes to the campaign schema or MotionKernel ranking
+path are required.
+
+## Use promoted kernels
+
+FastVideo ships safe bundled baselines and retains the native PyTorch path for
+training, unsupported layouts, or failures. To enable all Wan fusion points:
+
+```bash
+export FASTVIDEO_WAN_FUSIONS=1
+```
+
+To test verified output from an overnight MotionKernel run without copying
+files into FastVideo, explicitly trust its artifact directory:
+
+```bash
+export FASTVIDEO_AUTOKERNEL_ARTIFACT_DIR=/path/to/motionkernel/workspace
+```
+
+FastVideo matches artifacts by their declared operation, validates
+`KERNEL_TYPE`, and falls back to the bundled implementation if an artifact
+cannot be loaded. The older `FASTVIDEO_WAN_FUSED_NORM=1` switch remains a
+compatibility alias.
