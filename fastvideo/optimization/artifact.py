@@ -55,6 +55,8 @@ _FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _RELATIVE_FILE_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]{0,255}$")
+_IR_NODE_PATTERN = re.compile(r"^n[0-9]+$")
+_IR_REF_PATTERN = re.compile(r"^[pn][0-9]+$")
 
 # Structured rejection reasons. These are logged and exported verbatim, so they
 # are part of the contract with the producer.
@@ -302,6 +304,11 @@ class ArtifactManifest:
     graph_fingerprint: str
     operation_name: str
     parent_module: str
+    target_kind: str
+    capture_mode: str | None
+    selected_node_ids: tuple[str, ...]
+    boundary_refs: tuple[str, ...]
+    output_node_ids: tuple[str, ...]
     input_keys: tuple[tuple[Any, ...], ...]
     output_keys: tuple[tuple[Any, ...], ...]
     entry_file: str
@@ -316,6 +323,8 @@ class ArtifactManifest:
     execution_modes: tuple[str, ...]
     distributed_modes: tuple[str, ...]
     promotion_decision: str
+    benchmark_passed: bool
+    generation_passed: bool
     evidence_passed: bool
     speedup: float
     directory: Path
@@ -406,6 +415,57 @@ class ArtifactManifest:
             if not items:
                 raise _fail(source, location, "must be a non-empty list")
 
+        target_kind = operation.get("target_kind", "module")
+        if target_kind not in {"module", "subgraph"}:
+            raise _fail(source, "operation.target_kind", "must be 'module' or 'subgraph'")
+        rewrite_fields = {
+            "capture_mode",
+            "selected_node_ids",
+            "boundary_refs",
+            "output_node_ids",
+        }
+        if target_kind == "module" and rewrite_fields.intersection(operation):
+            raise _fail(
+                source,
+                "operation",
+                "module targets must not declare subgraph rewrite fields",
+            )
+
+        capture_mode: str | None = None
+        selected_node_ids: tuple[str, ...] = ()
+        boundary_refs: tuple[str, ...] = ()
+        output_node_ids: tuple[str, ...] = ()
+        if target_kind == "subgraph":
+            capture_mode = _text(operation.get("capture_mode"), source, "operation.capture_mode")
+            if capture_mode != "export":
+                raise _fail(
+                    source,
+                    "operation.capture_mode",
+                    "subgraph dispatch currently requires 'export'",
+                )
+
+            def refs(field: str, pattern: re.Pattern[str]) -> tuple[str, ...]:
+                items = _sequence(operation.get(field), source, f"operation.{field}")
+                if not items:
+                    raise _fail(source, f"operation.{field}", "must be a non-empty list")
+                result = tuple(
+                    _pattern(
+                        item,
+                        pattern,
+                        source,
+                        f"operation.{field}[{index}]",
+                        "a canonical executable-IR reference",
+                    ) for index, item in enumerate(items))
+                if len(result) != len(set(result)):
+                    raise _fail(source, f"operation.{field}", "must not contain duplicates")
+                return result
+
+            selected_node_ids = refs("selected_node_ids", _IR_NODE_PATTERN)
+            boundary_refs = refs("boundary_refs", _IR_REF_PATTERN)
+            output_node_ids = refs("output_node_ids", _IR_NODE_PATTERN)
+            if not set(output_node_ids).issubset(selected_node_ids):
+                raise _fail(source, "operation.output_node_ids", "must be selected nodes")
+
         return cls(
             artifact_id=_text(raw.get("artifact_id"), source, "artifact_id"),
             graph_fingerprint=_pattern(
@@ -417,6 +477,11 @@ class ArtifactManifest:
             ),
             operation_name=_text(operation.get("name"), source, "operation.name"),
             parent_module=_text(operation.get("parent_module"), source, "operation.parent_module"),
+            target_kind=target_kind,
+            capture_mode=capture_mode,
+            selected_node_ids=selected_node_ids,
+            boundary_refs=boundary_refs,
+            output_node_ids=output_node_ids,
             input_keys=_signature_keys(signature.get("inputs"), source, "signature.inputs"),
             output_keys=_signature_keys(signature.get("outputs"), source, "signature.outputs"),
             entry_file=entry_file,
@@ -459,6 +524,8 @@ class ArtifactManifest:
                 _text(item, source, f"compatibility.distributed_modes[{index}]")
                 for index, item in enumerate(distributed_modes)),
             promotion_decision=_text(promotion.get("decision"), source, "promotion.decision"),
+            benchmark_passed=_bool(benchmark.get("passed"), source, "evidence.benchmark.passed"),
+            generation_passed=_bool(generation.get("passed"), source, "evidence.generation.passed"),
             evidence_passed=(_bool(benchmark.get("passed"), source, "evidence.benchmark.passed")
                              and _bool(generation.get("passed"), source, "evidence.generation.passed")),
             speedup=float(speedup),
@@ -527,6 +594,7 @@ def check_compatibility(
     input_keys: tuple[tuple[Any, ...], ...],
     output_keys: tuple[tuple[Any, ...], ...],
     runtime: RuntimeProfile,
+    validation: bool = False,
 ) -> str | None:
     """Return the reason ``manifest`` cannot serve this call, or ``None``.
 
@@ -555,6 +623,12 @@ def check_compatibility(
         return REASON_EXECUTION_MODE
     if runtime.distributed_mode not in manifest.distributed_modes:
         return REASON_DISTRIBUTED_MODE
+    if validation:
+        if manifest.promotion_decision not in {"promoted", "quarantined"}:
+            return REASON_NOT_PROMOTED
+        if not manifest.benchmark_passed:
+            return REASON_EVIDENCE_INCOMPLETE
+        return None
     if manifest.promotion_decision != "promoted":
         return REASON_NOT_PROMOTED
     if not manifest.evidence_passed:
@@ -733,7 +807,11 @@ class ArtifactRegistry:
         This is the cheap pre-filter that keeps dispatch from tracing a module
         when the store holds nothing shaped like the live call.
         """
-        return [item for item in self.manifests if item.input_keys == input_keys]
+        return [item for item in self.manifests if item.target_kind == "module" and item.input_keys == input_keys]
+
+    def subgraph_candidates_for(self, scope: str) -> list[ArtifactManifest]:
+        """Export-subgraph bundles declared for this repeated module scope."""
+        return [item for item in self.manifests if item.target_kind == "subgraph" and item.parent_module == scope]
 
     def summary(self) -> dict[str, Any]:
         return {

@@ -365,7 +365,8 @@ def test_auto_falls_back_to_export_for_shape_control_flow(
         "input_0",
     ]
     assert all(
-        set(item["meta"]) == {"shape", "dtype", "requires_grad"}
+        set(item["meta"])
+        == {"shape", "stride", "dtype", "device_type", "requires_grad"}
         for item in executable_ir["inputs"]
     )
     assert "scale" not in json.dumps(executable_ir)

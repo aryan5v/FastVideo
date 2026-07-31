@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION: str = "*"
     FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE: str = ""
     FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION: bool = False
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -345,6 +346,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Optional path for the structured dispatch/fallback report.
     "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS":
     lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS", ""),
+    # Explicit A/B-validation mode. This admits a quarantined bundle only when
+    # its isolated benchmark passed; production dispatch still requires full
+    # generation evidence and a promoted decision.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION":
+    lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION", "0") != "0"),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":

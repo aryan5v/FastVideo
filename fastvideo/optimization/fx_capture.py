@@ -501,9 +501,19 @@ def _ir_tensor_meta(value: Any) -> dict[str, Any] | None:
         shape = [int(dim) for dim in value.shape]
     except (TypeError, ValueError, RuntimeError):
         return None
+    try:
+        stride = [int(step) for step in value.stride()]
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    try:
+        device_type = str(value.device.type)
+    except (AttributeError, RuntimeError):
+        return None
     return {
         "shape": shape,
+        "stride": stride,
         "dtype": str(value.dtype).replace("torch.", ""),
+        "device_type": device_type,
         "requires_grad": bool(value.requires_grad),
     }
 
@@ -1103,6 +1113,78 @@ def capture_invocation_identity(
         reasons = [str(item.get("reason", "")) for item in session._graph_breaks]
         raise RuntimeError(reasons[0] if reasons else "trace_produced_no_region")
     return regions[0]
+
+
+def capture_export_invocation(
+    module: nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    output: Any,
+    *,
+    scope: str,
+) -> tuple[dict[str, Any], Any]:
+    """Capture an export identity plus the in-memory program used to rewrite it.
+
+    The returned program never enters diagnostics or an artifact. It exists
+    only long enough for trusted runtime dispatch to replace a validated
+    allowlisted subgraph in this process.
+    """
+    inputs = _input_metas(args, kwargs)
+    outputs = _output_metas(output)
+    try:
+        from fastvideo.forward_context import get_forward_context
+
+        context = get_forward_context()
+        observed_context: tuple[Any, Any] | None = (
+            context.current_timestep,
+            context.attn_metadata,
+        )
+    except AssertionError:
+        observed_context = None
+    variant = _ShapeVariant(
+        inputs=inputs,
+        outputs=outputs,
+        example_args=args,
+        example_kwargs=dict(kwargs),
+        observed_context=observed_context,
+        calls=1,
+    )
+    session = FXCaptureSession(tracer="export", max_scopes=1, max_shape_variants=1)
+    exported = session._trace(module, variant, "export")
+    graph = getattr(exported, "graph", None)
+    if graph is None:
+        raise RuntimeError("trace result has no FX graph")
+    operations, dependencies, constants, _notes = _extract_graph(graph)
+    if not operations:
+        raise RuntimeError("trace result has no tensor operations")
+    executable_ir = _extract_executable_ir(exported, graph)
+    fingerprint = graph_fingerprint(
+        operations=operations,
+        input_signatures=[_signature_dict(meta) for meta in inputs],
+        output_signatures=[_signature_dict(meta) for meta in outputs],
+        safe_constants=constants,
+        parent_module=scope,
+    )
+    region = {
+        "name": _region_name(scope, _shape_key(inputs)),
+        "fingerprint": fingerprint,
+        "operations": operations,
+        "dependencies": dependencies,
+        "inputs": inputs,
+        "outputs": outputs,
+        "parent_module": scope,
+        "attributes": {
+            "module_class": type(module).__name__,
+            "tracer": "export",
+            "capture_mode": "export",
+            "capture_attempts": ["export"],
+            "capture_failures": [],
+            "executable_ir": executable_ir,
+        },
+    }
+    if constants:
+        region["safe_constants"] = constants
+    return region, exported
 
 
 def _coalesce(records: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:

@@ -55,13 +55,14 @@ from fastvideo.optimization.artifact import (
     load_entry_point,
     signature_key,
 )
-from fastvideo.optimization.fx_capture import default_capture_targets
+from fastvideo.optimization.fx_capture import capture_export_invocation, default_capture_targets
 from fastvideo.optimization.identity import (
     graph_identity,
     input_signatures,
     output_signatures,
     shape_key_for,
 )
+from fastvideo.optimization.subgraph import rewrite_exported_subgraph, subgraph_signature_keys
 
 logger = init_logger(__name__)
 
@@ -129,12 +130,14 @@ class GraphDispatchSession:
         tracer: str = "symbolic",
         max_scopes: int = 64,
         max_shape_variants: int = 8,
+        validation: bool = False,
     ) -> None:
         self.registry = registry
         self.runtime = runtime
         self.tracer = tracer
         self.max_scopes = max_scopes
         self.max_shape_variants = max_shape_variants
+        self.validation = validation
         self._wrappers: list[_Wrapper] = []
         self._scopes: set[str] = set()
         self._decisions: dict[tuple[str, str], _Decision] = {}
@@ -278,36 +281,66 @@ class GraphDispatchSession:
         if not input_metas:
             return _Decision(None, REASON_NO_TENSOR_INPUTS)
         input_keys = tuple(signature_key(meta) for meta in input_metas)
-        candidates = self.registry.candidates_for(input_keys)
+        module_candidates = self.registry.candidates_for(input_keys)
+        subgraph_candidates = self.registry.subgraph_candidates_for(scope)
+        candidates = module_candidates + subgraph_candidates
         if not candidates:
             return _Decision(None, REASON_NO_SIGNATURE_MATCH)
 
+        module_region: dict[str, Any] | None = None
+        export_region: dict[str, Any] | None = None
+        exported: Any | None = None
         try:
             with self._native_forward_for_identity(wrapper):
-                region = graph_identity(
-                    wrapper.module,
-                    args,
-                    kwargs,
-                    output,
-                    scope=scope,
-                    tracer=self.tracer,
-                )
+                if module_candidates:
+                    module_region = graph_identity(
+                        wrapper.module,
+                        args,
+                        kwargs,
+                        output,
+                        scope=scope,
+                        tracer=self.tracer,
+                    )
+                if subgraph_candidates:
+                    export_region, exported = capture_export_invocation(
+                        wrapper.module,
+                        args,
+                        kwargs,
+                        output,
+                        scope=scope,
+                    )
         except Exception as exc:  # noqa: BLE001 - untraceable modules stay native
             reason = f"{_REASON_IDENTITY_PREFIX}:{type(exc).__name__}"
             logger.info("Graph identity unavailable for %s: %s", scope, reason)
             return _Decision(None, reason)
 
-        fingerprint = str(region.get("fingerprint", ""))
-        output_keys = tuple(signature_key(meta) for meta in output_signatures(output))
+        module_output_keys = tuple(signature_key(meta) for meta in output_signatures(output))
         matched: list[ArtifactManifest] = []
         rejections: list[str] = []
         for manifest in candidates:
+            if manifest.target_kind == "subgraph":
+                if export_region is None:
+                    rejections.append(f"{manifest.artifact_id}:export_capture_missing")
+                    continue
+                candidate_input_keys, candidate_output_keys = subgraph_signature_keys(
+                    export_region,
+                    manifest,
+                )
+                fingerprint = str(export_region.get("fingerprint", ""))
+            else:
+                if module_region is None:
+                    rejections.append(f"{manifest.artifact_id}:module_capture_missing")
+                    continue
+                candidate_input_keys = input_keys
+                candidate_output_keys = module_output_keys
+                fingerprint = str(module_region.get("fingerprint", ""))
             compatibility_reason = check_compatibility(
                 manifest,
                 graph_fingerprint=fingerprint,
-                input_keys=input_keys,
-                output_keys=output_keys,
+                input_keys=candidate_input_keys,
+                output_keys=candidate_output_keys,
                 runtime=self.runtime,
+                validation=self.validation,
             )
             if compatibility_reason is None:
                 matched.append(manifest)
@@ -327,6 +360,14 @@ class GraphDispatchSession:
             return _Decision(None, f"{_REASON_LOAD_PREFIX}:NoTrustedRoot")
         try:
             candidate = load_entry_point(best, trusted_root=root)
+            if best.target_kind == "subgraph":
+                if exported is None:
+                    raise RuntimeError("export capture missing")
+                candidate = rewrite_exported_subgraph(
+                    exported,
+                    best,
+                    candidate,
+                )
         except Exception as exc:  # noqa: BLE001 - a bad bundle must not stop generation
             logger.warning("Artifact %s could not be loaded; staying native", best.artifact_id, exc_info=True)
             return _Decision(
@@ -339,7 +380,7 @@ class GraphDispatchSession:
             "Dispatching %s to artifact %s (fingerprint %s)",
             scope,
             best.artifact_id,
-            fingerprint,
+            best.graph_fingerprint,
         )
         return _Decision(
             candidate,
@@ -400,6 +441,7 @@ class GraphDispatchSession:
                     "distributed_mode": self.runtime.distributed_mode,
                 },
                 "tracer": self.tracer,
+                "validation": self.validation,
                 "scopes": sorted(self._scopes),
                 "dropped_scopes": self._dropped_scopes,
                 "dropped_shape_variants": dict(sorted(self._dropped_variants.items())),
@@ -486,6 +528,7 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
             tracer=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER,
             max_scopes=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES,
             max_shape_variants=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES,
+            validation=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION,
         )
         wrapped = session.attach_modules(modules)
     except Exception:  # noqa: BLE001 - dispatch setup never breaks generation

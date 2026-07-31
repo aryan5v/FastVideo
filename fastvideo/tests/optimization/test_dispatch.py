@@ -22,6 +22,7 @@ from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactReg
                                              verify_bundle)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
+from fastvideo.optimization.fx_capture import capture_export_invocation
 from fastvideo.optimization.identity import (graph_identity, input_signatures, output_signatures)
 
 WIDTH = 4
@@ -50,6 +51,15 @@ raise RuntimeError("import side effect")
 
 def fused_block(module, hidden):
     return hidden
+'''
+
+SUBGRAPH_KERNEL = '''"""CPU fake fused epilogue used by subgraph dispatch tests."""
+import torch
+
+
+def fused_subgraph(module, projected, hidden):
+    module.subgraph_calls = getattr(module, "subgraph_calls", 0) + 1
+    return torch.nn.functional.silu(projected) + hidden
 '''
 
 
@@ -204,6 +214,53 @@ def _sections(fingerprint, inputs, outputs, **overrides) -> dict:
     return sections
 
 
+def _subgraph_sections(module: nn.Module, hidden: torch.Tensor) -> dict:
+    with torch.no_grad():
+        output = module(hidden)
+    region, _ = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {
+                "name": f"boundary_{index}",
+                **copy.deepcopy(metadata[ref]),
+            }
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(("n0", "p2")),
+        signatures(("n2", )),
+    )
+    sections["operation"] = {
+        "name": "generated_blocks_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": ["aten::silu", "aten::add"],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": ["n1", "n2"],
+        "boundary_refs": ["n0", "p2"],
+        "output_node_ids": ["n2"],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    return sections
+
+
 def _write_bundle(root: Path, sections: dict, *, kernel_source: str = FAKE_KERNEL, name: str = "fused") -> Path:
     """Write a bundle the way the producer would, hashes included."""
     directory = root / name
@@ -233,11 +290,18 @@ def store(tmp_path: Path) -> Path:
     return directory
 
 
-def _session(store: Path, *, tracer: str = "symbolic", **overrides) -> GraphDispatchSession:
+def _session(
+    store: Path,
+    *,
+    tracer: str = "symbolic",
+    validation: bool = False,
+    **overrides,
+) -> GraphDispatchSession:
     return GraphDispatchSession(
         ArtifactRegistry(store),
         _runtime(**overrides),
         tracer=tracer,
+        validation=validation,
     )
 
 
@@ -328,6 +392,30 @@ def test_compatible_artifact_is_selected(store, hidden):
     assert decision["runtime_fallbacks"] == 0
 
 
+def test_quarantined_artifact_is_admitted_only_for_explicit_validation(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    sections = _sections(fingerprint, inputs, outputs)
+    sections["promotion"]["decision"] = "quarantined"
+    sections["evidence"]["generation"]["passed"] = False
+    _write_bundle(store, sections)
+
+    production = _session(store)
+    production.attach_modules(modules)
+    with torch.no_grad():
+        transformer(hidden)
+    production.detach()
+    assert _reasons(production) == [REASON_NO_COMPATIBLE_ARTIFACT]
+
+    validation = _session(store, validation=True)
+    validation.attach_modules(modules)
+    with torch.no_grad():
+        transformer(hidden)
+    validation.detach()
+    assert _reasons(validation) == [REASON_SELECTED]
+
+
 def test_export_identity_traces_native_forward_without_dispatch_recursion(store, hidden):
     modules = _pipeline_modules()
     transformer = modules["transformer"]
@@ -346,6 +434,28 @@ def test_export_identity_traces_native_forward_without_dispatch_recursion(store,
     assert torch.allclose(first, torch.full_like(first, MARKER))
     assert torch.allclose(second, torch.full_like(second, MARKER))
     assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_export_subgraph_artifact_rewrites_each_live_block_without_copying_weights(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    with torch.no_grad():
+        expected = transformer(hidden)
+    sections = _subgraph_sections(transformer.blocks[0], hidden)
+    _write_bundle(store, sections, kernel_source=SUBGRAPH_KERNEL)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        first = transformer(hidden)
+        second = transformer(hidden)
+
+    session.detach()
+    torch.testing.assert_close(first, expected)
+    torch.testing.assert_close(second, expected)
+    assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
+    assert _decisions(session)[0]["candidate_calls"] == 3
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):
