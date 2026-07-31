@@ -590,6 +590,24 @@ def test_fingerprint_is_stable_and_value_independent():
     assert len(first) == 32
 
 
+def test_op_overload_identity_uses_schema_not_distribution_specific_string():
+    class _Schema:
+        name = "aten::_flash_attn_default_forward"
+
+    class _NvidiaStyleOpOverload:
+        _schema = _Schema()
+        _overloadname = "default"
+
+        def __str__(self):
+            return "<OpOverload rendered differently by this torch build>"
+
+    target = _NvidiaStyleOpOverload()
+    node = type("Node", (), {"op": "call_function", "target": target})()
+
+    assert fx_capture._op_key(target) == "aten::_flash_attn_default_forward"
+    assert fx_capture._ir_target(node) == "aten._flash_attn_default_forward.default"
+
+
 def test_assert_metadata_only_rejects_tensors_and_forbidden_keys():
     import pytest
 

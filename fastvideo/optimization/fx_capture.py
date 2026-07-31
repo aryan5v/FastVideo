@@ -409,6 +409,12 @@ _OPERATOR_ALIASES = {
 
 def _op_key(target: Any) -> str:
     """Normalize an FX call target to an ``aten::``-style op key."""
+    schema_name = getattr(getattr(target, "_schema", None), "name", None)
+    if isinstance(schema_name, str) and "::" in schema_name:
+        # OpOverload.__str__ is not stable across PyTorch distributions.  In
+        # particular, NVIDIA builds may render it as a repr-like value while
+        # the schema retains the canonical namespace and operation name.
+        return schema_name
     text = str(target)
     if "aten::" in text:
         return "aten::" + text.split("aten::", 1)[1].split(".")[0].split("(")[0]
@@ -524,6 +530,12 @@ def _ir_target(node: Any) -> str:
     if node.op == "call_module":
         return f"module::{str(node.target)[:128]}"
     target = node.target
+    schema_name = getattr(getattr(target, "_schema", None), "name", None)
+    overload = getattr(target, "_overloadname", None)
+    if isinstance(schema_name, str) and schema_name.startswith("aten::"):
+        operation = schema_name.split("::", 1)[1]
+        overload_name = overload if isinstance(overload, str) and overload else "default"
+        return f"aten.{operation}.{overload_name}"
     name = getattr(target, "__name__", None)
     module = getattr(target, "__module__", "") or ""
     if module in {"_operator", "operator"} and name == "getitem":
