@@ -49,6 +49,19 @@ class _ShapeBranchBlock(nn.Module):
         return (hidden_states + 1) * self.scale
 
 
+class _ScalarInputBlock(nn.Module):
+    """Export specializes safe scalar arguments instead of treating them as tensors."""
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        original_seq_len: int,
+    ) -> torch.Tensor:
+        if original_seq_len > 2:
+            return hidden_states.flatten(0, 0) + original_seq_len
+        return hidden_states
+
+
 class _FakeLayerwiseOffloadHook(ForwardHook):
     class _State:
         def __init__(self, module: nn.Module) -> None:
@@ -389,6 +402,41 @@ def test_fallback_bypasses_eager_only_offload_wrapper():
         callable(block.forward)
         and ModuleHookManager.get_from(block) is not None
         for block in model.blocks
+    )
+
+
+def test_export_ir_specializes_safe_non_tensor_inputs():
+    class _ScalarTransformer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = nn.ModuleList(
+                [_ScalarInputBlock(), _ScalarInputBlock()]
+            )
+
+        def forward(
+            self,
+            hidden_states: torch.Tensor,
+            original_seq_len: int,
+        ) -> torch.Tensor:
+            for block in self.blocks:
+                hidden_states = block(hidden_states, original_seq_len)
+            return hidden_states
+
+    model = _ScalarTransformer()
+    session = fx_capture.FXCaptureSession()
+    assert session.attach(model, prefix="transformer") == 2
+    model(torch.randn(2, 4), 4)
+
+    region = session.finalize()["regions"][0]
+    executable_ir = region["attributes"]["executable_ir"]
+
+    assert region["attributes"]["capture_mode"] == "export"
+    assert len(executable_ir["inputs"]) == 1
+    assert executable_ir["inputs"][0]["name"] == "input_0"
+    assert any(
+        argument == {"const": 4}
+        for node in executable_ir["nodes"]
+        for argument in node["args"]
     )
 
 

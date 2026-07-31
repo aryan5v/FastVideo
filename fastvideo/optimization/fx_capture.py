@@ -563,11 +563,14 @@ def _ir_target(node: Any) -> str:
     return f"unsupported::{_safe_name(type(target).__name__)}"
 
 
-def _ir_argument(value: Any, node_ids: Mapping[Any, str]) -> dict[str, Any]:
+def _ir_argument(
+    value: Any,
+    node_expressions: Mapping[Any, dict[str, Any]],
+) -> dict[str, Any]:
     """Encode graph wiring and safe metadata constants, never tensor values."""
     try:
-        if value in node_ids:
-            return {"ref": node_ids[value]}
+        if value in node_expressions:
+            return dict(node_expressions[value])
     except (TypeError, RuntimeError):
         pass
     if value is None or isinstance(value, bool | int):
@@ -586,7 +589,9 @@ def _ir_argument(value: Any, node_ids: Mapping[Any, str]) -> dict[str, Any]:
         return {"device": "runtime"}
     if isinstance(value, tuple | list):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        return {kind: [_ir_argument(item, node_ids) for item in value]}
+        return {
+            kind: [_ir_argument(item, node_expressions) for item in value]
+        }
     # Static SymInts are shape metadata and safe to materialize.
     if type(value).__module__.startswith("torch") and type(value).__name__ in {
         "SymInt",
@@ -616,7 +621,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     if len(input_specs) != len(placeholders):
         raise RuntimeError("graph_signature_input_mismatch")
 
-    node_ids: dict[Any, str] = {}
+    node_expressions: dict[Any, dict[str, Any]] = {}
     inputs: list[dict[str, Any]] = []
     runtime_index = 0
     lifted_index = 0
@@ -625,7 +630,11 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     ):
         meta = _ir_tensor_meta((node.meta or {}).get("val"))
         if meta is None:
-            raise RuntimeError("non_tensor_graph_input")
+            constant = _ir_argument((node.meta or {}).get("val"), {})
+            if set(constant) == {"unsupported"}:
+                raise RuntimeError("unsupported_non_tensor_graph_input")
+            node_expressions[node] = constant
+            continue
         kind_name = getattr(getattr(input_spec, "kind", None), "name", "")
         if kind_name == "USER_INPUT":
             name = f"input_{runtime_index}"
@@ -636,7 +645,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
             kind = "lifted"
             lifted_index += 1
         node_id = f"p{index}"
-        node_ids[node] = node_id
+        node_expressions[node] = {"ref": node_id}
         inputs.append({"id": node_id, "name": name, "kind": kind, "meta": meta})
 
     nodes: list[dict[str, Any]] = []
@@ -648,13 +657,15 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
         if node.op not in {"call_function", "call_method", "call_module"}:
             raise RuntimeError("unsupported_graph_node_kind")
         node_id = f"n{len(nodes)}"
-        node_ids[node] = node_id
+        node_expressions[node] = {"ref": node_id}
         item: dict[str, Any] = {
             "id": node_id,
             "target": _ir_target(node),
-            "args": [_ir_argument(value, node_ids) for value in node.args],
+            "args": [
+                _ir_argument(value, node_expressions) for value in node.args
+            ],
             "kwargs": {
-                _safe_name(str(key)): _ir_argument(value, node_ids)
+                _safe_name(str(key)): _ir_argument(value, node_expressions)
                 for key, value in (node.kwargs or {}).items()
             },
         }
@@ -666,7 +677,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     output_nodes = [node for node in graph.nodes if node.op == "output"]
     if len(output_nodes) != 1 or not output_nodes[0].args:
         raise RuntimeError("invalid_graph_output")
-    encoded_output = _ir_argument(output_nodes[0].args[0], node_ids)
+    encoded_output = _ir_argument(output_nodes[0].args[0], node_expressions)
     outputs = (
         encoded_output["tuple"]
         if set(encoded_output) == {"tuple"}
@@ -966,11 +977,21 @@ class FXCaptureSession:
                                     graph,
                                 )
                             except Exception as exc:  # noqa: BLE001
+                                known_reason = str(exc)
+                                if known_reason not in {
+                                    "graph_signature_input_mismatch",
+                                    "invalid_graph_output",
+                                    "missing_graph_signature",
+                                    "unlifted_graph_attribute",
+                                    "unsupported_graph_node_kind",
+                                    "unsupported_non_tensor_graph_input",
+                                }:
+                                    known_reason = type(exc).__name__
                                 self._graph_breaks.append({
                                     "scope": record.scope,
                                     "reason": (
                                         "executable_ir_unavailable:"
-                                        f"{type(exc).__name__}"
+                                        f"{known_reason}"
                                     ),
                                     "count": max(variant.calls, 1),
                                 })
