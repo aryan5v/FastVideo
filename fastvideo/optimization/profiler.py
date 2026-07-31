@@ -14,6 +14,10 @@ from typing import Any
 import torch
 
 from fastvideo import envs
+from fastvideo.logger import init_logger
+from fastvideo.optimization.fx_capture import CAPTURE_SCHEMA_VERSION
+
+logger = init_logger(__name__)
 
 
 def _event_number(event: Any, *names: str) -> float:
@@ -83,7 +87,7 @@ def _rows(profiler: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _write_export(profiler: Any, output: Path) -> None:
+def _write_export(profiler: Any, output: Path, capture: dict[str, Any] | None = None) -> None:
     from fastvideo.version import __version__
 
     rows = _rows(profiler)
@@ -116,32 +120,91 @@ def _write_export(profiler: Any, output: Path) -> None:
         "total_cuda_time_us": total_cuda_time_us,
         "rows": rows,
     }
+    if capture is not None:
+        # Additive, optional keys: readers that only understand ``rows`` are
+        # unaffected, and the capture block carries its own schema version.
+        payload.update(capture)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temporary.replace(output)
 
 
+def _start_capture(modules: dict[str, Any] | None) -> Any:
+    """Attach FX capture hooks, or return None if disabled/unavailable."""
+    if not envs.FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX:
+        return None
+    try:
+        from fastvideo.optimization.fx_capture import FXCaptureSession
+
+        session = FXCaptureSession(
+            tracer=envs.FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER,
+            max_scopes=envs.FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES,
+            max_shape_variants=envs.FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES,
+        )
+        hooked = session.attach_modules(modules)
+    except Exception:
+        # Capture is best-effort telemetry; generation must be unaffected.
+        logger.warning("FX capture could not be started; continuing without it", exc_info=True)
+        return None
+    logger.info("FX capture attached to %d module(s)", hooked)
+    return session
+
+
+def _finish_capture(session: Any) -> dict[str, Any] | None:
+    """Detach hooks and build the capture payload, recording any failure."""
+    if session is None:
+        return None
+    try:
+        return session.finalize()
+    except Exception as exc:
+        logger.warning("FX capture finalize failed; exporting failure record", exc_info=True)
+        try:
+            session.detach()
+        except Exception:
+            logger.debug("FX capture detach failed", exc_info=True)
+        return {
+            "capture": {
+                "capture_schema_version": CAPTURE_SCHEMA_VERSION,
+                "errors": [f"finalize_failed: {type(exc).__name__}: {exc}"[:512]],
+            },
+            "regions": [],
+            "graph_breaks": [],
+            "unsupported": [],
+        }
+
+
 @contextlib.contextmanager
-def optimization_profile(call_index: int) -> Iterator[None]:
-    """Profile exactly the configured pipeline call inside the GPU worker."""
+def optimization_profile(call_index: int, modules: dict[str, Any] | None = None) -> Iterator[None]:
+    """Profile exactly the configured pipeline call inside the GPU worker.
+
+    ``modules`` is the pipeline's module mapping. When FX capture is requested
+    it is scanned generically for repeated block stacks — no architecture is
+    named here or in the capture module.
+    """
     template = envs.FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT
     target_call = envs.FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS
     if not template or call_index != target_call:
         yield
         return
 
+    session = _start_capture(modules)
     activities = [torch.profiler.ProfilerActivity.CPU]
     if torch.cuda.is_available():
         activities.append(torch.profiler.ProfilerActivity.CUDA)
         torch.cuda.synchronize()
-    with torch.profiler.profile(
-            activities=activities,
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=False,
-    ) as profiler:
-        yield
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-    _write_export(profiler, _output_path(template))
+    try:
+        with torch.profiler.profile(
+                activities=activities,
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+        ) as profiler:
+            yield
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+    finally:
+        # Tracing happens strictly after the profiler window closes so captured
+        # graphs never land in the exported timings.
+        capture = _finish_capture(session)
+    _write_export(profiler, _output_path(template), capture)

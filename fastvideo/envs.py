@@ -41,6 +41,10 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID: str = "unknown-workload"
     FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID: str = "unknown-model"
     FASTVIDEO_OPTIMIZATION_PROFILE_TASK: str = "video_generation"
+    FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX: bool = False
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER: str = "symbolic"
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES: int = 64
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES: int = 8
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -285,6 +289,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID", "unknown-model"),
     "FASTVIDEO_OPTIMIZATION_PROFILE_TASK":
     lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_TASK", "video_generation"),
+
+    # Metadata-only FX graph capture layered on the optimization profile. It
+    # only runs when the optimization profile above is also requested, so a
+    # clean timing run is never affected.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX":
+    lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX", "0") != "0"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER", "symbolic"),
+    # Upper bound on hooked block stacks, so a pathological model cannot make
+    # the export unbounded.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES", "64")),
+    # Upper bound on distinct input signatures recorded per stack.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES", "8")),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":
