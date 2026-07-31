@@ -203,98 +203,6 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _event_number(event: Any, *names: str) -> float:
-    for name in names:
-        value = getattr(event, name, None)
-        if value is not None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                continue
-    return 0.0
-
-
-def profiler_rows(profiler: Any) -> list[dict[str, Any]]:
-    """Export metadata-only key averages in MotionKernel's portable format."""
-    rows: list[dict[str, Any]] = []
-    for event in profiler.key_averages(group_by_input_shape=True):
-        device_total = _event_number(
-            event,
-            "device_time_total",
-            "cuda_time_total",
-        )
-        self_device = _event_number(
-            event,
-            "self_device_time_total",
-            "self_cuda_time_total",
-        )
-        rows.append(
-            {
-                "name": str(event.key),
-                "calls": int(event.count),
-                "cuda_time_us": device_total,
-                "self_cuda_time_us": self_device,
-                "cpu_time_us": _event_number(event, "cpu_time_total"),
-                "input_shapes": [
-                    list(shape)
-                    for shape in (getattr(event, "input_shapes", None) or [])
-                    if isinstance(shape, (list, tuple))
-                ],
-            }
-        )
-    return rows
-
-
-def write_profiler_export(
-    *,
-    profiler: Any,
-    path: Path,
-    workload: Mapping[str, Any],
-    model_id: str,
-    environment: Mapping[str, Any],
-) -> None:
-    """Write a metadata-only operator profile consumable by MotionKernel."""
-    rows = profiler_rows(profiler)
-    total_cuda_time_us = sum(
-        max(float(row["self_cuda_time_us"]), 0.0) for row in rows
-    )
-    identity_fields = {
-        "python",
-        "platform",
-        "torch",
-        "cuda_available",
-        "cuda",
-        "gpu_name",
-        "gpu_capability",
-        "fastvideo",
-        "mode_requested",
-    }
-    profile_environment = {
-        key: value for key, value in environment.items() if key in identity_fields
-    }
-    write_json(
-        path,
-        {
-            "schema_version": 1,
-            "producer": {
-                "name": "fastvideo",
-                "version": str(environment.get("fastvideo", "unknown")),
-            },
-            "workload": {
-                "workload_id": str(workload["workload_id"]),
-                "model_id": model_id,
-                "task": str(workload["task"]),
-            },
-            # Exclude executable paths and arbitrary mode environment values.
-            # The discovery artifact carries compatibility identity, not
-            # credentials or developer-machine details.
-            "environment": profile_environment,
-            "total_cuda_time_us": total_cuda_time_us,
-            "rows": rows,
-        },
-    )
-
-
 def _normalize_mode(mode: str) -> str:
     if mode == "fused":
         return "optimized"
@@ -325,6 +233,15 @@ def run_generation(
     model_id, generator_kwargs = build_generator_kwargs(
         workload, model_override=model_override
     )
+    if profile_output is not None:
+        profile_output = profile_output.expanduser().resolve()
+        os.environ["FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT"] = str(profile_output)
+        os.environ["FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS"] = str(warmups)
+        os.environ["FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID"] = str(
+            workload["workload_id"]
+        )
+        os.environ["FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID"] = model_id
+        os.environ["FASTVIDEO_OPTIMIZATION_PROFILE_TASK"] = str(workload["task"])
     environment = collect_environment()
     environment["mode_env"] = applied_env
     environment["mode_requested"] = mode
@@ -350,26 +267,15 @@ def run_generation(
             for _ in range(warmups):
                 generator.generate(request)
             if profile_output is not None:
-                activities = [torch.profiler.ProfilerActivity.CPU]
-                if use_cuda:
-                    activities.append(torch.profiler.ProfilerActivity.CUDA)
-                    torch.cuda.synchronize()
-                with torch.profiler.profile(
-                    activities=activities,
-                    record_shapes=True,
-                    profile_memory=True,
-                    with_stack=False,
-                ) as profiler:
-                    generator.generate(request)
-                    if use_cuda:
-                        torch.cuda.synchronize()
-                write_profiler_export(
-                    profiler=profiler,
-                    path=profile_output,
-                    workload=workload,
-                    model_id=model_id,
-                    environment=environment,
-                )
+                # The GPU pipeline runs in a worker process. Environment
+                # configuration above asks that worker to profile this exact
+                # post-warmup call and write the portable export.
+                generator.generate(request)
+                if not profile_output.is_file():
+                    raise RuntimeError(
+                        "GPU worker did not write the requested profiler export: "
+                        f"{profile_output}"
+                    )
             for run_index in range(runs):
                 if use_cuda:
                     torch.cuda.reset_peak_memory_stats()
@@ -380,10 +286,16 @@ def run_generation(
                     torch.cuda.synchronize()
                 timings.append(time.perf_counter() - start)
                 generation_times.append(getattr(result, "generation_time", None))
-                peak_memory.append(
+                reported_peak = getattr(result, "peak_memory_mb", None)
+                parent_peak = (
                     float(torch.cuda.max_memory_allocated()) / (1024.0 * 1024.0)
                     if use_cuda
-                    else getattr(result, "peak_memory_mb", None)
+                    else 0.0
+                )
+                peak_memory.append(
+                    reported_peak
+                    if reported_peak is not None
+                    else (parent_peak if parent_peak > 0 else None)
                 )
                 if save_frames and run_index == 0 and getattr(result, "frames", None) is not None:
                     frames_path = output_dir / f"{result_mode}_frames.npy"
