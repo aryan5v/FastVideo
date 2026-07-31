@@ -495,14 +495,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(plan, indent=2))
         return 0
 
-        payload = run_generation(
-            workload=workload,
-            workload_path=args.workload,
-            mode=args.mode,
-            output_dir=args.output_dir,
-            model_override=args.model,
-            profile_output=args.profile_output,
-        )
+    payload = run_generation(
+        workload=workload,
+        workload_path=args.workload,
+        mode=args.mode,
+        output_dir=args.output_dir,
+        model_override=args.model,
+        profile_output=args.profile_output,
+    )
     print(json.dumps(payload, indent=2))
     return 0 if payload.get("status") == "ok" else 1
 

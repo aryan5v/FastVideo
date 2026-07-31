@@ -169,3 +169,32 @@ def test_profiler_rows_are_metadata_only(launcher):
         }
     ]
     assert "values" not in rows[0]
+
+
+def test_non_dry_cli_runs_generation(tmp_path: Path, launcher, capsys, monkeypatch):
+    path = tmp_path / "w.json"
+    path.write_text(json.dumps(_minimal_workload()), encoding="utf-8")
+    calls = []
+
+    def fake_run_generation(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ok", "mode": "native"}
+
+    monkeypatch.setattr(launcher, "run_generation", fake_run_generation)
+    profile = tmp_path / "profile.json"
+    code = launcher.main(
+        [
+            "--workload",
+            str(path),
+            "--mode",
+            "native",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--profile-output",
+            str(profile),
+        ]
+    )
+    assert code == 0
+    assert len(calls) == 1
+    assert calls[0]["profile_output"] == profile
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
