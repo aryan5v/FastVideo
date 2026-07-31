@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import nn
 
+from fastvideo.hooks.hooks import ForwardHook, ModuleHookManager
 from fastvideo.optimization import fx_capture
 from fastvideo.optimization import profiler as optimization_profiler
 
@@ -41,6 +42,24 @@ class _ShapeBranchBlock(nn.Module):
         if hidden_states.shape[-1] > 2:
             return hidden_states * 2
         return hidden_states + 1
+
+
+class _FakeLayerwiseOffloadHook(ForwardHook):
+    def __init__(self) -> None:
+        self.pre_calls = 0
+        self.post_calls = 0
+
+    @classmethod
+    def name(cls) -> str:
+        return "LayerwiseOffloadHook"
+
+    def pre_forward(self, module, *args, **kwargs):
+        self.pre_calls += 1
+        return args, kwargs
+
+    def post_forward(self, module, output):
+        self.post_calls += 1
+        return output
 
 
 class _Transformer(nn.Module):
@@ -284,6 +303,32 @@ def test_auto_falls_back_to_export_for_shape_control_flow(
         "capture_failed:symbolic:dynamic_python_control_flow:TraceError"
     ]
     assert payload["capture"]["capture_mode_breakdown"]["export"] == 1
+
+
+def test_fallback_bypasses_eager_only_offload_wrapper():
+    model = _Transformer(depth=2, block=_ShapeBranchBlock)
+    hooks = []
+    for block in model.blocks:
+        manager = ModuleHookManager.get_from_or_default(block)
+        hook = _FakeLayerwiseOffloadHook()
+        manager.append_forward_hook(hook)
+        hooks.append(hook)
+
+    session = fx_capture.FXCaptureSession()
+    assert session.attach(model, prefix="transformer") == 2
+    model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"]
+    assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+    assert hooks[0].pre_calls >= 3
+    assert hooks[1].pre_calls == 1
+    assert all(hook.pre_calls == hook.post_calls for hook in hooks)
+    assert all(
+        callable(block.forward)
+        and ModuleHookManager.get_from(block) is not None
+        for block in model.blocks
+    )
 
 
 @pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])

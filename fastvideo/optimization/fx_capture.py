@@ -23,6 +23,7 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
@@ -296,6 +297,57 @@ def assert_metadata_only(payload: Any, path: str = "capture") -> None:
         raise RuntimeError(f"tensor value at {path}")
     elif payload is not None and not isinstance(payload, _SAFE_SCALAR_TYPES):
         raise RuntimeError(f"non-JSON value of type {type(payload).__name__} at {path}")
+
+
+@contextmanager
+def _capture_ready_module(
+    module: nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Iterator[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """Temporarily bypass FastVideo's eager-only layer-offload wrapper.
+
+    ``ModuleHookManager`` replaces ``forward`` with ``functools.partial``.
+    Non-strict export requires a Python function with ``__code__``, while
+    Dynamo intentionally refuses to inline the offload hook. Run that
+    host-side hook eagerly, expose the original forward only for graph
+    capture, then restore both parameters and wrapper. Unknown hooks fail
+    closed because bypassing them could change model semantics.
+    """
+    manager = getattr(module, "_hook_manager", None)
+    if manager is None:
+        yield args, kwargs
+        return
+
+    forward_hooks = getattr(manager, "forward_hooks", {})
+    unsupported_hooks = [
+        str(name)
+        for name in forward_hooks
+        if str(name) != "LayerwiseOffloadHook"
+    ]
+    if unsupported_hooks:
+        raise RuntimeError("unsupported_module_hooks")
+
+    offload_hook = forward_hooks.get("LayerwiseOffloadHook")
+    adjusted_args, adjusted_kwargs = args, kwargs
+    if offload_hook is not None:
+        adjusted_args, adjusted_kwargs = offload_hook.pre_forward(
+            module,
+            *args,
+            **kwargs,
+        )
+
+    wrapped_forward = module.forward
+    original_forward = getattr(manager, "original_forward", None)
+    if original_forward is None:
+        raise RuntimeError("missing_original_forward")
+    module.forward = original_forward
+    try:
+        yield tuple(adjusted_args), dict(adjusted_kwargs)
+    finally:
+        module.forward = wrapped_forward
+        if offload_hook is not None:
+            offload_hook.post_forward(module, None)
 
 
 # FX lowers Python operators (``a * b``) to ``operator.mul`` and friends. They
@@ -616,24 +668,32 @@ class FXCaptureSession:
         kwargs = variant.example_kwargs
         if args is None or kwargs is None:
             raise RuntimeError("example arguments unavailable")
-        if mode == "symbolic":
-            return torch.fx.symbolic_trace(module)
-        if mode == "export":
-            return torch.export.export(
-                module,
-                args,
-                kwargs,
-                strict=False,
-            ).graph_module
-        if mode == "dynamo":
-            exported = torch._dynamo.export(module, aten_graph=True)(
-                *args,
-                **kwargs,
-            )
-            graph_module = getattr(exported, "graph_module", None)
-            if graph_module is None and isinstance(exported, tuple):
-                graph_module = exported[0]
-            return graph_module if graph_module is not None else exported
+        with _capture_ready_module(module, args, kwargs) as (
+            capture_args,
+            capture_kwargs,
+        ):
+            if mode == "symbolic":
+                return torch.fx.symbolic_trace(module)
+            if mode == "export":
+                return torch.export.export(
+                    module,
+                    capture_args,
+                    capture_kwargs,
+                    strict=False,
+                ).graph_module
+            if mode == "dynamo":
+                exported = torch._dynamo.export(module, aten_graph=True)(
+                    *capture_args,
+                    **capture_kwargs,
+                )
+                graph_module = getattr(exported, "graph_module", None)
+                if graph_module is None and isinstance(exported, tuple):
+                    graph_module = exported[0]
+                return (
+                    graph_module
+                    if graph_module is not None
+                    else exported
+                )
         raise ValueError(f"unsupported capture mode {mode!r}")
 
     def _regions_for(self, record: _Scope) -> list[dict[str, Any]]:
