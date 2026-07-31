@@ -150,14 +150,14 @@ def resolve_mode_env(workload: Mapping[str, Any], mode: str) -> dict[str, str]:
     """
     mode_env = dict(workload.get("mode_env") or {})
     if mode in {"optimized", "fused", "candidate"}:
-        selected = (
-            mode_env.get(mode)
-            or mode_env.get("optimized")
-            or mode_env.get("fused")
-            or {}
-        )
+        if mode in mode_env:
+            selected = mode_env[mode]
+        elif "optimized" in mode_env:
+            selected = mode_env["optimized"]
+        else:
+            selected = mode_env.get("fused", {})
     else:
-        selected = mode_env.get(mode) or {}
+        selected = mode_env.get(mode, {})
     return {str(k): str(v) for k, v in dict(selected).items()}
 
 

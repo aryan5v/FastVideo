@@ -137,6 +137,13 @@ def test_resolve_mode_env_prefers_exact_fused_key(launcher):
     assert resolved["EXTRA_FUSE_FLAG"] == "1"
 
 
+def test_resolve_mode_env_preserves_explicit_empty_candidate(launcher):
+    workload = _minimal_workload()
+    workload["mode_env"]["candidate"] = {}
+
+    assert launcher.resolve_mode_env(workload, "candidate") == {}
+
+
 def test_candidate_keeps_dedicated_result_identity(launcher):
     assert launcher._normalize_mode("optimized") == "optimized"
     assert launcher._normalize_mode("fused") == "optimized"
