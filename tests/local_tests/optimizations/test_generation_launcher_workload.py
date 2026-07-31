@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -23,10 +22,8 @@ _LAUNCHER = os.path.join(
 
 
 def _load_launcher():
-    # Avoid the test directory shadowing imports; load the script by path.
-    sys.path = [p for p in sys.path if os.path.abspath(p) != _HERE]
-    if _REPO_ROOT not in sys.path:
-        sys.path.insert(0, _REPO_ROOT)
+    """Load the launcher script by path without permanently mutating sys.path."""
+    # Use a unique module name and no sys.path rewrite — file location is enough.
     spec = importlib.util.spec_from_file_location(
         "generation_launcher_under_test", _LAUNCHER
     )
@@ -36,7 +33,9 @@ def _load_launcher():
     return mod
 
 
-launcher = _load_launcher()
+@pytest.fixture(scope="module")
+def launcher():
+    return _load_launcher()
 
 
 def _minimal_workload(**overrides):
@@ -63,13 +62,17 @@ def _minimal_workload(**overrides):
         "mode_env": {
             "native": {"FASTVIDEO_WAN_FUSIONS": "0"},
             "optimized": {"FASTVIDEO_WAN_FUSIONS": "1"},
+            "fused": {
+                "FASTVIDEO_WAN_FUSIONS": "1",
+                "EXTRA_FUSE_FLAG": "1",
+            },
         },
     }
     payload.update(overrides)
     return payload
 
 
-def test_load_workload_dict_roundtrip(tmp_path: Path):
+def test_load_workload_dict_roundtrip(tmp_path: Path, launcher):
     path = tmp_path / "w.json"
     path.write_text(json.dumps(_minimal_workload()), encoding="utf-8")
     loaded = launcher.load_workload_dict(path)
@@ -83,7 +86,7 @@ def test_load_workload_dict_roundtrip(tmp_path: Path):
     assert kwargs["text_encoder_cpu_offload"] is True
 
 
-def test_prompt_file(tmp_path: Path):
+def test_prompt_file(tmp_path: Path, launcher):
     prompt = tmp_path / "p.txt"
     prompt.write_text("from file\n", encoding="utf-8")
     payload = _minimal_workload()
@@ -95,7 +98,7 @@ def test_prompt_file(tmp_path: Path):
     assert launcher.resolve_prompt(loaded, base_dir=tmp_path) == "from file"
 
 
-def test_rejects_bad_schema(tmp_path: Path):
+def test_rejects_bad_schema(tmp_path: Path, launcher):
     path = tmp_path / "w.json"
     path.write_text(
         json.dumps(_minimal_workload(schema_version=99)), encoding="utf-8"
@@ -104,9 +107,10 @@ def test_rejects_bad_schema(tmp_path: Path):
         launcher.load_workload_dict(path)
 
 
-def test_dry_run_cli(tmp_path: Path, capsys):
+def test_dry_run_cli_does_not_mutate_environ(tmp_path: Path, launcher, capsys, monkeypatch):
     path = tmp_path / "w.json"
     path.write_text(json.dumps(_minimal_workload()), encoding="utf-8")
+    monkeypatch.delenv("FASTVIDEO_WAN_FUSIONS", raising=False)
     code = launcher.main(
         [
             "--workload",
@@ -123,3 +127,11 @@ def test_dry_run_cli(tmp_path: Path, capsys):
     assert plan["workload_id"] == "unit-t2v"
     assert plan["mode"] == "native"
     assert plan["mode_env"]["FASTVIDEO_WAN_FUSIONS"] == "0"
+    assert "FASTVIDEO_WAN_FUSIONS" not in os.environ
+
+
+def test_resolve_mode_env_prefers_exact_fused_key(launcher):
+    workload = _minimal_workload()
+    resolved = launcher.resolve_mode_env(workload, "fused")
+    assert resolved["FASTVIDEO_WAN_FUSIONS"] == "1"
+    assert resolved["EXTRA_FUSE_FLAG"] == "1"

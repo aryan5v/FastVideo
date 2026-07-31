@@ -142,17 +142,31 @@ def build_generator_kwargs(
     return model_id, kwargs
 
 
-def apply_mode_env(workload: Mapping[str, Any], mode: str) -> dict[str, str]:
-    """Apply mode-specific environment variables and return the applied map."""
+def resolve_mode_env(workload: Mapping[str, Any], mode: str) -> dict[str, str]:
+    """Select mode-specific environment variables without mutating ``os.environ``.
+
+    Preference order for candidate modes: the exact mode key, then
+    ``optimized``, then ``fused`` (legacy alias).
+    """
     mode_env = dict(workload.get("mode_env") or {})
     if mode in {"optimized", "fused", "candidate"}:
-        key = "optimized" if "optimized" in mode_env else "fused"
-        selected = dict(mode_env.get(key) or mode_env.get("optimized") or {})
+        selected = (
+            mode_env.get(mode)
+            or mode_env.get("optimized")
+            or mode_env.get("fused")
+            or {}
+        )
     else:
-        selected = dict(mode_env.get(mode) or {})
+        selected = mode_env.get(mode) or {}
+    return {str(k): str(v) for k, v in dict(selected).items()}
+
+
+def apply_mode_env(workload: Mapping[str, Any], mode: str) -> dict[str, str]:
+    """Apply mode-specific environment variables and return the applied map."""
+    selected = resolve_mode_env(workload, mode)
     for name, value in selected.items():
         os.environ[str(name)] = str(value)
-    return {str(k): str(v) for k, v in selected.items()}
+    return selected
 
 
 def collect_environment() -> dict[str, Any]:
@@ -233,30 +247,27 @@ def run_generation(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        import numpy as np
+        import torch
         from fastvideo import VideoGenerator
 
+        use_cuda = bool(torch.cuda.is_available())
         generator = VideoGenerator.from_pretrained(model_id, **generator_kwargs)
         try:
             for _ in range(warmups):
                 generator.generate(request)
             for run_index in range(runs):
-                if hasattr(__import__("torch"), "cuda") and __import__("torch").cuda.is_available():
-                    import torch
-
+                if use_cuda:
                     torch.cuda.reset_peak_memory_stats()
                     torch.cuda.synchronize()
                 start = time.perf_counter()
                 result = generator.generate(request)
-                if hasattr(__import__("torch"), "cuda") and __import__("torch").cuda.is_available():
-                    import torch
-
+                if use_cuda:
                     torch.cuda.synchronize()
                 timings.append(time.perf_counter() - start)
                 generation_times.append(getattr(result, "generation_time", None))
                 peak_memory.append(getattr(result, "peak_memory_mb", None))
                 if save_frames and run_index == 0 and getattr(result, "frames", None) is not None:
-                    import numpy as np
-
                     frames_path = output_dir / f"{result_mode}_frames.npy"
                     np.save(frames_path, np.asarray(result.frames))
         finally:
@@ -350,10 +361,9 @@ def main(argv: list[str] | None = None) -> int:
                 "output": request["output"],
                 "prompt_chars": len(request["prompt"]),
             },
-            "mode_env": apply_mode_env(workload, args.mode),
+            # Resolve only — do not mutate os.environ in dry-run.
+            "mode_env": resolve_mode_env(workload, args.mode),
         }
-        # dry-run must not permanently mutate the parent environment beyond
-        # what the caller expects; mode env was applied above for visibility.
         print(json.dumps(plan, indent=2))
         return 0
 
