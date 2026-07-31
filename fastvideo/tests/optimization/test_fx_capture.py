@@ -38,16 +38,32 @@ class _UntraceableBlock(nn.Module):
 class _ShapeBranchBlock(nn.Module):
     """Representative shape branch that FX cannot evaluate from a Proxy."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.shape[-1] > 2:
-            return hidden_states * 2
-        return hidden_states + 1
+            return hidden_states * 2 * self.scale
+        return (hidden_states + 1) * self.scale
 
 
 class _FakeLayerwiseOffloadHook(ForwardHook):
-    def __init__(self) -> None:
+    class _State:
+        def __init__(self, module: nn.Module) -> None:
+            self.module = module
+            self.gpu_named_parameters = {}
+
+        def wait_and_replace_params(self) -> None:
+            for name, parameter in self.module.named_parameters():
+                if name in self.gpu_named_parameters:
+                    continue
+                self.gpu_named_parameters[name] = parameter.data
+
+    def __init__(self, module: nn.Module) -> None:
         self.pre_calls = 0
         self.post_calls = 0
+        self.state = self._State(module)
 
     @classmethod
     def name(cls) -> str:
@@ -55,10 +71,12 @@ class _FakeLayerwiseOffloadHook(ForwardHook):
 
     def pre_forward(self, module, *args, **kwargs):
         self.pre_calls += 1
+        self.state.wait_and_replace_params()
         return args, kwargs
 
     def post_forward(self, module, output):
         self.post_calls += 1
+        self.state.gpu_named_parameters.clear()
         return output
 
 
@@ -310,20 +328,27 @@ def test_fallback_bypasses_eager_only_offload_wrapper():
     hooks = []
     for block in model.blocks:
         manager = ModuleHookManager.get_from_or_default(block)
-        hook = _FakeLayerwiseOffloadHook()
+        hook = _FakeLayerwiseOffloadHook(block)
         manager.append_forward_hook(hook)
         hooks.append(hook)
 
     session = fx_capture.FXCaptureSession()
     assert session.attach(model, prefix="transformer") == 2
     model(torch.randn(2, 4))
+    prefetched = model.blocks[0].scale.data
+    hooks[0].state.gpu_named_parameters["scale"] = prefetched
     payload = session.finalize()
 
     assert payload["regions"]
     assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
-    assert hooks[0].pre_calls >= 3
-    assert hooks[1].pre_calls == 1
+    assert all(hook.pre_calls == 1 for hook in hooks)
     assert all(hook.pre_calls == hook.post_calls for hook in hooks)
+    assert hooks[0].state.gpu_named_parameters == {"scale": prefetched}
+    assert not hooks[1].state.gpu_named_parameters
+    model(torch.randn(2, 4))
+    assert all(hook.pre_calls == 2 for hook in hooks)
+    assert all(hook.pre_calls == hook.post_calls for hook in hooks)
+    assert all(not hook.state.gpu_named_parameters for hook in hooks)
     assert all(
         callable(block.forward)
         and ModuleHookManager.get_from(block) is not None

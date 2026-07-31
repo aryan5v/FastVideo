@@ -310,9 +310,12 @@ def _capture_ready_module(
     ``ModuleHookManager`` replaces ``forward`` with ``functools.partial``.
     Non-strict export requires a Python function with ``__code__``, while
     Dynamo intentionally refuses to inline the offload hook. Run that
-    host-side hook eagerly, expose the original forward only for graph
-    capture, then restore both parameters and wrapper. Unknown hooks fail
-    closed because bypassing them could change model semantics.
+    state loader eagerly, expose the original forward only for graph
+    capture, then restore the exact parameter/offload state and wrapper.
+    Calling the hook itself is not observational: its pre-hook prefetches
+    the next layer and can leave that layer populated after a failed trace.
+    Unknown hooks fail closed because bypassing them could change model
+    semantics.
     """
     manager = getattr(module, "_hook_manager", None)
     if manager is None:
@@ -328,26 +331,40 @@ def _capture_ready_module(
     if unsupported_hooks:
         raise RuntimeError("unsupported_module_hooks")
 
-    offload_hook = forward_hooks.get("LayerwiseOffloadHook")
-    adjusted_args, adjusted_kwargs = args, kwargs
-    if offload_hook is not None:
-        adjusted_args, adjusted_kwargs = offload_hook.pre_forward(
-            module,
-            *args,
-            **kwargs,
-        )
-
     wrapped_forward = module.forward
     original_forward = getattr(manager, "original_forward", None)
     if original_forward is None:
         raise RuntimeError("missing_original_forward")
-    module.forward = original_forward
+
+    offload_hook = forward_hooks.get("LayerwiseOffloadHook")
+    state = getattr(offload_hook, "state", None)
+    if offload_hook is not None and state is None:
+        raise RuntimeError("missing_offload_state")
+
+    parameter_data = {
+        name: parameter.data
+        for name, parameter in module.named_parameters()
+    }
+    gpu_parameters = (
+        dict(getattr(state, "gpu_named_parameters", {}))
+        if state is not None
+        else {}
+    )
     try:
-        yield tuple(adjusted_args), dict(adjusted_kwargs)
+        if state is not None:
+            state.wait_and_replace_params()
+        module.forward = original_forward
+        yield tuple(args), dict(kwargs)
     finally:
         module.forward = wrapped_forward
-        if offload_hook is not None:
-            offload_hook.post_forward(module, None)
+        if state is not None:
+            named_parameters = dict(module.named_parameters())
+            for name, data in parameter_data.items():
+                parameter = named_parameters.get(name)
+                if parameter is not None:
+                    parameter.data = data
+            state.gpu_named_parameters.clear()
+            state.gpu_named_parameters.update(gpu_parameters)
 
 
 # FX lowers Python operators (``a * b``) to ``operator.mul`` and friends. They
