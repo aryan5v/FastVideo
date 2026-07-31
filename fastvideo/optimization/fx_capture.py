@@ -25,6 +25,7 @@ from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
+from types import MethodType
 from typing import Any
 
 import torch
@@ -367,6 +368,58 @@ def _capture_ready_module(
             state.gpu_named_parameters.update(gpu_parameters)
 
 
+@contextmanager
+def _capture_forward_context(
+    observed_context: tuple[Any, Any] | None,
+) -> Iterator[None]:
+    """Re-establish the bounded runtime context needed by attention layers."""
+    if observed_context is None:
+        yield
+        return
+
+    from fastvideo.forward_context import set_forward_context
+
+    current_timestep, attention_metadata = observed_context
+    with set_forward_context(
+        current_timestep=current_timestep,
+        attn_metadata=attention_metadata,
+        forward_batch=None,
+    ):
+        yield
+
+
+@contextmanager
+def _traceable_module_forwards(module: nn.Module) -> Iterator[None]:
+    """Temporarily expose forwards hidden behind ``torch.compiler.disable``.
+
+    FastVideo deliberately keeps attention eager during normal compiled
+    execution. Discovery is different: export/Dynamo must see the attention
+    call to describe the dominant block. PyTorch's disable wrapper retains the
+    original callable, so expose it only during capture and restore every
+    module instance afterward.
+    """
+    original_forwards: list[tuple[nn.Module, Any]] = []
+    try:
+        for child in module.modules():
+            forward = child.forward
+            function = getattr(forward, "__func__", forward)
+            if not getattr(function, "_torchdynamo_disable", False):
+                continue
+            original = getattr(
+                function,
+                "_torchdynamo_orig_callable",
+                None,
+            )
+            if original is None:
+                raise RuntimeError("missing_compiler_disabled_forward")
+            original_forwards.append((child, forward))
+            child.forward = MethodType(original, child)
+        yield
+    finally:
+        for child, forward in reversed(original_forwards):
+            child.forward = forward
+
+
 # FX lowers Python operators (``a * b``) to ``operator.mul`` and friends. They
 # are the same aten ops as the method form, so normalize them together.
 _OPERATOR_ALIASES = {
@@ -487,6 +540,10 @@ class _ShapeVariant:
     # They are cleared before the JSON payload is returned and never serialized.
     example_args: tuple[Any, ...] | None = field(default=None, repr=False)
     example_kwargs: dict[str, Any] | None = field(default=None, repr=False)
+    observed_context: tuple[Any, Any] | None = field(
+        default=None,
+        repr=False,
+    )
     calls: int = 0
 
 
@@ -632,11 +689,22 @@ class FXCaptureSession:
             if len(record.variants) >= self.max_shape_variants:
                 record.dropped_variants += 1
                 return
+            try:
+                from fastvideo.forward_context import get_forward_context
+
+                forward_context = get_forward_context()
+                observed_context = (
+                    forward_context.current_timestep,
+                    forward_context.attn_metadata,
+                )
+            except AssertionError:
+                observed_context = None
             variant = _ShapeVariant(
                 inputs=inputs,
                 outputs=outputs,
                 example_args=args,
                 example_kwargs=dict(kwargs),
+                observed_context=observed_context,
             )
             record.variants[key] = variant
         variant.calls += 1
@@ -688,7 +756,9 @@ class FXCaptureSession:
         with _capture_ready_module(module, args, kwargs) as (
             capture_args,
             capture_kwargs,
-        ):
+        ), _capture_forward_context(
+            variant.observed_context
+        ), _traceable_module_forwards(module):
             if mode == "symbolic":
                 return torch.fx.symbolic_trace(module)
             if mode == "export":
@@ -751,6 +821,7 @@ class FXCaptureSession:
                 # Drop all live tensor/object references before serialization.
                 variant.example_args = None
                 variant.example_kwargs = None
+                variant.observed_context = None
 
             if capture_mode is None:
                 continue

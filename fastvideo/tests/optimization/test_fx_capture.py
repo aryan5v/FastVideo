@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import nn
 
+from fastvideo.forward_context import get_forward_context, set_forward_context
 from fastvideo.hooks.hooks import ForwardHook, ModuleHookManager
 from fastvideo.optimization import fx_capture
 from fastvideo.optimization import profiler as optimization_profiler
@@ -78,6 +79,25 @@ class _FakeLayerwiseOffloadHook(ForwardHook):
         self.post_calls += 1
         self.state.gpu_named_parameters.clear()
         return output
+
+
+class _ContextAttention(nn.Module):
+    @torch.compiler.disable
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        context = get_forward_context()
+        return hidden_states + context.current_timestep
+
+
+class _ContextShapeBranchBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.attention = _ContextAttention()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.shape[-1] > 2:
+            hidden_states = hidden_states * self.scale
+        return self.attention(hidden_states)
 
 
 class _Transformer(nn.Module):
@@ -353,6 +373,28 @@ def test_fallback_bypasses_eager_only_offload_wrapper():
         callable(block.forward)
         and ModuleHookManager.get_from(block) is not None
         for block in model.blocks
+    )
+
+
+def test_fallback_restores_observed_context_and_disabled_forwards():
+    model = _Transformer(depth=2, block=_ContextShapeBranchBlock)
+    session = fx_capture.FXCaptureSession()
+    assert session.attach(model, prefix="transformer") == 2
+
+    with set_forward_context(current_timestep=3, attn_metadata=None):
+        model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"]
+    assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+    assert all(
+        getattr(block.attention.forward, "_torchdynamo_disable", False)
+        for block in model.blocks
+    )
+    assert all(
+        variant.observed_context is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
     )
 
 
