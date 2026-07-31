@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -282,14 +283,15 @@ class GraphDispatchSession:
             return _Decision(None, REASON_NO_SIGNATURE_MATCH)
 
         try:
-            region = graph_identity(
-                wrapper.module,
-                args,
-                kwargs,
-                output,
-                scope=scope,
-                tracer=self.tracer,
-            )
+            with self._native_forward_for_identity(wrapper):
+                region = graph_identity(
+                    wrapper.module,
+                    args,
+                    kwargs,
+                    output,
+                    scope=scope,
+                    tracer=self.tracer,
+                )
         except Exception as exc:  # noqa: BLE001 - untraceable modules stay native
             reason = f"{_REASON_IDENTITY_PREFIX}:{type(exc).__name__}"
             logger.info("Graph identity unavailable for %s: %s", scope, reason)
@@ -300,17 +302,17 @@ class GraphDispatchSession:
         matched: list[ArtifactManifest] = []
         rejections: list[str] = []
         for manifest in candidates:
-            reason = check_compatibility(
+            compatibility_reason = check_compatibility(
                 manifest,
                 graph_fingerprint=fingerprint,
                 input_keys=input_keys,
                 output_keys=output_keys,
                 runtime=self.runtime,
             )
-            if reason is None:
+            if compatibility_reason is None:
                 matched.append(manifest)
             else:
-                rejections.append(f"{manifest.artifact_id}:{reason}")
+                rejections.append(f"{manifest.artifact_id}:{compatibility_reason}")
         if not matched:
             return _Decision(
                 None,
@@ -345,6 +347,21 @@ class GraphDispatchSession:
             artifact_id=best.artifact_id,
             rejections=tuple(sorted(rejections)),
         )
+
+    @contextmanager
+    def _native_forward_for_identity(self, wrapper: _Wrapper):
+        """Expose the real forward while export/Dynamo recompute identity.
+
+        Symbolic FX traces the class method, but export and Dynamo call the
+        instance forward. Leaving the dispatch wrapper installed would recurse
+        back into this session during identity capture.
+        """
+        installed_forward = wrapper.module.forward
+        wrapper.module.forward = wrapper.native_forward  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            wrapper.module.forward = installed_forward  # type: ignore[method-assign]
 
     def _variant_count(self, scope: str) -> int:
         return sum(1 for existing_scope, _ in self._decisions if existing_scope == scope)
@@ -412,7 +429,7 @@ class GraphDispatchSession:
 def _execution_mode(modules: dict[str, Any] | None) -> str:
     """Report ``training`` when any hooked module is in training mode."""
     for module in (modules or {}).values():
-        if isinstance(module, nn.Module) and module.training:
+        if isinstance(module, nn.Module) and any(child.training for child in module.modules()):
             return "training"
     return "inference"
 

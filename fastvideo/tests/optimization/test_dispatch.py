@@ -18,7 +18,8 @@ import torch
 from torch import nn
 
 from fastvideo import envs
-from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactRegistry, RuntimeProfile, verify_bundle)
+from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactRegistry, RuntimeProfile, load_entry_point,
+                                             verify_bundle)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
 from fastvideo.optimization.identity import (graph_identity, input_signatures, output_signatures)
@@ -111,11 +112,17 @@ def _runtime(**overrides) -> RuntimeProfile:
     return RuntimeProfile(**profile)
 
 
-def _observed_identity(module: nn.Module, hidden: torch.Tensor, *, scope: str = "transformer.blocks"):
+def _observed_identity(
+    module: nn.Module,
+    hidden: torch.Tensor,
+    *,
+    scope: str = "transformer.blocks",
+    tracer: str = "symbolic",
+):
     """Trace one call the way dispatch does, to learn the artifact identity."""
     with torch.no_grad():
         output = module(hidden)
-    region = graph_identity(module, (hidden, ), {}, output, scope=scope, tracer="symbolic")
+    region = graph_identity(module, (hidden, ), {}, output, scope=scope, tracer=tracer)
     return (
         region["fingerprint"],
         input_signatures((hidden, ), {}),
@@ -226,8 +233,12 @@ def store(tmp_path: Path) -> Path:
     return directory
 
 
-def _session(store: Path, **overrides) -> GraphDispatchSession:
-    return GraphDispatchSession(ArtifactRegistry(store), _runtime(**overrides), tracer="symbolic")
+def _session(store: Path, *, tracer: str = "symbolic", **overrides) -> GraphDispatchSession:
+    return GraphDispatchSession(
+        ArtifactRegistry(store),
+        _runtime(**overrides),
+        tracer=tracer,
+    )
 
 
 def _decisions(session: GraphDispatchSession) -> list[dict]:
@@ -315,6 +326,26 @@ def test_compatible_artifact_is_selected(store, hidden):
     assert decision["artifact_id"] == "fake-fused-block"
     assert decision["candidate_calls"] == 3
     assert decision["runtime_fallbacks"] == 0
+
+
+def test_export_identity_traces_native_forward_without_dispatch_recursion(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden, tracer="export"
+    )
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store, tracer="export")
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        first = transformer(hidden)
+        second = transformer(hidden)
+
+    session.detach()
+    assert torch.allclose(first, torch.full_like(first, MARKER))
+    assert torch.allclose(second, torch.full_like(second, MARKER))
+    assert _reasons(session) == [REASON_SELECTED]
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):
@@ -527,6 +558,68 @@ def test_unknown_schema_version_is_rejected(store, hidden):
     assert "unsupported version" in registry.errors[0]
 
 
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda document: document["signature"]["inputs"][0].update(
+                requires_grad="false"
+            ),
+            "requires_grad",
+        ),
+        (
+            lambda document: document["evidence"]["benchmark"].update(
+                speedup=float("nan")
+            ),
+            "finite non-negative",
+        ),
+        (
+            lambda document: document["compatibility"].update(
+                torch={"min": "3.0", "max_exclusive": "2.0"}
+            ),
+            "min must be lower",
+        ),
+    ],
+)
+def test_malformed_acted_on_manifest_fields_fail_closed(
+    store, hidden, mutate, match
+):
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(
+        modules["transformer"].blocks[0], hidden
+    )
+    document = _sections(fingerprint, inputs, outputs)
+    mutate(document)
+    _write_bundle(store, document)
+
+    registry = ArtifactRegistry(store)
+
+    assert registry.manifests == []
+    assert match in registry.errors[0]
+
+
+def test_artifact_module_names_do_not_collide_after_id_sanitizing(store, hidden):
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(
+        modules["transformer"].blocks[0], hidden
+    )
+    dashed = _sections(fingerprint, inputs, outputs, artifact_id="my-kernel-v1")
+    underscored = _sections(
+        fingerprint, inputs, outputs, artifact_id="my_kernel_v1"
+    )
+    dashed_dir = _write_bundle(store, dashed, name="dashed")
+    underscored_dir = _write_bundle(store, underscored, name="underscored")
+
+    dashed_candidate = load_entry_point(
+        verify_bundle(dashed_dir), trusted_root=store
+    )
+    underscored_candidate = load_entry_point(
+        verify_bundle(underscored_dir), trusted_root=store
+    )
+
+    assert dashed_candidate.__module__ != underscored_candidate.__module__
+
+
 def test_failing_import_falls_back_to_native(store, hidden):
     modules = _pipeline_modules()
     transformer = modules["transformer"]
@@ -686,5 +779,35 @@ def test_training_mode_is_detected_and_rejects_inference_only_artifacts(store, m
             actual = transformer(hidden)
         assert not torch.allclose(actual, torch.full_like(actual, MARKER))
         assert _decisions(session)[0]["rejections"] == ["fake-fused-block:execution_mode_unsupported"]
+    finally:
+        detach_graph_dispatch(session)
+
+
+def test_nested_training_module_is_detected_fail_closed(store, monkeypatch, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    transformer.eval()
+    transformer.blocks[0].train()
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR", str(store))
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID", "fake/model")
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION", ANY)
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER", "symbolic")
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES", 64)
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES", 8)
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE", "")
+    monkeypatch.setattr(envs, "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS", "")
+
+    session = attach_graph_dispatch(modules)
+
+    assert session is not None
+    try:
+        with torch.no_grad():
+            transformer(hidden)
+            transformer(hidden)
+        assert _decisions(session)[0]["rejections"] == [
+            "fake-fused-block:execution_mode_unsupported"
+        ]
     finally:
         detach_graph_dispatch(session)

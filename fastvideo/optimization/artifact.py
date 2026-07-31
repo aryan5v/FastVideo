@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -174,6 +175,18 @@ class VersionRange:
             minimum = _text(minimum, source, f"{location}.min")
         if maximum is not None:
             maximum = _text(maximum, source, f"{location}.max_exclusive")
+        low = parse_version(minimum)
+        high = parse_version(maximum)
+        if minimum is not None and low is None:
+            raise _fail(source, f"{location}.min", "must be a dotted version")
+        if maximum is not None and high is None:
+            raise _fail(
+                source,
+                f"{location}.max_exclusive",
+                "must be a dotted version",
+            )
+        if low is not None and high is not None and _compare_versions(low, high) >= 0:
+            raise _fail(source, location, "min must be lower than max_exclusive")
         return cls(minimum=minimum, maximum_exclusive=maximum)
 
     @property
@@ -232,6 +245,13 @@ def _signature_keys(raw: Any, source: object, location: str) -> tuple[tuple[Any,
     keys = []
     for index, item in enumerate(items):
         entry = _mapping(item, source, f"{location}[{index}]")
+        unknown = sorted(set(entry) - {"name", "shape", "stride", "dtype", "device_type", "requires_grad"})
+        if unknown:
+            raise _fail(
+                source,
+                f"{location}[{index}]",
+                f"unknown field(s) {unknown}",
+            )
         shape = _sequence(entry.get("shape"), source, f"{location}[{index}].shape")
         stride = _sequence(entry.get("stride"), source, f"{location}[{index}].stride")
         for values, name in ((shape, "shape"), (stride, "stride")):
@@ -242,6 +262,12 @@ def _signature_keys(raw: Any, source: object, location: str) -> tuple[tuple[Any,
                         f"{location}[{index}].{name}[{position}]",
                         "must be an integer",
                     )
+                if name == "shape" and value < 0:
+                    raise _fail(
+                        source,
+                        f"{location}[{index}].shape[{position}]",
+                        "must be non-negative",
+                    )
         if len(shape) != len(stride):
             raise _fail(
                 source,
@@ -250,6 +276,11 @@ def _signature_keys(raw: Any, source: object, location: str) -> tuple[tuple[Any,
             )
         _text(entry.get("dtype"), source, f"{location}[{index}].dtype")
         _text(entry.get("device_type"), source, f"{location}[{index}].device_type")
+        _bool(
+            entry.get("requires_grad", False),
+            source,
+            f"{location}[{index}].requires_grad",
+        )
         keys.append(signature_key(entry))
     return tuple(keys)
 
@@ -344,8 +375,36 @@ class ArtifactManifest:
         benchmark = _mapping(evidence.get("benchmark"), source, "evidence.benchmark")
         generation = _mapping(evidence.get("generation"), source, "evidence.generation")
         speedup = benchmark.get("speedup")
-        if isinstance(speedup, bool) or not isinstance(speedup, int | float):
-            raise _fail(source, "evidence.benchmark.speedup", "must be a number")
+        if (isinstance(speedup, bool) or not isinstance(speedup, int | float) or not math.isfinite(float(speedup))
+                or float(speedup) < 0):
+            raise _fail(
+                source,
+                "evidence.benchmark.speedup",
+                "must be a finite non-negative number",
+            )
+
+        architectures = _sequence(
+            compatibility.get("gpu_architectures"),
+            source,
+            "compatibility.gpu_architectures",
+        )
+        execution_modes = _sequence(
+            compatibility.get("execution_modes"),
+            source,
+            "compatibility.execution_modes",
+        )
+        distributed_modes = _sequence(
+            compatibility.get("distributed_modes"),
+            source,
+            "compatibility.distributed_modes",
+        )
+        for items, location in (
+            (architectures, "compatibility.gpu_architectures"),
+            (execution_modes, "compatibility.execution_modes"),
+            (distributed_modes, "compatibility.distributed_modes"),
+        ):
+            if not items:
+                raise _fail(source, location, "must be a non-empty list")
 
         return cls(
             artifact_id=_text(raw.get("artifact_id"), source, "artifact_id"),
@@ -376,12 +435,8 @@ class ArtifactManifest:
                 "compatibility.model_revision",
             ),
             gpu_architectures=tuple(
-                _text(item, source, f"compatibility.gpu_architectures[{index}]") for index, item in enumerate(
-                    _sequence(
-                        compatibility.get("gpu_architectures"),
-                        source,
-                        "compatibility.gpu_architectures",
-                    ))),
+                _text(item, source, f"compatibility.gpu_architectures[{index}]")
+                for index, item in enumerate(architectures)),
             torch_range=VersionRange.from_dict(
                 compatibility.get("torch"),
                 source=source,
@@ -398,19 +453,11 @@ class ArtifactManifest:
                 location="compatibility.triton",
             ),
             execution_modes=tuple(
-                _text(item, source, f"compatibility.execution_modes[{index}]") for index, item in enumerate(
-                    _sequence(
-                        compatibility.get("execution_modes"),
-                        source,
-                        "compatibility.execution_modes",
-                    ))),
+                _text(item, source, f"compatibility.execution_modes[{index}]")
+                for index, item in enumerate(execution_modes)),
             distributed_modes=tuple(
-                _text(item, source, f"compatibility.distributed_modes[{index}]") for index, item in enumerate(
-                    _sequence(
-                        compatibility.get("distributed_modes"),
-                        source,
-                        "compatibility.distributed_modes",
-                    ))),
+                _text(item, source, f"compatibility.distributed_modes[{index}]")
+                for index, item in enumerate(distributed_modes)),
             promotion_decision=_text(promotion.get("decision"), source, "promotion.decision"),
             evidence_passed=(_bool(benchmark.get("passed"), source, "evidence.benchmark.passed")
                              and _bool(generation.get("passed"), source, "evidence.generation.passed")),
@@ -608,7 +655,9 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
         )
 
     entry_file = _resolve_inside(directory, directory / verified.entry_file)
-    module_name = f"{_MODULE_NAMESPACE}.{re.sub(r'[^A-Za-z0-9_]', '_', verified.artifact_id)}"
+    readable_id = re.sub(r"[^A-Za-z0-9_]", "_", verified.artifact_id)
+    unique_id = hashlib.sha256(verified.artifact_id.encode("utf-8")).hexdigest()[:16]
+    module_name = f"{_MODULE_NAMESPACE}.{readable_id}_{unique_id}"
     spec = importlib.util.spec_from_file_location(module_name, entry_file)
     if spec is None or spec.loader is None:
         raise _fail(str(directory), "entry_point", f"cannot load {verified.entry_file!r}")
