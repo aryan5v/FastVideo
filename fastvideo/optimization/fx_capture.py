@@ -33,7 +33,7 @@ from torch import nn
 
 # Bumped independently of the profiler export's ``schema_version`` so consumers
 # can tell a capture-format change from a profiler-row change.
-CAPTURE_SCHEMA_VERSION = 1
+CAPTURE_SCHEMA_VERSION = 2
 
 # Region names and op keys must satisfy the consumer's validation patterns.
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -530,6 +530,156 @@ def _extract_graph(graph: Any) -> tuple[list[str], list[str], dict[str, Any], li
     return operations, dependencies, _sanitize_constants(constants), notes
 
 
+def _ir_tensor_meta(value: Any) -> dict[str, Any] | None:
+    """Return value metadata accepted by MotionKernel's executable IR."""
+    if not isinstance(value, torch.Tensor):
+        return None
+    try:
+        shape = [int(dim) for dim in value.shape]
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return {
+        "shape": shape,
+        "dtype": str(value.dtype).replace("torch.", ""),
+        "requires_grad": bool(value.requires_grad),
+    }
+
+
+def _ir_target(node: Any) -> str:
+    if node.op == "call_method":
+        return f"aten.{node.target}.default"
+    if node.op == "call_module":
+        return f"module::{str(node.target)[:128]}"
+    target = node.target
+    name = getattr(target, "__name__", None)
+    module = getattr(target, "__module__", "") or ""
+    if module in {"_operator", "operator"} and name == "getitem":
+        return "operator.getitem"
+    text = str(target)
+    if text.startswith("aten."):
+        return text
+    # The type category is enough for a fail-closed consumer; never serialize
+    # repr/source text for unknown callables.
+    return f"unsupported::{_safe_name(type(target).__name__)}"
+
+
+def _ir_argument(value: Any, node_ids: Mapping[Any, str]) -> dict[str, Any]:
+    """Encode graph wiring and safe metadata constants, never tensor values."""
+    try:
+        if value in node_ids:
+            return {"ref": node_ids[value]}
+    except (TypeError, RuntimeError):
+        pass
+    if value is None or isinstance(value, bool | int):
+        return {"const": value}
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return {"const": value}
+        return {"unsupported": "non_finite_float"}
+    if isinstance(value, str):
+        if re.fullmatch(r"[A-Za-z0-9_.:/-]{1,64}", value):
+            return {"const": value}
+        return {"unsupported": "string"}
+    if isinstance(value, torch.dtype):
+        return {"dtype": str(value).replace("torch.", "")}
+    if isinstance(value, torch.device):
+        return {"device": "runtime"}
+    if isinstance(value, tuple | list):
+        kind = "tuple" if isinstance(value, tuple) else "list"
+        return {kind: [_ir_argument(item, node_ids) for item in value]}
+    # Static SymInts are shape metadata and safe to materialize.
+    if type(value).__module__.startswith("torch") and type(value).__name__ in {
+        "SymInt",
+        "SymBool",
+        "SymFloat",
+    }:
+        try:
+            scalar = int(value) if type(value).__name__ != "SymFloat" else float(value)
+            return {"const": scalar}
+        except (TypeError, ValueError, RuntimeError):
+            return {"unsupported": type(value).__name__}
+    return {"unsupported": _safe_name(type(value).__name__)}
+
+
+def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
+    """Build an operand-aware, metadata-only IR from an ExportedProgram.
+
+    Export is required because its graph signature distinguishes runtime
+    tensors from lifted parameters. Lifted inputs receive generic names; model
+    parameter paths and values are deliberately excluded.
+    """
+    graph_signature = getattr(exported, "graph_signature", None)
+    if graph_signature is None:
+        raise RuntimeError("missing_graph_signature")
+    input_specs = list(getattr(graph_signature, "input_specs", ()))
+    placeholders = [node for node in graph.nodes if node.op == "placeholder"]
+    if len(input_specs) != len(placeholders):
+        raise RuntimeError("graph_signature_input_mismatch")
+
+    node_ids: dict[Any, str] = {}
+    inputs: list[dict[str, Any]] = []
+    runtime_index = 0
+    lifted_index = 0
+    for index, (node, input_spec) in enumerate(
+        zip(placeholders, input_specs, strict=True)
+    ):
+        meta = _ir_tensor_meta((node.meta or {}).get("val"))
+        if meta is None:
+            raise RuntimeError("non_tensor_graph_input")
+        kind_name = getattr(getattr(input_spec, "kind", None), "name", "")
+        if kind_name == "USER_INPUT":
+            name = f"input_{runtime_index}"
+            kind = "runtime"
+            runtime_index += 1
+        else:
+            name = f"lifted_{lifted_index}"
+            kind = "lifted"
+            lifted_index += 1
+        node_id = f"p{index}"
+        node_ids[node] = node_id
+        inputs.append({"id": node_id, "name": name, "kind": kind, "meta": meta})
+
+    nodes: list[dict[str, Any]] = []
+    for node in graph.nodes:
+        if node.op in {"placeholder", "output"}:
+            continue
+        if node.op == "get_attr":
+            raise RuntimeError("unlifted_graph_attribute")
+        if node.op not in {"call_function", "call_method", "call_module"}:
+            raise RuntimeError("unsupported_graph_node_kind")
+        node_id = f"n{len(nodes)}"
+        node_ids[node] = node_id
+        item: dict[str, Any] = {
+            "id": node_id,
+            "target": _ir_target(node),
+            "args": [_ir_argument(value, node_ids) for value in node.args],
+            "kwargs": {
+                _safe_name(str(key)): _ir_argument(value, node_ids)
+                for key, value in (node.kwargs or {}).items()
+            },
+        }
+        meta = _ir_tensor_meta((node.meta or {}).get("val"))
+        if meta is not None:
+            item["meta"] = meta
+        nodes.append(item)
+
+    output_nodes = [node for node in graph.nodes if node.op == "output"]
+    if len(output_nodes) != 1 or not output_nodes[0].args:
+        raise RuntimeError("invalid_graph_output")
+    encoded_output = _ir_argument(output_nodes[0].args[0], node_ids)
+    outputs = (
+        encoded_output["tuple"]
+        if set(encoded_output) == {"tuple"}
+        else [encoded_output]
+    )
+    return {
+        "schema_version": 1,
+        "inputs": inputs,
+        "nodes": nodes,
+        "outputs": outputs,
+    }
+
+
 @dataclass
 class _ShapeVariant:
     """One observed input/output signature for a scope."""
@@ -767,7 +917,7 @@ class FXCaptureSession:
                     capture_args,
                     capture_kwargs,
                     strict=False,
-                ).graph_module
+                )
             if mode == "dynamo":
                 exported = torch._dynamo.export(module, aten_graph=True)(
                     *capture_args,
@@ -792,6 +942,7 @@ class FXCaptureSession:
             dependencies: list[str] = []
             constants: dict[str, Any] = {}
             notes: list[str] = []
+            executable_ir: dict[str, Any] | None = None
             attempts = self._mode_order()
             try:
                 for mode in attempts:
@@ -808,6 +959,21 @@ class FXCaptureSession:
                                 "trace result has no tensor operations"
                             )
                         capture_mode = mode
+                        if mode == "export":
+                            try:
+                                executable_ir = _extract_executable_ir(
+                                    traced,
+                                    graph,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                self._graph_breaks.append({
+                                    "scope": record.scope,
+                                    "reason": (
+                                        "executable_ir_unavailable:"
+                                        f"{type(exc).__name__}"
+                                    ),
+                                    "count": max(variant.calls, 1),
+                                })
                         break
                     except Exception as exc:  # noqa: BLE001
                         reason = _capture_failure_reason(mode, exc)
@@ -873,6 +1039,8 @@ class FXCaptureSession:
                     "capture_failures": failures,
                 },
             }
+            if executable_ir is not None:
+                region["attributes"]["executable_ir"] = executable_ir
             if constants:
                 region["safe_constants"] = constants
             regions.append(region)

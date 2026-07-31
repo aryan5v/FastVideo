@@ -340,6 +340,22 @@ def test_auto_falls_back_to_export_for_shape_control_flow(
     assert attributes["capture_failures"] == [
         "capture_failed:symbolic:dynamic_python_control_flow:TraceError"
     ]
+    executable_ir = attributes["executable_ir"]
+    assert executable_ir["schema_version"] == 1
+    assert len(executable_ir["nodes"]) == len(payload["regions"][0]["operations"])
+    assert {item["kind"] for item in executable_ir["inputs"]} == {
+        "runtime",
+        "lifted",
+    }
+    assert [item["name"] for item in executable_ir["inputs"]] == [
+        "lifted_0",
+        "input_0",
+    ]
+    assert all(
+        set(item["meta"]) == {"shape", "dtype", "requires_grad"}
+        for item in executable_ir["inputs"]
+    )
+    assert "scale" not in json.dumps(executable_ir)
     assert payload["capture"]["capture_mode_breakdown"]["export"] == 1
 
 
