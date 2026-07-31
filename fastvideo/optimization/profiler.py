@@ -175,7 +175,8 @@ def _finish_capture(session: Any) -> dict[str, Any] | None:
         return {
             "capture": {
                 "capture_schema_version": CAPTURE_SCHEMA_VERSION,
-                "errors": [f"finalize_failed: {type(exc).__name__}: {exc}"[:512]],
+                # Exception text can include source snippets or argument reprs.
+                "errors": [f"finalize_failed:{type(exc).__name__}"],
             },
             "regions": [],
             "graph_breaks": [],

@@ -22,7 +22,8 @@ import json
 import math
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
 import torch
@@ -55,10 +56,8 @@ FORBIDDEN_KEYS = frozenset({
     "weights",
 })
 
-# Substrings that mark an FX ``get_attr`` target as a parameter/buffer read.
-_WEIGHT_ATTR_HINTS = ("weight", "bias", "embed", "param", "buffer")
-
 _SAFE_SCALAR_TYPES = (bool, int, float, str)
+_CAPTURE_MODES = ("symbolic", "export", "dynamo")
 
 
 def _canonical(value: Any) -> Any:
@@ -135,23 +134,88 @@ def _shape_key(metas: list[dict[str, Any]]) -> str:
                     for meta in metas)
 
 
+def _safe_name(value: str) -> str:
+    cleaned = _NAME_SANITIZE.sub("_", value).strip("._-")
+    return (cleaned or "tensor")[:96]
+
+
+def _tensor_leaves(
+    value: Any,
+    *,
+    prefix: str,
+    seen: set[int] | None = None,
+) -> list[tuple[str, torch.Tensor]]:
+    """Find tensor leaves in supported containers without reading values."""
+    if isinstance(value, torch.Tensor):
+        return [(_safe_name(prefix), value)]
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return []
+    seen.add(identity)
+    leaves: list[tuple[str, torch.Tensor]] = []
+    if isinstance(value, tuple | list):
+        for index, item in enumerate(value):
+            leaves.extend(
+                _tensor_leaves(
+                    item,
+                    prefix=f"{prefix}_{index}",
+                    seen=seen,
+                )
+            )
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            leaves.extend(
+                _tensor_leaves(
+                    item,
+                    prefix=f"{prefix}_{_safe_name(str(key))}",
+                    seen=seen,
+                )
+            )
+    elif is_dataclass(value) and not isinstance(value, type):
+        for item in fields(value):
+            leaves.extend(
+                _tensor_leaves(
+                    getattr(value, item.name),
+                    prefix=f"{prefix}_{_safe_name(item.name)}",
+                    seen=seen,
+                )
+            )
+    return leaves
+
+
+def _input_metas(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    leaves: list[tuple[str, torch.Tensor]] = []
+    seen: set[int] = set()
+    for index, value in enumerate(args):
+        leaves.extend(
+            _tensor_leaves(value, prefix=f"input_{index}", seen=seen)
+        )
+    for key, value in kwargs.items():
+        leaves.extend(
+            _tensor_leaves(
+                value,
+                prefix=f"kwarg_{_safe_name(str(key))}",
+                seen=seen,
+            )
+        )
+    return [_tensor_meta(name, tensor) for name, tensor in leaves]
+
+
+def _output_metas(output: Any) -> list[dict[str, Any]]:
+    return [
+        _tensor_meta(name, tensor)
+        for name, tensor in _tensor_leaves(output, prefix="output")
+    ]
+
+
 def _input_shape_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     """Build the same shape key as capture without retaining tensor metadata."""
-    parts: list[str] = []
-    for index, value in enumerate(args):
-        if isinstance(value, torch.Tensor):
-            parts.append(
-                f"input_{index}:{'x'.join(str(int(dim)) for dim in value.shape)}:"
-                f"{str(value.dtype).replace('torch.', '')}"
-            )
-    for key, value in kwargs.items():
-        if isinstance(value, torch.Tensor):
-            name = _NAME_SANITIZE.sub("_", str(key))
-            parts.append(
-                f"kwarg_{name}:{'x'.join(str(int(dim)) for dim in value.shape)}:"
-                f"{str(value.dtype).replace('torch.', '')}"
-            )
-    return "|".join(parts)
+    return _shape_key(_input_metas(args, kwargs))
 
 
 def _region_name(scope: str, shape_key: str) -> str:
@@ -164,13 +228,15 @@ def _region_name(scope: str, shape_key: str) -> str:
 
 
 def _is_safe_constant(value: Any) -> bool:
+    if value is None:
+        return True
     if isinstance(value, bool | int):
         return True
     if isinstance(value, float):
         return math.isfinite(value)
     if isinstance(value, str):
         # Short enum-like tags only — never free-form text.
-        return 0 < len(value) <= 64 and "\n" not in value
+        return bool(re.fullmatch(r"[A-Za-z0-9_.:/-]{1,64}", value))
     if isinstance(value, list | tuple):
         return len(value) <= 32 and all(_is_safe_constant(item) for item in value)
     return False
@@ -182,6 +248,38 @@ def _sanitize_constants(raw: dict[str, Any]) -> dict[str, Any]:
         for key, value in raw.items()
         if isinstance(key, str) and key and key.lower() not in FORBIDDEN_KEYS and _is_safe_constant(value)
     }
+
+
+def _capture_failure_reason(mode: str, exc: Exception) -> str:
+    """Classify failures without exporting exception text or source snippets."""
+    text = str(exc).lower()
+    if any(
+        marker in text
+        for marker in (
+            "data-dependent",
+            "data dependent",
+            "guardondatadependentsymnode",
+            ".item()",
+        )
+    ):
+        code = "data_dependent_control_flow"
+    elif any(
+        marker in text
+        for marker in (
+            "control flow",
+            "proxy object",
+            "symbolically traced variables",
+            "cannot be iterated",
+        )
+    ):
+        code = "dynamic_python_control_flow"
+    elif "alias" in text:
+        code = "unknown_aliasing"
+    elif "unsupported" in text or "not supported" in text:
+        code = "unsupported_graph"
+    else:
+        code = "trace_error"
+    return f"capture_failed:{mode}:{code}:{type(exc).__name__}"
 
 
 def assert_metadata_only(payload: Any, path: str = "capture") -> None:
@@ -242,20 +340,52 @@ def _extract_graph(graph: Any) -> tuple[list[str], list[str], dict[str, Any], li
     notes: list[str] = []
     index_of: dict[str, int] = {}
 
+    def node_names(value: Any) -> Iterator[str]:
+        name = getattr(value, "name", None)
+        if name is not None and hasattr(value, "op"):
+            yield name
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                yield from node_names(item)
+        elif isinstance(value, tuple | list):
+            for item in value:
+                yield from node_names(item)
+
     def record_deps(node: Any, index: int) -> None:
-        for arg in node.args:
-            arg_name = getattr(arg, "name", None)
-            if arg_name in index_of:
+        seen: set[str] = set()
+        for arg_name in node_names((node.args, node.kwargs or {})):
+            if arg_name in index_of and arg_name not in seen:
                 dependencies.append(f"{index_of[arg_name]}->{index}")
+                seen.add(arg_name)
+
+    def record_constants(node: Any, key: str) -> None:
+        for arg_index, value in enumerate(node.args):
+            if hasattr(value, "op"):
+                continue
+            if _is_safe_constant(value):
+                constants[f"{node.name}.arg{arg_index}"] = value
+            elif value is not None and not tuple(node_names(value)):
+                notes.append(
+                    f"{key}: unsafe positional constant arg{arg_index}"
+                )
+        for kwarg, value in (node.kwargs or {}).items():
+            if hasattr(value, "op"):
+                continue
+            if _is_safe_constant(value):
+                constants[f"{node.name}.{kwarg}"] = value
+            elif value is not None and not tuple(node_names(value)):
+                notes.append(
+                    f"{key}: non-scalar constant {kwarg!r} dropped"
+                )
 
     for node in graph.nodes:
         if node.op in {"placeholder", "output"}:
             continue
         if node.op == "get_attr":
             target = str(node.target)
-            if any(hint in target.lower() for hint in _WEIGHT_ATTR_HINTS):
-                # Parameter/buffer reads are weights — record the fact, never the value.
-                notes.append(f"get_attr:{target}: parameter read not exported")
+            notes.append(
+                f"get_attr:{target}: lifted attribute value not exported"
+            )
             continue
         if node.op == "call_function":
             key = _op_key(node.target)
@@ -271,11 +401,9 @@ def _extract_graph(graph: Any) -> tuple[list[str], list[str], dict[str, Any], li
         index_of[node.name] = index
         operations.append(key)
         record_deps(node, index)
-        for kwarg, value in (node.kwargs or {}).items():
-            if _is_safe_constant(value):
-                constants[f"{node.name}.{kwarg}"] = value
-            elif value is not None and not hasattr(value, "op"):
-                notes.append(f"{key}: non-scalar constant {kwarg!r} dropped")
+        record_constants(node, key)
+        if "as_strided" in key or key.endswith("::alias"):
+            notes.append(f"capture_safety:unknown_aliasing:{key}")
 
     return operations, dependencies, _sanitize_constants(constants), notes
 
@@ -286,6 +414,10 @@ class _ShapeVariant:
 
     inputs: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
+    # Bounded, in-memory references used only after the profiler window closes.
+    # They are cleared before the JSON payload is returned and never serialized.
+    example_args: tuple[Any, ...] | None = field(default=None, repr=False)
+    example_kwargs: dict[str, Any] | None = field(default=None, repr=False)
     calls: int = 0
 
 
@@ -332,7 +464,7 @@ class FXCaptureSession:
     def __init__(
         self,
         *,
-        tracer: str = "symbolic",
+        tracer: str = "auto",
         max_scopes: int = 64,
         max_shape_variants: int = 8,
     ) -> None:
@@ -353,7 +485,7 @@ class FXCaptureSession:
         try:
             targets = default_capture_targets(root)
         except Exception as exc:  # noqa: BLE001 — capture never breaks generation
-            self._record_error(f"target_selection_failed: {type(exc).__name__}: {exc}")
+            self._record_exception("target_selection_failed", exc)
             return 0
         hooked = 0
         for scope, module in targets:
@@ -365,7 +497,7 @@ class FXCaptureSession:
                 self._hook(qualified, module)
                 hooked += 1
             except Exception as exc:  # noqa: BLE001
-                self._record_error(f"hook_failed[{qualified}]: {type(exc).__name__}: {exc}")
+                self._record_exception("hook_failed", exc, scope=qualified)
         return hooked
 
     def attach_modules(self, modules: dict[str, Any] | None) -> int:
@@ -395,41 +527,35 @@ class FXCaptureSession:
                 profiler_range.__enter__()
                 active_ranges.append(profiler_range)
             except Exception as exc:  # noqa: BLE001 — never disturb the forward
-                self._record_error(f"profile_range_failed[{scope}]: {type(exc).__name__}: {exc}")
+                self._record_exception("profile_range_failed", exc, scope=scope)
 
         def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
             try:
                 self._observe(record, args, kwargs, output)
             except Exception as exc:  # noqa: BLE001 — never disturb the forward
-                self._record_error(f"observe_failed[{scope}]: {type(exc).__name__}: {exc}")
+                self._record_exception("observe_failed", exc, scope=scope)
             finally:
                 if active_ranges:
                     try:
                         active_ranges.pop().__exit__(None, None, None)
                     except Exception as exc:  # noqa: BLE001
-                        self._record_error(f"profile_range_close_failed[{scope}]: {type(exc).__name__}: {exc}")
+                        self._record_exception(
+                            "profile_range_close_failed",
+                            exc,
+                            scope=scope,
+                        )
 
         self._handles.append(module.register_forward_pre_hook(pre_hook, with_kwargs=True))
         self._handles.append(module.register_forward_hook(hook, with_kwargs=True, always_call=True))
 
     def _observe(self, record: _Scope, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
         record.calls += 1
-        inputs: list[dict[str, Any]] = []
-        for index, value in enumerate(args):
-            if isinstance(value, torch.Tensor):
-                inputs.append(_tensor_meta(f"input_{index}", value))
-        for key, value in kwargs.items():
-            if isinstance(value, torch.Tensor):
-                inputs.append(_tensor_meta(f"kwarg_{_NAME_SANITIZE.sub('_', str(key))}", value))
+        inputs = _input_metas(args, kwargs)
         if not inputs:
             self._graph_breaks.append({"scope": record.scope, "reason": "no_tensor_inputs", "count": 1})
             return
 
-        outputs: list[dict[str, Any]] = []
-        candidates = output if isinstance(output, tuple | list) else (output, )
-        for index, value in enumerate(candidates):
-            if isinstance(value, torch.Tensor):
-                outputs.append(_tensor_meta(f"output_{index}", value))
+        outputs = _output_metas(output)
 
         key = _shape_key(inputs)
         variant = record.variants.get(key)
@@ -437,7 +563,12 @@ class FXCaptureSession:
             if len(record.variants) >= self.max_shape_variants:
                 record.dropped_variants += 1
                 return
-            variant = _ShapeVariant(inputs=inputs, outputs=outputs)
+            variant = _ShapeVariant(
+                inputs=inputs,
+                outputs=outputs,
+                example_args=args,
+                example_kwargs=dict(kwargs),
+            )
             record.variants[key] = variant
         variant.calls += 1
 
@@ -448,53 +579,119 @@ class FXCaptureSession:
             try:
                 handle.remove()
             except Exception as exc:  # noqa: BLE001
-                self._record_error(f"detach_failed: {type(exc).__name__}: {exc}")
+                self._record_exception("detach_failed", exc)
         self._handles.clear()
 
     def _record_error(self, message: str) -> None:
         if len(self._errors) < 64:
             self._errors.append(message)
 
-    def _trace(self, module: nn.Module) -> Any:
-        if self.tracer == "symbolic":
+    def _record_exception(
+        self,
+        code: str,
+        exc: Exception,
+        *,
+        scope: str | None = None,
+    ) -> None:
+        location = f"[{scope}]" if scope else ""
+        self._record_error(f"{code}{location}:{type(exc).__name__}")
+
+    def _mode_order(self) -> tuple[str, ...]:
+        if self.tracer in {"auto", "fallback"}:
+            return _CAPTURE_MODES
+        if self.tracer in _CAPTURE_MODES:
+            return (self.tracer,)
+        raise ValueError(
+            f"unsupported tracer {self.tracer!r}; "
+            "use auto, symbolic, export, or dynamo"
+        )
+
+    def _trace(
+        self,
+        module: nn.Module,
+        variant: _ShapeVariant,
+        mode: str,
+    ) -> Any:
+        args = variant.example_args
+        kwargs = variant.example_kwargs
+        if args is None or kwargs is None:
+            raise RuntimeError("example arguments unavailable")
+        if mode == "symbolic":
             return torch.fx.symbolic_trace(module)
-        raise ValueError(f"unsupported tracer {self.tracer!r}")
+        if mode == "export":
+            return torch.export.export(
+                module,
+                args,
+                kwargs,
+                strict=False,
+            ).graph_module
+        if mode == "dynamo":
+            exported = torch._dynamo.export(module, aten_graph=True)(
+                *args,
+                **kwargs,
+            )
+            graph_module = getattr(exported, "graph_module", None)
+            if graph_module is None and isinstance(exported, tuple):
+                graph_module = exported[0]
+            return graph_module if graph_module is not None else exported
+        raise ValueError(f"unsupported capture mode {mode!r}")
 
     def _regions_for(self, record: _Scope) -> list[dict[str, Any]]:
-        try:
-            traced = self._trace(record.module)
-            graph = getattr(traced, "graph", None)
-            if graph is None:
-                raise RuntimeError("trace result has no FX graph")
-            operations, dependencies, constants, notes = _extract_graph(graph)
-        except Exception as exc:  # noqa: BLE001 — capture failures are data
-            self._graph_breaks.append({
-                "scope": record.scope,
-                "reason": f"fx_trace_failed: {type(exc).__name__}: {exc}"[:512],
-                "count": max(record.calls, 1),
-            })
-            return []
-
-        if not operations:
-            self._graph_breaks.append({
-                "scope": record.scope,
-                "reason": "empty_graph",
-                "count": max(record.calls, 1),
-            })
-            return []
-
-        for note in notes:
-            self._graph_breaks.append({"scope": record.scope, "reason": note[:512], "count": 1})
-            if "nested module" in note or "unknown_fx_op" in note:
-                self._unsupported.append({
-                    "op_name": note.split(":", 1)[0][:256],
-                    "reason": note[:512],
-                    "count": 1,
-                    "scope": record.scope,
-                })
-
         regions: list[dict[str, Any]] = []
         for shape_key, variant in record.variants.items():
+            capture_mode: str | None = None
+            failures: list[str] = []
+            operations: list[str] = []
+            dependencies: list[str] = []
+            constants: dict[str, Any] = {}
+            notes: list[str] = []
+            attempts = self._mode_order()
+            try:
+                for mode in attempts:
+                    try:
+                        traced = self._trace(record.module, variant, mode)
+                        graph = getattr(traced, "graph", None)
+                        if graph is None:
+                            raise RuntimeError("trace result has no FX graph")
+                        operations, dependencies, constants, notes = _extract_graph(
+                            graph
+                        )
+                        if not operations:
+                            raise RuntimeError(
+                                "trace result has no tensor operations"
+                            )
+                        capture_mode = mode
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        reason = _capture_failure_reason(mode, exc)
+                        failures.append(reason)
+                        self._graph_breaks.append({
+                            "scope": record.scope,
+                            "reason": reason,
+                            "count": max(variant.calls, 1),
+                        })
+            finally:
+                # Drop all live tensor/object references before serialization.
+                variant.example_args = None
+                variant.example_kwargs = None
+
+            if capture_mode is None:
+                continue
+
+            for note in notes:
+                self._graph_breaks.append({
+                    "scope": record.scope,
+                    "reason": note[:512],
+                    "count": 1,
+                })
+                if "nested module" in note or "unknown_fx_op" in note:
+                    self._unsupported.append({
+                        "op_name": note.split(":", 1)[0][:256],
+                        "reason": note[:512],
+                        "count": 1,
+                        "scope": record.scope,
+                    })
+
             fingerprint = graph_fingerprint(
                 operations=operations,
                 input_signatures=[_signature_dict(meta) for meta in variant.inputs],
@@ -521,6 +718,11 @@ class FXCaptureSession:
                 "attributes": {
                     "module_class": record.class_name,
                     "tracer": self.tracer,
+                    "capture_mode": capture_mode,
+                    "capture_attempts": list(attempts)[
+                        : list(attempts).index(capture_mode) + 1
+                    ],
+                    "capture_failures": failures,
                 },
             }
             if constants:
@@ -538,7 +740,11 @@ class FXCaptureSession:
             try:
                 regions.extend(self._regions_for(record))
             except Exception as exc:  # noqa: BLE001
-                self._record_error(f"finalize_failed[{record.scope}]: {type(exc).__name__}: {exc}")
+                self._record_exception(
+                    "finalize_failed",
+                    exc,
+                    scope=record.scope,
+                )
 
         breaks = _coalesce(self._graph_breaks, ("scope", "reason"))
         unsupported = _coalesce(self._unsupported, ("op_name", "reason", "scope"))
@@ -554,6 +760,22 @@ class FXCaptureSession:
                 "dropped_scopes": self._dropped_scopes,
                 "dropped_shape_variants": sum(record.dropped_variants for record in self._scopes.values()),
                 "errors": list(self._errors),
+                "capture_mode_breakdown": dict(
+                    sorted(
+                        (
+                            mode,
+                            sum(
+                                1
+                                for region in regions
+                                if region.get("attributes", {}).get(
+                                    "capture_mode"
+                                )
+                                == mode
+                            ),
+                        )
+                        for mode in _CAPTURE_MODES
+                    )
+                ),
             },
             "regions": regions,
             "graph_breaks": breaks,

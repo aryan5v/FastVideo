@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
+import pytest
 import torch
 from torch import nn
 
@@ -30,6 +32,15 @@ class _UntraceableBlock(nn.Module):
         if bool(hidden_states.sum() > 0):
             return hidden_states * 2
         return hidden_states
+
+
+class _ShapeBranchBlock(nn.Module):
+    """Representative shape branch that FX cannot evaluate from a Proxy."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.shape[-1] > 2:
+            return hidden_states * 2
+        return hidden_states + 1
 
 
 class _Transformer(nn.Module):
@@ -224,7 +235,12 @@ def test_trace_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["regions"] == []
     reasons = [item["reason"] for item in payload["graph_breaks"]]
-    assert any(reason.startswith("fx_trace_failed") for reason in reasons)
+    assert all(reason.startswith("capture_failed:") for reason in reasons)
+    assert {reason.split(":", 2)[1] for reason in reasons} == {
+        "symbolic",
+        "export",
+        "dynamo",
+    }
     assert payload["rows"], "profiler rows still export after a capture failure"
 
 
@@ -243,8 +259,75 @@ def test_finalize_failure_is_recorded_not_raised(tmp_path, monkeypatch):
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["regions"] == []
-    assert any("synthetic finalize failure" in error for error in payload["capture"]["errors"])
+    assert payload["capture"]["errors"] == ["finalize_failed:RuntimeError"]
     assert all(not block._forward_hooks for block in model.blocks)
+
+
+def test_auto_falls_back_to_export_for_shape_control_flow(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "profile.json"
+    _enable_profile(monkeypatch, output)
+    pipeline = _FakePipeline(
+        _Transformer(depth=2, block=_ShapeBranchBlock)
+    )
+
+    pipeline.forward(torch.randn(2, 4), steps=1)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert len(payload["regions"]) == 1
+    attributes = payload["regions"][0]["attributes"]
+    assert attributes["capture_mode"] == "export"
+    assert attributes["capture_attempts"] == ["symbolic", "export"]
+    assert attributes["capture_failures"] == [
+        "capture_failed:symbolic:dynamic_python_control_flow:TraceError"
+    ]
+    assert payload["capture"]["capture_mode_breakdown"]["export"] == 1
+
+
+@pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])
+def test_each_capture_mode_has_stable_metadata(mode):
+    session = fx_capture.FXCaptureSession(tracer=mode)
+    model = _Transformer(depth=2)
+    assert session.attach(model, prefix="transformer") == 2
+
+    model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"]
+    region = payload["regions"][0]
+    assert region["attributes"]["capture_mode"] == mode
+    assert region["attributes"]["capture_attempts"] == [mode]
+    assert payload["capture"]["capture_mode_breakdown"][mode] == 1
+    assert all(
+        variant.example_args is None and variant.example_kwargs is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
+def test_nested_dataclass_tensor_inputs_contribute_shape_metadata():
+    @dataclass
+    class _State:
+        hidden_states: torch.Tensor
+        conditioning: tuple[torch.Tensor, torch.Tensor]
+        config_name: str
+
+    state = _State(
+        hidden_states=torch.randn(2, 4),
+        conditioning=(torch.randn(1, 4), torch.randn(1, 4)),
+        config_name="private text is not metadata",
+    )
+
+    metas = fx_capture._input_metas((state,), {})
+
+    assert [meta["name"] for meta in metas] == [
+        "input_0_hidden_states",
+        "input_0_conditioning_0",
+        "input_0_conditioning_1",
+    ]
+    assert "private text" not in str(metas)
 
 
 def test_shape_variants_are_tracked_and_bounded(tmp_path, monkeypatch):
