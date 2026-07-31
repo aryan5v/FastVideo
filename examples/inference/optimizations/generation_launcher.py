@@ -203,8 +203,100 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _event_number(event: Any, *names: str) -> float:
+    for name in names:
+        value = getattr(event, name, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def profiler_rows(profiler: Any) -> list[dict[str, Any]]:
+    """Export metadata-only key averages in MotionKernel's portable format."""
+    rows: list[dict[str, Any]] = []
+    for event in profiler.key_averages(group_by_input_shape=True):
+        device_total = _event_number(
+            event,
+            "device_time_total",
+            "cuda_time_total",
+        )
+        self_device = _event_number(
+            event,
+            "self_device_time_total",
+            "self_cuda_time_total",
+        )
+        rows.append(
+            {
+                "name": str(event.key),
+                "calls": int(event.count),
+                "cuda_time_us": device_total,
+                "self_cuda_time_us": self_device,
+                "cpu_time_us": _event_number(event, "cpu_time_total"),
+                "input_shapes": [
+                    list(shape)
+                    for shape in (getattr(event, "input_shapes", None) or [])
+                    if isinstance(shape, (list, tuple))
+                ],
+            }
+        )
+    return rows
+
+
+def write_profiler_export(
+    *,
+    profiler: Any,
+    path: Path,
+    workload: Mapping[str, Any],
+    model_id: str,
+    environment: Mapping[str, Any],
+) -> None:
+    """Write a metadata-only operator profile consumable by MotionKernel."""
+    rows = profiler_rows(profiler)
+    total_cuda_time_us = sum(
+        max(float(row["self_cuda_time_us"]), 0.0) for row in rows
+    )
+    identity_fields = {
+        "python",
+        "platform",
+        "torch",
+        "cuda_available",
+        "cuda",
+        "gpu_name",
+        "gpu_capability",
+        "fastvideo",
+        "mode_requested",
+    }
+    profile_environment = {
+        key: value for key, value in environment.items() if key in identity_fields
+    }
+    write_json(
+        path,
+        {
+            "schema_version": 1,
+            "producer": {
+                "name": "fastvideo",
+                "version": str(environment.get("fastvideo", "unknown")),
+            },
+            "workload": {
+                "workload_id": str(workload["workload_id"]),
+                "model_id": model_id,
+                "task": str(workload["task"]),
+            },
+            # Exclude executable paths and arbitrary mode environment values.
+            # The discovery artifact carries compatibility identity, not
+            # credentials or developer-machine details.
+            "environment": profile_environment,
+            "total_cuda_time_us": total_cuda_time_us,
+            "rows": rows,
+        },
+    )
+
+
 def _normalize_mode(mode: str) -> str:
-    if mode in {"fused", "candidate"}:
+    if mode == "fused":
         return "optimized"
     return mode
 
@@ -216,6 +308,7 @@ def run_generation(
     mode: str,
     output_dir: Path,
     model_override: str | None = None,
+    profile_output: Path | None = None,
 ) -> dict[str, Any]:
     applied_env = apply_mode_env(workload, mode)
     attention_backend = (workload.get("sampling") or {}).get("attention_backend")
@@ -256,6 +349,27 @@ def run_generation(
         try:
             for _ in range(warmups):
                 generator.generate(request)
+            if profile_output is not None:
+                activities = [torch.profiler.ProfilerActivity.CPU]
+                if use_cuda:
+                    activities.append(torch.profiler.ProfilerActivity.CUDA)
+                    torch.cuda.synchronize()
+                with torch.profiler.profile(
+                    activities=activities,
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=False,
+                ) as profiler:
+                    generator.generate(request)
+                    if use_cuda:
+                        torch.cuda.synchronize()
+                write_profiler_export(
+                    profiler=profiler,
+                    path=profile_output,
+                    workload=workload,
+                    model_id=model_id,
+                    environment=environment,
+                )
             for run_index in range(runs):
                 if use_cuda:
                     torch.cuda.reset_peak_memory_stats()
@@ -266,7 +380,11 @@ def run_generation(
                     torch.cuda.synchronize()
                 timings.append(time.perf_counter() - start)
                 generation_times.append(getattr(result, "generation_time", None))
-                peak_memory.append(getattr(result, "peak_memory_mb", None))
+                peak_memory.append(
+                    float(torch.cuda.max_memory_allocated()) / (1024.0 * 1024.0)
+                    if use_cuda
+                    else getattr(result, "peak_memory_mb", None)
+                )
                 if save_frames and run_index == 0 and getattr(result, "frames", None) is not None:
                     frames_path = output_dir / f"{result_mode}_frames.npy"
                     np.save(frames_path, np.asarray(result.frames))
@@ -309,6 +427,8 @@ def run_generation(
         payload["log_path"] = str(log_path)
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
+    if profile_output is not None and profile_output.is_file():
+        payload["profiler_path"] = str(profile_output)
 
     result_path = output_dir / f"{result_mode}_result.json"
     write_json(result_path, payload)
@@ -337,6 +457,14 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="Validate workload and print the planned request without loading models",
+    )
+    parser.add_argument(
+        "--profile-output",
+        type=Path,
+        help=(
+            "Run one dedicated post-warmup torch.profiler generation and write "
+            "a metadata-only operator export; timed runs remain unprofiled"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -367,13 +495,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(plan, indent=2))
         return 0
 
-    payload = run_generation(
-        workload=workload,
-        workload_path=args.workload,
-        mode=args.mode,
-        output_dir=args.output_dir,
-        model_override=args.model,
-    )
+        payload = run_generation(
+            workload=workload,
+            workload_path=args.workload,
+            mode=args.mode,
+            output_dir=args.output_dir,
+            model_override=args.model,
+            profile_output=args.profile_output,
+        )
     print(json.dumps(payload, indent=2))
     return 0 if payload.get("status") == "ok" else 1
 

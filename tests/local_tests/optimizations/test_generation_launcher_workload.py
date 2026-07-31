@@ -135,3 +135,37 @@ def test_resolve_mode_env_prefers_exact_fused_key(launcher):
     resolved = launcher.resolve_mode_env(workload, "fused")
     assert resolved["FASTVIDEO_WAN_FUSIONS"] == "1"
     assert resolved["EXTRA_FUSE_FLAG"] == "1"
+
+
+def test_candidate_keeps_dedicated_result_identity(launcher):
+    assert launcher._normalize_mode("optimized") == "optimized"
+    assert launcher._normalize_mode("fused") == "optimized"
+    assert launcher._normalize_mode("candidate") == "candidate"
+
+
+def test_profiler_rows_are_metadata_only(launcher):
+    class _Event:
+        key = "aten::add"
+        count = 3
+        device_time_total = 12.5
+        self_device_time_total = 9.5
+        cpu_time_total = 20.0
+        input_shapes = [[1, 4], [1, 4]]
+
+    class _Profiler:
+        def key_averages(self, *, group_by_input_shape):
+            assert group_by_input_shape is True
+            return [_Event()]
+
+    rows = launcher.profiler_rows(_Profiler())
+    assert rows == [
+        {
+            "name": "aten::add",
+            "calls": 3,
+            "cuda_time_us": 12.5,
+            "self_cuda_time_us": 9.5,
+            "cpu_time_us": 20.0,
+            "input_shapes": [[1, 4], [1, 4]],
+        }
+    ]
+    assert "values" not in rows[0]

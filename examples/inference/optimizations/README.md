@@ -29,6 +29,14 @@ python examples/inference/optimizations/generation_launcher.py \
   --mode native \
   --output-dir /tmp/ltx_ab \
   --dry-run
+
+# Capture one dedicated metadata-only operator profile. Profiling is performed
+# outside the measured runs so profiler overhead does not affect A/B timing.
+python examples/inference/optimizations/generation_launcher.py \
+  --workload /path/to/motionkernel/workloads/ltx_480p.yaml \
+  --mode native \
+  --output-dir /tmp/ltx_profile \
+  --profile-output /tmp/ltx_profile/profiler.json
 ```
 
 From MotionKernel, the same flow is:
@@ -42,3 +50,5 @@ python workload.py run-ab \
 
 Result files use `schema_version: 1` and record wall time, generation time,
 peak memory, environment identity, optional frames path, and failure reasons.
+`candidate` mode writes `candidate_result.json`, so it cannot overwrite a
+previously validated `optimized_result.json`.
