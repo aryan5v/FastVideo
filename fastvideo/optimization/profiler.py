@@ -19,6 +19,8 @@ from fastvideo.optimization.fx_capture import CAPTURE_SCHEMA_VERSION
 
 logger = init_logger(__name__)
 
+_REGION_RANGE_PREFIX = "motionkernel::"
+
 
 def _event_number(event: Any, *names: str) -> float:
     for name in names:
@@ -60,9 +62,10 @@ def _rows(profiler: Any) -> list[dict[str, Any]]:
         # implementations that do not expose device_type.
         if device_type == "cuda":
             continue
-        rows.append({
+        event_name = str(event.key)
+        row: dict[str, Any] = {
             "name":
-            str(event.key),
+            event_name,
             "calls":
             int(event.count),
             "cuda_time_us":
@@ -83,7 +86,13 @@ def _rows(profiler: Any) -> list[dict[str, Any]]:
             device_type,
             "input_shapes":
             [list(shape) for shape in (getattr(event, "input_shapes", None) or []) if isinstance(shape, list | tuple)],
-        })
+        }
+        if event_name.startswith(_REGION_RANGE_PREFIX):
+            region_name = event_name.removeprefix(_REGION_RANGE_PREFIX)
+            row["name"] = region_name
+            row["parent_module"] = region_name.rsplit(".", maxsplit=1)[0]
+            row["scope_kind"] = "fx_region"
+        rows.append(row)
     return rows
 
 

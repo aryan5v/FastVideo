@@ -42,3 +42,23 @@ def test_rows_exclude_duplicate_cuda_activity_records():
     assert [row["name"] for row in rows] == ["aten::mul"]
     assert rows[0]["device_type"] == "cpu"
     assert rows[0]["self_cuda_time_us"] == 80.0
+
+
+def test_rows_export_fx_region_ranges_with_parent_scope():
+    class _RegionProfiler:
+        def key_averages(self, *, group_by_input_shape: bool):
+            assert group_by_input_shape
+            return (
+                _Event(
+                    "motionkernel::transformer.blocks.0123abcd",
+                    _DeviceType("CPU"),
+                    42.0,
+                    0.0,
+                ),
+            )
+
+    rows = _rows(_RegionProfiler())
+
+    assert rows[0]["name"] == "transformer.blocks.0123abcd"
+    assert rows[0]["parent_module"] == "transformer.blocks"
+    assert rows[0]["scope_kind"] == "fx_region"

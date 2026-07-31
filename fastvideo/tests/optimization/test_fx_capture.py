@@ -183,6 +183,37 @@ def test_hooks_are_removed_and_outputs_unchanged(tmp_path, monkeypatch):
     torch.testing.assert_close(after, baseline)
 
 
+def test_capture_emits_shape_specific_profiler_ranges(monkeypatch):
+    entered: list[str] = []
+    exited: list[str] = []
+
+    class _Range:
+        def __init__(self, name):
+            self.name = name
+
+        def __enter__(self):
+            entered.append(self.name)
+
+        def __exit__(self, exc_type, exc, traceback):
+            exited.append(self.name)
+
+    monkeypatch.setattr(
+        fx_capture.torch.profiler,
+        "record_function",
+        lambda name: _Range(name),
+    )
+    session = fx_capture.FXCaptureSession()
+    model = _Transformer(depth=2)
+    assert session.attach(model, prefix="transformer") == 2
+
+    model(torch.randn(2, 4))
+    payload = session.finalize()
+    region_name = payload["regions"][0]["name"]
+
+    assert entered == [f"motionkernel::{region_name}"] * 2
+    assert exited == entered
+
+
 def test_trace_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     output = tmp_path / "profile.json"
     _enable_profile(monkeypatch, output)

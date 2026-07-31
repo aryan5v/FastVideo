@@ -135,6 +135,25 @@ def _shape_key(metas: list[dict[str, Any]]) -> str:
                     for meta in metas)
 
 
+def _input_shape_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Build the same shape key as capture without retaining tensor metadata."""
+    parts: list[str] = []
+    for index, value in enumerate(args):
+        if isinstance(value, torch.Tensor):
+            parts.append(
+                f"input_{index}:{'x'.join(str(int(dim)) for dim in value.shape)}:"
+                f"{str(value.dtype).replace('torch.', '')}"
+            )
+    for key, value in kwargs.items():
+        if isinstance(value, torch.Tensor):
+            name = _NAME_SANITIZE.sub("_", str(key))
+            parts.append(
+                f"kwarg_{name}:{'x'.join(str(int(dim)) for dim in value.shape)}:"
+                f"{str(value.dtype).replace('torch.', '')}"
+            )
+    return "|".join(parts)
+
+
 def _region_name(scope: str, shape_key: str) -> str:
     digest = hashlib.sha256(shape_key.encode("utf-8")).hexdigest()[:8]
     base = _NAME_SANITIZE.sub("_", scope).strip("._-") or "region"
@@ -366,13 +385,32 @@ class FXCaptureSession:
             record = _Scope(scope=scope, class_name=type(module).__name__, module=module)
             self._scopes[scope] = record
 
+        active_ranges: list[Any] = []
+
+        def pre_hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            """Add a shape-specific range that torch.profiler can attribute."""
+            try:
+                name = _region_name(scope, _input_shape_key(args, kwargs))
+                profiler_range = torch.profiler.record_function(f"motionkernel::{name}")
+                profiler_range.__enter__()
+                active_ranges.append(profiler_range)
+            except Exception as exc:  # noqa: BLE001 — never disturb the forward
+                self._record_error(f"profile_range_failed[{scope}]: {type(exc).__name__}: {exc}")
+
         def hook(_module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
             try:
                 self._observe(record, args, kwargs, output)
             except Exception as exc:  # noqa: BLE001 — never disturb the forward
                 self._record_error(f"observe_failed[{scope}]: {type(exc).__name__}: {exc}")
+            finally:
+                if active_ranges:
+                    try:
+                        active_ranges.pop().__exit__(None, None, None)
+                    except Exception as exc:  # noqa: BLE001
+                        self._record_error(f"profile_range_close_failed[{scope}]: {type(exc).__name__}: {exc}")
 
-        self._handles.append(module.register_forward_hook(hook, with_kwargs=True))
+        self._handles.append(module.register_forward_pre_hook(pre_hook, with_kwargs=True))
+        self._handles.append(module.register_forward_hook(hook, with_kwargs=True, always_call=True))
 
     def _observe(self, record: _Scope, args: tuple[Any, ...], kwargs: dict[str, Any], output: Any) -> None:
         record.calls += 1
