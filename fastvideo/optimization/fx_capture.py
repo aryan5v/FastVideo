@@ -141,6 +141,12 @@ def _safe_name(value: str) -> str:
     return (cleaned or "tensor")[:96]
 
 
+def _safe_op_component(value: str) -> str:
+    """Sanitize a schema component without dropping meaningful underscores."""
+    cleaned = _NAME_SANITIZE.sub("_", value)
+    return (cleaned or "unknown")[:96]
+
+
 def _tensor_leaves(
     value: Any,
     *,
@@ -532,10 +538,13 @@ def _ir_target(node: Any) -> str:
     target = node.target
     schema_name = getattr(getattr(target, "_schema", None), "name", None)
     overload = getattr(target, "_overloadname", None)
-    if isinstance(schema_name, str) and schema_name.startswith("aten::"):
-        operation = schema_name.split("::", 1)[1]
+    if isinstance(schema_name, str) and "::" in schema_name:
+        namespace, operation = schema_name.split("::", 1)
         overload_name = overload if isinstance(overload, str) and overload else "default"
-        return f"aten.{operation}.{overload_name}"
+        return (
+            f"{_safe_op_component(namespace)}.{_safe_op_component(operation)}."
+            f"{_safe_op_component(overload_name)}"
+        )
     name = getattr(target, "__name__", None)
     module = getattr(target, "__module__", "") or ""
     if module in {"_operator", "operator"} and name == "getitem":

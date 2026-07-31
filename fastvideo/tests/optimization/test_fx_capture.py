@@ -607,6 +607,13 @@ def test_op_overload_identity_uses_schema_not_distribution_specific_string():
     assert fx_capture._op_key(target) == "aten::_flash_attn_default_forward"
     assert fx_capture._ir_target(node) == "aten._flash_attn_default_forward.default"
 
+    target._schema.name = "fastvideo::_flash_attn_default_forward"
+    assert fx_capture._op_key(target) == "fastvideo::_flash_attn_default_forward"
+    assert (
+        fx_capture._ir_target(node)
+        == "fastvideo._flash_attn_default_forward.default"
+    )
+
 
 def test_assert_metadata_only_rejects_tensors_and_forbidden_keys():
     import pytest
