@@ -36,9 +36,26 @@ def _output_path(template: str) -> Path:
     return path
 
 
+def _device_type(event: Any) -> str:
+    """Normalize torch profiler device enums without depending on internals."""
+    value = getattr(event, "device_type", None)
+    if value is None:
+        return "unknown"
+    text = str(value).rsplit(".", maxsplit=1)[-1].lower()
+    return text
+
+
 def _rows(profiler: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for event in profiler.key_averages(group_by_input_shape=True):
+        device_type = _device_type(event)
+        # CUDA activity rows describe the same kernels already attributed to
+        # their CPU-side operator rows. Mixing both categories double-counts
+        # device time and makes nested/custom-op scopes look independently
+        # optimizable. Unknown is retained for compatibility with profiler
+        # implementations that do not expose device_type.
+        if device_type == "cuda":
+            continue
         rows.append({
             "name":
             str(event.key),
@@ -58,6 +75,8 @@ def _rows(profiler: Any) -> list[dict[str, Any]]:
             ),
             "cpu_time_us":
             _event_number(event, "cpu_time_total"),
+            "device_type":
+            device_type,
             "input_shapes":
             [list(shape) for shape in (getattr(event, "input_shapes", None) or []) if isinstance(shape, list | tuple)],
         })
