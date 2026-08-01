@@ -122,6 +122,18 @@ class _TopologicalGapBlock(nn.Module):
         return gap + early
 
 
+class _StructuredInputBlock(nn.Module):
+    """A block with a tuple input, mirroring rotary-frequency arguments."""
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        frequencies: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        projected = hidden * frequencies[0]
+        return projected + frequencies[1]
+
+
 class _Transformer(nn.Module):
     """A repeated block stack: the structure dispatch keys on."""
 
@@ -611,6 +623,68 @@ def test_export_subgraph_rejects_recipe_without_one_insertion_point(tmp_path, hi
         match="no valid topological insertion point",
     ):
         dispatch(module, hidden)
+
+
+def test_export_subgraph_preserves_structured_input_calling_convention(
+    tmp_path, hidden
+):
+    module = _StructuredInputBlock().eval()
+    frequencies = (torch.full_like(hidden, 2.0), torch.full_like(hidden, 3.0))
+    with torch.no_grad():
+        expected = module(hidden, frequencies)
+    region, exported = capture_export_invocation(
+        module,
+        (hidden, frequencies),
+        {},
+        expected,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    final = ir["nodes"][-1]
+    boundary_refs = tuple(
+        item["ref"] for item in final["args"] if set(item) == {"ref"}
+    )
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(boundary_refs),
+        signatures((final["id"], )),
+    )
+    sections["operation"] = {
+        "name": "structured_input_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": [final["target"]],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": [final["id"]],
+        "boundary_refs": list(boundary_refs),
+        "output_node_ids": [final["id"]],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    sections["files"] = [
+        {"path": "kernel.py", "sha256": "0" * 64, "bytes": 0}
+    ]
+    manifest = ArtifactManifest.from_dict(sections, directory=tmp_path)
+    candidate = lambda _module, left, right: left + right
+    dispatch = rewrite_exported_subgraph(exported, manifest, candidate)
+
+    with torch.no_grad():
+        actual = dispatch(module, hidden, frequencies)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):

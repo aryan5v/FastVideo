@@ -185,6 +185,7 @@ def rewrite_exported_subgraph(
     cache: weakref.WeakKeyDictionary[nn.Module, fx.GraphModule] = weakref.WeakKeyDictionary()
 
     def build(parent_module: nn.Module) -> fx.GraphModule:
+        representative = exported.module()
         graph = copy.deepcopy(exported_graph)
         for node in list(graph.nodes):
             if node.op == "call_module" and str(node.target) == "_guards_fn":
@@ -196,6 +197,14 @@ def rewrite_exported_subgraph(
             runnable = fx.GraphModule(bindings, graph)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
+        # Export flattens nested user inputs (tuples, dataclasses, dictionaries)
+        # into placeholders and stores the inverse calling convention on its
+        # GraphModule. Building a new module from a bindings dictionary keeps
+        # the graph code generator but not those module attributes. Without
+        # them, structured FastVideo inputs are shifted across placeholders.
+        for name in ("_in_spec", "_out_spec"):
+            if hasattr(representative, name):
+                setattr(runnable, name, getattr(representative, name))
         refs = _runtime_nodes(exported, runnable)
         try:
             selected = [refs[item] for item in manifest.selected_node_ids]
