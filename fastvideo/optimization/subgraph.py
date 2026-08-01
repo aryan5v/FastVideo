@@ -28,6 +28,17 @@ def _get_attr(root: Any, target: str) -> Any:
     return value
 
 
+def _set_attr(root: Any, target: str, value: Any) -> None:
+    """Replace one existing qualified attribute without changing its path."""
+    atoms = target.split(".")
+    if not atoms or any(not atom for atom in atoms):
+        raise AttributeError(target)
+    owner = root
+    for atom in atoms[:-1]:
+        owner = getattr(owner, atom)
+    setattr(owner, atoms[-1], value)
+
+
 def _lifted_attribute_pairs(
     exported: Any,
     graph: fx.Graph,
@@ -237,7 +248,13 @@ def rewrite_exported_subgraph(
                 graph.erase_node(node)
         bindings = _graph_bindings(exported, graph, parent_module)
         try:
-            runnable = fx.GraphModule(bindings, graph)
+            # Rooting the rewritten module in Export's GraphModule retains its
+            # pytree/call machinery and opaque lifted constants. Constructing
+            # from a plain mapping is sufficient for simple tensor-only CPU
+            # graphs but can corrupt real exported model calling conventions.
+            runnable = fx.GraphModule(representative, graph)
+            for target, value in bindings.items():
+                _set_attr(runnable, target, value)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
         # Export flattens nested user inputs (tuples, dataclasses, dictionaries)
