@@ -47,6 +47,10 @@ def _tensor_key(value: Any) -> tuple[tuple[int, ...], str] | None:
     dtype = getattr(value, "dtype", None)
     if shape is None or dtype is None:
         return None
+    try:
+        return tuple(int(dim) for dim in shape), str(dtype)
+    except (TypeError, ValueError, RuntimeError):
+        return None
 
 
 def _tensor_anomaly(value: Any) -> dict[str, Any] | None:
@@ -65,10 +69,41 @@ def _tensor_anomaly(value: Any) -> dict[str, Any] | None:
         "local_shape": local_shape,
         "dtype": dtype,
     }
-    try:
-        return tuple(int(dim) for dim in shape), str(dtype)
-    except (TypeError, ValueError, RuntimeError):
-        return None
+
+
+def _value_metadata(value: Any) -> Any:
+    """Describe runtime operands without reading or serializing tensor values."""
+    key = _tensor_key(value)
+    if key is not None:
+        local_key = _tensor_key(getattr(value, "_local_tensor", None))
+        return {
+            "type": f"{type(value).__module__}.{type(value).__name__}",
+            "shape": key[0],
+            "local_shape": local_key[0] if local_key is not None else None,
+            "dtype": key[1],
+            "device": str(getattr(value, "device", "unknown")),
+        }
+    if isinstance(value, tuple):
+        return tuple(_value_metadata(item) for item in value)
+    if isinstance(value, list):
+        return [_value_metadata(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _value_metadata(item) for key, item in value.items()}
+    return {"type": f"{type(value).__module__}.{type(value).__name__}"}
+
+
+class _MetadataInterpreter(fx.Interpreter):
+    """Annotate a failing FX node with metadata-only resolved operands."""
+
+    def run_node(self, node: fx.Node) -> Any:
+        try:
+            return super().run_node(node)
+        except RuntimeError as exc:
+            args, kwargs = self.fetch_args_kwargs_from_env(node)
+            raise SubgraphRewriteError(
+                f"rewritten node {node.name!r} ({node.target}) failed; "
+                f"args={_value_metadata(args)}, kwargs={_value_metadata(kwargs)}"
+            ) from exc
 
 
 def _validate_runtime_inputs(
@@ -414,6 +449,10 @@ def rewrite_exported_subgraph(
                     if (detail := _tensor_anomaly(value)) is not None
                 },
             }
+            try:
+                _MetadataInterpreter(runnable).run(*flat_inputs)
+            except SubgraphRewriteError as diagnostic:
+                raise diagnostic from exc
             raise SubgraphRewriteError(
                 f"rewritten export execution failed; metadata anomalies: {anomalies}"
             ) from exc
