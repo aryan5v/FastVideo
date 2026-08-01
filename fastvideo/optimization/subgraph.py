@@ -194,6 +194,18 @@ def _graph_bindings(
         kind = getattr(getattr(spec, "kind", None), "name", "")
         source_target = str(getattr(spec, "target", ""))
         try:
+            # Prefer the exact attribute requested by the runnable graph. Some
+            # inference loaders expose ordinary Parameters with requires_grad
+            # disabled in a way Export classifies like a lifted constant; its
+            # representative storage may already have been released to an
+            # empty placeholder even though the live block owns real storage.
+            try:
+                bindings[runtime_target] = _get_attr(
+                    parent_module, runtime_target
+                )
+                continue
+            except AttributeError:
+                pass
             if kind in {"PARAMETER", "BUFFER"}:
                 if not source_target:
                     raise AttributeError(runtime_target)
