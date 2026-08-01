@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-import operator
 import copy
+import operator
 import weakref
-from typing import Any
 from collections.abc import Callable, Mapping
+from typing import Any
 
 from torch import fx, nn
 
@@ -16,6 +16,76 @@ from fastvideo.optimization.artifact import ArtifactManifest, signature_key
 
 class SubgraphRewriteError(RuntimeError):
     """The live exported graph does not satisfy an artifact rewrite recipe."""
+
+
+def _get_attr(root: Any, target: str) -> Any:
+    """Resolve one FX qualified target without evaluating arbitrary source."""
+    value = root
+    for atom in target.split("."):
+        if not atom:
+            raise AttributeError(target)
+        value = getattr(value, atom)
+    return value
+
+
+def _graph_bindings(
+    exported: Any,
+    graph: fx.Graph,
+    parent_module: nn.Module,
+) -> dict[str, Any]:
+    """Bind an exported graph to one live repeated block.
+
+    ``ExportedProgram.module()`` turns lifted inputs into ``get_attr`` nodes.
+    Parameters and buffers must resolve against the live block so every block
+    keeps its own weights. Export-created constants, however, can have opaque
+    names such as ``lifted_tensor_0`` that do not exist on the original block;
+    those are immutable capture-time constants and must resolve against the
+    representative exported module.
+    """
+    exported_module = exported.module()
+    input_specs = list(exported.graph_signature.input_specs)
+    lifted_specs = [
+        spec
+        for spec in input_specs
+        if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"
+    ]
+    attributes = [node for node in graph.nodes if node.op == "get_attr"]
+    if len(attributes) != len(lifted_specs):
+        raise SubgraphRewriteError("export lifted input mapping changed")
+
+    bindings: dict[str, Any] = {}
+    for node, spec in zip(attributes, lifted_specs, strict=True):
+        runtime_target = str(node.target)
+        kind = getattr(getattr(spec, "kind", None), "name", "")
+        source_target = str(getattr(spec, "target", ""))
+        try:
+            if kind in {"PARAMETER", "BUFFER"}:
+                if not source_target:
+                    raise AttributeError(runtime_target)
+                bindings[runtime_target] = _get_attr(parent_module, source_target)
+            else:
+                bindings[runtime_target] = _get_attr(exported_module, runtime_target)
+        except (AttributeError, KeyError) as exc:
+            raise SubgraphRewriteError(
+                "live module does not satisfy exported attributes"
+            ) from exc
+
+    # Export normally functionalizes nested modules into call_function nodes.
+    # Preserve a fail-closed fallback for any call_module target that remains.
+    for node in graph.nodes:
+        if node.op != "call_module":
+            continue
+        target = str(node.target)
+        try:
+            bindings[target] = _get_attr(parent_module, target)
+        except AttributeError:
+            try:
+                bindings[target] = _get_attr(exported_module, target)
+            except AttributeError as exc:
+                raise SubgraphRewriteError(
+                    "live module does not satisfy exported submodules"
+                ) from exc
+    return bindings
 
 
 def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node]:
@@ -31,7 +101,8 @@ def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node
 
     placeholders = [node for node in graph.nodes if node.op == "placeholder"]
     user_index = 0
-    attributes = {str(node.target): node for node in graph.nodes if node.op == "get_attr"}
+    attributes = [node for node in graph.nodes if node.op == "get_attr"]
+    lifted_index = 0
     for index, spec in enumerate(input_specs):
         kind = getattr(getattr(spec, "kind", None), "name", "")
         if kind == "USER_INPUT":
@@ -40,11 +111,12 @@ def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node
             refs[f"p{index}"] = placeholders[user_index]
             user_index += 1
             continue
-        target = str(getattr(spec, "target", ""))
-        node = attributes.get(target)
-        if node is None:
+        if lifted_index >= len(attributes):
             raise SubgraphRewriteError("runtime lifted input mapping changed")
-        refs[f"p{index}"] = node
+        refs[f"p{index}"] = attributes[lifted_index]
+        lifted_index += 1
+    if lifted_index != len(attributes):
+        raise SubgraphRewriteError("runtime lifted input mapping changed")
 
     raw_ops = [node for node in raw_graph.nodes if node.op in {"call_function", "call_method", "call_module"}]
     runtime_ops = [
@@ -119,8 +191,9 @@ def rewrite_exported_subgraph(
                 if node.users:
                     raise SubgraphRewriteError("export guard unexpectedly has users")
                 graph.erase_node(node)
+        bindings = _graph_bindings(exported, graph, parent_module)
         try:
-            runnable = fx.GraphModule(parent_module, graph)
+            runnable = fx.GraphModule(bindings, graph)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
         refs = _runtime_nodes(exported, runnable)

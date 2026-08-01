@@ -62,6 +62,14 @@ def fused_subgraph(module, projected, hidden):
     return torch.nn.functional.silu(projected) + hidden
 '''
 
+LIFTED_CONSTANT_KERNEL = '''"""CPU fake for an export-lifted tensor constant."""
+
+
+def fused_subgraph(module, value, offset):
+    module.subgraph_calls = getattr(module, "subgraph_calls", 0) + 1
+    return value + offset
+'''
+
 
 class _Block(nn.Module):
     """One traceable block, standing in for a transformer block."""
@@ -87,6 +95,20 @@ class _UntraceableBlock(nn.Module):
         if bool(hidden.sum() > 0):
             return self.proj(hidden)
         return self.proj(hidden) * 2
+
+
+class _LiftedConstantBlock(nn.Module):
+    """A plain tensor attribute becomes ``lifted_tensor_*`` under export."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(width, width)
+        # Deliberately not a Parameter or registered buffer. Export owns the
+        # opaque lifted name; the live module only owns ``offset``.
+        self.offset = torch.tensor(0.25)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.silu(self.proj(hidden)) + hidden + self.offset
 
 
 class _Transformer(nn.Module):
@@ -256,6 +278,52 @@ def _subgraph_sections(module: nn.Module, hidden: torch.Tensor) -> dict:
         "selected_node_ids": ["n1", "n2"],
         "boundary_refs": ["n0", "p2"],
         "output_node_ids": ["n2"],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    return sections
+
+
+def _lifted_constant_sections(module: nn.Module, hidden: torch.Tensor) -> dict:
+    with torch.no_grad():
+        output = module(hidden)
+    region, _ = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+    final = ir["nodes"][-1]
+    boundary_refs = [item["ref"] for item in final["args"] if "ref" in item]
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(boundary_refs),
+        signatures((final["id"], )),
+    )
+    sections["operation"] = {
+        "name": "generated_lifted_constant_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": [final["target"]],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": [final["id"]],
+        "boundary_refs": boundary_refs,
+        "output_node_ids": [final["id"]],
     }
     sections["entry_point"]["symbol"] = "fused_subgraph"
     return sections
@@ -456,6 +524,26 @@ def test_export_subgraph_artifact_rewrites_each_live_block_without_copying_weigh
     assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
     assert _reasons(session) == [REASON_SELECTED]
     assert _decisions(session)[0]["candidate_calls"] == 3
+
+
+def test_export_subgraph_binds_opaque_lifted_constants_from_export(store, hidden):
+    modules = _pipeline_modules(_LiftedConstantBlock)
+    transformer = modules["transformer"]
+    with torch.no_grad():
+        expected = transformer(hidden)
+    sections = _lifted_constant_sections(transformer.blocks[0], hidden)
+    _write_bundle(store, sections, kernel_source=LIFTED_CONSTANT_KERNEL)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)  # resolve both blocks
+        actual = transformer(hidden)
+
+    session.detach()
+    torch.testing.assert_close(actual, expected)
+    assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):
