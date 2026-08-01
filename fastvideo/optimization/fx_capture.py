@@ -887,7 +887,7 @@ class FXCaptureSession:
         self._record_error(f"{code}{location}:{type(exc).__name__}")
 
     def _mode_order(self) -> tuple[str, ...]:
-        if self.tracer in {"auto", "fallback"}:
+        if self.tracer == "auto":
             return _CAPTURE_MODES
         if self.tracer in _CAPTURE_MODES:
             return (self.tracer, )
