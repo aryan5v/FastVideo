@@ -142,6 +142,22 @@ class _StructuredInputBlock(nn.Module):
         return rotated + frequencies[1] + self.offset
 
 
+class _ManagedBlock(_Block):
+    """CPU fake exposing the FSDP2 materialization lifecycle."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__(width)
+        self.unshard_calls = 0
+        self.reshard_calls = 0
+
+    def unshard(self, *, async_op: bool = False) -> None:
+        assert async_op is False
+        self.unshard_calls += 1
+
+    def reshard(self) -> None:
+        self.reshard_calls += 1
+
+
 class _Transformer(nn.Module):
     """A repeated block stack: the structure dispatch keys on."""
 
@@ -555,6 +571,26 @@ def test_export_subgraph_artifact_rewrites_each_live_block_without_copying_weigh
     assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
     assert _reasons(session) == [REASON_SELECTED]
     assert _decisions(session)[0]["candidate_calls"] == 3
+
+
+def test_candidate_dispatch_runs_inside_managed_parameter_lifecycle(store, hidden):
+    modules = _pipeline_modules(_ManagedBlock)
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert [block.unshard_calls for block in transformer.blocks] == [1, 2]
+    assert [block.reshard_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
 
 
 def test_export_subgraph_binds_opaque_lifted_constants_from_export(store, hidden):

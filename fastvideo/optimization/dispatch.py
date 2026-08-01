@@ -232,7 +232,8 @@ class GraphDispatchSession:
         if decision.candidate is None:
             return native(*args, **kwargs)
         try:
-            result = decision.candidate(wrapper.module, *args, **kwargs)
+            with self._materialized_candidate_parameters(wrapper.module):
+                result = decision.candidate(wrapper.module, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - untrusted candidate code
             # Demote permanently: a candidate that raised once is not trusted
             # to be retried thousands of times over the rest of the run.
@@ -249,6 +250,24 @@ class GraphDispatchSession:
             return native(*args, **kwargs)
         decision.candidate_calls += 1
         return result
+
+    @contextmanager
+    def _materialized_candidate_parameters(self, module: nn.Module):
+        """Mirror FSDP2's forward lifecycle when dispatch bypasses its wrapper."""
+        unshard = getattr(module, "unshard", None)
+        reshard = getattr(module, "reshard", None)
+        managed = callable(unshard) and callable(reshard)
+        if not managed:
+            yield
+            return
+        try:
+            try:
+                unshard(async_op=False)
+            except TypeError:
+                unshard()
+            yield
+        finally:
+            reshard()
 
     def _decide(
         self,
