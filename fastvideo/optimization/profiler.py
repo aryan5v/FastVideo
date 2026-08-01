@@ -175,8 +175,14 @@ def _finish_capture(session: Any) -> dict[str, Any] | None:
         return {
             "capture": {
                 "capture_schema_version": CAPTURE_SCHEMA_VERSION,
+                "tracer": getattr(session, "tracer", "unknown"),
+                "scopes": [],
+                "scope_calls": {},
+                "dropped_scopes": 0,
+                "dropped_shape_variants": 0,
                 # Exception text can include source snippets or argument reprs.
                 "errors": [f"finalize_failed:{type(exc).__name__}"],
+                "capture_mode_breakdown": {},
             },
             "regions": [],
             "graph_breaks": [],
@@ -198,12 +204,15 @@ def optimization_profile(call_index: int, modules: dict[str, Any] | None = None)
         yield
         return
 
-    session = _start_capture(modules)
-    activities = [torch.profiler.ProfilerActivity.CPU]
-    if torch.cuda.is_available():
-        activities.append(torch.profiler.ProfilerActivity.CUDA)
-        torch.cuda.synchronize()
+    # The capture session starts inside the try: a failure before the profiler
+    # window opens must still detach the hooks it installed.
+    session = None
     try:
+        session = _start_capture(modules)
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+            torch.cuda.synchronize()
         with torch.profiler.profile(
                 activities=activities,
                 record_shapes=True,

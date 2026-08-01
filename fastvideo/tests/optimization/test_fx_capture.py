@@ -330,6 +330,19 @@ def test_finalize_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["regions"] == []
     assert payload["capture"]["errors"] == ["finalize_failed:RuntimeError"]
+    # The failure record carries the same keys as a successful capture so
+    # consumers never KeyError on the degraded path.
+    assert set(payload["capture"]) == {
+        "capture_schema_version",
+        "tracer",
+        "scopes",
+        "scope_calls",
+        "dropped_scopes",
+        "dropped_shape_variants",
+        "errors",
+        "capture_mode_breakdown",
+    }
+    assert set(payload) >= {"capture", "regions", "graph_breaks", "unsupported"}
     assert all(not block._forward_hooks for block in model.blocks)
 
 
@@ -622,3 +635,29 @@ def test_assert_metadata_only_rejects_tensors_and_forbidden_keys():
         fx_capture.assert_metadata_only({"regions": [{"prompt": "a cat"}]})
     with pytest.raises(RuntimeError):
         fx_capture.assert_metadata_only({"regions": [{"inputs": torch.zeros(2)}]})
+class _NoTensorBlock(nn.Module):
+    """A block whose forward takes no tensor arguments."""
+
+    def forward(self) -> torch.Tensor:
+        return torch.ones(1)
+
+
+def test_no_tensor_inputs_recorded_once_per_scope():
+    session = fx_capture.FXCaptureSession()
+    model = _Transformer(depth=2, block=_NoTensorBlock)
+    assert session.attach(model, prefix="transformer") == 2
+
+    for block in model.blocks:
+        block()
+        block()
+
+    payload = session.finalize()
+    breaks = [
+        item for item in payload["graph_breaks"] if item["reason"] == "no_tensor_inputs"
+    ]
+    # One coalesced entry per scope no matter how often the scope ran.
+    assert breaks == [{
+        "scope": "transformer.blocks",
+        "reason": "no_tensor_inputs",
+        "count": 4,
+    }]
