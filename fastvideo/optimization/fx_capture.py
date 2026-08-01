@@ -745,6 +745,9 @@ class FXCaptureSession:
         self._scopes: dict[str, _Scope] = {}
         self._handles: list[Any] = []
         self._graph_breaks: list[dict[str, Any]] = []
+        # One live entry per no-tensor-input scope, updated in place: a scope
+        # called N times must not append N records before finalize coalesces.
+        self._no_tensor_input_breaks: dict[str, dict[str, Any]] = {}
         self._unsupported: list[dict[str, Any]] = []
         self._errors: list[str] = []
         self._dropped_scopes = 0
@@ -823,7 +826,12 @@ class FXCaptureSession:
         record.calls += 1
         inputs = _input_metas(args, kwargs)
         if not inputs:
-            self._graph_breaks.append({"scope": record.scope, "reason": "no_tensor_inputs", "count": 1})
+            entry = self._no_tensor_input_breaks.get(record.scope)
+            if entry is None:
+                entry = {"scope": record.scope, "reason": "no_tensor_inputs", "count": 0}
+                self._no_tensor_input_breaks[record.scope] = entry
+                self._graph_breaks.append(entry)
+            entry["count"] += 1
             return
 
         outputs = _output_metas(output)

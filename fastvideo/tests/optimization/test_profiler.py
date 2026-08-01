@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fastvideo.optimization import profiler as optimization_profiler
 
 
@@ -63,3 +65,50 @@ def test_worker_profile_exports_metadata_only(tmp_path, monkeypatch):
     assert payload["total_cuda_time_us"] == 9.5
     assert payload["rows"][0]["input_shapes"] == [[1, 4], [1, 4]]
     assert "values" not in payload["rows"][0]
+def test_capture_detached_when_pre_profiler_step_fails(tmp_path, monkeypatch):
+    """A failure before the profiler window opens must not leak hooks."""
+    output = tmp_path / "profile.json"
+    monkeypatch.setenv("FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT", str(output))
+    monkeypatch.setenv("FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS", "0")
+
+    events = {"finalize": 0}
+
+    class _Session:
+        tracer = "auto"
+
+        def finalize(self):
+            events["finalize"] += 1
+            return {
+                "capture": {},
+                "regions": [],
+                "graph_breaks": [],
+                "unsupported": [],
+            }
+
+        def detach(self):
+            pass
+
+    monkeypatch.setattr(
+        optimization_profiler,
+        "_start_capture",
+        lambda modules: _Session(),
+    )
+    monkeypatch.setattr(
+        optimization_profiler.torch.cuda,
+        "is_available",
+        lambda: True,
+    )
+
+    def _boom():
+        raise RuntimeError("synthetic synchronize failure")
+
+    monkeypatch.setattr(optimization_profiler.torch.cuda, "synchronize", _boom)
+
+    with (
+        pytest.raises(RuntimeError, match="synthetic synchronize failure"),
+        optimization_profiler.optimization_profile(0),
+    ):
+        pass
+
+    assert events["finalize"] == 1
+    assert not output.exists()
