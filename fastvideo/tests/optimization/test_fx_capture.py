@@ -736,6 +736,28 @@ def test_already_registered_dataclass_is_not_registered_again(monkeypatch):
     assert registered == ()
 
 
+def test_unknown_pytree_registry_fails_closed_without_reregistering(monkeypatch):
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    calls: list[type] = []
+    monkeypatch.delattr(fx_capture.torch.utils._pytree, "SUPPORTED_NODES")
+    monkeypatch.setattr(
+        fx_capture.torch.export,
+        "register_dataclass",
+        lambda cls: calls.append(cls),
+    )
+
+    with pytest.raises(
+        fx_capture.DataclassRegistrationError,
+        match="pytree_registry_unavailable",
+    ):
+        fx_capture._register_dataclasses((_Args(torch.randn(2, 4)),), {})
+
+    assert calls == []
+
+
 def test_dataclass_registration_failure_is_sanitized_capture_metadata(
     monkeypatch,
 ):
@@ -822,6 +844,40 @@ def test_dataclass_output_type_is_registered_for_export():
 
     assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
     assert fx_capture._is_pytree_registered(_Out)
+    assert all(
+        not variant.output_dataclass_types
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
+def test_runtime_export_capture_registers_dataclass_output_type():
+    """Live dispatch recapture must register structured outputs too."""
+
+    @dataclass
+    class _Out:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, hidden_states: torch.Tensor) -> _Out:
+            return _Out(hidden_states * 2)
+
+    module = _Block().eval()
+    hidden_states = torch.randn(2, 4)
+    output = module(hidden_states)
+
+    region, exported = fx_capture.capture_export_invocation(
+        module,
+        (hidden_states,),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+
+    assert fx_capture._is_pytree_registered(_Out)
+    assert region["attributes"]["capture_mode"] == "export"
+    assert region["attributes"]["executable_ir"]["nodes"]
+    assert exported.graph is not None
 
 
 def test_dataclass_string_fields_never_reach_exported_json():

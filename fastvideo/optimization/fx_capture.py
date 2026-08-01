@@ -269,12 +269,21 @@ def _is_pytree_registered(cls: type) -> bool:
     process-wide call — an overwrite both warns and replaces the other party's
     serialized type name.
     """
+    if cls in _REGISTERED_DATACLASSES:
+        return True
     try:
         from torch.utils import _pytree
 
-        return cls in _pytree.SUPPORTED_NODES
-    except Exception:  # noqa: BLE001 — private registry is best-effort only
-        return cls in _REGISTERED_DATACLASSES
+        registry = _pytree.SUPPORTED_NODES
+        if not isinstance(registry, Mapping):
+            raise TypeError("unexpected pytree registry")
+        return cls in registry
+    except Exception as exc:  # noqa: BLE001 — never overwrite an unknown registration
+        # ``register_dataclass`` overwrites existing registrations. If this
+        # PyTorch build no longer exposes the registry used by every supported
+        # release, fail closed rather than clobbering a third party's
+        # serialized type name.
+        raise DataclassRegistrationError("pytree_registry_unavailable") from exc
 
 
 def _iter_dataclass_types(
@@ -1142,6 +1151,7 @@ class FXCaptureSession:
                 variant.example_args = None
                 variant.example_kwargs = None
                 variant.observed_context = None
+                variant.output_dataclass_types = ()
 
             if capture_mode is None:
                 continue
@@ -1222,6 +1232,7 @@ class FXCaptureSession:
                     variant.example_args = None
                     variant.example_kwargs = None
                     variant.observed_context = None
+                    variant.output_dataclass_types = ()
 
         breaks = _coalesce(self._graph_breaks, ("scope", "reason"))
         unsupported = _coalesce(self._unsupported, ("op_name", "reason", "scope"))
@@ -1340,6 +1351,7 @@ def capture_export_invocation(
         example_args=args,
         example_kwargs=dict(kwargs),
         observed_context=observed_context,
+        output_dataclass_types=dataclass_types_in(output),
         calls=1,
     )
     session = FXCaptureSession(tracer="export", max_scopes=1, max_shape_variants=1)
