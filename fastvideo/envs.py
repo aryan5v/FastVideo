@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE: str = ""
     FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS: str = ""
     FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION: bool = False
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE: str = ""
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -351,6 +352,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # generation evidence and a promoted decision.
     "FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION":
     lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION", "0") != "0"),
+    # Comma-separated allowlist of artifact IDs to admit from the directory.
+    # Empty means every verified bundle. This exists so a campaign can A/B one
+    # artifact at a time against the same directory, without staging a separate
+    # tree per trial: attributing a parity change or a latency regression to a
+    # specific artifact otherwise requires bisecting the whole set.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE", ""),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":

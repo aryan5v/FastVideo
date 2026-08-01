@@ -106,23 +106,40 @@ class _MetadataInterpreter(fx.Interpreter):
             ) from exc
 
 
-def _validate_runtime_inputs(
+def _placeholder_contract(
     graph: fx.Graph,
+) -> tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...]:
+    """Freeze the graph's placeholder contract once, at build time.
+
+    The rewritten graph is immutable for the lifetime of the dispatcher, so
+    walking every node to rediscover its placeholders on each call re-derives a
+    constant. That walk is O(graph size) in Python and runs inside the region
+    it is meant to be accelerating.
+    """
+    return tuple(
+        (str(node.target), _tensor_key((node.meta or {}).get("val")))
+        for node in graph.nodes
+        if node.op == "placeholder"
+    )
+
+
+def _validate_runtime_inputs(
+    contract: tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...],
     flat_inputs: list[Any],
 ) -> None:
-    placeholders = [node for node in graph.nodes if node.op == "placeholder"]
-    if len(placeholders) != len(flat_inputs):
+    if len(contract) != len(flat_inputs):
         raise SubgraphRewriteError(
             "runtime flattened input count differs from the exported graph"
         )
-    for index, (node, value) in enumerate(
-        zip(placeholders, flat_inputs, strict=True)
+    for index, ((target, expected), value) in enumerate(
+        zip(contract, flat_inputs, strict=True)
     ):
-        expected = _tensor_key((node.meta or {}).get("val"))
+        if expected is None:
+            continue
         actual = _tensor_key(value)
-        if expected is not None and actual != expected:
+        if actual != expected:
             raise SubgraphRewriteError(
-                f"runtime input {index} ({node.target}) metadata changed: "
+                f"runtime input {index} ({target}) metadata changed: "
                 f"expected {expected}, observed {actual}"
             )
 
@@ -340,7 +357,12 @@ def rewrite_exported_subgraph(
     output_spec = getattr(getattr(exported, "call_spec", None), "out_spec", None)
     if input_spec is None or output_spec is None:
         raise SubgraphRewriteError("export call specification is missing")
-    cache: weakref.WeakKeyDictionary[nn.Module, fx.GraphModule] = weakref.WeakKeyDictionary()
+    # Value is (rewritten module, frozen placeholder contract): the contract is
+    # derived once per build so the per-call path never walks the graph.
+    cache: weakref.WeakKeyDictionary[
+        nn.Module,
+        tuple[fx.GraphModule, tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...]],
+    ] = weakref.WeakKeyDictionary()
 
     def build(parent_module: nn.Module) -> fx.GraphModule:
         representative = exported.module()
@@ -448,12 +470,14 @@ def rewrite_exported_subgraph(
         return runnable
 
     def dispatch(parent_module: nn.Module, *args: Any, **kwargs: Any) -> Any:
-        runnable = cache.get(parent_module)
-        if runnable is None:
+        entry = cache.get(parent_module)
+        if entry is None:
             runnable = build(parent_module)
-            cache[parent_module] = runnable
+            entry = (runnable, _placeholder_contract(runnable.graph))
+            cache[parent_module] = entry
+        runnable, contract = entry
         flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
-        _validate_runtime_inputs(runnable.graph, flat_inputs)
+        _validate_runtime_inputs(contract, flat_inputs)
         try:
             flat_output = runnable(*flat_inputs)
         except RuntimeError as exc:

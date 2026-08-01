@@ -1388,3 +1388,140 @@ def test_load_entry_point_rejects_manifest_changed_since_validation(store, hidde
 
     with pytest.raises(ArtifactError, match="changed since validation"):
         load_entry_point(registry.manifests[0], trusted_root=store)
+
+
+# ---------------------------------------------------------------------------
+# Per-artifact isolation and hot-path cost
+#
+# Run ltx-v1-overnight-20260801-r4-sol dispatched four artifacts into
+# vae.decoder.up_blocks.6.res_blocks simultaneously, made 56 candidate calls
+# with zero runtime fallbacks, and regressed end-to-end from 3.2818s to
+# 3.9410s. Nothing in the evidence could say which artifact was responsible for
+# the parity change or the latency, because all four were enabled at once.
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_ids_admits_only_the_named_artifact(store, hidden):
+    """One artifact under test, same directory, no restaging."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    for index in range(3):
+        sections = _sections(fingerprint, inputs, outputs)
+        sections["artifact_id"] = f"mk-artifact-{index}"
+        _write_bundle(store, sections, name=f"bundle{index}")
+
+    everything = ArtifactRegistry(store)
+    assert len(everything.manifests) == 3
+    assert everything.enabled_ids == ()
+    assert everything.excluded_ids == ()
+
+    isolated = ArtifactRegistry(store, enabled_ids=["mk-artifact-1"])
+    assert [item.artifact_id for item in isolated.manifests] == ["mk-artifact-1"]
+    assert isolated.excluded_ids == ("mk-artifact-0", "mk-artifact-2")
+    assert isolated.errors == []
+
+
+def test_enabled_ids_appear_in_diagnostics(store, hidden):
+    """A trial's own report records what was under test and what was held back."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    for index in range(2):
+        sections = _sections(fingerprint, inputs, outputs)
+        sections["artifact_id"] = f"mk-artifact-{index}"
+        _write_bundle(store, sections, name=f"bundle{index}")
+
+    summary = ArtifactRegistry(store, enabled_ids=["mk-artifact-0"]).summary()
+    assert summary["artifact_ids"] == ["mk-artifact-0"]
+    assert summary["enabled_filter"] == ["mk-artifact-0"]
+    assert summary["excluded_ids"] == ["mk-artifact-1"]
+
+
+def test_requesting_an_absent_artifact_is_an_error_not_a_silent_empty_run(store, hidden):
+    """Otherwise a typo in a trial's ID reads as 'this artifact changes nothing'."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    sections = _sections(fingerprint, inputs, outputs)
+    sections["artifact_id"] = "mk-artifact-real"
+    _write_bundle(store, sections, name="bundle0")
+
+    registry = ArtifactRegistry(store, enabled_ids=["mk-artifact-typo"])
+    assert registry.manifests == []
+    assert any("mk-artifact-typo" in error for error in registry.errors)
+
+
+def test_enabled_ids_still_verify_every_bundle(store, hidden):
+    """Selection narrows what is used; it never skips integrity checks."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    good = _sections(fingerprint, inputs, outputs)
+    good["artifact_id"] = "mk-good"
+    _write_bundle(store, good, name="good")
+
+    tampered = _sections(fingerprint, inputs, outputs)
+    tampered["artifact_id"] = "mk-tampered"
+    directory = _write_bundle(store, tampered, name="tampered")
+    (directory / "kernel.py").write_text("raise RuntimeError('altered')", encoding="utf-8")
+
+    registry = ArtifactRegistry(store, enabled_ids=["mk-good"])
+    assert [item.artifact_id for item in registry.manifests] == ["mk-good"]
+    assert registry.errors, "the altered bundle is still reported"
+
+
+def test_placeholder_contract_is_derived_once_not_per_call():
+    """The per-call path must not walk the graph to rediscover placeholders."""
+    import operator
+
+    from torch import fx
+
+    from fastvideo.optimization.subgraph import (
+        _placeholder_contract,
+        _validate_runtime_inputs,
+    )
+
+    graph = fx.Graph()
+    first = graph.placeholder("x")
+    first.meta["val"] = torch.zeros(2, 3)
+    second = graph.placeholder("y")
+    second.meta["val"] = torch.zeros(4)
+    for index in range(200):
+        graph.call_function(operator.add, args=(first, index))
+    graph.output(first)
+
+    contract = _placeholder_contract(graph)
+    assert contract == (("x", ((2, 3), "torch.float32")), ("y", ((4,), "torch.float32")))
+
+    _validate_runtime_inputs(contract, [torch.zeros(2, 3), torch.zeros(4)])
+
+    with pytest.raises(SubgraphRewriteError, match="metadata changed"):
+        _validate_runtime_inputs(contract, [torch.zeros(2, 5), torch.zeros(4)])
+    with pytest.raises(SubgraphRewriteError, match="input count differs"):
+        _validate_runtime_inputs(contract, [torch.zeros(2, 3)])
+
+
+def test_dispatch_does_not_snapshot_parameters_on_the_success_path(store, hidden, monkeypatch):
+    """Three FSDP-lifecycle snapshots per call were charged to every dispatch."""
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    counted = {"count": 0}
+    original = GraphDispatchSession._parameter_snapshot
+
+    def counting(wrapper):
+        counted["count"] += 1
+        return original(wrapper)
+
+    monkeypatch.setattr(
+        GraphDispatchSession, "_parameter_snapshot", staticmethod(counting)
+    )
+
+    with torch.no_grad():
+        for _ in range(5):
+            transformer(hidden)
+
+    dispatched = sum(item["candidate_calls"] for item in _decisions(session))
+    assert dispatched > 0, "the artifact must actually be running"
+    assert counted["count"] == 0, "diagnostics belong on the failure path"

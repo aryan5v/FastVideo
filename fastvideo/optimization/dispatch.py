@@ -268,12 +268,8 @@ class GraphDispatchSession:
         decision.calls += 1
         if decision.candidate is None:
             return native(*args, **kwargs)
-        materialization = {
-            "before": self._parameter_snapshot(wrapper),
-        }
 
         def candidate_forward(*candidate_args: Any, **candidate_kwargs: Any) -> Any:
-            materialization["candidate"] = self._parameter_snapshot(wrapper)
             assert decision.candidate is not None
             return decision.candidate(
                 wrapper.module,
@@ -285,7 +281,6 @@ class GraphDispatchSession:
             with self._materialized_candidate_parameters(
                 wrapper.parameter_manager
             ):
-                materialization["inside"] = self._parameter_snapshot(wrapper)
                 hook_manager = ModuleHookManager.get_from(wrapper.module)
                 if hook_manager is None:
                     result = candidate_forward(*args, **kwargs)
@@ -301,12 +296,20 @@ class GraphDispatchSession:
             decision.runtime_fallbacks += 1
             decision.candidate = None
             decision.reason = f"{_REASON_RUNTIME_PREFIX}:{type(exc).__name__}"
+            # The FSDP-lifecycle snapshot is built here, on the failure path,
+            # rather than three times per successful call. It exists to
+            # diagnose parameter materialization; a run that never fails never
+            # needs it, and paying for it on every dispatch charged the
+            # candidate's measured saving for diagnostics it did not use.
             logger.warning(
                 "Artifact %s failed at runtime for %s; falling back to native "
                 "execution for the rest of this run; materialization=%s",
                 decision.artifact_id,
                 wrapper.scope,
-                json.dumps(materialization, sort_keys=True),
+                json.dumps(
+                    {"at_failure": self._parameter_snapshot(wrapper)},
+                    sort_keys=True,
+                ),
                 exc_info=True,
             )
             return native(*args, **kwargs)
@@ -615,7 +618,19 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
         return None
     try:
         root = Path(configured).expanduser()
-        registry = ArtifactRegistry(root)
+        enabled_ids = tuple(
+            part.strip()
+            for part in envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE.split(",")
+            if part.strip()
+        )
+        registry = ArtifactRegistry(root, enabled_ids=enabled_ids or None)
+        if enabled_ids:
+            logger.info(
+                "Artifact selection restricted to %s (%d of %d bundles admitted)",
+                ", ".join(enabled_ids),
+                len(registry.manifests),
+                len(registry.manifests) + len(registry.excluded_ids),
+            )
         for error in registry.errors:
             logger.warning("Skipping artifact bundle: %s", error)
         if not registry.enabled:

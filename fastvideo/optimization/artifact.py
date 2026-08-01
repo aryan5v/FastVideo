@@ -29,7 +29,7 @@ import types
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from fastvideo.logger import init_logger
 
@@ -823,20 +823,50 @@ class ArtifactRegistry:
     :attr:`errors` and skipped; they never disable the ones that passed.
     """
 
-    def __init__(self, root: Path | None) -> None:
+    def __init__(
+        self,
+        root: Path | None,
+        *,
+        enabled_ids: Iterable[str] | None = None,
+    ) -> None:
+        """Load and verify every bundle under ``root``.
+
+        Args:
+            enabled_ids: when given, admit only these artifact IDs. Every
+                bundle is still verified, so a corrupt one is still reported;
+                it is selection that narrows. This is what makes per-artifact
+                A/B isolation possible against a single directory.
+        """
         self.root = root
         self.manifests: list[ArtifactManifest] = []
         self.errors: list[str] = []
+        self.enabled_ids: tuple[str, ...] = tuple(enabled_ids) if enabled_ids is not None else ()
+        self.excluded_ids: tuple[str, ...] = ()
         if root is None:
             return
         if not root.is_dir():
             self.errors.append(f"artifact directory {str(root)!r}: not a directory")
             return
+        verified: list[ArtifactManifest] = []
         for path in discover_bundles(root):
             try:
-                self.manifests.append(verify_bundle(path))
+                verified.append(verify_bundle(path))
             except ArtifactError as exc:
                 self.errors.append(str(exc))
+        if not self.enabled_ids:
+            self.manifests = verified
+            return
+        allowed = set(self.enabled_ids)
+        self.manifests = [item for item in verified if item.artifact_id in allowed]
+        self.excluded_ids = tuple(
+            sorted(item.artifact_id for item in verified if item.artifact_id not in allowed)
+        )
+        missing = sorted(allowed - {item.artifact_id for item in verified})
+        for artifact_id in missing:
+            self.errors.append(
+                f"artifact {artifact_id!r} was requested but no verified bundle "
+                f"in {str(root)!r} provides it"
+            )
 
     @property
     def enabled(self) -> bool:
@@ -859,5 +889,9 @@ class ArtifactRegistry:
             "root": str(self.root) if self.root is not None else None,
             "loaded": len(self.manifests),
             "artifact_ids": sorted(item.artifact_id for item in self.manifests),
+            # Present so a per-artifact A/B trial's diagnostics record which
+            # artifact was under test and which were held back.
+            "enabled_filter": list(self.enabled_ids),
+            "excluded_ids": list(self.excluded_ids),
             "errors": list(self.errors),
         }
