@@ -509,7 +509,9 @@ def test_deferred_export_replays_observed_autocast_dtype():
     ir = payload["regions"][0]["attributes"]["executable_ir"]
     mm_nodes = [node for node in ir["nodes"] if node["target"] == "aten.mm.default"]
     assert mm_nodes
-    assert all(node["meta"]["dtype"] == "bfloat16" for node in mm_nodes)
+    # _ir_tensor_meta canonicalizes torch dtype names for the artifact schema.
+    expected_dtype = str(torch.bfloat16).removeprefix("torch.")
+    assert all(node["meta"]["dtype"] == expected_dtype for node in mm_nodes)
     assert not torch.is_autocast_enabled("cpu")
     assert all(
         variant.observed_autocast is None
