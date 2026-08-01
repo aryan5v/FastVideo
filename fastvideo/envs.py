@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID: str = "unknown-model"
     FASTVIDEO_OPTIMIZATION_PROFILE_TASK: str = "video_generation"
     FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX: bool = False
-    FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER: str = "symbolic"
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER: str = "auto"
     FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES: int = 64
     FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES: int = 8
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
@@ -296,7 +296,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX":
     lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX", "0") != "0"),
     "FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER":
-    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER", "symbolic"),
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER", "auto"),
     # Upper bound on hooked block stacks, so a pathological model cannot make
     # the export unbounded.
     "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES":

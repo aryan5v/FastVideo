@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
+import pytest
 import torch
 from torch import nn
 
+from fastvideo.forward_context import get_forward_context, set_forward_context
+from fastvideo.hooks.hooks import ForwardHook, ModuleHookManager
 from fastvideo.optimization import fx_capture
 from fastvideo.optimization import profiler as optimization_profiler
 
@@ -30,6 +34,70 @@ class _UntraceableBlock(nn.Module):
         if bool(hidden_states.sum() > 0):
             return hidden_states * 2
         return hidden_states
+
+
+class _ShapeBranchBlock(nn.Module):
+    """Representative shape branch that FX cannot evaluate from a Proxy."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.shape[-1] > 2:
+            return hidden_states * 2 * self.scale
+        return (hidden_states + 1) * self.scale
+
+
+class _FakeLayerwiseOffloadHook(ForwardHook):
+    class _State:
+        def __init__(self, module: nn.Module) -> None:
+            self.module = module
+            self.gpu_named_parameters = {}
+
+        def wait_and_replace_params(self) -> None:
+            for name, parameter in self.module.named_parameters():
+                if name in self.gpu_named_parameters:
+                    continue
+                self.gpu_named_parameters[name] = parameter.data
+
+    def __init__(self, module: nn.Module) -> None:
+        self.pre_calls = 0
+        self.post_calls = 0
+        self.state = self._State(module)
+
+    @classmethod
+    def name(cls) -> str:
+        return "LayerwiseOffloadHook"
+
+    def pre_forward(self, module, *args, **kwargs):
+        self.pre_calls += 1
+        self.state.wait_and_replace_params()
+        return args, kwargs
+
+    def post_forward(self, module, output):
+        self.post_calls += 1
+        self.state.gpu_named_parameters.clear()
+        return output
+
+
+class _ContextAttention(nn.Module):
+    @torch.compiler.disable
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        context = get_forward_context()
+        return hidden_states + context.current_timestep
+
+
+class _ContextShapeBranchBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.attention = _ContextAttention()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.shape[-1] > 2:
+            hidden_states = hidden_states * self.scale
+        return self.attention(hidden_states)
 
 
 class _Transformer(nn.Module):
@@ -224,7 +292,17 @@ def test_trace_failure_is_recorded_not_raised(tmp_path, monkeypatch):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["regions"] == []
     reasons = [item["reason"] for item in payload["graph_breaks"]]
-    assert any(reason.startswith("fx_trace_failed") for reason in reasons)
+    assert all(reason.startswith("capture_failed:") for reason in reasons)
+    assert {reason.split(":", 2)[1] for reason in reasons} == {
+        "symbolic",
+        "export",
+        "dynamo",
+    }
+    assert payload["capture"]["capture_mode_breakdown"] == {
+        "dynamo": 0,
+        "export": 0,
+        "symbolic": 0,
+    }
     assert payload["rows"], "profiler rows still export after a capture failure"
 
 
@@ -243,8 +321,156 @@ def test_finalize_failure_is_recorded_not_raised(tmp_path, monkeypatch):
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["regions"] == []
-    assert any("synthetic finalize failure" in error for error in payload["capture"]["errors"])
+    assert payload["capture"]["errors"] == ["finalize_failed:RuntimeError"]
     assert all(not block._forward_hooks for block in model.blocks)
+
+
+def test_auto_falls_back_to_export_for_shape_control_flow(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "profile.json"
+    _enable_profile(monkeypatch, output)
+    pipeline = _FakePipeline(
+        _Transformer(depth=2, block=_ShapeBranchBlock)
+    )
+
+    pipeline.forward(torch.randn(2, 4), steps=1)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert len(payload["regions"]) == 1
+    attributes = payload["regions"][0]["attributes"]
+    assert attributes["capture_mode"] == "export"
+    assert attributes["capture_attempts"] == ["symbolic", "export"]
+    assert attributes["capture_failures"] == [
+        "capture_failed:symbolic:dynamic_python_control_flow:TraceError"
+    ]
+    assert payload["capture"]["capture_mode_breakdown"]["export"] == 1
+
+
+def test_fallback_bypasses_eager_only_offload_wrapper():
+    model = _Transformer(depth=2, block=_ShapeBranchBlock)
+    hooks = []
+    for block in model.blocks:
+        manager = ModuleHookManager.get_from_or_default(block)
+        hook = _FakeLayerwiseOffloadHook(block)
+        manager.append_forward_hook(hook)
+        hooks.append(hook)
+
+    session = fx_capture.FXCaptureSession()
+    assert session.attach(model, prefix="transformer") == 2
+    model(torch.randn(2, 4))
+    prefetched = model.blocks[0].scale.data
+    hooks[0].state.gpu_named_parameters["scale"] = prefetched
+    payload = session.finalize()
+
+    assert payload["regions"]
+    assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+    assert all(hook.pre_calls == 1 for hook in hooks)
+    assert all(hook.pre_calls == hook.post_calls for hook in hooks)
+    assert hooks[0].state.gpu_named_parameters == {"scale": prefetched}
+    assert not hooks[1].state.gpu_named_parameters
+    model(torch.randn(2, 4))
+    assert all(hook.pre_calls == 2 for hook in hooks)
+    assert all(hook.pre_calls == hook.post_calls for hook in hooks)
+    assert all(not hook.state.gpu_named_parameters for hook in hooks)
+    assert all(
+        callable(block.forward)
+        and ModuleHookManager.get_from(block) is not None
+        for block in model.blocks
+    )
+
+
+def test_fallback_restores_observed_context_and_disabled_forwards():
+    model = _Transformer(depth=2, block=_ContextShapeBranchBlock)
+    session = fx_capture.FXCaptureSession()
+    assert session.attach(model, prefix="transformer") == 2
+
+    with set_forward_context(current_timestep=3, attn_metadata=None):
+        model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"]
+    assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+    assert all(
+        getattr(block.attention.forward, "_torchdynamo_disable", False)
+        for block in model.blocks
+    )
+    assert all(
+        variant.observed_context is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
+@pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])
+def test_each_capture_mode_has_stable_metadata(mode):
+    session = fx_capture.FXCaptureSession(tracer=mode)
+    model = _Transformer(depth=2)
+    assert session.attach(model, prefix="transformer") == 2
+
+    model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"]
+    region = payload["regions"][0]
+    assert region["attributes"]["capture_mode"] == mode
+    assert region["attributes"]["capture_attempts"] == [mode]
+    assert payload["capture"]["capture_mode_breakdown"][mode] == 1
+    assert all(
+        variant.example_args is None and variant.example_kwargs is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
+@pytest.mark.parametrize("tracer", ["invalid", "fallback"])
+def test_invalid_tracer_still_clears_all_live_capture_references(tracer):
+    session = fx_capture.FXCaptureSession(tracer=tracer)
+    model = _Transformer(depth=2)
+    assert session.attach(model, prefix="transformer") == 2
+    model(torch.randn(2, 4))
+    model(torch.randn(3, 4))
+
+    payload = session.finalize()
+
+    assert payload["regions"] == []
+    assert payload["capture"]["errors"] == [
+        "finalize_failed[transformer.blocks]:ValueError"
+    ]
+    assert all(
+        variant.example_args is None
+        and variant.example_kwargs is None
+        and variant.observed_context is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+    assert sum(
+        len(record.variants) for record in session._scopes.values()
+    ) == 2
+
+
+def test_nested_dataclass_tensor_inputs_contribute_shape_metadata():
+    @dataclass
+    class _State:
+        hidden_states: torch.Tensor
+        conditioning: tuple[torch.Tensor, torch.Tensor]
+        config_name: str
+
+    state = _State(
+        hidden_states=torch.randn(2, 4),
+        conditioning=(torch.randn(1, 4), torch.randn(1, 4)),
+        config_name="private text is not metadata",
+    )
+
+    metas = fx_capture._input_metas((state,), {})
+
+    assert [meta["name"] for meta in metas] == [
+        "input_0_hidden_states",
+        "input_0_conditioning_0",
+        "input_0_conditioning_1",
+    ]
+    assert "private text" not in str(metas)
 
 
 def test_shape_variants_are_tracked_and_bounded(tmp_path, monkeypatch):
