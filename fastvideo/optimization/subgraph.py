@@ -47,6 +47,24 @@ def _tensor_key(value: Any) -> tuple[tuple[int, ...], str] | None:
     dtype = getattr(value, "dtype", None)
     if shape is None or dtype is None:
         return None
+
+
+def _tensor_anomaly(value: Any) -> dict[str, Any] | None:
+    key = _tensor_key(value)
+    local = getattr(value, "_local_tensor", None)
+    local_key = _tensor_key(local)
+    if key is None:
+        return None
+    shape, dtype = key
+    local_shape = local_key[0] if local_key is not None else None
+    if 0 not in shape and (local_shape is None or 0 not in local_shape):
+        return None
+    return {
+        "type": f"{type(value).__module__}.{type(value).__name__}",
+        "shape": shape,
+        "local_shape": local_shape,
+        "dtype": dtype,
+    }
     try:
         return tuple(int(dim) for dim in shape), str(dtype)
     except (TypeError, ValueError, RuntimeError):
@@ -377,7 +395,28 @@ def rewrite_exported_subgraph(
             cache[parent_module] = runnable
         flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
         _validate_runtime_inputs(runnable.graph, flat_inputs)
-        flat_output = runnable(*flat_inputs)
+        try:
+            flat_output = runnable(*flat_inputs)
+        except RuntimeError as exc:
+            anomalies = {
+                "attributes": {
+                    str(node.target): detail
+                    for node in runnable.graph.nodes
+                    if node.op == "get_attr"
+                    if (detail := _tensor_anomaly(
+                        _get_attr(runnable, str(node.target))
+                    ))
+                    is not None
+                },
+                "inputs": {
+                    str(index): detail
+                    for index, value in enumerate(flat_inputs)
+                    if (detail := _tensor_anomaly(value)) is not None
+                },
+            }
+            raise SubgraphRewriteError(
+                f"rewritten export execution failed; metadata anomalies: {anomalies}"
+            ) from exc
         leaves = list(flat_output) if isinstance(flat_output, tuple) else [flat_output]
         return tree_unflatten(leaves, output_spec)
 
