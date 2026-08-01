@@ -240,10 +240,135 @@ def _sanitize_constants(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class DataclassRegistrationError(RuntimeError):
+    """Input/output dataclass types could not be prepared for export."""
+
+
+# Bounds for the pre-export scan. A malformed or adversarial input structure
+# must not turn discovery into an unbounded walk.
+_MAX_DATACLASS_SCAN_DEPTH = 16
+_MAX_DATACLASS_SCAN_NODES = 4096
+
+# Backstop dedup cache for the (unlikely) case where pytree's registry cannot
+# be consulted. Registration is already a permanent global, so holding the
+# class here adds no lifetime that ``register_dataclass`` did not already take.
+_REGISTERED_DATACLASSES: set[type] = set()
+
+
+def _is_pytree_registered(cls: type) -> bool:
+    """True when ``cls`` is already a pytree node, however it was registered.
+
+    Consulting the live registry (rather than only our own cache) keeps us from
+    overwriting a registration made by the model, ``diffusers``, or an earlier
+    process-wide call — an overwrite both warns and replaces the other party's
+    serialized type name.
+    """
+    try:
+        from torch.utils import _pytree
+
+        return cls in _pytree.SUPPORTED_NODES
+    except Exception:  # noqa: BLE001 — private registry is best-effort only
+        return cls in _REGISTERED_DATACLASSES
+
+
+def _iter_dataclass_types(
+    value: Any,
+    *,
+    seen: set[int],
+    depth: int,
+    budget: list[int],
+) -> Iterator[type]:
+    """Yield dataclass types reachable from ``value``.
+
+    Only ``type(...)`` is read. Field values are traversed for *structure*
+    alone: they are never compared, formatted, hashed, or exported, and tensor
+    storage is never touched.
+    """
+    if depth > _MAX_DATACLASS_SCAN_DEPTH:
+        raise DataclassRegistrationError("dataclass_scan_depth_exceeded")
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise DataclassRegistrationError("dataclass_scan_budget_exceeded")
+
+    # Leaves: tensors and safe scalars can never contain a dataclass. Skipping
+    # them before the identity check also avoids interned-scalar id collisions.
+    if value is None or isinstance(value, (torch.Tensor, *_SAFE_SCALAR_TYPES)):
+        return
+    identity = id(value)
+    if identity in seen:
+        return
+    seen.add(identity)
+
+    if isinstance(value, tuple | list):
+        for item in value:
+            yield from _iter_dataclass_types(item, seen=seen, depth=depth + 1, budget=budget)
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_dataclass_types(item, seen=seen, depth=depth + 1, budget=budget)
+    elif is_dataclass(value) and not isinstance(value, type):
+        yield type(value)
+        for item in fields(value):
+            try:
+                child = getattr(value, item.name)
+            except AttributeError:
+                # An uninitialized ``field(init=False)`` carries no type to
+                # register; a later export failure is recorded normally.
+                continue
+            yield from _iter_dataclass_types(child, seen=seen, depth=depth + 1, budget=budget)
+
+
+def dataclass_types_in(value: Any) -> tuple[type, ...]:
+    """Ordered, de-duplicated dataclass types reachable from ``value``."""
+    seen: set[int] = set()
+    budget = [_MAX_DATACLASS_SCAN_NODES]
+    found = _iter_dataclass_types(value, seen=seen, depth=0, budget=budget)
+    return tuple(dict.fromkeys(found))
+
+
+def _register_dataclasses(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        extra_types: tuple[type, ...] = (),
+) -> tuple[str, ...]:
+    """Register every dataclass type the traced call needs, once each.
+
+    ``torch.export`` flattens inputs and outputs through pytree, so a module
+    whose signature carries a dataclass is rejected unless that type is a
+    registered node. This is the model-independent fix: the types come from the
+    observed call itself, so no architecture, field name, or class is named
+    here. Returns the sanitized class names that were newly registered.
+    """
+    try:
+        discovered: list[type] = []
+        seen: set[int] = set()
+        budget = [_MAX_DATACLASS_SCAN_NODES]
+        for value in (*args, *kwargs.values()):
+            discovered.extend(_iter_dataclass_types(value, seen=seen, depth=0, budget=budget))
+        discovered.extend(extra_types)
+    except DataclassRegistrationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — traversal must fail closed
+        raise DataclassRegistrationError("dataclass_scan_failed") from exc
+
+    registered: list[str] = []
+    for cls in dict.fromkeys(discovered):
+        if _is_pytree_registered(cls):
+            continue
+        try:
+            torch.export.register_dataclass(cls)
+        except Exception as exc:  # noqa: BLE001 — registration must fail closed
+            raise DataclassRegistrationError("dataclass_register_failed") from exc
+        _REGISTERED_DATACLASSES.add(cls)
+        registered.append(_safe_name(cls.__name__))
+    return tuple(registered)
+
+
 def _capture_failure_reason(mode: str, exc: Exception) -> str:
     """Classify failures without exporting exception text or source snippets."""
     text = str(exc).lower()
-    if any(marker in text for marker in (
+    if isinstance(exc, DataclassRegistrationError):
+        code = "dataclass_registration"
+    elif any(marker in text for marker in (
             "data-dependent",
             "data dependent",
             "guardondatadependentsymnode",
@@ -587,9 +712,17 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     runtime_index = 0
     lifted_index = 0
     for index, (node, input_spec) in enumerate(zip(placeholders, input_specs, strict=True)):
-        meta = _ir_tensor_meta((node.meta or {}).get("val"))
+        placeholder_value = (node.meta or {}).get("val")
+        meta = _ir_tensor_meta(placeholder_value)
         if meta is None:
-            constant = _ir_argument((node.meta or {}).get("val"), {})
+            # A specialized non-tensor graph input. Strings arriving as *inputs*
+            # are caller data — model ids, paths, captions, dataclass tag fields
+            # — not op enums, so they never enter the IR even when they match
+            # the enum-shaped safe-string pattern. Registering dataclasses makes
+            # their string fields reachable here, so this fails closed.
+            if isinstance(placeholder_value, str):
+                raise RuntimeError("unsupported_non_tensor_graph_input")
+            constant = _ir_argument(placeholder_value, {})
             if set(constant) == {"unsupported"}:
                 raise RuntimeError("unsupported_non_tensor_graph_input")
             node_expressions[node] = constant
@@ -658,6 +791,10 @@ class _ShapeVariant:
         default=None,
         repr=False,
     )
+    # Export rejects an unregistered dataclass in the *output* as well as the
+    # input, so the observed return structure contributes its types. Only the
+    # types are kept — never the returned objects or their tensors.
+    output_dataclass_types: tuple[type, ...] = field(default=(), repr=False)
     calls: int = 0
 
 
@@ -813,12 +950,19 @@ class FXCaptureSession:
                 )
             except AssertionError:
                 observed_context = None
+            try:
+                output_dataclass_types = dataclass_types_in(output)
+            except DataclassRegistrationError:
+                # A pathological return structure must not break the forward;
+                # export will fail closed and be recorded during finalize.
+                output_dataclass_types = ()
             variant = _ShapeVariant(
                 inputs=inputs,
                 outputs=outputs,
                 example_args=args,
                 example_kwargs=dict(kwargs),
                 observed_context=observed_context,
+                output_dataclass_types=output_dataclass_types,
             )
             record.variants[key] = variant
         variant.calls += 1
@@ -870,8 +1014,16 @@ class FXCaptureSession:
                 capture_kwargs,
         ), _capture_forward_context(variant.observed_context), _traceable_module_forwards(module):
             if mode == "symbolic":
+                # Symbolic tracing builds proxies from the forward signature and
+                # never pytree-flattens the example inputs, so it needs no
+                # dataclass registration.
                 return torch.fx.symbolic_trace(module)
             if mode == "export":
+                _register_dataclasses(
+                    capture_args,
+                    capture_kwargs,
+                    variant.output_dataclass_types,
+                )
                 return torch.export.export(
                     module,
                     capture_args,
@@ -879,6 +1031,11 @@ class FXCaptureSession:
                     strict=False,
                 )
             if mode == "dynamo":
+                _register_dataclasses(
+                    capture_args,
+                    capture_kwargs,
+                    variant.output_dataclass_types,
+                )
                 exported = torch._dynamo.export(module, aten_graph=True)(
                     *capture_args,
                     **capture_kwargs,

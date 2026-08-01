@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 
 import pytest
@@ -504,6 +505,383 @@ def test_nested_dataclass_tensor_inputs_contribute_shape_metadata():
         "input_0_conditioning_1",
     ]
     assert "private text" not in str(metas)
+
+
+class _DataclassTransformer(nn.Module):
+    """Repeated stack whose block takes and returns a dataclass, as DiTs do."""
+
+    def __init__(self, block_cls, depth: int = 2) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([block_cls() for _ in range(depth)])
+
+    def forward(self, args):
+        for block in self.blocks:
+            args = block(args)
+        return args
+
+
+def test_unregistered_dataclass_input_exports_through_capture_session():
+    """Requirement 1: a never-registered dataclass must export, not fail."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+        scale: float
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            return _Args(args.hidden_states * args.scale, args.scale)
+
+    assert not fx_capture._is_pytree_registered(_Args)
+
+    session = fx_capture.FXCaptureSession(tracer="export")
+    model = _DataclassTransformer(_Block)
+    assert session.attach(model, prefix="transformer") == 2
+    model(_Args(torch.randn(2, 4), 2.0))
+    payload = session.finalize()
+
+    assert payload["regions"], "dataclass input must not block capture"
+    region = payload["regions"][0]
+    assert region["attributes"]["capture_mode"] == "export"
+    assert region["attributes"]["capture_failures"] == []
+    assert "executable_ir" in region["attributes"]
+    assert fx_capture._is_pytree_registered(_Args)
+
+
+def test_nested_dataclasses_in_containers_are_all_registered():
+    """Requirement 2: nesting through dataclass/list/tuple/mapping fields."""
+
+    @dataclass
+    class _Leaf:
+        cond: torch.Tensor
+
+    @dataclass
+    class _Mid:
+        leaf: _Leaf
+        pair: tuple
+
+    @dataclass
+    class _Root:
+        hidden_states: torch.Tensor
+        mid: _Mid
+        table: dict
+        items: list
+
+    leaf = _Leaf(torch.randn(2, 4))
+    root = _Root(
+        hidden_states=torch.randn(2, 4),
+        mid=_Mid(leaf=leaf, pair=(_Leaf(torch.randn(2, 4)), 3)),
+        table={"a": _Leaf(torch.randn(2, 4))},
+        items=[_Leaf(torch.randn(2, 4))],
+    )
+
+    found = fx_capture.dataclass_types_in(root)
+
+    assert set(found) == {_Root, _Mid, _Leaf}
+    # De-duplicated even though _Leaf appears four times.
+    assert len(found) == 3
+
+
+def test_nested_dataclass_block_exports_with_correct_ir():
+    """Requirements 2 and 4: nested dataclasses export with sound metadata."""
+
+    @dataclass
+    class _Inner:
+        cond: torch.Tensor
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+        inner: _Inner
+        scale: float
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            hidden = args.hidden_states * args.scale + args.inner.cond
+            return _Args(hidden, args.inner, args.scale)
+
+    session = fx_capture.FXCaptureSession(tracer="export")
+    model = _DataclassTransformer(_Block)
+    session.attach(model, prefix="transformer")
+    model(_Args(torch.randn(2, 4), _Inner(torch.randn(2, 4)), 2.0))
+    payload = session.finalize()
+
+    region = payload["regions"][0]
+    # Tensor metadata still describes both dataclass tensor leaves.
+    assert [meta["name"] for meta in region["inputs"]] == [
+        "input_0_hidden_states",
+        "input_0_inner_cond",
+    ]
+    assert all(meta["shape"] == [2, 4] for meta in region["inputs"])
+    assert all(meta["dtype"] == "float32" for meta in region["inputs"])
+
+    executable_ir = region["attributes"]["executable_ir"]
+    assert executable_ir["schema_version"] == 1
+    assert len(executable_ir["nodes"]) == len(region["operations"])
+    # Both tensor fields arrive as runtime inputs; the float is specialized.
+    runtime = [
+        item for item in executable_ir["inputs"] if item["kind"] == "runtime"
+    ]
+    assert [item["name"] for item in runtime] == ["input_0", "input_1"]
+    assert all(
+        set(item["meta"]) == {"shape", "dtype", "requires_grad"}
+        for item in executable_ir["inputs"]
+    )
+    assert any(op.startswith("aten::") for op in region["operations"])
+    assert region["dependencies"]
+
+
+def test_repeated_capture_emits_no_duplicate_registration_warning():
+    """Requirement 3: re-registering a pytree node warns; we must not."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            return _Args(args.hidden_states * 2)
+
+    def _capture() -> dict:
+        session = fx_capture.FXCaptureSession(tracer="export")
+        model = _DataclassTransformer(_Block)
+        session.attach(model, prefix="transformer")
+        model(_Args(torch.randn(2, 4)))
+        return session.finalize()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = _capture()
+        second = _capture()
+        third = _capture()
+
+    messages = [str(item.message) for item in caught]
+    assert not [text for text in messages if "already registered" in text]
+    assert not [text for text in messages if "Overwriting" in text]
+    # Every repeat still produces the same usable capture.
+    for payload in (first, second, third):
+        assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+        assert "executable_ir" in payload["regions"][0]["attributes"]
+    assert (
+        first["regions"][0]["fingerprint"]
+        == second["regions"][0]["fingerprint"]
+        == third["regions"][0]["fingerprint"]
+    )
+
+
+def test_already_registered_dataclass_is_not_registered_again(monkeypatch):
+    """Registration is skipped when the type is already a pytree node."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    torch.export.register_dataclass(_Args)
+
+    calls: list[type] = []
+
+    def _spy(cls, **kwargs):
+        calls.append(cls)
+
+    monkeypatch.setattr(fx_capture.torch.export, "register_dataclass", _spy)
+    registered = fx_capture._register_dataclasses((_Args(torch.randn(2, 4)),), {})
+
+    assert calls == []
+    assert registered == ()
+
+
+def test_dataclass_registration_failure_is_sanitized_capture_metadata(
+    monkeypatch,
+):
+    """Registration failures fail closed into existing capture metadata."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            return _Args(args.hidden_states * 2)
+
+    def _boom(cls, **kwargs):
+        raise RuntimeError("secret-internal-detail /private/path")
+
+    monkeypatch.setattr(fx_capture.torch.export, "register_dataclass", _boom)
+
+    session = fx_capture.FXCaptureSession(tracer="export")
+    model = _DataclassTransformer(_Block)
+    session.attach(model, prefix="transformer")
+    model(_Args(torch.randn(2, 4)))
+    payload = session.finalize()
+
+    assert payload["regions"] == []
+    reasons = [item["reason"] for item in payload["graph_breaks"]]
+    assert reasons == [
+        "capture_failed:export:dataclass_registration:DataclassRegistrationError"
+    ]
+    serialized = json.dumps(payload)
+    assert "secret-internal-detail" not in serialized
+    assert "/private/path" not in serialized
+    fx_capture.assert_metadata_only(payload)
+
+
+def test_dataclass_scan_is_bounded_and_cycle_safe():
+    """Traversal must terminate on cycles and refuse unbounded structures."""
+
+    @dataclass
+    class _Node:
+        tensor: torch.Tensor
+        peer: object = None
+
+    first = _Node(torch.randn(2, 2))
+    second = _Node(torch.randn(2, 2))
+    first.peer = second
+    second.peer = first  # cycle
+
+    assert fx_capture.dataclass_types_in(first) == (_Node,)
+
+    deep: object = torch.randn(2, 2)
+    for _ in range(fx_capture._MAX_DATACLASS_SCAN_DEPTH + 4):
+        deep = [deep]
+    with pytest.raises(fx_capture.DataclassRegistrationError):
+        fx_capture.dataclass_types_in(deep)
+
+
+def test_dataclass_output_type_is_registered_for_export():
+    """Export rejects unregistered dataclasses in the output as well."""
+
+    @dataclass
+    class _Out:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, hidden_states: torch.Tensor) -> _Out:
+            return _Out(hidden_states * 2)
+
+    class _Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = nn.ModuleList([_Block(), _Block()])
+
+        def forward(self, hidden_states: torch.Tensor):
+            for block in self.blocks:
+                hidden_states = block(hidden_states).hidden_states
+            return hidden_states
+
+    session = fx_capture.FXCaptureSession(tracer="export")
+    model = _Model()
+    session.attach(model, prefix="transformer")
+    model(torch.randn(2, 4))
+    payload = session.finalize()
+
+    assert payload["regions"][0]["attributes"]["capture_mode"] == "export"
+    assert fx_capture._is_pytree_registered(_Out)
+
+
+def test_dataclass_string_fields_never_reach_exported_json():
+    """Requirement 5: registration must not open a string leak channel."""
+
+    secret = "Lightricks-LTX-Video-private-tag"
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+        tag: str
+        scale: float
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            return _Args(args.hidden_states * args.scale, args.tag, args.scale)
+
+    session = fx_capture.FXCaptureSession(tracer="export")
+    model = _DataclassTransformer(_Block)
+    session.attach(model, prefix="transformer")
+    model(_Args(torch.randn(2, 4), secret, 2.0))
+    payload = session.finalize()
+
+    serialized = json.dumps(payload)
+    assert secret not in serialized
+    assert "tag" not in serialized
+    fx_capture.assert_metadata_only(payload)
+
+    # The string input is refused rather than silently dropped: the region
+    # keeps its tensor metadata, and the missing IR is reported.
+    region = payload["regions"][0]
+    assert region["attributes"]["capture_mode"] == "export"
+    assert "executable_ir" not in region["attributes"]
+    assert any(
+        item["reason"]
+        == "executable_ir_unavailable:unsupported_non_tensor_graph_input"
+        for item in payload["graph_breaks"]
+    )
+
+
+def test_dataclass_capture_preserves_mode_fallback_order():
+    """Requirement 6: dataclass inputs do not disturb the fallback chain."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            return _Args(args.hidden_states * 2)
+
+    # ``auto`` still prefers symbolic, which needs no registration at all.
+    auto = fx_capture.FXCaptureSession()
+    auto_model = _DataclassTransformer(_Block)
+    auto.attach(auto_model, prefix="transformer")
+    auto_model(_Args(torch.randn(2, 4)))
+    auto_payload = auto.finalize()
+
+    attributes = auto_payload["regions"][0]["attributes"]
+    assert attributes["capture_mode"] == "symbolic"
+    assert attributes["capture_attempts"] == ["symbolic"]
+    assert attributes["capture_failures"] == []
+
+    # Each explicit mode still reports itself, and export now succeeds.
+    for mode in ("symbolic", "export", "dynamo"):
+        session = fx_capture.FXCaptureSession(tracer=mode)
+        model = _DataclassTransformer(_Block)
+        session.attach(model, prefix="transformer")
+        model(_Args(torch.randn(2, 4)))
+        payload = session.finalize()
+
+        assert payload["regions"], f"{mode} must capture a dataclass block"
+        assert payload["regions"][0]["attributes"]["capture_mode"] == mode
+        assert payload["capture"]["capture_mode_breakdown"][mode] == 1
+        assert payload["capture"]["errors"] == []
+
+
+def test_untraceable_dataclass_block_still_fails_closed_in_every_mode():
+    """Requirement 6: genuine trace failures keep their existing reasons."""
+
+    @dataclass
+    class _Args:
+        hidden_states: torch.Tensor
+
+    class _Block(nn.Module):
+        def forward(self, args: _Args) -> _Args:
+            if bool(args.hidden_states.sum() > 0):
+                return _Args(args.hidden_states * 2)
+            return args
+
+    session = fx_capture.FXCaptureSession()
+    model = _DataclassTransformer(_Block)
+    session.attach(model, prefix="transformer")
+    model(_Args(torch.randn(2, 4)))
+    payload = session.finalize()
+
+    assert payload["regions"] == []
+    reasons = [item["reason"] for item in payload["graph_breaks"]]
+    assert all(reason.startswith("capture_failed:") for reason in reasons)
+    assert {reason.split(":", 2)[1] for reason in reasons} == {
+        "symbolic",
+        "export",
+        "dynamo",
+    }
+    # The failures are real trace errors, not registration errors.
+    assert not [reason for reason in reasons if "dataclass_registration" in reason]
 
 
 def test_shape_variants_are_tracked_and_bounded(tmp_path, monkeypatch):
