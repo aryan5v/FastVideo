@@ -512,7 +512,7 @@ class ComposedPipelineBase(ABC):
         logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
         call_index = self._optimization_profile_calls
         self._optimization_profile_calls += 1
-        with optimization_profile(call_index):
+        with optimization_profile(call_index, getattr(self, "modules", None)):
             # logger.info("Batch: %s", batch)
             for stage in self.stages:
                 batch = stage(batch, fastvideo_args)
