@@ -1060,6 +1060,15 @@ class FXCaptureSession:
                     exc,
                     scope=record.scope,
                 )
+            finally:
+                # _regions_for clears variants as it consumes them, but an
+                # early failure (for example an invalid tracer) can occur
+                # before later variants are visited. Never retain live model
+                # inputs after finalize returns.
+                for variant in record.variants.values():
+                    variant.example_args = None
+                    variant.example_kwargs = None
+                    variant.observed_context = None
 
         breaks = _coalesce(self._graph_breaks, ("scope", "reason"))
         unsupported = _coalesce(self._unsupported, ("op_name", "reason", "scope"))
