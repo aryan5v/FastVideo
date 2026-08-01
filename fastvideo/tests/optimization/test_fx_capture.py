@@ -669,7 +669,8 @@ def test_nested_dataclass_block_exports_with_correct_ir():
     ]
     assert [item["name"] for item in runtime] == ["input_0", "input_1"]
     assert all(
-        set(item["meta"]) == {"shape", "dtype", "requires_grad"}
+        set(item["meta"])
+        == {"shape", "stride", "dtype", "device_type", "requires_grad"}
         for item in executable_ir["inputs"]
     )
     assert any(op.startswith("aten::") for op in region["operations"])

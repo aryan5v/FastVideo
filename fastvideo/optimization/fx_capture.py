@@ -666,10 +666,8 @@ def _ir_target(node: Any) -> str:
     if isinstance(schema_name, str) and "::" in schema_name:
         namespace, operation = schema_name.split("::", 1)
         overload_name = overload if isinstance(overload, str) and overload else "default"
-        return (
-            f"{_safe_op_component(namespace)}.{_safe_op_component(operation)}."
-            f"{_safe_op_component(overload_name)}"
-        )
+        return (f"{_safe_op_component(namespace)}.{_safe_op_component(operation)}."
+                f"{_safe_op_component(overload_name)}")
     name = getattr(target, "__name__", None)
     module = getattr(target, "__module__", "") or ""
     if module in {"_operator", "operator"} and name == "getitem":
@@ -1189,9 +1187,7 @@ class FXCaptureSession:
                     "module_class": record.class_name,
                     "tracer": self.tracer,
                     "capture_mode": capture_mode,
-                    "capture_attempts": list(
-                        attempts[: attempts.index(capture_mode) + 1]
-                    ),
+                    "capture_attempts": list(attempts[:attempts.index(capture_mode) + 1]),
                     "capture_failures": failures,
                 },
             }
