@@ -267,10 +267,14 @@ class GraphDispatchSession:
         decision.calls += 1
         if decision.candidate is None:
             return native(*args, **kwargs)
+        materialization = {
+            "before": self._parameter_snapshot(wrapper),
+        }
         try:
             with self._materialized_candidate_parameters(
                 wrapper.parameter_manager
             ):
+                materialization["inside"] = self._parameter_snapshot(wrapper)
                 result = decision.candidate(wrapper.module, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - untrusted candidate code
             # Demote permanently: a candidate that raised once is not trusted
@@ -280,14 +284,32 @@ class GraphDispatchSession:
             decision.reason = f"{_REASON_RUNTIME_PREFIX}:{type(exc).__name__}"
             logger.warning(
                 "Artifact %s failed at runtime for %s; falling back to native "
-                "execution for the rest of this run",
+                "execution for the rest of this run; materialization=%s",
                 decision.artifact_id,
                 wrapper.scope,
+                json.dumps(materialization, sort_keys=True),
                 exc_info=True,
             )
             return native(*args, **kwargs)
         decision.candidate_calls += 1
         return result
+
+    @staticmethod
+    def _parameter_snapshot(wrapper: _Wrapper) -> dict[str, Any]:
+        """Return bounded tensor metadata for diagnosing FSDP lifecycle gaps."""
+        module_parameters = tuple(wrapper.module.parameters(recurse=False))
+        manager = wrapper.parameter_manager
+        return {
+            "manager_has_lifecycle": callable(getattr(manager, "unshard", None))
+            and callable(getattr(manager, "reshard", None)),
+            "manager_is_module": manager is wrapper.module,
+            "manager_type": type(manager).__name__,
+            "module_direct_parameter_count": len(module_parameters),
+            "module_direct_parameter_shapes": [
+                list(parameter.shape) for parameter in module_parameters[:16]
+            ],
+            "module_type": type(wrapper.module).__name__,
+        }
 
     @contextmanager
     def _materialized_candidate_parameters(self, module: nn.Module):
