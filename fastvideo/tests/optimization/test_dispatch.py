@@ -18,6 +18,7 @@ import torch
 from torch import nn
 
 from fastvideo import envs
+from fastvideo.hooks.hooks import ForwardHook, ModuleHookManager
 from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactManifest, ArtifactRegistry,
                                              RuntimeProfile, load_entry_point, verify_bundle)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
@@ -45,6 +46,16 @@ RAISING_KERNEL = '''"""CPU fake kernel that fails at call time."""
 
 def fused_block(module, hidden):
     raise RuntimeError("candidate exploded")
+'''
+
+OFFLOADED_KERNEL = '''"""CPU fake requiring hook-materialized parameters."""
+import torch
+
+
+def fused_block(module, hidden):
+    if module.proj.weight.numel() == 0:
+        raise RuntimeError("candidate observed offloaded parameters")
+    return torch.full_like(hidden, float(module.marker))
 '''
 
 IMPORT_FAILURE_KERNEL = '''"""CPU fake kernel that fails at import time."""
@@ -156,6 +167,53 @@ class _ManagedBlock(_Block):
 
     def reshard(self) -> None:
         self.reshard_calls += 1
+
+
+class _FakeLayerwiseOffloadHook(ForwardHook):
+    """CPU fake for FastVideo's parameter swapping hook."""
+
+    class _State:
+        def __init__(self, module: nn.Module) -> None:
+            self.module = module
+            self.full_parameters = {
+                name: parameter.data.clone()
+                for name, parameter in module.named_parameters()
+            }
+            self.gpu_named_parameters: dict[str, torch.Tensor] = {}
+            self.release()
+
+        def wait_and_replace_params(self) -> None:
+            for name, parameter in self.module.named_parameters():
+                materialized = self.full_parameters[name]
+                parameter.data = materialized
+                self.gpu_named_parameters[name] = materialized
+
+        def release(self) -> None:
+            for parameter in self.module.parameters():
+                parameter.data = torch.empty(
+                    (0, ) * parameter.ndim,
+                    dtype=parameter.dtype,
+                )
+            self.gpu_named_parameters.clear()
+
+    def __init__(self, module: nn.Module) -> None:
+        self.state = self._State(module)
+        self.pre_calls = 0
+        self.post_calls = 0
+
+    @classmethod
+    def name(cls) -> str:
+        return "LayerwiseOffloadHook"
+
+    def pre_forward(self, module, *args, **kwargs):
+        self.pre_calls += 1
+        self.state.wait_and_replace_params()
+        return args, kwargs
+
+    def post_forward(self, module, output):
+        self.post_calls += 1
+        self.state.release()
+        return output
 
 
 class _Transformer(nn.Module):
@@ -627,6 +685,42 @@ def test_candidate_dispatch_uses_nearest_managed_ancestor(store, hidden):
     assert transformer.unshard_calls == 3
     assert transformer.reshard_calls == 3
     assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_candidate_dispatch_runs_through_module_hook_lifecycle(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(
+        store,
+        _sections(fingerprint, inputs, outputs),
+        kernel_source=OFFLOADED_KERNEL,
+    )
+    hooks = []
+    for block in transformer.blocks:
+        manager = ModuleHookManager.get_from_or_default(block)
+        hook = _FakeLayerwiseOffloadHook(block)
+        manager.append_forward_hook(hook)
+        hooks.append(hook)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert [hook.pre_calls for hook in hooks] == [2, 2]
+    assert [hook.post_calls for hook in hooks] == [2, 2]
+    assert all(
+        parameter.numel() == 0
+        for block in transformer.blocks
+        for parameter in block.parameters()
+    )
+    assert _reasons(session) == [REASON_SELECTED]
+    assert _decisions(session)[0]["candidate_calls"] == 3
 
 
 def test_export_subgraph_binds_opaque_lifted_constants_from_export(store, hidden):

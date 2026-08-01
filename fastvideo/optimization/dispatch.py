@@ -46,6 +46,7 @@ from collections.abc import Callable
 from torch import nn
 
 from fastvideo import envs
+from fastvideo.hooks.hooks import ModuleHookManager
 from fastvideo.logger import init_logger
 from fastvideo.optimization.artifact import (
     ArtifactManifest,
@@ -270,12 +271,30 @@ class GraphDispatchSession:
         materialization = {
             "before": self._parameter_snapshot(wrapper),
         }
+
+        def candidate_forward(*candidate_args: Any, **candidate_kwargs: Any) -> Any:
+            materialization["candidate"] = self._parameter_snapshot(wrapper)
+            assert decision.candidate is not None
+            return decision.candidate(
+                wrapper.module,
+                *candidate_args,
+                **candidate_kwargs,
+            )
+
         try:
             with self._materialized_candidate_parameters(
                 wrapper.parameter_manager
             ):
                 materialization["inside"] = self._parameter_snapshot(wrapper)
-                result = decision.candidate(wrapper.module, *args, **kwargs)
+                hook_manager = ModuleHookManager.get_from(wrapper.module)
+                if hook_manager is None:
+                    result = candidate_forward(*args, **kwargs)
+                else:
+                    result = hook_manager.run_with_forward(
+                        candidate_forward,
+                        *args,
+                        **kwargs,
+                    )
         except Exception as exc:  # noqa: BLE001 - untrusted candidate code
             # Demote permanently: a candidate that raised once is not trusted
             # to be retried thousands of times over the rest of the run.
@@ -299,7 +318,14 @@ class GraphDispatchSession:
         """Return bounded tensor metadata for diagnosing FSDP lifecycle gaps."""
         module_parameters = tuple(wrapper.module.parameters(recurse=False))
         manager = wrapper.parameter_manager
+        hook_manager = ModuleHookManager.get_from(wrapper.module)
         return {
+            "hook_manager": hook_manager is not None,
+            "hook_names": (
+                sorted(str(name) for name in hook_manager.forward_hooks)
+                if hook_manager is not None
+                else []
+            ),
             "manager_has_lifecycle": callable(getattr(manager, "unshard", None))
             and callable(getattr(manager, "reshard", None)),
             "manager_is_module": manager is wrapper.module,
