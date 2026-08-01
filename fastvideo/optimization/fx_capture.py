@@ -159,22 +159,18 @@ def _tensor_leaves(
     leaves: list[tuple[str, torch.Tensor]] = []
     if isinstance(value, tuple | list):
         for index, item in enumerate(value):
-            leaves.extend(
-                _tensor_leaves(
-                    item,
-                    prefix=f"{prefix}_{index}",
-                    seen=seen,
-                )
-            )
+            leaves.extend(_tensor_leaves(
+                item,
+                prefix=f"{prefix}_{index}",
+                seen=seen,
+            ))
     elif isinstance(value, Mapping):
         for key, item in value.items():
-            leaves.extend(
-                _tensor_leaves(
-                    item,
-                    prefix=f"{prefix}_{_safe_name(str(key))}",
-                    seen=seen,
-                )
-            )
+            leaves.extend(_tensor_leaves(
+                item,
+                prefix=f"{prefix}_{_safe_name(str(key))}",
+                seen=seen,
+            ))
     elif is_dataclass(value) and not isinstance(value, type):
         for item in fields(value):
             leaves.extend(
@@ -182,8 +178,7 @@ def _tensor_leaves(
                     getattr(value, item.name),
                     prefix=f"{prefix}_{_safe_name(item.name)}",
                     seen=seen,
-                )
-            )
+                ))
     return leaves
 
 
@@ -194,25 +189,18 @@ def _input_metas(
     leaves: list[tuple[str, torch.Tensor]] = []
     seen: set[int] = set()
     for index, value in enumerate(args):
-        leaves.extend(
-            _tensor_leaves(value, prefix=f"input_{index}", seen=seen)
-        )
+        leaves.extend(_tensor_leaves(value, prefix=f"input_{index}", seen=seen))
     for key, value in kwargs.items():
-        leaves.extend(
-            _tensor_leaves(
-                value,
-                prefix=f"kwarg_{_safe_name(str(key))}",
-                seen=seen,
-            )
-        )
+        leaves.extend(_tensor_leaves(
+            value,
+            prefix=f"kwarg_{_safe_name(str(key))}",
+            seen=seen,
+        ))
     return [_tensor_meta(name, tensor) for name, tensor in leaves]
 
 
 def _output_metas(output: Any) -> list[dict[str, Any]]:
-    return [
-        _tensor_meta(name, tensor)
-        for name, tensor in _tensor_leaves(output, prefix="output")
-    ]
+    return [_tensor_meta(name, tensor) for name, tensor in _tensor_leaves(output, prefix="output")]
 
 
 def _input_shape_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -255,25 +243,19 @@ def _sanitize_constants(raw: dict[str, Any]) -> dict[str, Any]:
 def _capture_failure_reason(mode: str, exc: Exception) -> str:
     """Classify failures without exporting exception text or source snippets."""
     text = str(exc).lower()
-    if any(
-        marker in text
-        for marker in (
+    if any(marker in text for marker in (
             "data-dependent",
             "data dependent",
             "guardondatadependentsymnode",
             ".item()",
-        )
-    ):
+    )):
         code = "data_dependent_control_flow"
-    elif any(
-        marker in text
-        for marker in (
+    elif any(marker in text for marker in (
             "control flow",
             "proxy object",
             "symbolically traced variables",
             "cannot be iterated",
-        )
-    ):
+    )):
         code = "dynamic_python_control_flow"
     elif "alias" in text:
         code = "unknown_aliasing"
@@ -324,11 +306,7 @@ def _capture_ready_module(
         return
 
     forward_hooks = getattr(manager, "forward_hooks", {})
-    unsupported_hooks = [
-        str(name)
-        for name in forward_hooks
-        if str(name) != "LayerwiseOffloadHook"
-    ]
+    unsupported_hooks = [str(name) for name in forward_hooks if str(name) != "LayerwiseOffloadHook"]
     if unsupported_hooks:
         raise RuntimeError("unsupported_module_hooks")
 
@@ -342,15 +320,8 @@ def _capture_ready_module(
     if offload_hook is not None and state is None:
         raise RuntimeError("missing_offload_state")
 
-    parameter_data = {
-        name: parameter.data
-        for name, parameter in module.named_parameters()
-    }
-    gpu_parameters = (
-        dict(getattr(state, "gpu_named_parameters", {}))
-        if state is not None
-        else {}
-    )
+    parameter_data = {name: parameter.data for name, parameter in module.named_parameters()}
+    gpu_parameters = (dict(getattr(state, "gpu_named_parameters", {})) if state is not None else {})
     try:
         if state is not None:
             state.wait_and_replace_params()
@@ -369,9 +340,7 @@ def _capture_ready_module(
 
 
 @contextmanager
-def _capture_forward_context(
-    observed_context: tuple[Any, Any] | None,
-) -> Iterator[None]:
+def _capture_forward_context(observed_context: tuple[Any, Any] | None, ) -> Iterator[None]:
     """Re-establish the bounded runtime context needed by attention layers."""
     if observed_context is None:
         yield
@@ -381,9 +350,9 @@ def _capture_forward_context(
 
     current_timestep, attention_metadata = observed_context
     with set_forward_context(
-        current_timestep=current_timestep,
-        attn_metadata=attention_metadata,
-        forward_batch=None,
+            current_timestep=current_timestep,
+            attn_metadata=attention_metadata,
+            forward_batch=None,
     ):
         yield
 
@@ -487,27 +456,21 @@ def _extract_graph(graph: Any) -> tuple[list[str], list[str], dict[str, Any], li
             if _is_safe_constant(value):
                 constants[f"{node.name}.arg{arg_index}"] = value
             elif value is not None and not tuple(node_names(value)):
-                notes.append(
-                    f"{key}: unsafe positional constant arg{arg_index}"
-                )
+                notes.append(f"{key}: unsafe positional constant arg{arg_index}")
         for kwarg, value in (node.kwargs or {}).items():
             if hasattr(value, "op"):
                 continue
             if _is_safe_constant(value):
                 constants[f"{node.name}.{kwarg}"] = value
             elif value is not None and not tuple(node_names(value)):
-                notes.append(
-                    f"{key}: non-scalar constant {kwarg!r} dropped"
-                )
+                notes.append(f"{key}: non-scalar constant {kwarg!r} dropped")
 
     for node in graph.nodes:
         if node.op in {"placeholder", "output"}:
             continue
         if node.op == "get_attr":
             target = str(node.target)
-            notes.append(
-                f"get_attr:{target}: lifted attribute value not exported"
-            )
+            notes.append(f"get_attr:{target}: lifted attribute value not exported")
             continue
         if node.op == "call_function":
             key = _op_key(node.target)
@@ -589,14 +552,12 @@ def _ir_argument(
         return {"device": "runtime"}
     if isinstance(value, tuple | list):
         kind = "tuple" if isinstance(value, tuple) else "list"
-        return {
-            kind: [_ir_argument(item, node_expressions) for item in value]
-        }
+        return {kind: [_ir_argument(item, node_expressions) for item in value]}
     # Static SymInts are shape metadata and safe to materialize.
     if type(value).__module__.startswith("torch") and type(value).__name__ in {
-        "SymInt",
-        "SymBool",
-        "SymFloat",
+            "SymInt",
+            "SymBool",
+            "SymFloat",
     }:
         try:
             scalar = int(value) if type(value).__name__ != "SymFloat" else float(value)
@@ -625,9 +586,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     inputs: list[dict[str, Any]] = []
     runtime_index = 0
     lifted_index = 0
-    for index, (node, input_spec) in enumerate(
-        zip(placeholders, input_specs, strict=True)
-    ):
+    for index, (node, input_spec) in enumerate(zip(placeholders, input_specs, strict=True)):
         meta = _ir_tensor_meta((node.meta or {}).get("val"))
         if meta is None:
             constant = _ir_argument((node.meta or {}).get("val"), {})
@@ -661,9 +620,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
         item: dict[str, Any] = {
             "id": node_id,
             "target": _ir_target(node),
-            "args": [
-                _ir_argument(value, node_expressions) for value in node.args
-            ],
+            "args": [_ir_argument(value, node_expressions) for value in node.args],
             "kwargs": {
                 _safe_name(str(key)): _ir_argument(value, node_expressions)
                 for key, value in (node.kwargs or {}).items()
@@ -678,11 +635,7 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
     if len(output_nodes) != 1 or not output_nodes[0].args:
         raise RuntimeError("invalid_graph_output")
     encoded_output = _ir_argument(output_nodes[0].args[0], node_expressions)
-    outputs = (
-        encoded_output["tuple"]
-        if set(encoded_output) == {"tuple"}
-        else [encoded_output]
-    )
+    outputs = (encoded_output["tuple"] if set(encoded_output) == {"tuple"} else [encoded_output])
     return {
         "schema_version": 1,
         "inputs": inputs,
@@ -898,11 +851,9 @@ class FXCaptureSession:
         if self.tracer in {"auto", "fallback"}:
             return _CAPTURE_MODES
         if self.tracer in _CAPTURE_MODES:
-            return (self.tracer,)
-        raise ValueError(
-            f"unsupported tracer {self.tracer!r}; "
-            "use auto, symbolic, export, or dynamo"
-        )
+            return (self.tracer, )
+        raise ValueError(f"unsupported tracer {self.tracer!r}; "
+                         "use auto, symbolic, export, or dynamo")
 
     def _trace(
         self,
@@ -915,11 +866,9 @@ class FXCaptureSession:
         if args is None or kwargs is None:
             raise RuntimeError("example arguments unavailable")
         with _capture_ready_module(module, args, kwargs) as (
-            capture_args,
-            capture_kwargs,
-        ), _capture_forward_context(
-            variant.observed_context
-        ), _traceable_module_forwards(module):
+                capture_args,
+                capture_kwargs,
+        ), _capture_forward_context(variant.observed_context), _traceable_module_forwards(module):
             if mode == "symbolic":
                 return torch.fx.symbolic_trace(module)
             if mode == "export":
@@ -937,11 +886,7 @@ class FXCaptureSession:
                 graph_module = getattr(exported, "graph_module", None)
                 if graph_module is None and isinstance(exported, tuple):
                     graph_module = exported[0]
-                return (
-                    graph_module
-                    if graph_module is not None
-                    else exported
-                )
+                return (graph_module if graph_module is not None else exported)
         raise ValueError(f"unsupported capture mode {mode!r}")
 
     def _regions_for(self, record: _Scope) -> list[dict[str, Any]]:
@@ -962,13 +907,9 @@ class FXCaptureSession:
                         graph = getattr(traced, "graph", None)
                         if graph is None:
                             raise RuntimeError("trace result has no FX graph")
-                        operations, dependencies, constants, notes = _extract_graph(
-                            graph
-                        )
+                        operations, dependencies, constants, notes = _extract_graph(graph)
                         if not operations:
-                            raise RuntimeError(
-                                "trace result has no tensor operations"
-                            )
+                            raise RuntimeError("trace result has no tensor operations")
                         capture_mode = mode
                         if mode == "export":
                             try:
@@ -979,20 +920,18 @@ class FXCaptureSession:
                             except Exception as exc:  # noqa: BLE001
                                 known_reason = str(exc)
                                 if known_reason not in {
-                                    "graph_signature_input_mismatch",
-                                    "invalid_graph_output",
-                                    "missing_graph_signature",
-                                    "unlifted_graph_attribute",
-                                    "unsupported_graph_node_kind",
-                                    "unsupported_non_tensor_graph_input",
+                                        "graph_signature_input_mismatch",
+                                        "invalid_graph_output",
+                                        "missing_graph_signature",
+                                        "unlifted_graph_attribute",
+                                        "unsupported_graph_node_kind",
+                                        "unsupported_non_tensor_graph_input",
                                 }:
                                     known_reason = type(exc).__name__
                                 self._graph_breaks.append({
                                     "scope": record.scope,
-                                    "reason": (
-                                        "executable_ir_unavailable:"
-                                        f"{known_reason}"
-                                    ),
+                                    "reason": ("executable_ir_unavailable:"
+                                               f"{known_reason}"),
                                     "count": max(variant.calls, 1),
                                 })
                         break
@@ -1054,9 +993,7 @@ class FXCaptureSession:
                     "module_class": record.class_name,
                     "tracer": self.tracer,
                     "capture_mode": capture_mode,
-                    "capture_attempts": list(attempts)[
-                        : list(attempts).index(capture_mode) + 1
-                    ],
+                    "capture_attempts": list(attempts)[:list(attempts).index(capture_mode) + 1],
                     "capture_failures": failures,
                 },
             }
@@ -1087,32 +1024,28 @@ class FXCaptureSession:
         unsupported = _coalesce(self._unsupported, ("op_name", "reason", "scope"))
         payload = {
             "capture": {
-                "capture_schema_version": CAPTURE_SCHEMA_VERSION,
-                "tracer": self.tracer,
-                "scopes": sorted(self._scopes),
+                "capture_schema_version":
+                CAPTURE_SCHEMA_VERSION,
+                "tracer":
+                self.tracer,
+                "scopes":
+                sorted(self._scopes),
                 "scope_calls": {
                     record.scope: record.calls
                     for record in self._scopes.values()
                 },
-                "dropped_scopes": self._dropped_scopes,
-                "dropped_shape_variants": sum(record.dropped_variants for record in self._scopes.values()),
-                "errors": list(self._errors),
-                "capture_mode_breakdown": dict(
-                    sorted(
-                        (
-                            mode,
-                            sum(
-                                1
-                                for region in regions
-                                if region.get("attributes", {}).get(
-                                    "capture_mode"
-                                )
-                                == mode
-                            ),
-                        )
-                        for mode in _CAPTURE_MODES
-                    )
-                ),
+                "dropped_scopes":
+                self._dropped_scopes,
+                "dropped_shape_variants":
+                sum(record.dropped_variants for record in self._scopes.values()),
+                "errors":
+                list(self._errors),
+                "capture_mode_breakdown":
+                dict(
+                    sorted((
+                        mode,
+                        sum(1 for region in regions if region.get("attributes", {}).get("capture_mode") == mode),
+                    ) for mode in _CAPTURE_MODES)),
             },
             "regions": regions,
             "graph_breaks": breaks,
