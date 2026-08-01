@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ import torch
 from torch import nn
 
 from fastvideo import envs
-from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactManifest, ArtifactRegistry,
+from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactError, ArtifactManifest, ArtifactRegistry,
                                              RuntimeProfile, load_entry_point, verify_bundle)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
@@ -1230,3 +1231,58 @@ def test_nested_training_module_is_detected_fail_closed(store, monkeypatch, hidd
         ]
     finally:
         detach_graph_dispatch(session)
+# -- bundle immutability under trusted loading ---------------------------------
+
+
+def _simple_bundle(store: Path, hidden: torch.Tensor, name: str = "fused") -> Path:
+    modules = _pipeline_modules()
+    block = modules["transformer"].blocks[0]
+    fingerprint, inputs, outputs = _observed_identity(block, hidden)
+    return _write_bundle(store, _sections(fingerprint, inputs, outputs), name=name)
+
+
+def test_load_entry_point_writes_no_bytecode_into_bundle(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    registry = ArtifactRegistry(store)
+    assert registry.errors == []
+
+    load_entry_point(registry.manifests[0], trusted_root=store)
+
+    assert not list(bundle.rglob("*.pyc"))
+    # The producer-side validator ignores nothing: a bundle that acquired a
+    # bytecode cache during loading would fail its next verification, which is
+    # exactly the finalize-stage failure this guards against.
+    verify_bundle(bundle)
+
+
+def test_verify_bundle_rejects_undeclared_bytecode_cache(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    cache = bundle / "__pycache__"
+    cache.mkdir()
+    (cache / "kernel.cpython-311.pyc").write_bytes(b"forged")
+
+    with pytest.raises(ArtifactError, match="undeclared"):
+        verify_bundle(bundle)
+
+
+def test_verify_bundle_rejects_symlinked_directory(store, hidden, tmp_path):
+    bundle = _simple_bundle(store, hidden)
+    hidden_dir = tmp_path / "hidden"
+    hidden_dir.mkdir()
+    (hidden_dir / "secret.py").write_text("secret", encoding="utf-8")
+    os.symlink(hidden_dir, bundle / "hidden_link")
+
+    with pytest.raises(ArtifactError, match="undeclared"):
+        verify_bundle(bundle)
+
+
+def test_load_entry_point_rejects_manifest_changed_since_validation(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    registry = ArtifactRegistry(store)
+    assert registry.errors == []
+    document = json.loads((bundle / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    document["evidence"]["benchmark"]["speedup"] = 99.0
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="changed since validation"):
+        load_entry_point(registry.manifests[0], trusted_root=store)
