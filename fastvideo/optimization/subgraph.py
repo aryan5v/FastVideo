@@ -41,6 +41,39 @@ def _set_attr(root: Any, target: str, value: Any) -> None:
     setattr(owner, atoms[-1], value)
 
 
+def _tensor_key(value: Any) -> tuple[tuple[int, ...], str] | None:
+    """Return metadata-only tensor identity without reading tensor values."""
+    shape = getattr(value, "shape", None)
+    dtype = getattr(value, "dtype", None)
+    if shape is None or dtype is None:
+        return None
+    try:
+        return tuple(int(dim) for dim in shape), str(dtype)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+
+
+def _validate_runtime_inputs(
+    graph: fx.Graph,
+    flat_inputs: list[Any],
+) -> None:
+    placeholders = [node for node in graph.nodes if node.op == "placeholder"]
+    if len(placeholders) != len(flat_inputs):
+        raise SubgraphRewriteError(
+            "runtime flattened input count differs from the exported graph"
+        )
+    for index, (node, value) in enumerate(
+        zip(placeholders, flat_inputs, strict=True)
+    ):
+        expected = _tensor_key((node.meta or {}).get("val"))
+        actual = _tensor_key(value)
+        if expected is not None and actual != expected:
+            raise SubgraphRewriteError(
+                f"runtime input {index} ({node.target}) metadata changed: "
+                f"expected {expected}, observed {actual}"
+            )
+
+
 def _lifted_attribute_pairs(
     exported: Any,
     graph: fx.Graph,
@@ -265,6 +298,13 @@ def rewrite_exported_subgraph(
             # graphs but can corrupt real exported model calling conventions.
             runnable = fx.GraphModule(representative, graph)
             for target, value in bindings.items():
+                expected = _tensor_key(_get_attr(representative, target))
+                actual = _tensor_key(value)
+                if expected is not None and actual != expected:
+                    raise SubgraphRewriteError(
+                        f"live attribute {target!r} metadata changed: "
+                        f"expected {expected}, observed {actual}"
+                    )
                 _set_attr(runnable, target, value)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
@@ -336,6 +376,7 @@ def rewrite_exported_subgraph(
             runnable = build(parent_module)
             cache[parent_module] = runnable
         flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
+        _validate_runtime_inputs(runnable.graph, flat_inputs)
         flat_output = runnable(*flat_inputs)
         leaves = list(flat_output) if isinstance(flat_output, tuple) else [flat_output]
         return tree_unflatten(leaves, output_spec)
