@@ -23,7 +23,7 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from types import MethodType
 from typing import Any
@@ -60,6 +60,30 @@ FORBIDDEN_KEYS = frozenset({
 
 _SAFE_SCALAR_TYPES = (bool, int, float, str)
 _CAPTURE_MODES = ("symbolic", "export", "dynamo")
+_AUTOCAST_DEVICE_TYPES = ("cpu", "cuda")
+
+
+@dataclass(frozen=True)
+class _AutocastState:
+    """Bounded execution-mode metadata needed to replay deferred capture."""
+
+    devices: tuple[tuple[str, bool, torch.dtype], ...]
+    cache_enabled: bool
+
+
+def _observe_autocast_state() -> _AutocastState:
+    devices = tuple(
+        (
+            device_type,
+            bool(torch.is_autocast_enabled(device_type)),
+            torch.get_autocast_dtype(device_type),
+        )
+        for device_type in _AUTOCAST_DEVICE_TYPES
+    )
+    return _AutocastState(
+        devices=devices,
+        cache_enabled=bool(torch.is_autocast_cache_enabled()),
+    )
 
 
 def _canonical(value: Any) -> Any:
@@ -498,6 +522,33 @@ def _capture_forward_context(observed_context: tuple[Any, Any] | None, ) -> Iter
 
 
 @contextmanager
+def _capture_autocast(
+    observed: _AutocastState | None,
+) -> Iterator[None]:
+    """Replay autocast exactly as it was configured for the observed call.
+
+    Discovery traces after the timed forward has finished. Without this
+    replay, numerically sensitive operations such as reductions can acquire a
+    different dtype in Export than they had in the real model execution.
+    """
+    if observed is None:
+        yield
+        return
+
+    with ExitStack() as stack:
+        for device_type, enabled, dtype in observed.devices:
+            stack.enter_context(
+                torch.autocast(
+                    device_type=device_type,
+                    enabled=enabled,
+                    dtype=dtype,
+                    cache_enabled=observed.cache_enabled,
+                )
+            )
+        yield
+
+
+@contextmanager
 def _traceable_module_forwards(module: nn.Module) -> Iterator[None]:
     """Temporarily expose forwards hidden behind ``torch.compiler.disable``.
 
@@ -829,6 +880,10 @@ class _ShapeVariant:
         default=None,
         repr=False,
     )
+    observed_autocast: _AutocastState | None = field(
+        default=None,
+        repr=False,
+    )
     # Export rejects an unregistered dataclass in the *output* as well as the
     # input, so the observed return structure contributes its types. Only the
     # types are kept — never the returned objects or their tensors.
@@ -1008,6 +1063,7 @@ class FXCaptureSession:
                 example_args=args,
                 example_kwargs=dict(kwargs),
                 observed_context=observed_context,
+                observed_autocast=_observe_autocast_state(),
                 output_dataclass_types=output_dataclass_types,
             )
             record.variants[key] = variant
@@ -1058,7 +1114,9 @@ class FXCaptureSession:
         with _capture_ready_module(module, args, kwargs) as (
                 capture_args,
                 capture_kwargs,
-        ), _capture_forward_context(variant.observed_context), _traceable_module_forwards(module):
+        ), _capture_forward_context(variant.observed_context), _capture_autocast(
+                variant.observed_autocast,
+        ), _traceable_module_forwards(module):
             if mode == "symbolic":
                 # Symbolic tracing builds proxies from the forward signature and
                 # never pytree-flattens the example inputs, so it needs no
@@ -1151,6 +1209,7 @@ class FXCaptureSession:
                 variant.example_args = None
                 variant.example_kwargs = None
                 variant.observed_context = None
+                variant.observed_autocast = None
                 variant.output_dataclass_types = ()
 
             if capture_mode is None:
@@ -1232,6 +1291,7 @@ class FXCaptureSession:
                     variant.example_args = None
                     variant.example_kwargs = None
                     variant.observed_context = None
+                    variant.observed_autocast = None
                     variant.output_dataclass_types = ()
 
         breaks = _coalesce(self._graph_breaks, ("scope", "reason"))
@@ -1351,6 +1411,7 @@ def capture_export_invocation(
         example_args=args,
         example_kwargs=dict(kwargs),
         observed_context=observed_context,
+        observed_autocast=_observe_autocast_state(),
         output_dataclass_types=dataclass_types_in(output),
         calls=1,
     )

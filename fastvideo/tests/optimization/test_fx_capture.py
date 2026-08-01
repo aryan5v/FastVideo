@@ -63,6 +63,17 @@ class _ScalarInputBlock(nn.Module):
         return hidden_states
 
 
+class _AutocastBlock(nn.Module):
+    """Matrix multiply whose exported dtype depends on ambient autocast."""
+
+    def __init__(self, width: int = 4) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.eye(width))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return torch.mm(hidden_states, self.weight)
+
+
 class _FakeLayerwiseOffloadHook(ForwardHook):
     class _State:
         def __init__(self, module: nn.Module) -> None:
@@ -482,6 +493,31 @@ def test_fallback_restores_observed_context_and_disabled_forwards():
     )
 
 
+def test_deferred_export_replays_observed_autocast_dtype():
+    model = _Transformer(depth=2, block=_AutocastBlock)
+    session = fx_capture.FXCaptureSession(tracer="export")
+    assert session.attach(model, prefix="transformer") == 2
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = model(torch.randn(2, 4))
+    assert output.dtype == torch.bfloat16
+    assert not torch.is_autocast_enabled("cpu")
+
+    payload = session.finalize()
+
+    assert payload["regions"]
+    ir = payload["regions"][0]["attributes"]["executable_ir"]
+    mm_nodes = [node for node in ir["nodes"] if node["target"] == "aten.mm.default"]
+    assert mm_nodes
+    assert all(node["meta"]["dtype"] == "bfloat16" for node in mm_nodes)
+    assert not torch.is_autocast_enabled("cpu")
+    assert all(
+        variant.observed_autocast is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
 @pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])
 def test_each_capture_mode_has_stable_metadata(mode):
     session = fx_capture.FXCaptureSession(tracer=mode)
@@ -521,6 +557,7 @@ def test_invalid_tracer_still_clears_all_live_capture_references(tracer):
         variant.example_args is None
         and variant.example_kwargs is None
         and variant.observed_context is None
+        and variant.observed_autocast is None
         for record in session._scopes.values()
         for variant in record.variants.values()
     )

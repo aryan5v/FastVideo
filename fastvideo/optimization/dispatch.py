@@ -447,31 +447,6 @@ class GraphDispatchSession:
                 runtime=self.runtime,
                 validation=self.validation,
             )
-            if compatibility_reason in {
-                "input_signature_mismatch",
-                "output_signature_mismatch",
-            }:
-                expected = (
-                    manifest.input_keys
-                    if compatibility_reason == "input_signature_mismatch"
-                    else manifest.output_keys
-                )
-                observed = (
-                    candidate_input_keys
-                    if compatibility_reason == "input_signature_mismatch"
-                    else candidate_output_keys
-                )
-                # Tensor layout metadata is already part of the public
-                # artifact contract and contains no tensor values. Logging it
-                # here makes a fail-closed dispatch rejection diagnosable on a
-                # remote generation without weakening compatibility checks.
-                logger.info(
-                    "Artifact %s rejected for %s: expected=%s observed=%s",
-                    manifest.artifact_id,
-                    compatibility_reason,
-                    expected,
-                    observed,
-                )
             if compatibility_reason is None:
                 matched.append(manifest)
             else:
