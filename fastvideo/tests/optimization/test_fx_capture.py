@@ -429,6 +429,7 @@ def test_invalid_tracer_still_clears_all_live_capture_references():
     model = _Transformer(depth=2)
     assert session.attach(model, prefix="transformer") == 2
     model(torch.randn(2, 4))
+    model(torch.randn(3, 4))
 
     payload = session.finalize()
 
@@ -443,6 +444,9 @@ def test_invalid_tracer_still_clears_all_live_capture_references():
         for record in session._scopes.values()
         for variant in record.variants.values()
     )
+    assert sum(
+        len(record.variants) for record in session._scopes.values()
+    ) == 2
 
 
 def test_nested_dataclass_tensor_inputs_contribute_shape_metadata():
