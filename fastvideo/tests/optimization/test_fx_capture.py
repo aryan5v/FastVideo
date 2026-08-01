@@ -311,6 +311,11 @@ def test_trace_failure_is_recorded_not_raised(tmp_path, monkeypatch):
         "export",
         "dynamo",
     }
+    assert payload["capture"]["capture_mode_breakdown"] == {
+        "dynamo": 0,
+        "export": 0,
+        "symbolic": 0,
+    }
     assert payload["rows"], "profiler rows still export after a capture failure"
 
 
@@ -492,6 +497,27 @@ def test_each_capture_mode_has_stable_metadata(mode):
     assert payload["capture"]["capture_mode_breakdown"][mode] == 1
     assert all(
         variant.example_args is None and variant.example_kwargs is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
+def test_invalid_tracer_still_clears_all_live_capture_references():
+    session = fx_capture.FXCaptureSession(tracer="invalid")
+    model = _Transformer(depth=2)
+    assert session.attach(model, prefix="transformer") == 2
+    model(torch.randn(2, 4))
+
+    payload = session.finalize()
+
+    assert payload["regions"] == []
+    assert payload["capture"]["errors"] == [
+        "finalize_failed[transformer.blocks]:ValueError"
+    ]
+    assert all(
+        variant.example_args is None
+        and variant.example_kwargs is None
+        and variant.observed_context is None
         for record in session._scopes.values()
         for variant in record.variants.values()
     )
