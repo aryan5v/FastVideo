@@ -275,7 +275,7 @@ def _capture_failure_reason(mode: str, exc: Exception) -> str:
         )
     ):
         code = "dynamic_python_control_flow"
-    elif "alias" in text:
+    elif re.search(r"\balias(?:ed|es|ing)?\b", text):
         code = "unknown_aliasing"
     elif "unsupported" in text or "not supported" in text:
         code = "unsupported_graph"
@@ -697,7 +697,7 @@ class FXCaptureSession:
                     forward_context.current_timestep,
                     forward_context.attn_metadata,
                 )
-            except AssertionError:
+            except Exception:  # noqa: BLE001 - optional metadata only
                 observed_context = None
             variant = _ShapeVariant(
                 inputs=inputs,
@@ -792,8 +792,8 @@ class FXCaptureSession:
             dependencies: list[str] = []
             constants: dict[str, Any] = {}
             notes: list[str] = []
-            attempts = self._mode_order()
             try:
+                attempts = self._mode_order()
                 for mode in attempts:
                     try:
                         traced = self._trace(record.module, variant, mode)
@@ -867,9 +867,9 @@ class FXCaptureSession:
                     "module_class": record.class_name,
                     "tracer": self.tracer,
                     "capture_mode": capture_mode,
-                    "capture_attempts": list(attempts)[
-                        : list(attempts).index(capture_mode) + 1
-                    ],
+                    "capture_attempts": list(
+                        attempts[: attempts.index(capture_mode) + 1]
+                    ),
                     "capture_failures": failures,
                 },
             }
