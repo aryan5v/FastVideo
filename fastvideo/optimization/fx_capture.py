@@ -141,6 +141,12 @@ def _safe_name(value: str) -> str:
     return (cleaned or "tensor")[:96]
 
 
+def _safe_op_component(value: str) -> str:
+    """Sanitize a schema component without dropping meaningful underscores."""
+    cleaned = _NAME_SANITIZE.sub("_", value)
+    return (cleaned or "unknown")[:96]
+
+
 def _tensor_leaves(
     value: Any,
     *,
@@ -257,7 +263,7 @@ def _capture_failure_reason(mode: str, exc: Exception) -> str:
             "cannot be iterated",
     )):
         code = "dynamic_python_control_flow"
-    elif "alias" in text:
+    elif re.search(r"\balias(?:ed|es|ing)?\b", text):
         code = "unknown_aliasing"
     elif "unsupported" in text or "not supported" in text:
         code = "unsupported_graph"
@@ -409,6 +415,12 @@ _OPERATOR_ALIASES = {
 
 def _op_key(target: Any) -> str:
     """Normalize an FX call target to an ``aten::``-style op key."""
+    schema_name = getattr(getattr(target, "_schema", None), "name", None)
+    if isinstance(schema_name, str) and "::" in schema_name:
+        # OpOverload.__str__ is not stable across PyTorch distributions.  In
+        # particular, NVIDIA builds may render it as a repr-like value while
+        # the schema retains the canonical namespace and operation name.
+        return schema_name
     text = str(target)
     if "aten::" in text:
         return "aten::" + text.split("aten::", 1)[1].split(".")[0].split("(")[0]
@@ -501,9 +513,19 @@ def _ir_tensor_meta(value: Any) -> dict[str, Any] | None:
         shape = [int(dim) for dim in value.shape]
     except (TypeError, ValueError, RuntimeError):
         return None
+    try:
+        stride = [int(step) for step in value.stride()]
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    try:
+        device_type = str(value.device.type)
+    except (AttributeError, RuntimeError):
+        return None
     return {
         "shape": shape,
+        "stride": stride,
         "dtype": str(value.dtype).replace("torch.", ""),
+        "device_type": device_type,
         "requires_grad": bool(value.requires_grad),
     }
 
@@ -514,6 +536,15 @@ def _ir_target(node: Any) -> str:
     if node.op == "call_module":
         return f"module::{str(node.target)[:128]}"
     target = node.target
+    schema_name = getattr(getattr(target, "_schema", None), "name", None)
+    overload = getattr(target, "_overloadname", None)
+    if isinstance(schema_name, str) and "::" in schema_name:
+        namespace, operation = schema_name.split("::", 1)
+        overload_name = overload if isinstance(overload, str) and overload else "default"
+        return (
+            f"{_safe_op_component(namespace)}.{_safe_op_component(operation)}."
+            f"{_safe_op_component(overload_name)}"
+        )
     name = getattr(target, "__name__", None)
     module = getattr(target, "__module__", "") or ""
     if module in {"_operator", "operator"} and name == "getitem":
@@ -714,6 +745,9 @@ class FXCaptureSession:
         self._scopes: dict[str, _Scope] = {}
         self._handles: list[Any] = []
         self._graph_breaks: list[dict[str, Any]] = []
+        # One live entry per no-tensor-input scope, updated in place: a scope
+        # called N times must not append N records before finalize coalesces.
+        self._no_tensor_input_breaks: dict[str, dict[str, Any]] = {}
         self._unsupported: list[dict[str, Any]] = []
         self._errors: list[str] = []
         self._dropped_scopes = 0
@@ -792,7 +826,12 @@ class FXCaptureSession:
         record.calls += 1
         inputs = _input_metas(args, kwargs)
         if not inputs:
-            self._graph_breaks.append({"scope": record.scope, "reason": "no_tensor_inputs", "count": 1})
+            entry = self._no_tensor_input_breaks.get(record.scope)
+            if entry is None:
+                entry = {"scope": record.scope, "reason": "no_tensor_inputs", "count": 0}
+                self._no_tensor_input_breaks[record.scope] = entry
+                self._graph_breaks.append(entry)
+            entry["count"] += 1
             return
 
         outputs = _output_metas(output)
@@ -811,7 +850,7 @@ class FXCaptureSession:
                     forward_context.current_timestep,
                     forward_context.attn_metadata,
                 )
-            except AssertionError:
+            except Exception:  # noqa: BLE001 - optional metadata only
                 observed_context = None
             variant = _ShapeVariant(
                 inputs=inputs,
@@ -848,7 +887,7 @@ class FXCaptureSession:
         self._record_error(f"{code}{location}:{type(exc).__name__}")
 
     def _mode_order(self) -> tuple[str, ...]:
-        if self.tracer in {"auto", "fallback"}:
+        if self.tracer == "auto":
             return _CAPTURE_MODES
         if self.tracer in _CAPTURE_MODES:
             return (self.tracer, )
@@ -899,8 +938,8 @@ class FXCaptureSession:
             constants: dict[str, Any] = {}
             notes: list[str] = []
             executable_ir: dict[str, Any] | None = None
-            attempts = self._mode_order()
             try:
+                attempts = self._mode_order()
                 for mode in attempts:
                     try:
                         traced = self._trace(record.module, variant, mode)
@@ -993,7 +1032,9 @@ class FXCaptureSession:
                     "module_class": record.class_name,
                     "tracer": self.tracer,
                     "capture_mode": capture_mode,
-                    "capture_attempts": list(attempts)[:list(attempts).index(capture_mode) + 1],
+                    "capture_attempts": list(
+                        attempts[: attempts.index(capture_mode) + 1]
+                    ),
                     "capture_failures": failures,
                 },
             }
@@ -1019,6 +1060,15 @@ class FXCaptureSession:
                     exc,
                     scope=record.scope,
                 )
+            finally:
+                # _regions_for clears variants as it consumes them, but an
+                # early failure (for example an invalid tracer) can occur
+                # before later variants are visited. Never retain live model
+                # inputs after finalize returns.
+                for variant in record.variants.values():
+                    variant.example_args = None
+                    variant.example_kwargs = None
+                    variant.observed_context = None
 
         breaks = _coalesce(self._graph_breaks, ("scope", "reason"))
         unsupported = _coalesce(self._unsupported, ("op_name", "reason", "scope"))
@@ -1103,6 +1153,78 @@ def capture_invocation_identity(
         reasons = [str(item.get("reason", "")) for item in session._graph_breaks]
         raise RuntimeError(reasons[0] if reasons else "trace_produced_no_region")
     return regions[0]
+
+
+def capture_export_invocation(
+    module: nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    output: Any,
+    *,
+    scope: str,
+) -> tuple[dict[str, Any], Any]:
+    """Capture an export identity plus the in-memory program used to rewrite it.
+
+    The returned program never enters diagnostics or an artifact. It exists
+    only long enough for trusted runtime dispatch to replace a validated
+    allowlisted subgraph in this process.
+    """
+    inputs = _input_metas(args, kwargs)
+    outputs = _output_metas(output)
+    try:
+        from fastvideo.forward_context import get_forward_context
+
+        context = get_forward_context()
+        observed_context: tuple[Any, Any] | None = (
+            context.current_timestep,
+            context.attn_metadata,
+        )
+    except AssertionError:
+        observed_context = None
+    variant = _ShapeVariant(
+        inputs=inputs,
+        outputs=outputs,
+        example_args=args,
+        example_kwargs=dict(kwargs),
+        observed_context=observed_context,
+        calls=1,
+    )
+    session = FXCaptureSession(tracer="export", max_scopes=1, max_shape_variants=1)
+    exported = session._trace(module, variant, "export")
+    graph = getattr(exported, "graph", None)
+    if graph is None:
+        raise RuntimeError("trace result has no FX graph")
+    operations, dependencies, constants, _notes = _extract_graph(graph)
+    if not operations:
+        raise RuntimeError("trace result has no tensor operations")
+    executable_ir = _extract_executable_ir(exported, graph)
+    fingerprint = graph_fingerprint(
+        operations=operations,
+        input_signatures=[_signature_dict(meta) for meta in inputs],
+        output_signatures=[_signature_dict(meta) for meta in outputs],
+        safe_constants=constants,
+        parent_module=scope,
+    )
+    region = {
+        "name": _region_name(scope, _shape_key(inputs)),
+        "fingerprint": fingerprint,
+        "operations": operations,
+        "dependencies": dependencies,
+        "inputs": inputs,
+        "outputs": outputs,
+        "parent_module": scope,
+        "attributes": {
+            "module_class": type(module).__name__,
+            "tracer": "export",
+            "capture_mode": "export",
+            "capture_attempts": ["export"],
+            "capture_failures": [],
+            "executable_ir": executable_ir,
+        },
+    }
+    if constants:
+        region["safe_constants"] = constants
+    return region, exported
 
 
 def _coalesce(records: list[dict[str, Any]], keys: tuple[str, ...]) -> list[dict[str, Any]]:

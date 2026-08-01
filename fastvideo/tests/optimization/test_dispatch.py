@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,23 @@ import torch
 from torch import nn
 
 from fastvideo import envs
-from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactRegistry, RuntimeProfile, load_entry_point,
-                                             verify_bundle)
+from fastvideo.hooks.hooks import ForwardHook, ModuleHookManager
+from fastvideo.optimization.artifact import (
+    ANY,
+    MANIFEST_FILENAME,
+    ArtifactError,
+    ArtifactManifest,
+    ArtifactRegistry,
+    RuntimeProfile,
+    load_entry_point,
+    verify_bundle,
+)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
+from fastvideo.optimization.fx_capture import capture_export_invocation
 from fastvideo.optimization.identity import (graph_identity, input_signatures, output_signatures)
+from fastvideo.optimization.subgraph import (SubgraphRewriteError,
+                                             rewrite_exported_subgraph)
 
 WIDTH = 4
 MARKER = 7.0
@@ -44,12 +57,39 @@ def fused_block(module, hidden):
     raise RuntimeError("candidate exploded")
 '''
 
+OFFLOADED_KERNEL = '''"""CPU fake requiring hook-materialized parameters."""
+import torch
+
+
+def fused_block(module, hidden):
+    if module.proj.weight.numel() == 0:
+        raise RuntimeError("candidate observed offloaded parameters")
+    return torch.full_like(hidden, float(module.marker))
+'''
+
 IMPORT_FAILURE_KERNEL = '''"""CPU fake kernel that fails at import time."""
 raise RuntimeError("import side effect")
 
 
 def fused_block(module, hidden):
     return hidden
+'''
+
+SUBGRAPH_KERNEL = '''"""CPU fake fused epilogue used by subgraph dispatch tests."""
+import torch
+
+
+def fused_subgraph(module, projected, hidden):
+    module.subgraph_calls = getattr(module, "subgraph_calls", 0) + 1
+    return torch.nn.functional.silu(projected) + hidden
+'''
+
+LIFTED_CONSTANT_KERNEL = '''"""CPU fake for an export-lifted tensor constant."""
+
+
+def fused_subgraph(module, value, offset):
+    module.subgraph_calls = getattr(module, "subgraph_calls", 0) + 1
+    return value + offset
 '''
 
 
@@ -79,6 +119,112 @@ class _UntraceableBlock(nn.Module):
         return self.proj(hidden) * 2
 
 
+class _LiftedConstantBlock(nn.Module):
+    """A plain tensor attribute becomes ``lifted_tensor_*`` under export."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(width, width)
+        # Deliberately not a Parameter or registered buffer. Export owns the
+        # opaque lifted name; the live module only owns ``offset``.
+        self.offset = torch.tensor(0.25)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.silu(self.proj(hidden)) + hidden + self.offset
+
+
+class _TopologicalGapBlock(nn.Module):
+    """A selected producer and consumer separated by an unselected op."""
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        early = torch.neg(hidden)
+        gap = torch.sin(early)
+        return gap + early
+
+
+class _StructuredInputBlock(nn.Module):
+    """A block with a tuple input, mirroring rotary-frequency arguments."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        # Registration deliberately differs from execution order. Export is
+        # free to order get_attr nodes by first use, not registration order.
+        self.offset = nn.Parameter(torch.full((width, ), 3.0))
+        self.scale = nn.Parameter(torch.full((width, ), 2.0))
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        frequencies: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        projected = hidden * self.scale
+        rotated = projected * frequencies[0]
+        return rotated + frequencies[1] + self.offset
+
+
+class _ManagedBlock(_Block):
+    """CPU fake exposing the FSDP2 materialization lifecycle."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__(width)
+        self.unshard_calls = 0
+        self.reshard_calls = 0
+
+    def unshard(self, *, async_op: bool = False) -> None:
+        assert async_op is False
+        self.unshard_calls += 1
+
+    def reshard(self) -> None:
+        self.reshard_calls += 1
+
+
+class _FakeLayerwiseOffloadHook(ForwardHook):
+    """CPU fake for FastVideo's parameter swapping hook."""
+
+    class _State:
+        def __init__(self, module: nn.Module) -> None:
+            self.module = module
+            self.full_parameters = {
+                name: parameter.data.clone()
+                for name, parameter in module.named_parameters()
+            }
+            self.gpu_named_parameters: dict[str, torch.Tensor] = {}
+            self.release()
+
+        def wait_and_replace_params(self) -> None:
+            for name, parameter in self.module.named_parameters():
+                materialized = self.full_parameters[name]
+                parameter.data = materialized
+                self.gpu_named_parameters[name] = materialized
+
+        def release(self) -> None:
+            for parameter in self.module.parameters():
+                parameter.data = torch.empty(
+                    (0, ) * parameter.ndim,
+                    dtype=parameter.dtype,
+                )
+            self.gpu_named_parameters.clear()
+
+    def __init__(self, module: nn.Module) -> None:
+        self.state = self._State(module)
+        self.pre_calls = 0
+        self.post_calls = 0
+
+    @classmethod
+    def name(cls) -> str:
+        return "LayerwiseOffloadHook"
+
+    def pre_forward(self, module, *args, **kwargs):
+        self.pre_calls += 1
+        self.state.wait_and_replace_params()
+        return args, kwargs
+
+    def post_forward(self, module, output):
+        self.post_calls += 1
+        self.state.release()
+        return output
+
+
 class _Transformer(nn.Module):
     """A repeated block stack: the structure dispatch keys on."""
 
@@ -90,6 +236,22 @@ class _Transformer(nn.Module):
         for block in self.blocks:
             hidden = block(hidden)
         return hidden
+
+
+class _ManagedTransformer(_Transformer):
+    """CPU fake whose parameter lifecycle is owned above its blocks."""
+
+    def __init__(self, width: int = WIDTH, depth: int = 2) -> None:
+        super().__init__(width=width, depth=depth)
+        self.unshard_calls = 0
+        self.reshard_calls = 0
+
+    def unshard(self, *, async_op: bool = False) -> None:
+        assert async_op is False
+        self.unshard_calls += 1
+
+    def reshard(self) -> None:
+        self.reshard_calls += 1
 
 
 def _pipeline_modules(block_cls=_Block) -> dict[str, nn.Module]:
@@ -204,6 +366,99 @@ def _sections(fingerprint, inputs, outputs, **overrides) -> dict:
     return sections
 
 
+def _subgraph_sections(module: nn.Module, hidden: torch.Tensor) -> dict:
+    with torch.no_grad():
+        output = module(hidden)
+    region, _ = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {
+                "name": f"boundary_{index}",
+                **copy.deepcopy(metadata[ref]),
+            }
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(("n0", "p2")),
+        signatures(("n2", )),
+    )
+    sections["operation"] = {
+        "name": "generated_blocks_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": ["aten::silu", "aten::add"],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": ["n1", "n2"],
+        "boundary_refs": ["n0", "p2"],
+        "output_node_ids": ["n2"],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    return sections
+
+
+def _lifted_constant_sections(module: nn.Module, hidden: torch.Tensor) -> dict:
+    with torch.no_grad():
+        output = module(hidden)
+    region, _ = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+    final = ir["nodes"][-1]
+    boundary_refs = [item["ref"] for item in final["args"] if "ref" in item]
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(boundary_refs),
+        signatures((final["id"], )),
+    )
+    sections["operation"] = {
+        "name": "generated_lifted_constant_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": [final["target"]],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": [final["id"]],
+        "boundary_refs": boundary_refs,
+        "output_node_ids": [final["id"]],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    return sections
+
+
 def _write_bundle(root: Path, sections: dict, *, kernel_source: str = FAKE_KERNEL, name: str = "fused") -> Path:
     """Write a bundle the way the producer would, hashes included."""
     directory = root / name
@@ -233,11 +488,18 @@ def store(tmp_path: Path) -> Path:
     return directory
 
 
-def _session(store: Path, *, tracer: str = "symbolic", **overrides) -> GraphDispatchSession:
+def _session(
+    store: Path,
+    *,
+    tracer: str = "symbolic",
+    validation: bool = False,
+    **overrides,
+) -> GraphDispatchSession:
     return GraphDispatchSession(
         ArtifactRegistry(store),
         _runtime(**overrides),
         tracer=tracer,
+        validation=validation,
     )
 
 
@@ -328,6 +590,30 @@ def test_compatible_artifact_is_selected(store, hidden):
     assert decision["runtime_fallbacks"] == 0
 
 
+def test_quarantined_artifact_is_admitted_only_for_explicit_validation(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    sections = _sections(fingerprint, inputs, outputs)
+    sections["promotion"]["decision"] = "quarantined"
+    sections["evidence"]["generation"]["passed"] = False
+    _write_bundle(store, sections)
+
+    production = _session(store)
+    production.attach_modules(modules)
+    with torch.no_grad():
+        transformer(hidden)
+    production.detach()
+    assert _reasons(production) == [REASON_NO_COMPATIBLE_ARTIFACT]
+
+    validation = _session(store, validation=True)
+    validation.attach_modules(modules)
+    with torch.no_grad():
+        transformer(hidden)
+    validation.detach()
+    assert _reasons(validation) == [REASON_SELECTED]
+
+
 def test_export_identity_traces_native_forward_without_dispatch_recursion(store, hidden):
     modules = _pipeline_modules()
     transformer = modules["transformer"]
@@ -346,6 +632,242 @@ def test_export_identity_traces_native_forward_without_dispatch_recursion(store,
     assert torch.allclose(first, torch.full_like(first, MARKER))
     assert torch.allclose(second, torch.full_like(second, MARKER))
     assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_export_subgraph_artifact_rewrites_each_live_block_without_copying_weights(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    with torch.no_grad():
+        expected = transformer(hidden)
+    sections = _subgraph_sections(transformer.blocks[0], hidden)
+    _write_bundle(store, sections, kernel_source=SUBGRAPH_KERNEL)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        first = transformer(hidden)
+        second = transformer(hidden)
+
+    session.detach()
+    torch.testing.assert_close(first, expected)
+    torch.testing.assert_close(second, expected)
+    assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
+    assert _decisions(session)[0]["candidate_calls"] == 3
+
+
+def test_candidate_dispatch_runs_inside_managed_parameter_lifecycle(store, hidden):
+    modules = _pipeline_modules(_ManagedBlock)
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert [block.unshard_calls for block in transformer.blocks] == [1, 2]
+    assert [block.reshard_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_candidate_dispatch_uses_nearest_managed_ancestor(store, hidden):
+    transformer = _ManagedTransformer().eval()
+    modules = {"transformer": transformer}
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert transformer.unshard_calls == 3
+    assert transformer.reshard_calls == 3
+    assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_candidate_dispatch_runs_through_module_hook_lifecycle(store, hidden):
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(
+        store,
+        _sections(fingerprint, inputs, outputs),
+        kernel_source=OFFLOADED_KERNEL,
+    )
+    hooks = []
+    for block in transformer.blocks:
+        manager = ModuleHookManager.get_from_or_default(block)
+        hook = _FakeLayerwiseOffloadHook(block)
+        manager.append_forward_hook(hook)
+        hooks.append(hook)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert [hook.pre_calls for hook in hooks] == [2, 2]
+    assert [hook.post_calls for hook in hooks] == [2, 2]
+    assert all(
+        parameter.numel() == 0
+        for block in transformer.blocks
+        for parameter in block.parameters()
+    )
+    assert _reasons(session) == [REASON_SELECTED]
+    assert _decisions(session)[0]["candidate_calls"] == 3
+
+
+def test_export_subgraph_binds_opaque_lifted_constants_from_export(store, hidden):
+    modules = _pipeline_modules(_LiftedConstantBlock)
+    transformer = modules["transformer"]
+    with torch.no_grad():
+        expected = transformer(hidden)
+    sections = _lifted_constant_sections(transformer.blocks[0], hidden)
+    _write_bundle(store, sections, kernel_source=LIFTED_CONSTANT_KERNEL)
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)  # resolve both blocks
+        actual = transformer(hidden)
+
+    session.detach()
+    torch.testing.assert_close(actual, expected)
+    assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_export_subgraph_rejects_recipe_without_one_insertion_point(tmp_path, hidden):
+    module = _TopologicalGapBlock().eval()
+    with torch.no_grad():
+        output = module(hidden)
+    region, exported = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    assert [node["id"] for node in ir["nodes"]] == ["n0", "n1", "n2"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(("p0", "n1")),
+        signatures(("n0", "n2")),
+    )
+    sections["operation"] = {
+        "name": "invalid_scattered_recipe",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": ["aten::neg", "aten::add"],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": ["n0", "n2"],
+        "boundary_refs": ["p0", "n1"],
+        "output_node_ids": ["n0", "n2"],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    sections["files"] = [
+        {"path": "kernel.py", "sha256": "0" * 64, "bytes": 0}
+    ]
+    manifest = ArtifactManifest.from_dict(sections, directory=tmp_path)
+    dispatch = rewrite_exported_subgraph(exported, manifest, lambda *_: None)
+
+    with pytest.raises(
+        SubgraphRewriteError,
+        match="no valid topological insertion point",
+    ):
+        dispatch(module, hidden)
+
+
+def test_export_subgraph_preserves_structured_input_calling_convention(
+    tmp_path, hidden
+):
+    module = _StructuredInputBlock(WIDTH).eval()
+    frequencies = (torch.full_like(hidden, 2.0), torch.full_like(hidden, 3.0))
+    with torch.no_grad():
+        expected = module(hidden, frequencies)
+    region, exported = capture_export_invocation(
+        module,
+        (hidden, frequencies),
+        {},
+        expected,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    final = ir["nodes"][-1]
+    boundary_refs = tuple(
+        item["ref"] for item in final["args"] if set(item) == {"ref"}
+    )
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(boundary_refs),
+        signatures((final["id"], )),
+    )
+    sections["operation"] = {
+        "name": "structured_input_epilogue",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": [final["target"]],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": [final["id"]],
+        "boundary_refs": list(boundary_refs),
+        "output_node_ids": [final["id"]],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    sections["files"] = [
+        {"path": "kernel.py", "sha256": "0" * 64, "bytes": 0}
+    ]
+    manifest = ArtifactManifest.from_dict(sections, directory=tmp_path)
+    candidate = lambda _module, left, right: left + right
+    dispatch = rewrite_exported_subgraph(exported, manifest, candidate)
+
+    with torch.no_grad():
+        actual = dispatch(module, hidden, frequencies)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):
@@ -811,3 +1333,58 @@ def test_nested_training_module_is_detected_fail_closed(store, monkeypatch, hidd
         ]
     finally:
         detach_graph_dispatch(session)
+# -- bundle immutability under trusted loading ---------------------------------
+
+
+def _simple_bundle(store: Path, hidden: torch.Tensor, name: str = "fused") -> Path:
+    modules = _pipeline_modules()
+    block = modules["transformer"].blocks[0]
+    fingerprint, inputs, outputs = _observed_identity(block, hidden)
+    return _write_bundle(store, _sections(fingerprint, inputs, outputs), name=name)
+
+
+def test_load_entry_point_writes_no_bytecode_into_bundle(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    registry = ArtifactRegistry(store)
+    assert registry.errors == []
+
+    load_entry_point(registry.manifests[0], trusted_root=store)
+
+    assert not list(bundle.rglob("*.pyc"))
+    # The producer-side validator ignores nothing: a bundle that acquired a
+    # bytecode cache during loading would fail its next verification, which is
+    # exactly the finalize-stage failure this guards against.
+    verify_bundle(bundle)
+
+
+def test_verify_bundle_rejects_undeclared_bytecode_cache(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    cache = bundle / "__pycache__"
+    cache.mkdir()
+    (cache / "kernel.cpython-311.pyc").write_bytes(b"forged")
+
+    with pytest.raises(ArtifactError, match="undeclared"):
+        verify_bundle(bundle)
+
+
+def test_verify_bundle_rejects_symlinked_directory(store, hidden, tmp_path):
+    bundle = _simple_bundle(store, hidden)
+    hidden_dir = tmp_path / "hidden"
+    hidden_dir.mkdir()
+    (hidden_dir / "secret.py").write_text("secret", encoding="utf-8")
+    os.symlink(hidden_dir, bundle / "hidden_link")
+
+    with pytest.raises(ArtifactError, match="undeclared"):
+        verify_bundle(bundle)
+
+
+def test_load_entry_point_rejects_manifest_changed_since_validation(store, hidden):
+    bundle = _simple_bundle(store, hidden)
+    registry = ArtifactRegistry(store)
+    assert registry.errors == []
+    document = json.loads((bundle / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    document["evidence"]["benchmark"]["speedup"] = 99.0
+    (bundle / MANIFEST_FILENAME).write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="changed since validation"):
+        load_entry_point(registry.manifests[0], trusted_root=store)

@@ -46,6 +46,7 @@ from collections.abc import Callable
 from torch import nn
 
 from fastvideo import envs
+from fastvideo.hooks.hooks import ModuleHookManager
 from fastvideo.logger import init_logger
 from fastvideo.optimization.artifact import (
     ArtifactManifest,
@@ -55,13 +56,14 @@ from fastvideo.optimization.artifact import (
     load_entry_point,
     signature_key,
 )
-from fastvideo.optimization.fx_capture import default_capture_targets
+from fastvideo.optimization.fx_capture import capture_export_invocation, default_capture_targets
 from fastvideo.optimization.identity import (
     graph_identity,
     input_signatures,
     output_signatures,
     shape_key_for,
 )
+from fastvideo.optimization.subgraph import rewrite_exported_subgraph, subgraph_signature_keys
 
 logger = init_logger(__name__)
 
@@ -114,6 +116,7 @@ class _Wrapper:
 
     scope: str
     module: nn.Module
+    parameter_manager: nn.Module
     native_forward: Callable[..., Any]
     had_own_forward: bool = False
 
@@ -129,12 +132,14 @@ class GraphDispatchSession:
         tracer: str = "symbolic",
         max_scopes: int = 64,
         max_shape_variants: int = 8,
+        validation: bool = False,
     ) -> None:
         self.registry = registry
         self.runtime = runtime
         self.tracer = tracer
         self.max_scopes = max_scopes
         self.max_shape_variants = max_shape_variants
+        self.validation = validation
         self._wrappers: list[_Wrapper] = []
         self._scopes: set[str] = set()
         self._decisions: dict[tuple[str, str], _Decision] = {}
@@ -161,6 +166,11 @@ class GraphDispatchSession:
         except Exception as exc:  # noqa: BLE001 - dispatch never breaks generation
             self._record_exception("target_selection_failed", exc)
             return 0
+        parents = {
+            id(child): parent
+            for parent in root.modules()
+            for child in parent.children()
+        }
         wrapped = 0
         for scope, module in targets:
             qualified = f"{prefix}.{scope}" if prefix else scope
@@ -168,19 +178,49 @@ class GraphDispatchSession:
                 self._dropped_scopes += 1
                 continue
             try:
-                self._install(qualified, module)
+                self._install(
+                    qualified,
+                    module,
+                    parameter_manager=self._parameter_manager(
+                        root, module, parents
+                    ),
+                )
                 self._scopes.add(qualified)
                 wrapped += 1
             except Exception as exc:  # noqa: BLE001
                 self._record_exception("install_failed", exc, scope=qualified)
         return wrapped
 
-    def _install(self, scope: str, module: nn.Module) -> None:
+    @staticmethod
+    def _parameter_manager(
+        root: nn.Module,
+        module: nn.Module,
+        parents: dict[int, nn.Module],
+    ) -> nn.Module:
+        current = module
+        while True:
+            if callable(getattr(current, "unshard", None)) and callable(
+                getattr(current, "reshard", None)
+            ):
+                return current
+            parent = parents.get(id(current))
+            if parent is None or parent is current:
+                return root
+            current = parent
+
+    def _install(
+        self,
+        scope: str,
+        module: nn.Module,
+        *,
+        parameter_manager: nn.Module,
+    ) -> None:
         """Replace ``module.forward`` with the dispatching wrapper."""
         native_forward = module.forward
         wrapper = _Wrapper(
             scope=scope,
             module=module,
+            parameter_manager=parameter_manager,
             native_forward=native_forward,
             had_own_forward="forward" in vars(module),
         )
@@ -228,8 +268,33 @@ class GraphDispatchSession:
         decision.calls += 1
         if decision.candidate is None:
             return native(*args, **kwargs)
+        materialization = {
+            "before": self._parameter_snapshot(wrapper),
+        }
+
+        def candidate_forward(*candidate_args: Any, **candidate_kwargs: Any) -> Any:
+            materialization["candidate"] = self._parameter_snapshot(wrapper)
+            assert decision.candidate is not None
+            return decision.candidate(
+                wrapper.module,
+                *candidate_args,
+                **candidate_kwargs,
+            )
+
         try:
-            result = decision.candidate(wrapper.module, *args, **kwargs)
+            with self._materialized_candidate_parameters(
+                wrapper.parameter_manager
+            ):
+                materialization["inside"] = self._parameter_snapshot(wrapper)
+                hook_manager = ModuleHookManager.get_from(wrapper.module)
+                if hook_manager is None:
+                    result = candidate_forward(*args, **kwargs)
+                else:
+                    result = hook_manager.run_with_forward(
+                        candidate_forward,
+                        *args,
+                        **kwargs,
+                    )
         except Exception as exc:  # noqa: BLE001 - untrusted candidate code
             # Demote permanently: a candidate that raised once is not trusted
             # to be retried thousands of times over the rest of the run.
@@ -238,14 +303,57 @@ class GraphDispatchSession:
             decision.reason = f"{_REASON_RUNTIME_PREFIX}:{type(exc).__name__}"
             logger.warning(
                 "Artifact %s failed at runtime for %s; falling back to native "
-                "execution for the rest of this run",
+                "execution for the rest of this run; materialization=%s",
                 decision.artifact_id,
                 wrapper.scope,
+                json.dumps(materialization, sort_keys=True),
                 exc_info=True,
             )
             return native(*args, **kwargs)
         decision.candidate_calls += 1
         return result
+
+    @staticmethod
+    def _parameter_snapshot(wrapper: _Wrapper) -> dict[str, Any]:
+        """Return bounded tensor metadata for diagnosing FSDP lifecycle gaps."""
+        module_parameters = tuple(wrapper.module.parameters(recurse=False))
+        manager = wrapper.parameter_manager
+        hook_manager = ModuleHookManager.get_from(wrapper.module)
+        return {
+            "hook_manager": hook_manager is not None,
+            "hook_names": (
+                sorted(str(name) for name in hook_manager.forward_hooks)
+                if hook_manager is not None
+                else []
+            ),
+            "manager_has_lifecycle": callable(getattr(manager, "unshard", None))
+            and callable(getattr(manager, "reshard", None)),
+            "manager_is_module": manager is wrapper.module,
+            "manager_type": type(manager).__name__,
+            "module_direct_parameter_count": len(module_parameters),
+            "module_direct_parameter_shapes": [
+                list(parameter.shape) for parameter in module_parameters[:16]
+            ],
+            "module_type": type(wrapper.module).__name__,
+        }
+
+    @contextmanager
+    def _materialized_candidate_parameters(self, module: nn.Module):
+        """Mirror FSDP2's forward lifecycle when dispatch bypasses its wrapper."""
+        unshard = getattr(module, "unshard", None)
+        reshard = getattr(module, "reshard", None)
+        managed = callable(unshard) and callable(reshard)
+        if not managed:
+            yield
+            return
+        try:
+            try:
+                unshard(async_op=False)
+            except TypeError:
+                unshard()
+            yield
+        finally:
+            reshard()
 
     def _decide(
         self,
@@ -278,36 +386,66 @@ class GraphDispatchSession:
         if not input_metas:
             return _Decision(None, REASON_NO_TENSOR_INPUTS)
         input_keys = tuple(signature_key(meta) for meta in input_metas)
-        candidates = self.registry.candidates_for(input_keys)
+        module_candidates = self.registry.candidates_for(input_keys)
+        subgraph_candidates = self.registry.subgraph_candidates_for(scope)
+        candidates = module_candidates + subgraph_candidates
         if not candidates:
             return _Decision(None, REASON_NO_SIGNATURE_MATCH)
 
+        module_region: dict[str, Any] | None = None
+        export_region: dict[str, Any] | None = None
+        exported: Any | None = None
         try:
             with self._native_forward_for_identity(wrapper):
-                region = graph_identity(
-                    wrapper.module,
-                    args,
-                    kwargs,
-                    output,
-                    scope=scope,
-                    tracer=self.tracer,
-                )
+                if module_candidates:
+                    module_region = graph_identity(
+                        wrapper.module,
+                        args,
+                        kwargs,
+                        output,
+                        scope=scope,
+                        tracer=self.tracer,
+                    )
+                if subgraph_candidates:
+                    export_region, exported = capture_export_invocation(
+                        wrapper.module,
+                        args,
+                        kwargs,
+                        output,
+                        scope=scope,
+                    )
         except Exception as exc:  # noqa: BLE001 - untraceable modules stay native
             reason = f"{_REASON_IDENTITY_PREFIX}:{type(exc).__name__}"
             logger.info("Graph identity unavailable for %s: %s", scope, reason)
             return _Decision(None, reason)
 
-        fingerprint = str(region.get("fingerprint", ""))
-        output_keys = tuple(signature_key(meta) for meta in output_signatures(output))
+        module_output_keys = tuple(signature_key(meta) for meta in output_signatures(output))
         matched: list[ArtifactManifest] = []
         rejections: list[str] = []
         for manifest in candidates:
+            if manifest.target_kind == "subgraph":
+                if export_region is None:
+                    rejections.append(f"{manifest.artifact_id}:export_capture_missing")
+                    continue
+                candidate_input_keys, candidate_output_keys = subgraph_signature_keys(
+                    export_region,
+                    manifest,
+                )
+                fingerprint = str(export_region.get("fingerprint", ""))
+            else:
+                if module_region is None:
+                    rejections.append(f"{manifest.artifact_id}:module_capture_missing")
+                    continue
+                candidate_input_keys = input_keys
+                candidate_output_keys = module_output_keys
+                fingerprint = str(module_region.get("fingerprint", ""))
             compatibility_reason = check_compatibility(
                 manifest,
                 graph_fingerprint=fingerprint,
-                input_keys=input_keys,
-                output_keys=output_keys,
+                input_keys=candidate_input_keys,
+                output_keys=candidate_output_keys,
                 runtime=self.runtime,
+                validation=self.validation,
             )
             if compatibility_reason is None:
                 matched.append(manifest)
@@ -327,6 +465,14 @@ class GraphDispatchSession:
             return _Decision(None, f"{_REASON_LOAD_PREFIX}:NoTrustedRoot")
         try:
             candidate = load_entry_point(best, trusted_root=root)
+            if best.target_kind == "subgraph":
+                if exported is None:
+                    raise RuntimeError("export capture missing")
+                candidate = rewrite_exported_subgraph(
+                    exported,
+                    best,
+                    candidate,
+                )
         except Exception as exc:  # noqa: BLE001 - a bad bundle must not stop generation
             logger.warning("Artifact %s could not be loaded; staying native", best.artifact_id, exc_info=True)
             return _Decision(
@@ -339,7 +485,7 @@ class GraphDispatchSession:
             "Dispatching %s to artifact %s (fingerprint %s)",
             scope,
             best.artifact_id,
-            fingerprint,
+            best.graph_fingerprint,
         )
         return _Decision(
             candidate,
@@ -400,6 +546,7 @@ class GraphDispatchSession:
                     "distributed_mode": self.runtime.distributed_mode,
                 },
                 "tracer": self.tracer,
+                "validation": self.validation,
                 "scopes": sorted(self._scopes),
                 "dropped_scopes": self._dropped_scopes,
                 "dropped_shape_variants": dict(sorted(self._dropped_variants.items())),
@@ -486,6 +633,7 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
             tracer=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER,
             max_scopes=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES,
             max_shape_variants=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES,
+            validation=envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION,
         )
         wrapped = session.attach_modules(modules)
     except Exception:  # noqa: BLE001 - dispatch setup never breaks generation

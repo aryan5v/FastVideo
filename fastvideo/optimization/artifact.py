@@ -21,12 +21,12 @@ Three rules hold everywhere in this module:
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import math
 import re
 import sys
-from dataclasses import dataclass
+import types
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from collections.abc import Callable
@@ -48,13 +48,17 @@ ANY = "*"
 #: real module for the rest of the process.
 _MODULE_NAMESPACE = "fastvideo._artifacts"
 
-_IGNORED_DIRECTORIES = frozenset({"__pycache__"})
+#: No executable directory is ignored. Bytecode caches are executable content
+#: and must never be invisible to undeclared-file validation.
+_IGNORED_DIRECTORIES: frozenset[str] = frozenset()
 _READ_CHUNK_BYTES = 1 << 20
 
 _FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _RELATIVE_FILE_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]{0,255}$")
+_IR_NODE_PATTERN = re.compile(r"^n[0-9]+$")
+_IR_REF_PATTERN = re.compile(r"^[pn][0-9]+$")
 
 # Structured rejection reasons. These are logged and exported verbatim, so they
 # are part of the contract with the producer.
@@ -302,6 +306,11 @@ class ArtifactManifest:
     graph_fingerprint: str
     operation_name: str
     parent_module: str
+    target_kind: str
+    capture_mode: str | None
+    selected_node_ids: tuple[str, ...]
+    boundary_refs: tuple[str, ...]
+    output_node_ids: tuple[str, ...]
     input_keys: tuple[tuple[Any, ...], ...]
     output_keys: tuple[tuple[Any, ...], ...]
     entry_file: str
@@ -316,6 +325,8 @@ class ArtifactManifest:
     execution_modes: tuple[str, ...]
     distributed_modes: tuple[str, ...]
     promotion_decision: str
+    benchmark_passed: bool
+    generation_passed: bool
     evidence_passed: bool
     speedup: float
     directory: Path
@@ -406,6 +417,57 @@ class ArtifactManifest:
             if not items:
                 raise _fail(source, location, "must be a non-empty list")
 
+        target_kind = operation.get("target_kind", "module")
+        if target_kind not in {"module", "subgraph"}:
+            raise _fail(source, "operation.target_kind", "must be 'module' or 'subgraph'")
+        rewrite_fields = {
+            "capture_mode",
+            "selected_node_ids",
+            "boundary_refs",
+            "output_node_ids",
+        }
+        if target_kind == "module" and rewrite_fields.intersection(operation):
+            raise _fail(
+                source,
+                "operation",
+                "module targets must not declare subgraph rewrite fields",
+            )
+
+        capture_mode: str | None = None
+        selected_node_ids: tuple[str, ...] = ()
+        boundary_refs: tuple[str, ...] = ()
+        output_node_ids: tuple[str, ...] = ()
+        if target_kind == "subgraph":
+            capture_mode = _text(operation.get("capture_mode"), source, "operation.capture_mode")
+            if capture_mode != "export":
+                raise _fail(
+                    source,
+                    "operation.capture_mode",
+                    "subgraph dispatch currently requires 'export'",
+                )
+
+            def refs(field: str, pattern: re.Pattern[str]) -> tuple[str, ...]:
+                items = _sequence(operation.get(field), source, f"operation.{field}")
+                if not items:
+                    raise _fail(source, f"operation.{field}", "must be a non-empty list")
+                result = tuple(
+                    _pattern(
+                        item,
+                        pattern,
+                        source,
+                        f"operation.{field}[{index}]",
+                        "a canonical executable-IR reference",
+                    ) for index, item in enumerate(items))
+                if len(result) != len(set(result)):
+                    raise _fail(source, f"operation.{field}", "must not contain duplicates")
+                return result
+
+            selected_node_ids = refs("selected_node_ids", _IR_NODE_PATTERN)
+            boundary_refs = refs("boundary_refs", _IR_REF_PATTERN)
+            output_node_ids = refs("output_node_ids", _IR_NODE_PATTERN)
+            if not set(output_node_ids).issubset(selected_node_ids):
+                raise _fail(source, "operation.output_node_ids", "must be selected nodes")
+
         return cls(
             artifact_id=_text(raw.get("artifact_id"), source, "artifact_id"),
             graph_fingerprint=_pattern(
@@ -417,6 +479,11 @@ class ArtifactManifest:
             ),
             operation_name=_text(operation.get("name"), source, "operation.name"),
             parent_module=_text(operation.get("parent_module"), source, "operation.parent_module"),
+            target_kind=target_kind,
+            capture_mode=capture_mode,
+            selected_node_ids=selected_node_ids,
+            boundary_refs=boundary_refs,
+            output_node_ids=output_node_ids,
             input_keys=_signature_keys(signature.get("inputs"), source, "signature.inputs"),
             output_keys=_signature_keys(signature.get("outputs"), source, "signature.outputs"),
             entry_file=entry_file,
@@ -459,6 +526,8 @@ class ArtifactManifest:
                 _text(item, source, f"compatibility.distributed_modes[{index}]")
                 for index, item in enumerate(distributed_modes)),
             promotion_decision=_text(promotion.get("decision"), source, "promotion.decision"),
+            benchmark_passed=_bool(benchmark.get("passed"), source, "evidence.benchmark.passed"),
+            generation_passed=_bool(generation.get("passed"), source, "evidence.generation.passed"),
             evidence_passed=(_bool(benchmark.get("passed"), source, "evidence.benchmark.passed")
                              and _bool(generation.get("passed"), source, "evidence.generation.passed")),
             speedup=float(speedup),
@@ -527,6 +596,7 @@ def check_compatibility(
     input_keys: tuple[tuple[Any, ...], ...],
     output_keys: tuple[tuple[Any, ...], ...],
     runtime: RuntimeProfile,
+    validation: bool = False,
 ) -> str | None:
     """Return the reason ``manifest`` cannot serve this call, or ``None``.
 
@@ -555,6 +625,12 @@ def check_compatibility(
         return REASON_EXECUTION_MODE
     if runtime.distributed_mode not in manifest.distributed_modes:
         return REASON_DISTRIBUTED_MODE
+    if validation:
+        if manifest.promotion_decision not in {"promoted", "quarantined"}:
+            return REASON_NOT_PROMOTED
+        if not manifest.benchmark_passed:
+            return REASON_EVIDENCE_INCOMPLETE
+        return None
     if manifest.promotion_decision != "promoted":
         return REASON_NOT_PROMOTED
     if not manifest.evidence_passed:
@@ -577,6 +653,12 @@ def file_sha256(path: Path) -> str:
 def _bundle_contents(directory: Path) -> set[str]:
     present = set()
     for path in directory.rglob("*"):
+        if path.is_symlink():
+            # rglob does not follow symlinks, and a symlink to a directory
+            # reports is_dir() -- enumerate the link itself so hidden content
+            # behind it cannot escape undeclared-file validation.
+            present.add(path.relative_to(directory).as_posix())
+            continue
         if path.is_dir():
             continue
         relative = path.relative_to(directory)
@@ -642,31 +724,62 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
 
     The bundle is verified again here even if the caller already validated it:
     the gap between validation and import is precisely where a swapped file
-    would land.
+    would land. The entry point is executed from an immutable byte snapshot
+    bound to the digest the verifier accepted -- the standard source loader is
+    deliberately not used, so neither a replaced path nor a forged bytecode
+    cache can substitute different code after verification. No bytecode is
+    written back: a cache inside the bundle would be undeclared executable
+    content and must fail the next verification, not silently appear.
     """
     directory = _resolve_inside(trusted_root, manifest.directory)
     verified = verify_bundle(directory)
-    if verified.artifact_id != manifest.artifact_id:
+    if replace(verified, directory=manifest.directory) != manifest:
         raise _fail(
             str(directory),
-            "artifact_id",
-            f"changed from {manifest.artifact_id!r} to {verified.artifact_id!r} "
-            "since validation",
+            "manifest",
+            "changed since validation",
         )
 
     entry_file = _resolve_inside(directory, directory / verified.entry_file)
+    entry_digest = next(
+        (item for item in verified.files if item.path == verified.entry_file),
+        None,
+    )
+    if entry_digest is None:  # Defensive: manifest parsing already enforces this.
+        raise _fail(str(directory), "entry_point", "file is not declared")
+    try:
+        source = entry_file.read_bytes()
+    except OSError as exc:
+        raise _fail(
+            str(directory),
+            "entry_point",
+            f"cannot read {verified.entry_file!r}",
+        ) from exc
+    # Execute this immutable snapshot only after binding it to the digest that
+    # verify_bundle accepted. A path replacement after this check is harmless:
+    # no loader reopens the mutable path.
+    actual_hash = hashlib.sha256(source).hexdigest()
+    if len(source) != entry_digest.size or actual_hash != entry_digest.sha256:
+        raise _fail(
+            str(directory),
+            "entry_point",
+            f"{verified.entry_file!r} changed after verification",
+        )
+
     readable_id = re.sub(r"[^A-Za-z0-9_]", "_", verified.artifact_id)
     unique_id = hashlib.sha256(verified.artifact_id.encode("utf-8")).hexdigest()[:16]
     module_name = f"{_MODULE_NAMESPACE}.{readable_id}_{unique_id}"
-    spec = importlib.util.spec_from_file_location(module_name, entry_file)
-    if spec is None or spec.loader is None:
-        raise _fail(str(directory), "entry_point", f"cannot load {verified.entry_file!r}")
-    module = importlib.util.module_from_spec(spec)
+    module = types.ModuleType(module_name)
+    module.__file__ = str(entry_file)
+    module.__package__ = module_name.rpartition(".")[0]
     # Registered before execution so the module can look itself up, and removed
     # again on failure so a half-initialized module is never reachable.
     sys.modules[module_name] = module
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
-        spec.loader.exec_module(module)
+        code = compile(source, str(entry_file), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102 - verified artifact is executable
     except Exception as exc:  # noqa: BLE001 - untrusted code, any failure is a rejection
         sys.modules.pop(module_name, None)
         raise _fail(
@@ -674,6 +787,8 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
             "entry_point",
             f"importing {verified.entry_file!r} raised {type(exc).__name__}",
         ) from exc
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
 
     candidate = getattr(module, verified.entry_symbol, None)
     if candidate is None or not callable(candidate):
@@ -733,7 +848,11 @@ class ArtifactRegistry:
         This is the cheap pre-filter that keeps dispatch from tracing a module
         when the store holds nothing shaped like the live call.
         """
-        return [item for item in self.manifests if item.input_keys == input_keys]
+        return [item for item in self.manifests if item.target_kind == "module" and item.input_keys == input_keys]
+
+    def subgraph_candidates_for(self, scope: str) -> list[ArtifactManifest]:
+        """Export-subgraph bundles declared for this repeated module scope."""
+        return [item for item in self.manifests if item.target_kind == "subgraph" and item.parent_module == scope]
 
     def summary(self) -> dict[str, Any]:
         return {

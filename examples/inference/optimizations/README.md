@@ -91,6 +91,7 @@ and records a structured reason; the candidate is not retried afterwards.
 | `FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES` | `64` | Upper bound on dispatched block stacks. |
 | `FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES` | `8` | Upper bound on resolved input signatures per stack. |
 | `FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS` | `""` | Optional path for the structured dispatch/fallback report. |
+| `FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION` | `0` | Explicit A/B mode that may run a quarantined artifact after isolated correctness passes. Production keeps this unset and requires full-generation evidence plus promotion. |
 
 The diagnostics report is metadata only: it records each scope, shape key,
 decision reason, artifact id, rejection codes and call counts, plus the
