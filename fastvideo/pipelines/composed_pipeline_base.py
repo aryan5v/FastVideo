@@ -19,7 +19,7 @@ from fastvideo.fastvideo_args import FastVideoArgs, TrainingArgs
 from fastvideo.hooks.activation_trace import attach_activation_trace, detach_activation_trace
 from fastvideo.logger import init_logger
 from fastvideo.profiler import get_or_create_profiler
-from fastvideo.optimization import optimization_profile
+from fastvideo.optimization import (attach_graph_dispatch, detach_graph_dispatch, optimization_profile)
 from fastvideo.models.loader.component_loader import PipelineComponentLoader
 from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 from fastvideo.pipelines.stages import PipelineStage
@@ -65,6 +65,7 @@ class ComposedPipelineBase(ABC):
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
         self._trace_mgr = None
+        self._dispatch_session = None
         self._optimization_profile_calls = 0
 
         if required_config_modules is not None:
@@ -237,6 +238,9 @@ class ComposedPipelineBase(ABC):
                     logger.info("Torch Compile enabled for audio VAE")
 
         self._trace_mgr = attach_activation_trace(self.modules.get("transformer"))
+        # Generic graph dispatch. Returns None unless a trusted artifact
+        # directory is configured, in which case nothing is wrapped at all.
+        self._dispatch_session = attach_graph_dispatch(self.modules)
 
         if not self.fastvideo_args.training_mode:
             logger.info("Creating pipeline stages...")
@@ -526,6 +530,8 @@ class ComposedPipelineBase(ABC):
     def close(self) -> None:
         detach_activation_trace(getattr(self, "_trace_mgr", None))
         self._trace_mgr = None
+        detach_graph_dispatch(getattr(self, "_dispatch_session", None))
+        self._dispatch_session = None
 
     def __del__(self):
         self.close()

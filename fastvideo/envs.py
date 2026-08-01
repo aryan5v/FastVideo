@@ -45,6 +45,14 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER: str = "auto"
     FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES: int = 64
     FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES: int = 8
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER: str = "symbolic"
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES: int = 64
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES: int = 8
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION: str = "*"
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS: str = ""
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -304,6 +312,39 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Upper bound on distinct input signatures recorded per stack.
     "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES":
     lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES", "8")),
+
+    # Trusted directory holding packaged optimization artifacts. Executable
+    # candidate code is loaded only from here, and only after every declared
+    # file matches the hash recorded in its manifest. Leaving this unset
+    # disables graph dispatch entirely: no forward is wrapped and generation
+    # behaves exactly as it does without the feature.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR", ""),
+    # Tracer used to recompute a module's graph fingerprint at dispatch time.
+    # ``symbolic`` is the default because, unlike ``export`` and ``dynamo``, it
+    # does not re-execute the module with real inputs.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER", "symbolic"),
+    # Upper bound on dispatched block stacks.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES", "64")),
+    # Upper bound on distinct input signatures resolved per stack.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES", "8")),
+    # Model identity matched against each artifact's declared compatibility.
+    # Falls back to the optimization profile's model id when unset.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID", ""),
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION", "*"),
+    # Sharding mode declared to the matcher. Empty means auto-detect, which
+    # only resolves a single-rank run; a multi-rank run must declare its mode
+    # explicitly or no artifact is selected.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE", ""),
+    # Optional path for the structured dispatch/fallback report.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS", ""),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":
