@@ -28,6 +28,52 @@ def _get_attr(root: Any, target: str) -> Any:
     return value
 
 
+def _lifted_attribute_pairs(
+    exported: Any,
+    graph: fx.Graph,
+) -> list[tuple[Any, fx.Node]]:
+    """Pair lifted input specs with runtime attributes without order assumptions."""
+    input_specs = list(exported.graph_signature.input_specs)
+    lifted_specs = [
+        spec
+        for spec in input_specs
+        if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"
+    ]
+    attributes = [node for node in graph.nodes if node.op == "get_attr"]
+    if len(attributes) != len(lifted_specs):
+        raise SubgraphRewriteError("export lifted input mapping changed")
+
+    by_target: dict[str, fx.Node] = {}
+    for node in attributes:
+        target = str(node.target)
+        if target in by_target:
+            raise SubgraphRewriteError("export contains duplicate lifted attributes")
+        by_target[target] = node
+
+    paired: list[tuple[Any, fx.Node] | None] = [None] * len(lifted_specs)
+    assigned: set[fx.Node] = set()
+    for index, spec in enumerate(lifted_specs):
+        source_target = str(getattr(spec, "target", "") or "")
+        node = by_target.get(source_target)
+        if node is not None and node not in assigned:
+            paired[index] = (spec, node)
+            assigned.add(node)
+
+    unmatched_specs = [
+        (index, spec)
+        for index, spec in enumerate(lifted_specs)
+        if paired[index] is None
+    ]
+    unmatched_nodes = [node for node in attributes if node not in assigned]
+    if len(unmatched_specs) != len(unmatched_nodes):
+        raise SubgraphRewriteError("export lifted input mapping is ambiguous")
+    for (index, spec), node in zip(unmatched_specs, unmatched_nodes, strict=True):
+        paired[index] = (spec, node)
+    if any(item is None for item in paired):
+        raise SubgraphRewriteError("export lifted input mapping is incomplete")
+    return [item for item in paired if item is not None]
+
+
 def _graph_bindings(
     exported: Any,
     graph: fx.Graph,
@@ -43,18 +89,8 @@ def _graph_bindings(
     representative exported module.
     """
     exported_module = exported.module()
-    input_specs = list(exported.graph_signature.input_specs)
-    lifted_specs = [
-        spec
-        for spec in input_specs
-        if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"
-    ]
-    attributes = [node for node in graph.nodes if node.op == "get_attr"]
-    if len(attributes) != len(lifted_specs):
-        raise SubgraphRewriteError("export lifted input mapping changed")
-
     bindings: dict[str, Any] = {}
-    for node, spec in zip(attributes, lifted_specs, strict=True):
+    for spec, node in _lifted_attribute_pairs(exported, graph):
         runtime_target = str(node.target)
         kind = getattr(getattr(spec, "kind", None), "name", "")
         source_target = str(getattr(spec, "target", ""))
@@ -101,8 +137,8 @@ def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node
 
     placeholders = [node for node in graph.nodes if node.op == "placeholder"]
     user_index = 0
-    attributes = [node for node in graph.nodes if node.op == "get_attr"]
-    lifted_index = 0
+    lifted_pairs = _lifted_attribute_pairs(exported, graph)
+    lifted_nodes = iter(node for _spec, node in lifted_pairs)
     for index, spec in enumerate(input_specs):
         kind = getattr(getattr(spec, "kind", None), "name", "")
         if kind == "USER_INPUT":
@@ -111,11 +147,18 @@ def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node
             refs[f"p{index}"] = placeholders[user_index]
             user_index += 1
             continue
-        if lifted_index >= len(attributes):
-            raise SubgraphRewriteError("runtime lifted input mapping changed")
-        refs[f"p{index}"] = attributes[lifted_index]
-        lifted_index += 1
-    if lifted_index != len(attributes):
+        try:
+            attribute = next(lifted_nodes)
+        except StopIteration as exc:
+            raise SubgraphRewriteError(
+                "runtime lifted input mapping changed"
+            ) from exc
+        refs[f"p{index}"] = attribute
+    try:
+        next(lifted_nodes)
+    except StopIteration:
+        pass
+    else:
         raise SubgraphRewriteError("runtime lifted input mapping changed")
 
     raw_ops = [node for node in raw_graph.nodes if node.op in {"call_function", "call_method", "call_module"}]

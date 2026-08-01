@@ -125,13 +125,21 @@ class _TopologicalGapBlock(nn.Module):
 class _StructuredInputBlock(nn.Module):
     """A block with a tuple input, mirroring rotary-frequency arguments."""
 
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        # Registration deliberately differs from execution order. Export is
+        # free to order get_attr nodes by first use, not registration order.
+        self.offset = nn.Parameter(torch.full((width, ), 3.0))
+        self.scale = nn.Parameter(torch.full((width, ), 2.0))
+
     def forward(
         self,
         hidden: torch.Tensor,
         frequencies: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        projected = hidden * frequencies[0]
-        return projected + frequencies[1]
+        projected = hidden * self.scale
+        rotated = projected * frequencies[0]
+        return rotated + frequencies[1] + self.offset
 
 
 class _Transformer(nn.Module):
@@ -628,7 +636,7 @@ def test_export_subgraph_rejects_recipe_without_one_insertion_point(tmp_path, hi
 def test_export_subgraph_preserves_structured_input_calling_convention(
     tmp_path, hidden
 ):
-    module = _StructuredInputBlock().eval()
+    module = _StructuredInputBlock(WIDTH).eval()
     frequencies = (torch.full_like(hidden, 2.0), torch.full_like(hidden, 3.0))
     with torch.no_grad():
         expected = module(hidden, frequencies)
