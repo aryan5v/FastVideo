@@ -18,12 +18,14 @@ import torch
 from torch import nn
 
 from fastvideo import envs
-from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactRegistry, RuntimeProfile, load_entry_point,
-                                             verify_bundle)
+from fastvideo.optimization.artifact import (ANY, MANIFEST_FILENAME, ArtifactManifest, ArtifactRegistry,
+                                             RuntimeProfile, load_entry_point, verify_bundle)
 from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REASON_NO_SIGNATURE_MATCH, REASON_SELECTED,
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
 from fastvideo.optimization.fx_capture import capture_export_invocation
 from fastvideo.optimization.identity import (graph_identity, input_signatures, output_signatures)
+from fastvideo.optimization.subgraph import (SubgraphRewriteError,
+                                             rewrite_exported_subgraph)
 
 WIDTH = 4
 MARKER = 7.0
@@ -109,6 +111,15 @@ class _LiftedConstantBlock(nn.Module):
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.silu(self.proj(hidden)) + hidden + self.offset
+
+
+class _TopologicalGapBlock(nn.Module):
+    """A selected producer and consumer separated by an unselected op."""
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        early = torch.neg(hidden)
+        gap = torch.sin(early)
+        return gap + early
 
 
 class _Transformer(nn.Module):
@@ -544,6 +555,59 @@ def test_export_subgraph_binds_opaque_lifted_constants_from_export(store, hidden
     torch.testing.assert_close(actual, expected)
     assert [block.subgraph_calls for block in transformer.blocks] == [1, 2]
     assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_export_subgraph_rejects_recipe_without_one_insertion_point(tmp_path, hidden):
+    module = _TopologicalGapBlock().eval()
+    with torch.no_grad():
+        output = module(hidden)
+    region, exported = capture_export_invocation(
+        module,
+        (hidden, ),
+        {},
+        output,
+        scope="transformer.blocks",
+    )
+    ir = region["attributes"]["executable_ir"]
+    assert [node["id"] for node in ir["nodes"]] == ["n0", "n1", "n2"]
+    metadata = {
+        item["id"]: item["meta"]
+        for section in ("inputs", "nodes")
+        for item in ir[section]
+        if "meta" in item
+    }
+
+    def signatures(refs):
+        return [
+            {"name": f"boundary_{index}", **copy.deepcopy(metadata[ref])}
+            for index, ref in enumerate(refs)
+        ]
+
+    sections = _sections(
+        region["fingerprint"],
+        signatures(("p0", "n1")),
+        signatures(("n0", "n2")),
+    )
+    sections["operation"] = {
+        "name": "invalid_scattered_recipe",
+        "graph_fingerprint": region["fingerprint"],
+        "parent_module": "transformer.blocks",
+        "operations": ["aten::neg", "aten::add"],
+        "target_kind": "subgraph",
+        "capture_mode": "export",
+        "selected_node_ids": ["n0", "n2"],
+        "boundary_refs": ["p0", "n1"],
+        "output_node_ids": ["n0", "n2"],
+    }
+    sections["entry_point"]["symbol"] = "fused_subgraph"
+    manifest = ArtifactManifest.from_dict(sections, directory=tmp_path)
+    dispatch = rewrite_exported_subgraph(exported, manifest, lambda *_: None)
+
+    with pytest.raises(
+        SubgraphRewriteError,
+        match="no valid topological insertion point",
+    ):
+        dispatch(module, hidden)
 
 
 def test_fastest_compatible_artifact_wins(store, hidden):

@@ -206,6 +206,7 @@ def rewrite_exported_subgraph(
 
         selected_set = set(selected)
         output_set = set(outputs)
+        positions = {node: index for index, node in enumerate(graph.nodes)}
         for node in selected:
             external_users = [user for user in node.users if user not in selected_set]
             if external_users and node not in output_set:
@@ -213,11 +214,30 @@ def rewrite_exported_subgraph(
         if any(node in selected_set for node in boundary):
             raise SubgraphRewriteError("rewrite boundary must be outside the selected nodes")
 
+        # A subgraph artifact is one call and therefore needs one legal point
+        # in the parent graph: all boundary values must exist before it, and
+        # every external consumer of a replaced output must follow it. A
+        # dependency-connected recipe can still violate this when it spans an
+        # unsupported operation. Reject that recipe before mutating the graph.
+        latest_boundary = max(boundary, key=positions.__getitem__)
+        external_consumers = {
+            user
+            for output in outputs
+            for user in output.users
+            if user not in selected_set
+        }
+        if any(
+            positions[user] <= positions[latest_boundary]
+            for user in external_consumers
+        ):
+            raise SubgraphRewriteError(
+                "rewrite recipe has no valid topological insertion point"
+            )
+
         def invoke(*values: Any) -> Any:
             return candidate(parent_module, *values)
 
-        first = selected[0]
-        with graph.inserting_before(first):
+        with graph.inserting_after(latest_boundary):
             replacement = graph.call_function(invoke, args=tuple(boundary))
         if len(outputs) == 1:
             replacements = [replacement]
