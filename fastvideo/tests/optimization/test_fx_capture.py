@@ -424,8 +424,9 @@ def test_each_capture_mode_has_stable_metadata(mode):
     )
 
 
-def test_invalid_tracer_still_clears_all_live_capture_references():
-    session = fx_capture.FXCaptureSession(tracer="invalid")
+@pytest.mark.parametrize("tracer", ["invalid", "fallback"])
+def test_invalid_tracer_still_clears_all_live_capture_references(tracer):
+    session = fx_capture.FXCaptureSession(tracer=tracer)
     model = _Transformer(depth=2)
     assert session.attach(model, prefix="transformer") == 2
     model(torch.randn(2, 4))
