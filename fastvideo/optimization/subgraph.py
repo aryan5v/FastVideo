@@ -351,7 +351,19 @@ def rewrite_exported_subgraph(
             # graphs but can corrupt real exported model calling conventions.
             runnable = fx.GraphModule(representative, graph)
             for target, value in bindings.items():
-                expected = _tensor_key(_get_attr(representative, target))
+                attribute_node = next(
+                    (
+                        node
+                        for node in graph.nodes
+                        if node.op == "get_attr" and str(node.target) == target
+                    ),
+                    None,
+                )
+                expected = _tensor_key(
+                    (attribute_node.meta or {}).get("val")
+                    if attribute_node is not None
+                    else None
+                )
                 actual = _tensor_key(value)
                 if expected is not None and actual != expected:
                     raise SubgraphRewriteError(
