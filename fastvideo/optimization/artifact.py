@@ -21,12 +21,12 @@ Three rules hold everywhere in this module:
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import math
 import re
 import sys
-from dataclasses import dataclass
+import types
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from collections.abc import Callable
@@ -48,7 +48,9 @@ ANY = "*"
 #: real module for the rest of the process.
 _MODULE_NAMESPACE = "fastvideo._artifacts"
 
-_IGNORED_DIRECTORIES = frozenset({"__pycache__"})
+#: No executable directory is ignored. Bytecode caches are executable content
+#: and must never be invisible to undeclared-file validation.
+_IGNORED_DIRECTORIES: frozenset[str] = frozenset()
 _READ_CHUNK_BYTES = 1 << 20
 
 _FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -651,6 +653,12 @@ def file_sha256(path: Path) -> str:
 def _bundle_contents(directory: Path) -> set[str]:
     present = set()
     for path in directory.rglob("*"):
+        if path.is_symlink():
+            # rglob does not follow symlinks, and a symlink to a directory
+            # reports is_dir() -- enumerate the link itself so hidden content
+            # behind it cannot escape undeclared-file validation.
+            present.add(path.relative_to(directory).as_posix())
+            continue
         if path.is_dir():
             continue
         relative = path.relative_to(directory)
@@ -716,31 +724,62 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
 
     The bundle is verified again here even if the caller already validated it:
     the gap between validation and import is precisely where a swapped file
-    would land.
+    would land. The entry point is executed from an immutable byte snapshot
+    bound to the digest the verifier accepted -- the standard source loader is
+    deliberately not used, so neither a replaced path nor a forged bytecode
+    cache can substitute different code after verification. No bytecode is
+    written back: a cache inside the bundle would be undeclared executable
+    content and must fail the next verification, not silently appear.
     """
     directory = _resolve_inside(trusted_root, manifest.directory)
     verified = verify_bundle(directory)
-    if verified.artifact_id != manifest.artifact_id:
+    if replace(verified, directory=manifest.directory) != manifest:
         raise _fail(
             str(directory),
-            "artifact_id",
-            f"changed from {manifest.artifact_id!r} to {verified.artifact_id!r} "
-            "since validation",
+            "manifest",
+            "changed since validation",
         )
 
     entry_file = _resolve_inside(directory, directory / verified.entry_file)
+    entry_digest = next(
+        (item for item in verified.files if item.path == verified.entry_file),
+        None,
+    )
+    if entry_digest is None:  # Defensive: manifest parsing already enforces this.
+        raise _fail(str(directory), "entry_point", "file is not declared")
+    try:
+        source = entry_file.read_bytes()
+    except OSError as exc:
+        raise _fail(
+            str(directory),
+            "entry_point",
+            f"cannot read {verified.entry_file!r}",
+        ) from exc
+    # Execute this immutable snapshot only after binding it to the digest that
+    # verify_bundle accepted. A path replacement after this check is harmless:
+    # no loader reopens the mutable path.
+    actual_hash = hashlib.sha256(source).hexdigest()
+    if len(source) != entry_digest.size or actual_hash != entry_digest.sha256:
+        raise _fail(
+            str(directory),
+            "entry_point",
+            f"{verified.entry_file!r} changed after verification",
+        )
+
     readable_id = re.sub(r"[^A-Za-z0-9_]", "_", verified.artifact_id)
     unique_id = hashlib.sha256(verified.artifact_id.encode("utf-8")).hexdigest()[:16]
     module_name = f"{_MODULE_NAMESPACE}.{readable_id}_{unique_id}"
-    spec = importlib.util.spec_from_file_location(module_name, entry_file)
-    if spec is None or spec.loader is None:
-        raise _fail(str(directory), "entry_point", f"cannot load {verified.entry_file!r}")
-    module = importlib.util.module_from_spec(spec)
+    module = types.ModuleType(module_name)
+    module.__file__ = str(entry_file)
+    module.__package__ = module_name.rpartition(".")[0]
     # Registered before execution so the module can look itself up, and removed
     # again on failure so a half-initialized module is never reachable.
     sys.modules[module_name] = module
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
-        spec.loader.exec_module(module)
+        code = compile(source, str(entry_file), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102 - verified artifact is executable
     except Exception as exc:  # noqa: BLE001 - untrusted code, any failure is a rejection
         sys.modules.pop(module_name, None)
         raise _fail(
@@ -748,6 +787,8 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
             "entry_point",
             f"importing {verified.entry_file!r} raised {type(exc).__name__}",
         ) from exc
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
 
     candidate = getattr(module, verified.entry_symbol, None)
     if candidate is None or not callable(candidate):
