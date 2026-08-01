@@ -600,6 +600,9 @@ def test_export_subgraph_rejects_recipe_without_one_insertion_point(tmp_path, hi
         "output_node_ids": ["n0", "n2"],
     }
     sections["entry_point"]["symbol"] = "fused_subgraph"
+    sections["files"] = [
+        {"path": "kernel.py", "sha256": "0" * 64, "bytes": 0}
+    ]
     manifest = ArtifactManifest.from_dict(sections, directory=tmp_path)
     dispatch = rewrite_exported_subgraph(exported, manifest, lambda *_: None)
 
