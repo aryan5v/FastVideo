@@ -10,6 +10,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from torch import fx, nn
+from torch.fx._pytree import tree_flatten_spec
+from torch.utils._pytree import tree_unflatten
 
 from fastvideo.optimization.artifact import ArtifactManifest, signature_key
 
@@ -236,11 +238,20 @@ def rewrite_exported_subgraph(
     if manifest.target_kind != "subgraph" or manifest.capture_mode != "export":
         raise SubgraphRewriteError("artifact is not an export subgraph target")
     exported_graph = exported.module().graph
+    input_spec = getattr(getattr(exported, "call_spec", None), "in_spec", None)
+    output_spec = getattr(getattr(exported, "call_spec", None), "out_spec", None)
+    if input_spec is None or output_spec is None:
+        raise SubgraphRewriteError("export call specification is missing")
     cache: weakref.WeakKeyDictionary[nn.Module, fx.GraphModule] = weakref.WeakKeyDictionary()
 
     def build(parent_module: nn.Module) -> fx.GraphModule:
         representative = exported.module()
         graph = copy.deepcopy(exported_graph)
+        # Execute the rewritten graph with explicit flat leaves. Export's
+        # generated PyTreeCodeGen wrapper is tied to module attributes and has
+        # proven fragile when transplanted into a fresh GraphModule for real
+        # model signatures containing tuples and specialized scalar leaves.
+        graph.set_codegen(fx.graph.CodeGen())
         for node in list(graph.nodes):
             if node.op == "call_module" and str(node.target) == "_guards_fn":
                 if node.users:
@@ -257,14 +268,6 @@ def rewrite_exported_subgraph(
                 _set_attr(runnable, target, value)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
-        # Export flattens nested user inputs (tuples, dataclasses, dictionaries)
-        # into placeholders and stores the inverse calling convention on its
-        # GraphModule. Building a new module from a bindings dictionary keeps
-        # the graph code generator but not those module attributes. Without
-        # them, structured FastVideo inputs are shifted across placeholders.
-        for name in ("_in_spec", "_out_spec"):
-            if hasattr(representative, name):
-                setattr(runnable, name, getattr(representative, name))
         refs = _runtime_nodes(exported, runnable)
         try:
             selected = [refs[item] for item in manifest.selected_node_ids]
@@ -332,6 +335,9 @@ def rewrite_exported_subgraph(
         if runnable is None:
             runnable = build(parent_module)
             cache[parent_module] = runnable
-        return runnable(*args, **kwargs)
+        flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
+        flat_output = runnable(*flat_inputs)
+        leaves = list(flat_output) if isinstance(flat_output, tuple) else [flat_output]
+        return tree_unflatten(leaves, output_spec)
 
     return dispatch
