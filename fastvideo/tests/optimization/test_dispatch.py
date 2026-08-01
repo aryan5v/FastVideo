@@ -171,6 +171,22 @@ class _Transformer(nn.Module):
         return hidden
 
 
+class _ManagedTransformer(_Transformer):
+    """CPU fake whose parameter lifecycle is owned above its blocks."""
+
+    def __init__(self, width: int = WIDTH, depth: int = 2) -> None:
+        super().__init__(width=width, depth=depth)
+        self.unshard_calls = 0
+        self.reshard_calls = 0
+
+    def unshard(self, *, async_op: bool = False) -> None:
+        assert async_op is False
+        self.unshard_calls += 1
+
+    def reshard(self) -> None:
+        self.reshard_calls += 1
+
+
 def _pipeline_modules(block_cls=_Block) -> dict[str, nn.Module]:
     torch.manual_seed(0)
     return {"transformer": _Transformer(block_cls=block_cls).eval()}
@@ -590,6 +606,26 @@ def test_candidate_dispatch_runs_inside_managed_parameter_lifecycle(store, hidde
     session.detach()
     assert [block.unshard_calls for block in transformer.blocks] == [1, 2]
     assert [block.reshard_calls for block in transformer.blocks] == [1, 2]
+    assert _reasons(session) == [REASON_SELECTED]
+
+
+def test_candidate_dispatch_uses_nearest_managed_ancestor(store, hidden):
+    transformer = _ManagedTransformer().eval()
+    modules = {"transformer": transformer}
+    fingerprint, inputs, outputs = _observed_identity(
+        transformer.blocks[0], hidden
+    )
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        transformer(hidden)
+        transformer(hidden)
+
+    session.detach()
+    assert transformer.unshard_calls == 3
+    assert transformer.reshard_calls == 3
     assert _reasons(session) == [REASON_SELECTED]
 
 

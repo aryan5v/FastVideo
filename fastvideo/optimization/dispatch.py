@@ -115,6 +115,7 @@ class _Wrapper:
 
     scope: str
     module: nn.Module
+    parameter_manager: nn.Module
     native_forward: Callable[..., Any]
     had_own_forward: bool = False
 
@@ -164,6 +165,11 @@ class GraphDispatchSession:
         except Exception as exc:  # noqa: BLE001 - dispatch never breaks generation
             self._record_exception("target_selection_failed", exc)
             return 0
+        parents = {
+            id(child): parent
+            for parent in root.modules()
+            for child in parent.children()
+        }
         wrapped = 0
         for scope, module in targets:
             qualified = f"{prefix}.{scope}" if prefix else scope
@@ -171,19 +177,49 @@ class GraphDispatchSession:
                 self._dropped_scopes += 1
                 continue
             try:
-                self._install(qualified, module)
+                self._install(
+                    qualified,
+                    module,
+                    parameter_manager=self._parameter_manager(
+                        root, module, parents
+                    ),
+                )
                 self._scopes.add(qualified)
                 wrapped += 1
             except Exception as exc:  # noqa: BLE001
                 self._record_exception("install_failed", exc, scope=qualified)
         return wrapped
 
-    def _install(self, scope: str, module: nn.Module) -> None:
+    @staticmethod
+    def _parameter_manager(
+        root: nn.Module,
+        module: nn.Module,
+        parents: dict[int, nn.Module],
+    ) -> nn.Module:
+        current = module
+        while True:
+            if callable(getattr(current, "unshard", None)) and callable(
+                getattr(current, "reshard", None)
+            ):
+                return current
+            parent = parents.get(id(current))
+            if parent is None or parent is current:
+                return root
+            current = parent
+
+    def _install(
+        self,
+        scope: str,
+        module: nn.Module,
+        *,
+        parameter_manager: nn.Module,
+    ) -> None:
         """Replace ``module.forward`` with the dispatching wrapper."""
         native_forward = module.forward
         wrapper = _Wrapper(
             scope=scope,
             module=module,
+            parameter_manager=parameter_manager,
             native_forward=native_forward,
             had_own_forward="forward" in vars(module),
         )
@@ -232,7 +268,9 @@ class GraphDispatchSession:
         if decision.candidate is None:
             return native(*args, **kwargs)
         try:
-            with self._materialized_candidate_parameters(wrapper.module):
+            with self._materialized_candidate_parameters(
+                wrapper.parameter_manager
+            ):
                 result = decision.candidate(wrapper.module, *args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - untrusted candidate code
             # Demote permanently: a candidate that raised once is not trusted
