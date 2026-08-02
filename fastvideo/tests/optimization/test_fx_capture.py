@@ -547,8 +547,6 @@ def test_deferred_export_replays_observed_cuda_autocast_dtype():
         for record in session._scopes.values()
         for variant in record.variants.values()
     )
-
-
 @pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])
 def test_each_capture_mode_has_stable_metadata(mode):
     session = fx_capture.FXCaptureSession(tracer=mode)
