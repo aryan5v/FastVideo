@@ -1627,14 +1627,62 @@ def test_cuda_graph_runner_declines_non_tensor_inputs():
         runner([object()])
 
 
-def test_cuda_graph_scope_shares_one_buffer_set_across_blocks():
+def test_cuda_graph_scope_shares_one_buffer_per_position_across_blocks():
     """48 blocks x 27 placeholders of per-block buffers would add ~19GB."""
     from fastvideo.optimization.subgraph import _CudaGraphScope
 
     scope = _CudaGraphScope()
-    first = scope.prepare([torch.zeros(4, 8), torch.ones(3)])
-    second = scope.prepare([torch.zeros(4, 8), torch.ones(3)])
-    assert first is second, "every block reads the same static addresses"
+    first = scope.buffer_for(0, torch.zeros(4, 8))
+    second = scope.buffer_for(0, torch.zeros(4, 8))
+    assert first is second, "every block reads the same static address"
+    assert scope.buffer_for(1, torch.ones(3)) is not first
+
+
+def test_cuda_graph_scope_rejects_a_layout_change_between_blocks():
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    scope.buffer_for(0, torch.zeros(4, 8))
+    with pytest.raises(CudaGraphUnavailable, match="changed layout"):
+        scope.buffer_for(0, torch.zeros(4, 9))
+
+
+def test_a_pinned_input_that_moves_declines_rather_than_reading_stale_memory():
+    """The capture reads pinned inputs in place; a moved one must not replay.
+
+    Reading whatever now occupies that address would silently produce wrong
+    output, which is the one outcome this path must never have.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 1
+    runner._pinned = {0: 123456}
+    runner._moving = {}
+
+    with pytest.raises(CudaGraphUnavailable, match="moved after capture"):
+        runner([torch.zeros(2)])
+
+
+def test_warmup_records_input_addresses_for_the_stability_decision():
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    tensor = torch.zeros(4)
+    for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphUnavailable, match="warming up"):
+            runner([tensor])
+    assert len(runner._observed) == _CudaGraphRunner.WARMUP_ITERATIONS
+    assert all(seen == [tensor.data_ptr()] for seen in runner._observed)
 
 
 def test_dispatch_falls_back_to_eager_when_capture_is_unavailable(store, hidden):

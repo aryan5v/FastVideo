@@ -205,37 +205,45 @@ def _unflatten(flat_output: Any, output_spec: Any) -> Any:
 
 
 class _CudaGraphScope:
-    """Static input buffers and a memory pool shared by one scope's captures.
+    """Static buffers and a memory pool shared by one scope's captures.
 
     Every repeated block in a stack is called with the same input signature, so
-    one set of static input buffers serves all of them: each block's capture
-    records reads from the *same* addresses, and the dispatcher copies the live
-    inputs in once before replaying whichever block it is on.
+    one buffer serves all of them at a given position: each block's capture
+    records reads from the same address, and the dispatcher refreshes it once
+    before replaying whichever block it is on.
 
-    This matters for memory, not speed. ``transformer.model.transformer_blocks``
-    has 48 blocks and 27 placeholders, several of them large (a 1x4680x24576
-    bfloat16 timestep tensor is 230MB). Per-block buffers would add roughly
-    19GB against a 68GB baseline -- far past the workload's 5% peak-memory
-    allowance -- while the tensors are largely identical across blocks anyway.
-    Sharing a ``graph_pool_handle`` likewise stops each capture from reserving
-    its own pool for intermediates.
+    Buffers are allocated only for inputs that actually move. Most of a
+    diffusion block's boundary tensors -- timesteps, positional embeddings,
+    the text context -- are the *same tensor object* for all 48 blocks and all
+    8 steps of a generation, so the capture can read them where they already
+    live. On ``transformer.model.transformer_blocks`` the 27 placeholders total
+    roughly 565MB per call; copying only the ones that move avoids most of
+    that traffic, and avoids reserving the memory to copy into.
     """
 
     def __init__(self) -> None:
-        self.static_inputs: list[Any] | None = None
+        self.buffers: dict[int, Any] = {}
         self.pool: Any = None
 
-    def prepare(self, flat_inputs: list[Any]) -> list[Any]:
+    def ensure_pool(self) -> Any:
         import torch
 
-        if self.static_inputs is None:
-            self.static_inputs = [value.clone().detach() for value in flat_inputs]
-            # Only meaningful with a CUDA context; a pool handle is not
-            # obtainable otherwise and is not needed, because capture will
-            # decline first.
-            if torch.cuda.is_available():
-                self.pool = torch.cuda.graph_pool_handle()
-        return self.static_inputs
+        if self.pool is None and torch.cuda.is_available():
+            self.pool = torch.cuda.graph_pool_handle()
+        return self.pool
+
+    def buffer_for(self, index: int, template: Any) -> Any:
+        """A static buffer for one moving input position, shared across blocks."""
+        existing = self.buffers.get(index)
+        if existing is not None:
+            if existing.shape != template.shape or existing.dtype != template.dtype:
+                raise CudaGraphUnavailable(
+                    f"scope input {index} changed layout between blocks"
+                )
+            return existing
+        buffer = template.clone().detach()
+        self.buffers[index] = buffer
+        return buffer
 
 
 class CudaGraphUnavailable(RuntimeError):
@@ -274,10 +282,17 @@ class _CudaGraphRunner:
         self._runnable = runnable
         self._scope = scope
         self._graph: Any = None
-        self._static_inputs: list[Any] = []
         self._static_outputs: tuple[Any, ...] = ()
         self._output_was_tuple = True
         self._warmups = 0
+        self._arity = 0
+        #: Input addresses seen during warmup, used to decide which inputs are
+        #: stable enough to be read in place.
+        self._observed: list[list[int | None]] = []
+        #: index -> captured address, for inputs read where they live.
+        self._pinned: dict[int, int] = {}
+        #: index -> static buffer, for inputs that move between calls.
+        self._moving: dict[int, Any] = {}
 
     def _capture(self, flat_inputs: list[Any]) -> None:
         import torch
@@ -292,28 +307,41 @@ class _CudaGraphRunner:
         if not torch.cuda.is_available():
             raise CudaGraphUnavailable("CUDA is not available")
 
-        static_inputs = self._scope.prepare(flat_inputs)
-        if len(static_inputs) != len(flat_inputs):
-            raise CudaGraphUnavailable("scope input arity differs between blocks")
-        for index, (static, live) in enumerate(zip(static_inputs, flat_inputs, strict=True)):
-            if static.shape != live.shape or static.dtype != live.dtype:
-                raise CudaGraphUnavailable(
-                    f"runtime input {index} differs from the scope's captured layout"
-                )
-            static.copy_(live)
+        # An input whose address never moved across warmup can be read where it
+        # lives; one that moved needs a static buffer refreshed per call.
+        pointers = [value.data_ptr() for value in flat_inputs]
+        stable = [
+            all(observed[index] == pointers[index] for observed in self._observed)
+            for index in range(len(flat_inputs))
+        ]
+
+        capture_inputs: list[Any] = []
+        self._pinned = {}
+        self._moving = {}
+        for index, value in enumerate(flat_inputs):
+            if stable[index]:
+                capture_inputs.append(value)
+                self._pinned[index] = pointers[index]
+                continue
+            buffer = self._scope.buffer_for(index, value)
+            buffer.copy_(value)
+            capture_inputs.append(buffer)
+            self._moving[index] = buffer
+
+        pool = self._scope.ensure_pool()
+        if pool is None:
+            raise CudaGraphUnavailable("no CUDA graph memory pool")
 
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             for _ in range(self.WARMUP_ITERATIONS):
-                self._runnable(*static_inputs)
+                self._runnable(*capture_inputs)
         torch.cuda.current_stream().wait_stream(stream)
 
         graph = torch.cuda.CUDAGraph()
-        if self._scope.pool is None:
-            raise CudaGraphUnavailable("no CUDA graph memory pool")
-        with torch.cuda.graph(graph, pool=self._scope.pool):
-            outputs = self._runnable(*static_inputs)
+        with torch.cuda.graph(graph, pool=pool):
+            outputs = self._runnable(*capture_inputs)
 
         leaves = outputs if isinstance(outputs, tuple) else (outputs,)
         self._output_was_tuple = isinstance(outputs, tuple)
@@ -322,7 +350,7 @@ class _CudaGraphRunner:
                 raise CudaGraphUnavailable(
                     f"output {position} is {type(leaf).__name__}, not a tensor"
                 )
-        self._static_inputs = static_inputs
+        self._arity = len(flat_inputs)
         self._static_outputs = tuple(leaves)
         self._graph = graph
 
@@ -332,8 +360,14 @@ class _CudaGraphRunner:
         if self._graph is None:
             if self._warmups < self.WARMUP_ITERATIONS:
                 # Let the eager path settle first; capturing on the very first
-                # call would record one-time allocator and autotune work.
+                # call would record one-time allocator and autotune work. The
+                # addresses seen here are what decide which inputs need a
+                # static buffer.
                 self._warmups += 1
+                self._observed.append([
+                    value.data_ptr() if isinstance(value, torch.Tensor) else None
+                    for value in flat_inputs
+                ])
                 raise CudaGraphUnavailable("warming up")
             try:
                 self._capture(flat_inputs)
@@ -342,9 +376,8 @@ class _CudaGraphRunner:
             except Exception as exc:  # noqa: BLE001 - capture is best effort
                 # A failed capture must not escape as an arbitrary error: the
                 # caller would read it as a candidate runtime fault and demote
-                # the artifact for the rest of the run, when the kernel is
-                # fine and only the acceleration is unavailable. Drop any
-                # partial capture and let the eager replay proceed.
+                # the artifact for the rest of the run, when the kernel is fine
+                # and only the acceleration is unavailable.
                 self._graph = None
                 self._static_outputs = ()
                 try:
@@ -355,16 +388,26 @@ class _CudaGraphRunner:
                     f"capture failed: {type(exc).__name__}: {exc}"
                 ) from exc
 
-        if len(flat_inputs) != len(self._static_inputs):
+        if len(flat_inputs) != self._arity:
             raise CudaGraphUnavailable("runtime input count changed after capture")
-        for index, (static, live) in enumerate(
-            zip(self._static_inputs, flat_inputs, strict=True)
-        ):
+
+        for index, live in enumerate(flat_inputs):
             if not isinstance(live, torch.Tensor):
                 raise CudaGraphUnavailable(f"runtime input {index} is no longer a tensor")
-            if live.shape != static.shape or live.dtype != static.dtype:
+            pinned = self._pinned.get(index)
+            if pinned is not None:
+                # The capture reads this tensor where it lives. If it has moved,
+                # replaying would read whatever now occupies that address, so
+                # decline and let the eager replay answer instead.
+                if live.data_ptr() != pinned:
+                    raise CudaGraphUnavailable(
+                        f"runtime input {index} moved after capture"
+                    )
+                continue
+            buffer = self._moving[index]
+            if live.shape != buffer.shape or live.dtype != buffer.dtype:
                 raise CudaGraphUnavailable(f"runtime input {index} changed shape or dtype")
-            static.copy_(live)
+            buffer.copy_(live)
 
         self._graph.replay()
         # The static outputs are overwritten by the next replay, so hand the
