@@ -1525,3 +1525,139 @@ def test_dispatch_does_not_snapshot_parameters_on_the_success_path(store, hidden
     dispatched = sum(item["candidate_calls"] for item in _decisions(session))
     assert dispatched > 0, "the artifact must actually be running"
     assert counted["count"] == 0, "diagnostics belong on the failure path"
+
+
+# ---------------------------------------------------------------------------
+# Rewritten-graph execution cost
+#
+# Shadow timing on transformer.model.transformer_blocks measured the eager
+# replay at 11.57ms against the module's own forward at 8.18ms on identical
+# inputs. The op histogram showed 621 call_function nodes per call -- the graph
+# is decomposed, so the penalty is per-op dispatch, not arithmetic. That 3.39ms
+# swamped the artifact's 124us saving and is what fails gate 5.
+# ---------------------------------------------------------------------------
+
+
+def _assertion_graph(with_user: bool):
+    """A graph holding two export-style metadata assertions."""
+    import operator as _operator
+
+    from torch import fx
+
+    import fastvideo.optimization.subgraph as sg
+
+    def _assert_tensor_metadata(*args):  # stands in for the aten overload
+        return None
+
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    kept = graph.call_function(_operator.add, args=(x, 1))
+    first = graph.call_function(_assert_tensor_metadata, args=(x,))
+    graph.call_function(_assert_tensor_metadata, args=(kept,))
+    graph.output(graph.call_function(_operator.add, args=(first, 1)) if with_user else kept)
+    return graph, sg, str(_assert_tensor_metadata), _operator
+
+
+def test_export_runtime_assertions_are_stripped(monkeypatch):
+    """68 of the transformer graph's 621 ops per call were metadata assertions."""
+    graph, sg, target, _operator = _assertion_graph(with_user=False)
+    monkeypatch.setattr(sg, "_ASSERTION_TARGETS", frozenset({target}))
+
+    assert sg._strip_runtime_assertions(graph) == 2
+    remaining = [str(n.target) for n in graph.nodes if n.op == "call_function"]
+    assert remaining == [str(_operator.add)]
+
+
+def test_an_assertion_with_users_is_never_stripped(monkeypatch):
+    """Only dead assertions go; nothing the graph depends on is removed."""
+    graph, sg, target, _ = _assertion_graph(with_user=True)
+    monkeypatch.setattr(sg, "_ASSERTION_TARGETS", frozenset({target}))
+
+    # One assertion feeds the output and must survive; the other is dead.
+    assert sg._strip_runtime_assertions(graph) == 1
+
+
+def test_stripping_leaves_an_unrelated_graph_untouched():
+    from fastvideo.optimization.subgraph import _strip_runtime_assertions
+
+    graph, _, _, _ = _assertion_graph(with_user=False)
+    before = len([n for n in graph.nodes if n.op == "call_function"])
+    assert _strip_runtime_assertions(graph) == 0, "no aten assertions present"
+    assert len([n for n in graph.nodes if n.op == "call_function"]) == before
+
+
+def test_cuda_graph_runner_warms_up_before_capturing():
+    """Capturing the first call would record one-time allocator work."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphUnavailable, match="warming up"):
+            runner([torch.zeros(2)])
+
+
+def test_cuda_graph_runner_declines_non_cuda_inputs():
+    """It must decline rather than guess: declining only costs speed."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    with pytest.raises(CudaGraphUnavailable):
+        runner([torch.zeros(2)])
+
+
+def test_cuda_graph_runner_declines_non_tensor_inputs():
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    with pytest.raises(CudaGraphUnavailable, match="not a tensor"):
+        runner([object()])
+
+
+def test_cuda_graph_scope_shares_one_buffer_set_across_blocks():
+    """48 blocks x 27 placeholders of per-block buffers would add ~19GB."""
+    from fastvideo.optimization.subgraph import _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    first = scope.prepare([torch.zeros(4, 8), torch.ones(3)])
+    second = scope.prepare([torch.zeros(4, 8), torch.ones(3)])
+    assert first is second, "every block reads the same static addresses"
+
+
+def test_dispatch_falls_back_to_eager_when_capture_is_unavailable(store, hidden):
+    """On CPU there is no CUDA graph; the artifact must still run, eagerly.
+
+    The fake kernel returns a marker value, so a marker-filled result is proof
+    the candidate ran rather than the native forward.
+    """
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    from fastvideo.optimization.subgraph import _CudaGraphRunner
+
+    with torch.no_grad():
+        for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS + 3):
+            observed = transformer(hidden)
+
+    assert torch.equal(observed, torch.full_like(observed, MARKER))
+    decisions = _decisions(session)
+    assert sum(item["candidate_calls"] for item in decisions) > 0
+    assert sum(item["runtime_fallbacks"] for item in decisions) == 0
+    session.detach()
