@@ -335,7 +335,25 @@ class _CudaGraphRunner:
                 # call would record one-time allocator and autotune work.
                 self._warmups += 1
                 raise CudaGraphUnavailable("warming up")
-            self._capture(flat_inputs)
+            try:
+                self._capture(flat_inputs)
+            except CudaGraphUnavailable:
+                raise
+            except Exception as exc:  # noqa: BLE001 - capture is best effort
+                # A failed capture must not escape as an arbitrary error: the
+                # caller would read it as a candidate runtime fault and demote
+                # the artifact for the rest of the run, when the kernel is
+                # fine and only the acceleration is unavailable. Drop any
+                # partial capture and let the eager replay proceed.
+                self._graph = None
+                self._static_outputs = ()
+                try:
+                    torch.cuda.synchronize()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise CudaGraphUnavailable(
+                    f"capture failed: {type(exc).__name__}: {exc}"
+                ) from exc
 
         if len(flat_inputs) != len(self._static_inputs):
             raise CudaGraphUnavailable("runtime input count changed after capture")
