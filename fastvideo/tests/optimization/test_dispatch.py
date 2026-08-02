@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -1173,13 +1174,18 @@ def test_bundle_outside_the_trusted_root_is_never_loaded(store, tmp_path, hidden
 # -- runtime failure ----------------------------------------------------------
 
 
-def test_candidate_exception_falls_back_to_native_output(store, hidden):
+def test_candidate_exception_falls_back_to_native_output(store, hidden, monkeypatch):
     modules = _pipeline_modules()
     transformer = modules["transformer"]
     fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
     _write_bundle(store, _sections(fingerprint, inputs, outputs), kernel_source=RAISING_KERNEL)
     session = _session(store)
     session.attach_modules(modules)
+    monkeypatch.setattr(
+        GraphDispatchSession,
+        "_parameter_snapshot",
+        staticmethod(lambda _wrapper: (_ for _ in ()).throw(RuntimeError("diagnostics failed"))),
+    )
 
     with torch.no_grad():
         native = _pipeline_modules()["transformer"](hidden)
@@ -1388,3 +1394,607 @@ def test_load_entry_point_rejects_manifest_changed_since_validation(store, hidde
 
     with pytest.raises(ArtifactError, match="changed since validation"):
         load_entry_point(registry.manifests[0], trusted_root=store)
+
+
+# ---------------------------------------------------------------------------
+# Per-artifact isolation and hot-path cost
+#
+# Run ltx-v1-overnight-20260801-r4-sol dispatched four artifacts into
+# vae.decoder.up_blocks.6.res_blocks simultaneously, made 56 candidate calls
+# with zero runtime fallbacks, and regressed end-to-end from 3.2818s to
+# 3.9410s. Nothing in the evidence could say which artifact was responsible for
+# the parity change or the latency, because all four were enabled at once.
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_ids_admits_only_the_named_artifact(store, hidden):
+    """One artifact under test, same directory, no restaging."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    for index in range(3):
+        sections = _sections(fingerprint, inputs, outputs)
+        sections["artifact_id"] = f"mk-artifact-{index}"
+        _write_bundle(store, sections, name=f"bundle{index}")
+
+    everything = ArtifactRegistry(store)
+    assert len(everything.manifests) == 3
+    assert everything.enabled_ids == ()
+    assert everything.excluded_ids == ()
+
+    isolated = ArtifactRegistry(store, enabled_ids=["mk-artifact-1"])
+    assert [item.artifact_id for item in isolated.manifests] == ["mk-artifact-1"]
+    assert isolated.excluded_ids == ("mk-artifact-0", "mk-artifact-2")
+    assert isolated.errors == []
+
+
+def test_enabled_ids_appear_in_diagnostics(store, hidden):
+    """A trial's own report records what was under test and what was held back."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    for index in range(2):
+        sections = _sections(fingerprint, inputs, outputs)
+        sections["artifact_id"] = f"mk-artifact-{index}"
+        _write_bundle(store, sections, name=f"bundle{index}")
+
+    summary = ArtifactRegistry(store, enabled_ids=["mk-artifact-0"]).summary()
+    assert summary["artifact_ids"] == ["mk-artifact-0"]
+    assert summary["enabled_filter"] == ["mk-artifact-0"]
+    assert summary["excluded_ids"] == ["mk-artifact-1"]
+
+
+def test_requesting_an_absent_artifact_is_an_error_not_a_silent_empty_run(store, hidden):
+    """Otherwise a typo in a trial's ID reads as 'this artifact changes nothing'."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    sections = _sections(fingerprint, inputs, outputs)
+    sections["artifact_id"] = "mk-artifact-real"
+    _write_bundle(store, sections, name="bundle0")
+
+    registry = ArtifactRegistry(store, enabled_ids=["mk-artifact-typo"])
+    assert registry.manifests == []
+    assert any("mk-artifact-typo" in error for error in registry.errors)
+
+
+def test_enabled_ids_still_verify_every_bundle(store, hidden):
+    """Selection narrows what is used; it never skips integrity checks."""
+    modules = _pipeline_modules()
+    fingerprint, inputs, outputs = _observed_identity(modules["transformer"].blocks[0], hidden)
+    good = _sections(fingerprint, inputs, outputs)
+    good["artifact_id"] = "mk-good"
+    _write_bundle(store, good, name="good")
+
+    tampered = _sections(fingerprint, inputs, outputs)
+    tampered["artifact_id"] = "mk-tampered"
+    directory = _write_bundle(store, tampered, name="tampered")
+    (directory / "kernel.py").write_text("raise RuntimeError('altered')", encoding="utf-8")
+
+    registry = ArtifactRegistry(store, enabled_ids=["mk-good"])
+    assert [item.artifact_id for item in registry.manifests] == ["mk-good"]
+    assert registry.errors, "the altered bundle is still reported"
+
+
+def test_placeholder_contract_validation():
+    """The per-call path must not walk the graph to rediscover placeholders."""
+    import operator
+
+    from torch import fx
+
+    from fastvideo.optimization.subgraph import (
+        _placeholder_contract,
+        _validate_runtime_inputs,
+    )
+
+    graph = fx.Graph()
+    first = graph.placeholder("x")
+    first.meta["val"] = torch.zeros(2, 3)
+    second = graph.placeholder("y")
+    second.meta["val"] = torch.zeros(4)
+    for index in range(200):
+        graph.call_function(operator.add, args=(first, index))
+    graph.output(first)
+
+    contract = _placeholder_contract(graph)
+    assert contract == (("x", ((2, 3), "torch.float32")), ("y", ((4,), "torch.float32")))
+
+    _validate_runtime_inputs(contract, [torch.zeros(2, 3), torch.zeros(4)])
+
+    with pytest.raises(SubgraphRewriteError, match="metadata changed"):
+        _validate_runtime_inputs(contract, [torch.zeros(2, 5), torch.zeros(4)])
+    with pytest.raises(SubgraphRewriteError, match="input count differs"):
+        _validate_runtime_inputs(contract, [torch.zeros(2, 3)])
+
+
+def test_dispatch_does_not_snapshot_parameters_on_the_success_path(store, hidden, monkeypatch):
+    """Three FSDP-lifecycle snapshots per call were charged to every dispatch."""
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    counted = {"count": 0}
+    original = GraphDispatchSession._parameter_snapshot
+
+    def counting(wrapper):
+        counted["count"] += 1
+        return original(wrapper)
+
+    monkeypatch.setattr(
+        GraphDispatchSession, "_parameter_snapshot", staticmethod(counting)
+    )
+
+    with torch.no_grad():
+        for _ in range(5):
+            transformer(hidden)
+
+    dispatched = sum(item["candidate_calls"] for item in _decisions(session))
+    assert dispatched > 0, "the artifact must actually be running"
+    assert counted["count"] == 0, "diagnostics belong on the failure path"
+
+
+# ---------------------------------------------------------------------------
+# Rewritten-graph execution cost
+#
+# Shadow timing on transformer.model.transformer_blocks measured the eager
+# replay at 11.57ms against the module's own forward at 8.18ms on identical
+# inputs. The op histogram showed 621 call_function nodes per call -- the graph
+# is decomposed, so the penalty is per-op dispatch, not arithmetic. That 3.39ms
+# swamped the artifact's 124us saving and is what fails gate 5.
+# ---------------------------------------------------------------------------
+
+
+def _assertion_graph(with_user: bool):
+    """A graph holding two export-style metadata assertions."""
+    import operator as _operator
+
+    from torch import fx
+
+    import fastvideo.optimization.subgraph as sg
+
+    def _assert_tensor_metadata(*args):  # stands in for the aten overload
+        return None
+
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    kept = graph.call_function(_operator.add, args=(x, 1))
+    first = graph.call_function(_assert_tensor_metadata, args=(x,))
+    graph.call_function(_assert_tensor_metadata, args=(kept,))
+    graph.output(graph.call_function(_operator.add, args=(first, 1)) if with_user else kept)
+    return graph, sg, str(_assert_tensor_metadata), _operator
+
+
+def test_export_runtime_assertions_are_stripped(monkeypatch):
+    """68 of the transformer graph's 621 ops per call were metadata assertions."""
+    graph, sg, target, _operator = _assertion_graph(with_user=False)
+    assert "aten._assert_tensor_metadata.default" in sg._ASSERTION_TARGETS
+    monkeypatch.setattr(sg, "_ASSERTION_TARGETS", frozenset({target}))
+
+    assert sg._strip_runtime_assertions(graph) == 2
+    remaining = [str(n.target) for n in graph.nodes if n.op == "call_function"]
+    assert remaining == [str(_operator.add)]
+
+
+def test_an_assertion_with_users_is_never_stripped(monkeypatch):
+    """Only dead assertions go; nothing the graph depends on is removed."""
+    graph, sg, target, _ = _assertion_graph(with_user=True)
+    monkeypatch.setattr(sg, "_ASSERTION_TARGETS", frozenset({target}))
+
+    # One assertion feeds the output and must survive; the other is dead.
+    assert sg._strip_runtime_assertions(graph) == 1
+
+
+def test_stripping_leaves_an_unrelated_graph_untouched():
+    from fastvideo.optimization.subgraph import _strip_runtime_assertions
+
+    graph, _, _, _ = _assertion_graph(with_user=False)
+    before = len([n for n in graph.nodes if n.op == "call_function"])
+    assert _strip_runtime_assertions(graph) == 0, "no aten assertions present"
+    assert len([n for n in graph.nodes if n.op == "call_function"]) == before
+
+
+def test_cuda_graph_runner_warms_up_before_capturing():
+    """Capturing the first call would record one-time allocator work."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphUnavailable, match="warming up"):
+            runner([torch.zeros(2)])
+
+
+def test_cuda_graph_runner_declines_non_cuda_inputs():
+    """It must decline rather than guess: declining only costs speed."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    with pytest.raises(CudaGraphUnavailable):
+        runner([torch.zeros(2)])
+
+
+def test_cuda_graph_runner_accepts_non_tensor_leaves(monkeypatch):
+    """A Python scalar is a constant to bake in, not a reason to decline."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    runner._observed = [[None, None]] * _CudaGraphRunner.WARMUP_ITERATIONS
+
+    # On CPU capture still declines, but for the honest reason.
+    with pytest.raises(CudaGraphUnavailable) as raised:
+        runner([True, 3])
+    assert "not a tensor" not in str(raised.value)
+
+
+def test_cuda_graph_runner_declines_a_cpu_tensor():
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    runner._observed = [[0]] * _CudaGraphRunner.WARMUP_ITERATIONS
+    with pytest.raises(CudaGraphUnavailable):
+        runner([torch.zeros(2)])
+
+
+def test_cuda_graph_scope_shares_one_buffer_per_position_across_blocks():
+    """48 blocks x 27 placeholders of per-block buffers would add ~19GB."""
+    from fastvideo.optimization.subgraph import _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    first = scope.buffer_for(0, torch.zeros(4, 8))
+    second = scope.buffer_for(0, torch.zeros(4, 8))
+    assert first is second, "every block reads the same static address"
+    assert scope.buffer_for(1, torch.ones(3)) is not first
+
+
+def test_cuda_graph_scope_rejects_a_layout_change_between_blocks():
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    scope.buffer_for(0, torch.zeros(4, 8))
+    with pytest.raises(CudaGraphUnavailable, match="changed layout"):
+        scope.buffer_for(0, torch.zeros(4, 9))
+
+
+def test_cuda_graph_scope_rejects_a_stride_change_between_blocks():
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    contiguous = torch.zeros(4, 4)
+    transposed = contiguous.t()
+    assert contiguous.shape == transposed.shape
+    assert contiguous.stride() != transposed.stride()
+    scope.buffer_for(0, contiguous)
+    with pytest.raises(CudaGraphUnavailable, match="changed layout"):
+        scope.buffer_for(0, transposed)
+
+
+def test_a_pinned_input_that_moves_declines_rather_than_reading_stale_memory():
+    """The capture reads pinned inputs in place; a moved one must not replay.
+
+    Reading whatever now occupies that address would silently produce wrong
+    output, which is the one outcome this path must never have.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 1
+    runner._pinned = {0: (123456, (2,), (1,), "torch.float32", "cpu", 0)}
+    runner._moving = {}
+    runner._attributes = []
+
+    with pytest.raises(CudaGraphUnavailable, match="moved or changed layout"):
+        runner([torch.zeros(2)])
+
+
+def test_a_restrided_input_at_the_same_address_is_rejected():
+    """data_ptr alone cannot see a layout change, and the capture baked one in."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+        _layout_identity,
+    )
+
+    contiguous = torch.zeros(4, 4)
+    permuted = contiguous.t()
+    assert contiguous.data_ptr() == permuted.data_ptr()
+    assert contiguous.shape == permuted.shape
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 1
+    runner._pinned = {0: _layout_identity(contiguous)}
+    runner._moving = {}
+    runner._attributes = []
+
+    with pytest.raises(CudaGraphUnavailable, match="moved or changed layout"):
+        runner([permuted])
+
+
+def test_warmup_records_input_addresses_for_the_stability_decision():
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    tensor = torch.zeros(4)
+    for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphUnavailable, match="warming up"):
+            runner([tensor])
+    from fastvideo.optimization.subgraph import _layout_identity
+
+    assert len(runner._observed) == _CudaGraphRunner.WARMUP_ITERATIONS
+    assert all(seen == [_layout_identity(tensor)] for seen in runner._observed)
+
+
+def test_dispatch_falls_back_to_eager_when_capture_is_unavailable(store, hidden):
+    """On CPU there is no CUDA graph; the artifact must still run, eagerly.
+
+    The fake kernel returns a marker value, so a marker-filled result is proof
+    the candidate ran rather than the native forward.
+    """
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = _session(store)
+    session.attach_modules(modules)
+
+    from fastvideo.optimization.subgraph import _CudaGraphRunner
+
+    with torch.no_grad():
+        for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS + 3):
+            observed = transformer(hidden)
+
+    assert torch.equal(observed, torch.full_like(observed, MARKER))
+    decisions = _decisions(session)
+    assert sum(item["candidate_calls"] for item in decisions) > 0
+    assert sum(item["runtime_fallbacks"] for item in decisions) == 0
+    session.detach()
+
+
+def test_non_tensor_leaves_are_captured_as_constants():
+    """Export flattens Python scalars and flags through as graph inputs.
+
+    A bool among the transformer block's 27 placeholders was making every one
+    of its 48 captures decline, so the fast path never engaged at all.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+        _layout_identity,
+    )
+
+    tensor = torch.zeros(2)
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 2
+    runner._pinned = {0: _layout_identity(tensor)}
+    runner._moving = {}
+    runner._constants = {1: True}
+    runner._attributes = []
+    runner._static_outputs = (torch.zeros(1),)
+    runner._output_was_tuple = False
+
+    with pytest.raises(CudaGraphUnavailable, match="changed from the captured constant"):
+        runner([tensor, False])
+
+
+def test_a_matching_constant_does_not_block_replay(monkeypatch):
+    from fastvideo.optimization.subgraph import _CudaGraphRunner, _CudaGraphScope
+
+    events = []
+
+    class _FakeGraph:
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+            events.append("replay")
+
+    class _FakeStream:
+        def __init__(self, name):
+            self.name = name
+
+        def wait_stream(self, other):
+            events.append(f"{self.name}_wait_{other.name}")
+
+    from fastvideo.optimization.subgraph import _layout_identity
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    graph = _FakeGraph()
+    runner._graph = graph
+    current = _FakeStream("current")
+    capture = _FakeStream("capture")
+    runner._capture_stream = capture
+    runner._arity = 2
+    tensor = torch.zeros(2)
+    runner._pinned = {0: _layout_identity(tensor)}
+    runner._moving = {}
+    runner._constants = {1: True}
+    runner._attributes = []
+    runner._static_outputs = (torch.ones(3),)
+    runner._output_was_tuple = True
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: current)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: nullcontext())
+
+    result = runner([tensor, True])
+    assert graph.replays == 1
+    assert events == ["capture_wait_current", "replay", "current_wait_capture"]
+    assert torch.equal(result[0], torch.ones(3))
+    assert result[0] is not runner._static_outputs[0], "outputs must be copied out"
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_cuda_graph_replay_synchronizes_a_different_current_stream():
+    """Input writes and output clones remain ordered across CUDA streams."""
+    from torch import fx
+
+    from fastvideo.optimization.subgraph import (
+        CudaGraphWarmingUp,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    class _Double(nn.Module):
+        def forward(self, value):
+            return value * 2
+
+    runner = _CudaGraphRunner(fx.symbolic_trace(_Double()).cuda(), _CudaGraphScope())
+    value = torch.ones(32, device="cuda")
+    for _ in range(runner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphWarmingUp):
+            runner([value])
+    runner([value])  # capture and first verified replay
+
+    caller = torch.cuda.Stream()
+    with torch.cuda.stream(caller):
+        value.fill_(3)
+        observed = runner([value])
+    torch.cuda.current_stream().wait_stream(caller)
+    assert torch.equal(observed, torch.full_like(observed, 6))
+
+
+def test_a_moved_parameter_stops_the_replay():
+    """FSDP2's reshard frees the storage a capture baked pointers into.
+
+    The capture records every parameter and buffer the graph reads through
+    get_attr. Those are not inputs, so the input checks do not cover them.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+        _layout_identity,
+    )
+
+    class _Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4))
+
+    holder = _Holder()
+    runner = _CudaGraphRunner(runnable=holder, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 0
+    runner._pinned = {}
+    runner._moving = {}
+    runner._constants = {}
+    runner._attributes = [("weight", _layout_identity(holder.weight))]
+
+    # Same values, different storage: exactly what an unshard/reshard cycle does.
+    holder.weight = nn.Parameter(torch.zeros(4))
+
+    with pytest.raises(CudaGraphUnavailable, match="moved after capture"):
+        runner([])
+
+
+def test_a_mutable_output_is_refused_rather_than_aliased():
+    """A list output would hand back the graph's own static buffers."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _classify_output_leaves,
+    )
+
+    with pytest.raises(CudaGraphUnavailable, match="mutable list"):
+        _classify_output_leaves(([torch.zeros(2)],))
+
+
+def test_warming_up_is_a_distinct_type_not_a_message():
+    """Control flow hinged on an exact string; a reworded message would have
+    turned every warmup call into a permanent disable."""
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, CudaGraphWarmingUp
+
+    assert issubclass(CudaGraphWarmingUp, CudaGraphUnavailable)
+    assert not isinstance(CudaGraphUnavailable("nope"), CudaGraphWarmingUp)
+
+
+@pytest.fixture
+def isolated_timing_state():
+    from fastvideo.optimization import timing
+
+    timing.reset()
+    yield timing
+    timing.reset()
+
+
+def test_timing_state_can_be_reset_between_sessions(monkeypatch, isolated_timing_state):
+    """Process-global counters would otherwise mix two sessions' measurements."""
+    timing = isolated_timing_state
+
+    monkeypatch.setattr(timing, "ENABLED", True)
+    timing.reset()
+    timing.record("phase.a", 0.5)
+    timing.note("something")
+    assert timing.snapshot()["phases"]["phase.a"]["calls"] == 1
+    assert timing.snapshot()["notes"] == {"something": 1}
+
+    timing.reset()
+    assert timing.snapshot()["phases"] == {}
+    assert timing.snapshot()["notes"] == {}
+
+
+def test_timing_notes_are_bounded(monkeypatch, isolated_timing_state):
+    timing = isolated_timing_state
+    monkeypatch.setattr(timing, "_MAX_DISTINCT_NOTES", 2)
+    timing.note("first")
+    timing.note("second")
+    timing.note("third")
+    timing.note("fourth")
+    assert timing.snapshot()["notes"] == {
+        "first": 1,
+        "second": 1,
+        "other_notes_omitted": 2,
+    }
+    timing.reset()
+
+
+def test_a_refused_capture_releases_its_pool():
+    """The pool must not outlive a rejected capture via refcounting alone."""
+    from fastvideo.optimization.subgraph import _CudaGraphRunner, _CudaGraphScope
+
+    class _FakeGraph:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    pending = _FakeGraph()
+    runner._pending_graph = pending
+    runner._release_capture()
+
+    assert pending.reset_calls == 1
+    assert runner._graph is None
+    assert runner._pending_graph is None
+    assert runner._static_outputs == ()
+    assert runner._attributes == []

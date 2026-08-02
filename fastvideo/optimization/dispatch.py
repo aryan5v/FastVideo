@@ -48,6 +48,7 @@ from torch import nn
 from fastvideo import envs
 from fastvideo.hooks.hooks import ModuleHookManager
 from fastvideo.logger import init_logger
+from fastvideo.optimization import timing
 from fastvideo.optimization.artifact import (
     ArtifactManifest,
     ArtifactRegistry,
@@ -250,8 +251,9 @@ class GraphDispatchSession:
     def _dispatch(self, wrapper: _Wrapper, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         native = wrapper.native_forward
         try:
-            input_metas = input_signatures(args, kwargs)
-            shape_key = shape_key_for(input_metas)
+            with timing.phase("dispatch.shape_key"):
+                input_metas = input_signatures(args, kwargs)
+                shape_key = shape_key_for(input_metas)
         except Exception as exc:  # noqa: BLE001
             self._record_exception("shape_key_failed", exc, scope=wrapper.scope)
             return native(*args, **kwargs)
@@ -261,19 +263,17 @@ class GraphDispatchSession:
         if decision is None:
             # First call for this signature: run native, learn the output
             # layout, then decide once for every later call.
-            output = native(*args, **kwargs)
+            with timing.phase("dispatch.native_reference"):
+                output = native(*args, **kwargs)
             self._decisions[key] = self._decide(wrapper, args, kwargs, output, input_metas)
             return output
 
         decision.calls += 1
         if decision.candidate is None:
-            return native(*args, **kwargs)
-        materialization = {
-            "before": self._parameter_snapshot(wrapper),
-        }
+            with timing.phase("dispatch.native_fallback"):
+                return native(*args, **kwargs)
 
         def candidate_forward(*candidate_args: Any, **candidate_kwargs: Any) -> Any:
-            materialization["candidate"] = self._parameter_snapshot(wrapper)
             assert decision.candidate is not None
             return decision.candidate(
                 wrapper.module,
@@ -281,11 +281,17 @@ class GraphDispatchSession:
                 **candidate_kwargs,
             )
 
+        if timing.SHADOW:
+            # Same module, same live tensors, same stream: the only honest
+            # comparison for "is the artifact path cheaper than what it
+            # replaced". The result is discarded.
+            with timing.phase("shadow.native_forward"):
+                native(*args, **kwargs)
+
         try:
-            with self._materialized_candidate_parameters(
+            with timing.phase("dispatch.candidate_total"), self._materialized_candidate_parameters(
                 wrapper.parameter_manager
             ):
-                materialization["inside"] = self._parameter_snapshot(wrapper)
                 hook_manager = ModuleHookManager.get_from(wrapper.module)
                 if hook_manager is None:
                     result = candidate_forward(*args, **kwargs)
@@ -301,12 +307,20 @@ class GraphDispatchSession:
             decision.runtime_fallbacks += 1
             decision.candidate = None
             decision.reason = f"{_REASON_RUNTIME_PREFIX}:{type(exc).__name__}"
+            # The FSDP-lifecycle snapshot is built here, on the failure path,
+            # rather than three times per successful call. It exists to
+            # diagnose parameter materialization; a run that never fails never
+            # needs it, and paying for it on every dispatch charged the
+            # candidate's measured saving for diagnostics it did not use.
             logger.warning(
                 "Artifact %s failed at runtime for %s; falling back to native "
                 "execution for the rest of this run; materialization=%s",
                 decision.artifact_id,
                 wrapper.scope,
-                json.dumps(materialization, sort_keys=True),
+                json.dumps(
+                    {"at_failure": self._safe_parameter_snapshot(wrapper)},
+                    sort_keys=True,
+                ),
                 exc_info=True,
             )
             return native(*args, **kwargs)
@@ -336,6 +350,14 @@ class GraphDispatchSession:
             ],
             "module_type": type(wrapper.module).__name__,
         }
+
+    @staticmethod
+    def _safe_parameter_snapshot(wrapper: _Wrapper) -> dict[str, Any]:
+        """Never let best-effort failure diagnostics suppress native fallback."""
+        try:
+            return GraphDispatchSession._parameter_snapshot(wrapper)
+        except Exception as exc:  # noqa: BLE001 - diagnostics are never authoritative
+            return {"snapshot_error": type(exc).__name__}
 
     @contextmanager
     def _materialized_candidate_parameters(self, module: nn.Module):
@@ -613,9 +635,22 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
     configured = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR
     if not configured:
         return None
+    timing.reset()
     try:
         root = Path(configured).expanduser()
-        registry = ArtifactRegistry(root)
+        enabled_ids = tuple(
+            part.strip()
+            for part in envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE.split(",")
+            if part.strip()
+        )
+        registry = ArtifactRegistry(root, enabled_ids=enabled_ids or None)
+        if enabled_ids:
+            logger.info(
+                "Artifact selection restricted to %s (%d of %d bundles admitted)",
+                ", ".join(enabled_ids),
+                len(registry.manifests),
+                len(registry.manifests) + len(registry.excluded_ids),
+            )
         for error in registry.errors:
             logger.warning("Skipping artifact bundle: %s", error)
         if not registry.enabled:
@@ -656,4 +691,9 @@ def detach_graph_dispatch(session: GraphDispatchSession | None) -> None:
         logger.warning("Graph dispatch detach failed", exc_info=True)
     output = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS
     if output:
-        session.write_diagnostics(output)
+        diagnostics_path = Path(str(output))
+        session.write_diagnostics(diagnostics_path)
+        try:
+            timing.write_report(diagnostics_path.with_name("timing.json"))
+        except Exception:  # noqa: BLE001 - diagnostics must never break teardown
+            logger.warning("Could not resolve timing diagnostics path", exc_info=True)
