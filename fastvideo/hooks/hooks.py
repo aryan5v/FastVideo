@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
+from collections.abc import Callable
 from typing import Any
 from torch import nn
 
@@ -60,16 +61,29 @@ class ModuleHookManager:
 
             def forward_hook_wrapper(mod: nn.Module, *args, **kwargs):
                 manager: ModuleHookManager = getattr(mod, cls.module_hook_attribute)
-                for hook in manager.forward_hooks.values():
-                    args, kwargs = hook.pre_forward(mod, *args, **kwargs)
-                output = manager.original_forward(*args, **kwargs)
-                for hook in reversed(manager.forward_hooks.values()):
-                    output = hook.post_forward(mod, output)
-                return output
+                return manager.run_with_forward(
+                    manager.original_forward,
+                    *args,
+                    **kwargs,
+                )
 
             module.forward = functools.partial(forward_hook_wrapper, module)
 
         return getattr(module, cls.module_hook_attribute)
+
+    def run_with_forward(
+        self,
+        forward: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run ``forward`` through this module's installed hook lifecycle."""
+        for hook in self.forward_hooks.values():
+            args, kwargs = hook.pre_forward(self.module, *args, **kwargs)
+        output = forward(*args, **kwargs)
+        for hook in reversed(self.forward_hooks.values()):
+            output = hook.post_forward(self.module, output)
+        return output
 
     @staticmethod
     def remove_from_manager(module: nn.Module) -> None:

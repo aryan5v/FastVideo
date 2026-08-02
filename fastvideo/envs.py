@@ -36,6 +36,28 @@ if TYPE_CHECKING:
     FASTVIDEO_TORCH_PROFILER_WARMUP_STEPS: int = 1
     FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS: int = 2
     FASTVIDEO_TORCH_PROFILE_REGIONS: str = ""
+    FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT: str = ""
+    FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS: int = 0
+    FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID: str = "unknown-workload"
+    FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID: str = "unknown-model"
+    FASTVIDEO_OPTIMIZATION_PROFILE_TASK: str = "video_generation"
+    FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX: bool = False
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER: str = "auto"
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES: int = 64
+    FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES: int = 8
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER: str = "symbolic"
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES: int = 64
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES: int = 8
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION: str = "*"
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION: bool = False
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS: bool = True
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING: str = ""
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -267,6 +289,90 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS", "2")),
     "FASTVIDEO_TORCH_PROFILE_REGIONS":
     lambda: os.getenv("FASTVIDEO_TORCH_PROFILE_REGIONS", ""),
+
+    # Metadata-only optimization discovery profile written inside the GPU
+    # worker. The launcher selects one post-warmup pipeline call.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT", ""),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS", "0")),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID", "unknown-workload"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID", "unknown-model"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_TASK":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_TASK", "video_generation"),
+
+    # Metadata-only FX graph capture layered on the optimization profile. It
+    # only runs when the optimization profile above is also requested, so a
+    # clean timing run is never affected.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX":
+    lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_CAPTURE_FX", "0") != "0"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_TRACER", "auto"),
+    # Upper bound on hooked block stacks, so a pathological model cannot make
+    # the export unbounded.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SCOPES", "64")),
+    # Upper bound on distinct input signatures recorded per stack.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_FX_MAX_SHAPES", "8")),
+
+    # Trusted directory holding packaged optimization artifacts. Executable
+    # candidate code is loaded only from here, and only after every declared
+    # file matches the hash recorded in its manifest. Leaving this unset
+    # disables graph dispatch entirely: no forward is wrapped and generation
+    # behaves exactly as it does without the feature.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR", ""),
+    # Tracer used to recompute a module's graph fingerprint at dispatch time.
+    # ``symbolic`` is the default because, unlike ``export`` and ``dynamo``, it
+    # does not re-execute the module with real inputs.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TRACER", "symbolic"),
+    # Upper bound on dispatched block stacks.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SCOPES", "64")),
+    # Upper bound on distinct input signatures resolved per stack.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MAX_SHAPES", "8")),
+    # Model identity matched against each artifact's declared compatibility.
+    # Falls back to the optimization profile's model id when unset.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_ID", ""),
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_MODEL_REVISION", "*"),
+    # Sharding mode declared to the matcher. Empty means auto-detect, which
+    # only resolves a single-rank run; a multi-rank run must declare its mode
+    # explicitly or no artifact is selected.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE", ""),
+    # Optional path for the structured dispatch/fallback report.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS", ""),
+    # Explicit A/B-validation mode. This admits a quarantined bundle only when
+    # its isolated benchmark passed; production dispatch still requires full
+    # generation evidence and a promoted decision.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION":
+    lambda: bool(os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION", "0") != "0"),
+    # Comma-separated allowlist of artifact IDs to admit from the directory.
+    # Empty means every verified bundle. This exists so a campaign can A/B one
+    # artifact at a time against the same directory, without staging a separate
+    # tree per trial: attributing a parity change or a latency regression to a
+    # specific artifact otherwise requires bisecting the whole set.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE", ""),
+    # Replay rewritten subgraphs through CUDA graphs. Set to 0/false to force
+    # eager graph execution while retaining artifact dispatch.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS", "1") not in {"0", "false", "False", ""},
+    # Optional metadata-only operation histogram for a rewritten graph.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH", ""),
+    # Per-phase dispatch timing: 1 (host), sync (device), or shadow (diagnostic
+    # native replay plus synchronized candidate timing).
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING", ""),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":
