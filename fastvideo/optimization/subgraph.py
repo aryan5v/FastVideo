@@ -205,14 +205,15 @@ def _unflatten(flat_output: Any, output_spec: Any) -> Any:
 
 
 class _CudaGraphScope:
-    """Static buffers and a memory pool shared by one scope's captures.
+    """Static input buffers shared by one scope's captures.
 
     Every repeated block in a stack is called with the same input signature, so
     one buffer serves all of them at a given position: each block's capture
     records reads from the same address, and the dispatcher refreshes it once
     before replaying whichever block it is on.
 
-    Buffers are allocated only for inputs that actually move. Most of a
+    Memory pools are deliberately *not* shared: see the capture site. Buffers
+    are allocated only for inputs that actually move. Most of a
     diffusion block's boundary tensors -- timesteps, positional embeddings,
     the text context -- are the *same tensor object* for all 48 blocks and all
     8 steps of a generation, so the capture can read them where they already
@@ -223,14 +224,6 @@ class _CudaGraphScope:
 
     def __init__(self) -> None:
         self.buffers: dict[int, Any] = {}
-        self.pool: Any = None
-
-    def ensure_pool(self) -> Any:
-        import torch
-
-        if self.pool is None and torch.cuda.is_available():
-            self.pool = torch.cuda.graph_pool_handle()
-        return self.pool
 
     def buffer_for(self, index: int, template: Any) -> Any:
         """A static buffer for one moving input position, shared across blocks."""
@@ -295,6 +288,8 @@ class _CudaGraphRunner:
         self._moving: dict[int, Any] = {}
         #: index -> value, for non-tensor leaves baked into the capture.
         self._constants: dict[int, Any] = {}
+        #: position -> value, for non-tensor outputs the graph reproduces.
+        self._output_constants: dict[int, Any] = {}
 
     def _capture(self, flat_inputs: list[Any]) -> None:
         import torch
@@ -338,10 +333,6 @@ class _CudaGraphRunner:
             capture_inputs.append(buffer)
             self._moving[index] = buffer
 
-        pool = self._scope.ensure_pool()
-        if pool is None:
-            raise CudaGraphUnavailable("no CUDA graph memory pool")
-
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -349,17 +340,23 @@ class _CudaGraphRunner:
                 self._runnable(*capture_inputs)
         torch.cuda.current_stream().wait_stream(stream)
 
+        # Each capture gets its own memory pool. Sharing one across a stack's
+        # blocks trips the caching allocator's `use_count > 0` assert: every
+        # graph keeps its output buffers alive for the life of the run, so the
+        # pool is never free of live allocations when the next capture starts.
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, pool=pool):
+        with torch.cuda.graph(graph):
             outputs = self._runnable(*capture_inputs)
 
         leaves = outputs if isinstance(outputs, tuple) else (outputs,)
         self._output_was_tuple = isinstance(outputs, tuple)
-        for position, leaf in enumerate(leaves):
-            if not isinstance(leaf, torch.Tensor):
-                raise CudaGraphUnavailable(
-                    f"output {position} is {type(leaf).__name__}, not a tensor"
-                )
+        # A non-tensor output is a constant the graph reproduces identically on
+        # every replay, so it is returned as captured rather than copied out.
+        self._output_constants = {
+            position: leaf
+            for position, leaf in enumerate(leaves)
+            if not isinstance(leaf, torch.Tensor)
+        }
         self._arity = len(flat_inputs)
         self._static_outputs = tuple(leaves)
         self._graph = graph
@@ -430,9 +427,12 @@ class _CudaGraphRunner:
             buffer.copy_(live)
 
         self._graph.replay()
-        # The static outputs are overwritten by the next replay, so hand the
-        # caller its own copies.
-        copies = tuple(leaf.clone() for leaf in self._static_outputs)
+        # The static tensor outputs are overwritten by the next replay, so hand
+        # the caller its own copies; constants are returned as captured.
+        copies = tuple(
+            leaf if position in self._output_constants else leaf.clone()
+            for position, leaf in enumerate(self._static_outputs)
+        )
         return copies if self._output_was_tuple else copies[0]
 
 
