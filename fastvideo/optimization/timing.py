@@ -26,7 +26,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-__all__ = ["ENABLED", "SHADOW", "SYNCHRONIZE", "note", "phase", "record", "snapshot", "write_report"]
+__all__ = [
+    "ENABLED",
+    "SHADOW",
+    "SYNCHRONIZE",
+    "note",
+    "phase",
+    "record",
+    "reset",
+    "snapshot",
+    "write_report",
+]
 
 _SETTING = os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING", "")
 ENABLED = bool(_SETTING)
@@ -103,6 +113,19 @@ def record(name: str, seconds: float) -> None:
         return
     _totals[name] += seconds
     _counts[name] += 1
+
+
+def reset() -> None:
+    """Clear all accumulated timing state.
+
+    The counters are process-global, so two dispatch sessions in one process --
+    serving two models in sequence, say -- would otherwise contribute to the
+    same totals and produce a report attributable to neither. Call this when
+    starting a session whose measurements must stand alone.
+    """
+    _totals.clear()
+    _counts.clear()
+    _notes.clear()
 
 
 def snapshot() -> dict[str, Any]:

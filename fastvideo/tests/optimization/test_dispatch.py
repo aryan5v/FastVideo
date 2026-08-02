@@ -1889,3 +1889,42 @@ def test_warming_up_is_a_distinct_type_not_a_message():
 
     assert issubclass(CudaGraphWarmingUp, CudaGraphUnavailable)
     assert not isinstance(CudaGraphUnavailable("nope"), CudaGraphWarmingUp)
+
+
+def test_timing_state_can_be_reset_between_sessions(monkeypatch):
+    """Process-global counters would otherwise mix two sessions' measurements."""
+    from fastvideo.optimization import timing
+
+    monkeypatch.setattr(timing, "ENABLED", True)
+    timing.reset()
+    timing.record("phase.a", 0.5)
+    timing.note("something")
+    assert timing.snapshot()["phases"]["phase.a"]["calls"] == 1
+    assert timing.snapshot()["notes"] == {"something": 1}
+
+    timing.reset()
+    assert timing.snapshot()["phases"] == {}
+    assert timing.snapshot()["notes"] == {}
+
+
+def test_a_refused_capture_releases_its_pool():
+    """The pool must not outlive a rejected capture via refcounting alone."""
+    from fastvideo.optimization.subgraph import _CudaGraphRunner, _CudaGraphScope
+
+    class _FakeGraph:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    pending = _FakeGraph()
+    runner._pending_graph = pending
+    runner._release_capture()
+
+    assert pending.reset_calls == 1
+    assert runner._graph is None
+    assert runner._pending_graph is None
+    assert runner._static_outputs == ()
+    assert runner._attributes == []

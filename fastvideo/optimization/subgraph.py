@@ -320,6 +320,8 @@ class _CudaGraphRunner:
         self._output_constants: dict[int, Any] = {}
         #: (target, layout) for every parameter/buffer the capture baked in.
         self._attributes: list[tuple[str, tuple[Any, ...]]] = []
+        #: A capture taken but not yet verified, so cleanup can release it.
+        self._pending_graph: Any = None
 
     def _capture(self, flat_inputs: list[Any]) -> None:
         import torch
@@ -375,6 +377,7 @@ class _CudaGraphRunner:
         # graph keeps its output buffers alive for the life of the run, so the
         # pool is never free of live allocations when the next capture starts.
         graph = torch.cuda.CUDAGraph()
+        self._pending_graph = graph
         with torch.cuda.graph(graph):
             outputs = self._runnable(*capture_inputs)
 
@@ -419,7 +422,6 @@ class _CudaGraphRunner:
 
         self._arity = len(flat_inputs)
         self._static_outputs = tuple(leaves)
-        self._graph = graph
 
         # Everything above argues the capture must be bitwise identical to the
         # eager replay. This checks it. The graph contains one node that export
@@ -450,6 +452,24 @@ class _CudaGraphRunner:
                     "eager replay; refusing to use the capture"
                 )
 
+        # Published only once verified. Until this assignment the runner has no
+        # graph to replay, so a rejected capture can never be used.
+        self._graph = graph
+        self._pending_graph = None
+
+    def _release_capture(self) -> None:
+        """Drop a capture and free the private memory pool it reserved."""
+        aborted, self._graph = self._graph, None
+        self._static_outputs = ()
+        self._attributes = []
+        self._pending_graph, pending = None, getattr(self, "_pending_graph", None)
+        for candidate in (aborted, pending):
+            try:
+                if candidate is not None:
+                    candidate.reset()
+            except Exception:  # noqa: BLE001 - cleanup must never raise
+                pass
+
     def __call__(self, flat_inputs: list[Any]) -> Any:
         import torch
 
@@ -468,22 +488,18 @@ class _CudaGraphRunner:
             try:
                 self._capture(flat_inputs)
             except CudaGraphUnavailable:
+                # A refused capture releases its private pool here, the same as
+                # the unexpected-error path below. Relying on the caller
+                # dropping the runner would leave the two paths asymmetric and
+                # the pool's lifetime dependent on refcounting.
+                self._release_capture()
                 raise
             except Exception as exc:  # noqa: BLE001 - capture is best effort
                 # A failed capture must not escape as an arbitrary error: the
                 # caller would read it as a candidate runtime fault and demote
                 # the artifact for the rest of the run, when the kernel is fine
                 # and only the acceleration is unavailable.
-                aborted, self._graph = self._graph, None
-                self._static_outputs = ()
-                self._attributes = []
-                # Release the private pool an aborted capture would otherwise
-                # pin for the life of the run.
-                try:
-                    if aborted is not None:
-                        aborted.reset()
-                except Exception:  # noqa: BLE001
-                    pass
+                self._release_capture()
                 try:
                     torch.cuda.synchronize()
                 except Exception:  # noqa: BLE001
@@ -936,15 +952,14 @@ def rewrite_exported_subgraph(
                     # This graph cannot be captured. The eager replay below is
                     # the authority; a capture is only ever an accelerator for
                     # it, never a different answer.
-                    if True:
-                        timing.note(f"cuda_graph_declined: {reason}")
-                        logger.warning(
-                            "CUDA graph replay unavailable for %s (%s); "
-                            "continuing with eager replay",
-                            manifest.artifact_id,
-                            reason,
-                        )
-                        entry.cuda_graph = None
+                    timing.note(f"cuda_graph_declined: {reason}")
+                    logger.warning(
+                        "CUDA graph replay unavailable for %s (%s); "
+                        "continuing with eager replay",
+                        manifest.artifact_id,
+                        reason,
+                    )
+                    entry.cuda_graph = None
             with timing.phase("subgraph.execute"):
                 flat_output = runnable(*flat_inputs)
         except RuntimeError as exc:
