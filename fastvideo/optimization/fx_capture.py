@@ -729,6 +729,16 @@ def _ir_target(node: Any) -> str:
     text = str(target)
     if text.startswith("aten."):
         return text
+    op_key = _op_key(target)
+    if op_key.startswith("aten::"):
+        # Some torch higher-order operators have no OpOverload schema, but
+        # _extract_graph still assigns them a stable aten-style identity. Keep
+        # the IR and operation list aligned so a fail-closed consumer can skip
+        # the opaque node and carve independent tensor runs around it. These
+        # synthetic targets remain non-executable unless explicitly added to
+        # MotionKernel's exact-overload allowlist.
+        operation = op_key.split("::", 1)[1]
+        return f"aten.{_safe_op_component(operation)}.default"
     # The type category is enough for a fail-closed consumer; never serialize
     # repr/source text for unknown callables.
     return f"unsupported::{_safe_name(type(target).__name__)}"

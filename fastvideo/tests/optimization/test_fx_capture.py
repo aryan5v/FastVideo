@@ -1195,6 +1195,19 @@ def test_op_overload_identity_uses_schema_not_distribution_specific_string():
     )
 
 
+def test_schema_less_torch_target_keeps_operation_identity_in_ir():
+    def wrap_with_autocast(*_args):
+        raise AssertionError("metadata-only test must not execute the target")
+
+    wrap_with_autocast.__module__ = "torch._higher_order_ops.wrap"
+    node = type(
+        "Node", (), {"op": "call_function", "target": wrap_with_autocast}
+    )()
+
+    assert fx_capture._op_key(wrap_with_autocast) == "aten::wrap_with_autocast"
+    assert fx_capture._ir_target(node) == "aten.wrap_with_autocast.default"
+
+
 def test_assert_metadata_only_rejects_tensors_and_forbidden_keys():
     import pytest
 
