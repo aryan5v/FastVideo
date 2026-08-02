@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-__all__ = ["ENABLED", "SHADOW", "SYNCHRONIZE", "phase", "record", "snapshot", "write_report"]
+__all__ = ["ENABLED", "SHADOW", "SYNCHRONIZE", "note", "phase", "record", "snapshot", "write_report"]
 
 _SETTING = os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING", "")
 ENABLED = bool(_SETTING)
@@ -39,6 +39,11 @@ SHADOW = _SETTING.lower() == "shadow"
 
 _totals: dict[str, float] = defaultdict(float)
 _counts: dict[str, int] = defaultdict(int)
+#: Free-form structured notes, e.g. why an acceleration path declined. Recorded
+#: here rather than only logged so the reason survives whatever the host's log
+#: level happens to be -- a silently declined fast path looks identical to one
+#: that was never attempted.
+_notes: dict[str, int] = defaultdict(int)
 
 
 class _NoOp:
@@ -87,6 +92,11 @@ def phase(name: str):
     return _timed(name)
 
 
+def note(message: str) -> None:
+    """Count one structured observation. Always on, so it survives log config."""
+    _notes[str(message)[:200]] += 1
+
+
 def record(name: str, seconds: float) -> None:
     """Add an externally measured duration to a named phase."""
     if not ENABLED:
@@ -111,6 +121,7 @@ def snapshot() -> dict[str, Any]:
         "phases": dict(
             sorted(phases.items(), key=lambda item: -item[1]["total_seconds"])
         ),
+        "notes": dict(sorted(_notes.items(), key=lambda item: -item[1])),
     }
 
 

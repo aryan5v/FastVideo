@@ -805,13 +805,16 @@ def rewrite_exported_subgraph(
                     # eager replay below is the authority; a capture is only
                     # ever an accelerator for it, never a different answer.
                     if str(reason) != "warming up":
-                        logger.info(
+                        timing.note(f"cuda_graph_declined: {reason}")
+                        logger.warning(
                             "CUDA graph replay unavailable for %s (%s); "
                             "continuing with eager replay",
                             manifest.artifact_id,
                             reason,
                         )
                         entry.cuda_graph = None
+                    else:
+                        timing.note("cuda_graph_warmup")
             with timing.phase("subgraph.execute"):
                 flat_output = runnable(*flat_inputs)
         except RuntimeError as exc:
