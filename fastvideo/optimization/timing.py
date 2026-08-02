@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from fastvideo import envs
 
 __all__ = [
     "ENABLED",
@@ -38,7 +41,7 @@ __all__ = [
     "write_report",
 ]
 
-_SETTING = os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING", "")
+_SETTING = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING
 ENABLED = bool(_SETTING)
 SYNCHRONIZE = _SETTING.lower() in {"sync", "cuda", "device", "shadow"}
 #: Also run the native forward on every dispatched call and time it, so the
@@ -46,6 +49,10 @@ SYNCHRONIZE = _SETTING.lower() in {"sync", "cuda", "device", "shadow"}
 #: inputs. Diagnostic only: it roughly doubles the region's cost and the
 #: native result is discarded.
 SHADOW = _SETTING.lower() == "shadow"
+# Shadow mode performs an extra native forward per dispatched call. A stateful
+# forward that consumes RNG, updates a cache, or mutates module state can
+# therefore change generation results even though the shadow output is
+# discarded. Never enable it during parity or generation-result comparisons.
 
 _totals: dict[str, float] = defaultdict(float)
 _counts: dict[str, int] = defaultdict(int)
@@ -54,6 +61,8 @@ _counts: dict[str, int] = defaultdict(int)
 #: level happens to be -- a silently declined fast path looks identical to one
 #: that was never attempted.
 _notes: dict[str, int] = defaultdict(int)
+_MAX_DISTINCT_NOTES = 128
+_OVERFLOW_NOTE = "other_notes_omitted"
 
 
 class _NoOp:
@@ -104,7 +113,11 @@ def phase(name: str):
 
 def note(message: str) -> None:
     """Count one structured observation. Always on, so it survives log config."""
-    _notes[str(message)[:200]] += 1
+    key = str(message)[:200]
+    if key in _notes or len(_notes) < _MAX_DISTINCT_NOTES:
+        _notes[key] += 1
+    else:
+        _notes[_OVERFLOW_NOTE] += 1
 
 
 def record(name: str, seconds: float) -> None:
@@ -153,11 +166,26 @@ def write_report(path: str | Path) -> Path | None:
     if not ENABLED:
         return None
     output = Path(path).expanduser()
+    temporary: Path | None = None
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
-            json.dumps(snapshot(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(snapshot(), indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(output)
+        temporary = None
     except Exception:  # noqa: BLE001 - diagnostics must never break a run
         return None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return output

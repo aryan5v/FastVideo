@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -1173,13 +1174,18 @@ def test_bundle_outside_the_trusted_root_is_never_loaded(store, tmp_path, hidden
 # -- runtime failure ----------------------------------------------------------
 
 
-def test_candidate_exception_falls_back_to_native_output(store, hidden):
+def test_candidate_exception_falls_back_to_native_output(store, hidden, monkeypatch):
     modules = _pipeline_modules()
     transformer = modules["transformer"]
     fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
     _write_bundle(store, _sections(fingerprint, inputs, outputs), kernel_source=RAISING_KERNEL)
     session = _session(store)
     session.attach_modules(modules)
+    monkeypatch.setattr(
+        GraphDispatchSession,
+        "_parameter_snapshot",
+        staticmethod(lambda _wrapper: (_ for _ in ()).throw(RuntimeError("diagnostics failed"))),
+    )
 
     with torch.no_grad():
         native = _pipeline_modules()["transformer"](hidden)
@@ -1467,7 +1473,7 @@ def test_enabled_ids_still_verify_every_bundle(store, hidden):
     assert registry.errors, "the altered bundle is still reported"
 
 
-def test_placeholder_contract_is_derived_once_not_per_call():
+def test_placeholder_contract_validation():
     """The per-call path must not walk the graph to rediscover placeholders."""
     import operator
 
@@ -1561,6 +1567,7 @@ def _assertion_graph(with_user: bool):
 def test_export_runtime_assertions_are_stripped(monkeypatch):
     """68 of the transformer graph's 621 ops per call were metadata assertions."""
     graph, sg, target, _operator = _assertion_graph(with_user=False)
+    assert "aten._assert_tensor_metadata.default" in sg._ASSERTION_TARGETS
     monkeypatch.setattr(sg, "_ASSERTION_TARGETS", frozenset({target}))
 
     assert sg._strip_runtime_assertions(graph) == 2
@@ -1664,6 +1671,19 @@ def test_cuda_graph_scope_rejects_a_layout_change_between_blocks():
     scope.buffer_for(0, torch.zeros(4, 8))
     with pytest.raises(CudaGraphUnavailable, match="changed layout"):
         scope.buffer_for(0, torch.zeros(4, 9))
+
+
+def test_cuda_graph_scope_rejects_a_stride_change_between_blocks():
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, _CudaGraphScope
+
+    scope = _CudaGraphScope()
+    contiguous = torch.zeros(4, 4)
+    transposed = contiguous.t()
+    assert contiguous.shape == transposed.shape
+    assert contiguous.stride() != transposed.stride()
+    scope.buffer_for(0, contiguous)
+    with pytest.raises(CudaGraphUnavailable, match="changed layout"):
+        scope.buffer_for(0, transposed)
 
 
 def test_a_pinned_input_that_moves_declines_rather_than_reading_stale_memory():
@@ -1786,8 +1806,10 @@ def test_non_tensor_leaves_are_captured_as_constants():
         runner([tensor, False])
 
 
-def test_a_matching_constant_does_not_block_replay():
+def test_a_matching_constant_does_not_block_replay(monkeypatch):
     from fastvideo.optimization.subgraph import _CudaGraphRunner, _CudaGraphScope
+
+    events = []
 
     class _FakeGraph:
         def __init__(self):
@@ -1795,12 +1817,23 @@ def test_a_matching_constant_does_not_block_replay():
 
         def replay(self):
             self.replays += 1
+            events.append("replay")
+
+    class _FakeStream:
+        def __init__(self, name):
+            self.name = name
+
+        def wait_stream(self, other):
+            events.append(f"{self.name}_wait_{other.name}")
 
     from fastvideo.optimization.subgraph import _layout_identity
 
     runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
     graph = _FakeGraph()
     runner._graph = graph
+    current = _FakeStream("current")
+    capture = _FakeStream("capture")
+    runner._capture_stream = capture
     runner._arity = 2
     tensor = torch.zeros(2)
     runner._pinned = {0: _layout_identity(tensor)}
@@ -1809,11 +1842,45 @@ def test_a_matching_constant_does_not_block_replay():
     runner._attributes = []
     runner._static_outputs = (torch.ones(3),)
     runner._output_was_tuple = True
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: current)
+    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: nullcontext())
 
     result = runner([tensor, True])
     assert graph.replays == 1
+    assert events == ["capture_wait_current", "replay", "current_wait_capture"]
     assert torch.equal(result[0], torch.ones(3))
     assert result[0] is not runner._static_outputs[0], "outputs must be copied out"
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_cuda_graph_replay_synchronizes_a_different_current_stream():
+    """Input writes and output clones remain ordered across CUDA streams."""
+    from torch import fx
+
+    from fastvideo.optimization.subgraph import (
+        CudaGraphWarmingUp,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    class _Double(nn.Module):
+        def forward(self, value):
+            return value * 2
+
+    runner = _CudaGraphRunner(fx.symbolic_trace(_Double()).cuda(), _CudaGraphScope())
+    value = torch.ones(32, device="cuda")
+    for _ in range(runner.WARMUP_ITERATIONS):
+        with pytest.raises(CudaGraphWarmingUp):
+            runner([value])
+    runner([value])  # capture and first verified replay
+
+    caller = torch.cuda.Stream()
+    with torch.cuda.stream(caller):
+        value.fill_(3)
+        observed = runner([value])
+    torch.cuda.current_stream().wait_stream(caller)
+    assert torch.equal(observed, torch.full_like(observed, 6))
 
 
 def test_a_moved_parameter_stops_the_replay():
@@ -1850,36 +1917,15 @@ def test_a_moved_parameter_stops_the_replay():
         runner([])
 
 
-def test_a_mutable_output_is_refused_rather_than_aliased(monkeypatch):
+def test_a_mutable_output_is_refused_rather_than_aliased():
     """A list output would hand back the graph's own static buffers."""
     from fastvideo.optimization.subgraph import (
         CudaGraphUnavailable,
-        _CudaGraphRunner,
-        _CudaGraphScope,
+        _classify_output_leaves,
     )
 
-    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
-
-    class _FakeGraph:
-        def replay(self):
-            pass
-
-        def reset(self):
-            pass
-
-    # Drive just the output-classification branch of _capture.
-    leaves = ([torch.zeros(2)],)
     with pytest.raises(CudaGraphUnavailable, match="mutable list"):
-        runner._output_constants = {}
-        for position, leaf in enumerate(leaves):
-            if isinstance(leaf, torch.Tensor):
-                continue
-            if leaf is None or isinstance(leaf, (bool, int, float, complex, str, bytes)):
-                continue
-            raise CudaGraphUnavailable(
-                f"output {position} is a mutable {type(leaf).__name__}; "
-                "returning it uncopied would alias the graph's static buffers"
-            )
+        _classify_output_leaves(([torch.zeros(2)],))
 
 
 def test_warming_up_is_a_distinct_type_not_a_message():
@@ -1891,9 +1937,18 @@ def test_warming_up_is_a_distinct_type_not_a_message():
     assert not isinstance(CudaGraphUnavailable("nope"), CudaGraphWarmingUp)
 
 
-def test_timing_state_can_be_reset_between_sessions(monkeypatch):
-    """Process-global counters would otherwise mix two sessions' measurements."""
+@pytest.fixture
+def isolated_timing_state():
     from fastvideo.optimization import timing
+
+    timing.reset()
+    yield timing
+    timing.reset()
+
+
+def test_timing_state_can_be_reset_between_sessions(monkeypatch, isolated_timing_state):
+    """Process-global counters would otherwise mix two sessions' measurements."""
+    timing = isolated_timing_state
 
     monkeypatch.setattr(timing, "ENABLED", True)
     timing.reset()
@@ -1905,6 +1960,21 @@ def test_timing_state_can_be_reset_between_sessions(monkeypatch):
     timing.reset()
     assert timing.snapshot()["phases"] == {}
     assert timing.snapshot()["notes"] == {}
+
+
+def test_timing_notes_are_bounded(monkeypatch, isolated_timing_state):
+    timing = isolated_timing_state
+    monkeypatch.setattr(timing, "_MAX_DISTINCT_NOTES", 2)
+    timing.note("first")
+    timing.note("second")
+    timing.note("third")
+    timing.note("fourth")
+    assert timing.snapshot()["notes"] == {
+        "first": 1,
+        "second": 1,
+        "other_notes_omitted": 2,
+    }
+    timing.reset()
 
 
 def test_a_refused_capture_releases_its_pool():

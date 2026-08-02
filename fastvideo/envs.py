@@ -55,6 +55,9 @@ if TYPE_CHECKING:
     FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS: str = ""
     FASTVIDEO_OPTIMIZATION_ARTIFACT_VALIDATION: bool = False
     FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS: bool = True
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH: str = ""
+    FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING: str = ""
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -359,6 +362,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # specific artifact otherwise requires bisecting the whole set.
     "FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE":
     lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE", ""),
+    # Replay rewritten subgraphs through CUDA graphs. Set to 0/false to force
+    # eager graph execution while retaining artifact dispatch.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS", "1")
+    not in {"0", "false", "False", ""},
+    # Optional metadata-only operation histogram for a rewritten graph.
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH", ""),
+    # Per-phase dispatch timing: 1 (host), sync (device), or shadow (diagnostic
+    # native replay plus synchronized candidate timing).
+    "FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING", ""),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":

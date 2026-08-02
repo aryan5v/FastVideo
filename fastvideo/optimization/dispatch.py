@@ -318,7 +318,7 @@ class GraphDispatchSession:
                 decision.artifact_id,
                 wrapper.scope,
                 json.dumps(
-                    {"at_failure": self._parameter_snapshot(wrapper)},
+                    {"at_failure": self._safe_parameter_snapshot(wrapper)},
                     sort_keys=True,
                 ),
                 exc_info=True,
@@ -350,6 +350,14 @@ class GraphDispatchSession:
             ],
             "module_type": type(wrapper.module).__name__,
         }
+
+    @staticmethod
+    def _safe_parameter_snapshot(wrapper: _Wrapper) -> dict[str, Any]:
+        """Never let best-effort failure diagnostics suppress native fallback."""
+        try:
+            return GraphDispatchSession._parameter_snapshot(wrapper)
+        except Exception as exc:  # noqa: BLE001 - diagnostics are never authoritative
+            return {"snapshot_error": type(exc).__name__}
 
     @contextmanager
     def _materialized_candidate_parameters(self, module: nn.Module):
@@ -627,6 +635,7 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
     configured = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DIR
     if not configured:
         return None
+    timing.reset()
     try:
         root = Path(configured).expanduser()
         enabled_ids = tuple(
@@ -682,5 +691,9 @@ def detach_graph_dispatch(session: GraphDispatchSession | None) -> None:
         logger.warning("Graph dispatch detach failed", exc_info=True)
     output = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS
     if output:
-        session.write_diagnostics(output)
-        timing.write_report(Path(str(output)).with_name("timing.json"))
+        diagnostics_path = Path(str(output))
+        session.write_diagnostics(diagnostics_path)
+        try:
+            timing.write_report(diagnostics_path.with_name("timing.json"))
+        except Exception:  # noqa: BLE001 - diagnostics must never break teardown
+            logger.warning("Could not resolve timing diagnostics path", exc_info=True)

@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 import json
 import operator
-import os
 import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -19,6 +18,7 @@ from torch import fx, nn
 from torch.fx._pytree import tree_flatten_spec
 from torch.utils._pytree import tree_unflatten
 
+from fastvideo import envs
 from fastvideo.logger import init_logger
 from fastvideo.optimization import timing
 from fastvideo.optimization.artifact import ArtifactManifest, signature_key
@@ -169,7 +169,9 @@ def _strip_runtime_assertions(graph: fx.Graph) -> int:
     return removed
 
 
-def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest) -> None:
+def _dump_graph_profile(
+    graph: fx.Graph, manifest: ArtifactManifest, *, block_identity: str
+) -> None:
     """Write an op histogram of the rewritten graph, when asked to.
 
     The rewritten graph is what the dispatcher executes in place of the
@@ -179,7 +181,7 @@ def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest) -> None:
     dozens of primitives here. Metadata only: op names and counts, never tensor
     values.
     """
-    destination = os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH", "")
+    destination = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH
     if not destination:
         return
     try:
@@ -199,7 +201,11 @@ def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest) -> None:
                 "call_method": sum(1 for n in graph.nodes if n.op == "call_method"),
             },
         }
-        output = Path(destination).expanduser()
+        configured = Path(destination).expanduser()
+        suffix = configured.suffix or ".json"
+        output = configured.with_name(
+            f"{configured.stem}.{manifest.artifact_id}.{block_identity}{suffix}"
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except Exception:  # noqa: BLE001 - diagnostics must never break a run
@@ -209,9 +215,7 @@ def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest) -> None:
 #: CUDA-graph replay of the rewritten subgraph. On by default: it is bitwise
 #: identical to the eager replay by construction and removes the dispatch cost
 #: that made subgraph artifacts uneconomic. Set to "0" to force eager replay.
-_CUDA_GRAPHS_ENABLED = os.getenv(
-    "FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS", "1"
-) not in {"0", "false", "False", ""}
+_CUDA_GRAPHS_ENABLED = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS
 
 
 @dataclass
@@ -254,7 +258,12 @@ class _CudaGraphScope:
         """A static buffer for one moving input position, shared across blocks."""
         existing = self.buffers.get(index)
         if existing is not None:
-            if existing.shape != template.shape or existing.dtype != template.dtype:
+            if (
+                existing.shape != template.shape
+                or existing.stride() != template.stride()
+                or existing.dtype != template.dtype
+                or existing.device != template.device
+            ):
                 raise CudaGraphUnavailable(
                     f"scope input {index} changed layout between blocks"
                 )
@@ -270,6 +279,24 @@ class CudaGraphUnavailable(RuntimeError):
 
 class CudaGraphWarmingUp(CudaGraphUnavailable):
     """Not yet ready to capture. Distinct from a refusal, which is permanent."""
+
+
+def _classify_output_leaves(leaves: tuple[Any, ...]) -> dict[int, Any]:
+    """Return immutable non-tensor outputs, declining every mutable leaf."""
+    import torch
+
+    constants: dict[int, Any] = {}
+    for position, leaf in enumerate(leaves):
+        if isinstance(leaf, torch.Tensor):
+            continue
+        if leaf is None or isinstance(leaf, (bool, int, float, complex, str, bytes)):
+            constants[position] = leaf
+            continue
+        raise CudaGraphUnavailable(
+            f"output {position} is a mutable {type(leaf).__name__}; "
+            "returning it uncopied would alias the graph's static buffers"
+        )
+    return constants
 
 
 class _CudaGraphRunner:
@@ -310,9 +337,9 @@ class _CudaGraphRunner:
         self._arity = 0
         #: Input addresses seen during warmup, used to decide which inputs are
         #: stable enough to be read in place.
-        self._observed: list[list[int | None]] = []
+        self._observed: list[list[tuple[Any, ...] | None]] = []
         #: index -> captured address, for inputs read where they live.
-        self._pinned: dict[int, int] = {}
+        self._pinned: dict[int, tuple[Any, ...]] = {}
         #: index -> static buffer, for inputs that move between calls.
         self._moving: dict[int, Any] = {}
         #: index -> value, for non-tensor leaves baked into the capture.
@@ -323,6 +350,8 @@ class _CudaGraphRunner:
         self._attributes: list[tuple[str, tuple[Any, ...]]] = []
         #: A capture taken but not yet verified, so cleanup can release it.
         self._pending_graph: Any = None
+        #: The stream on which the CUDA graph was captured and is replayed.
+        self._capture_stream: Any = None
 
     def _capture(self, flat_inputs: list[Any]) -> None:
         import torch
@@ -339,6 +368,11 @@ class _CudaGraphRunner:
             _layout_identity(value) if isinstance(value, torch.Tensor) else None
             for value in flat_inputs
         ]
+        for index, (value, identity) in enumerate(zip(flat_inputs, pointers, strict=True)):
+            if isinstance(value, torch.Tensor) and identity is None:
+                raise CudaGraphUnavailable(
+                    f"runtime input {index} has no readable layout"
+                )
         stable = [
             all(observed[index] == pointers[index] for observed in self._observed)
             for index in range(len(flat_inputs))
@@ -379,7 +413,7 @@ class _CudaGraphRunner:
         # pool is never free of live allocations when the next capture starts.
         graph = torch.cuda.CUDAGraph()
         self._pending_graph = graph
-        with torch.cuda.graph(graph):
+        with torch.cuda.stream(stream), torch.cuda.graph(graph):
             outputs = self._runnable(*capture_inputs)
 
         leaves = outputs if isinstance(outputs, tuple) else (outputs,)
@@ -389,17 +423,7 @@ class _CudaGraphRunner:
         # genuinely immutable value: a list or dict leaf would hand the caller
         # the static buffers themselves, and the next replay would rewrite what
         # it is holding. Anything else declines.
-        self._output_constants = {}
-        for position, leaf in enumerate(leaves):
-            if isinstance(leaf, torch.Tensor):
-                continue
-            if leaf is None or isinstance(leaf, (bool, int, float, complex, str, bytes)):
-                self._output_constants[position] = leaf
-                continue
-            raise CudaGraphUnavailable(
-                f"output {position} is a mutable {type(leaf).__name__}; "
-                "returning it uncopied would alias the graph's static buffers"
-            )
+        self._output_constants = _classify_output_leaves(leaves)
         # The capture also baked in every parameter and buffer the graph reads
         # through get_attr. Those are not inputs, so nothing above covers them,
         # and they are not stable in general: FSDP2's reshard frees the
@@ -429,12 +453,14 @@ class _CudaGraphRunner:
         # did not functionalize -- the artifact's own entry point -- so purity
         # is an assumption about third-party code, and the workload's contract
         # is byte_equal. Verify once per block, then trust the replay.
-        graph.replay()
-        replayed = tuple(
-            leaf if position in self._output_constants else leaf.clone()
-            for position, leaf in enumerate(self._static_outputs)
-        )
-        reference = self._runnable(*capture_inputs)
+        with torch.cuda.stream(stream):
+            graph.replay()
+            replayed = tuple(
+                leaf if position in self._output_constants else leaf.clone()
+                for position, leaf in enumerate(self._static_outputs)
+            )
+            reference = self._runnable(*capture_inputs)
+        torch.cuda.current_stream().wait_stream(stream)
         reference_leaves = reference if isinstance(reference, tuple) else (reference,)
         if len(reference_leaves) != len(replayed):
             raise CudaGraphUnavailable("capture changed the output arity")
@@ -456,6 +482,7 @@ class _CudaGraphRunner:
         # Published only once verified. Until this assignment the runner has no
         # graph to replay, so a rejected capture can never be used.
         self._graph = graph
+        self._capture_stream = stream
         self._pending_graph = None
 
     def _release_capture(self) -> None:
@@ -463,7 +490,9 @@ class _CudaGraphRunner:
         aborted, self._graph = self._graph, None
         self._static_outputs = ()
         self._attributes = []
-        self._pending_graph, pending = None, getattr(self, "_pending_graph", None)
+        self._capture_stream = None
+        pending = self._pending_graph
+        self._pending_graph = None
         for candidate in (aborted, pending):
             try:
                 if candidate is not None:
@@ -537,7 +566,11 @@ class _CudaGraphRunner:
                         f"runtime input {index} moved or changed layout after capture"
                     )
                 continue
-            buffer = self._moving[index]
+            buffer = self._moving.get(index)
+            if buffer is None:
+                raise CudaGraphUnavailable(
+                    f"runtime input {index} has no captured storage"
+                )
             if live.shape != buffer.shape or live.dtype != buffer.dtype:
                 raise CudaGraphUnavailable(f"runtime input {index} changed shape or dtype")
             buffer.copy_(live)
@@ -551,7 +584,14 @@ class _CudaGraphRunner:
                     f"bound attribute {target!r} moved after capture"
                 )
 
-        self._graph.replay()
+        capture_stream = self._capture_stream
+        if capture_stream is None:
+            raise CudaGraphUnavailable("capture stream is unavailable")
+        current_stream = torch.cuda.current_stream()
+        capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(capture_stream):
+            self._graph.replay()
+        current_stream.wait_stream(capture_stream)
         # The static tensor outputs are overwritten by the next replay, so hand
         # the caller its own copies; constants are returned as captured.
         copies = tuple(
@@ -812,8 +852,9 @@ def rewrite_exported_subgraph(
     output_spec = getattr(getattr(exported, "call_spec", None), "out_spec", None)
     if input_spec is None or output_spec is None:
         raise SubgraphRewriteError("export call specification is missing")
-    # Value is (rewritten module, frozen placeholder contract): the contract is
-    # derived once per build so the per-call path never walks the graph.
+    # Each _Entry owns the rewritten module, frozen placeholder contract, and
+    # optional CUDA-graph runner. The contract is derived once per build so the
+    # per-call path never walks the graph.
     cache: weakref.WeakKeyDictionary[nn.Module, _Entry] = weakref.WeakKeyDictionary()
     graph_scope = _CudaGraphScope()
 
@@ -921,7 +962,11 @@ def rewrite_exported_subgraph(
         _strip_runtime_assertions(graph)
         graph.lint()
         runnable.recompile()
-        _dump_graph_profile(graph, manifest)
+        _dump_graph_profile(
+            graph,
+            manifest,
+            block_identity=f"{id(parent_module):x}",
+        )
         return runnable
 
     def dispatch(parent_module: nn.Module, *args: Any, **kwargs: Any) -> Any:
@@ -952,11 +997,9 @@ def rewrite_exported_subgraph(
                     # the authority; a capture is only ever an accelerator for
                     # it, never a different answer.
                     timing.note(f"cuda_graph_declined: {reason}")
-                    logger.warning(
-                        "CUDA graph replay unavailable for %s (%s); "
-                        "continuing with eager replay",
-                        manifest.artifact_id,
-                        reason,
+                    logger.warning_once(
+                        f"CUDA graph replay unavailable for {manifest.artifact_id} "
+                        f"({reason}); continuing with eager replay"
                     )
                     entry.cuda_graph = None
             with timing.phase("subgraph.execute"):

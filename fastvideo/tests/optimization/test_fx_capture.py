@@ -520,6 +520,35 @@ def test_deferred_export_replays_observed_autocast_dtype():
     )
 
 
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_deferred_export_replays_observed_cuda_autocast_dtype():
+    """GPU contract: finalize replays capture under the observed CUDA autocast."""
+    model = _Transformer(depth=2, block=_AutocastBlock).cuda()
+    session = fx_capture.FXCaptureSession(tracer="export")
+    assert session.attach(model, prefix="transformer") == 2
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = model(torch.randn(2, 4, device="cuda"))
+    assert output.dtype == torch.bfloat16
+    assert not torch.is_autocast_enabled("cuda")
+
+    payload = session.finalize()
+
+    assert payload["regions"]
+    ir = payload["regions"][0]["attributes"]["executable_ir"]
+    mm_nodes = [node for node in ir["nodes"] if node["target"] == "aten.mm.default"]
+    assert mm_nodes
+    expected_dtype = str(torch.bfloat16).removeprefix("torch.")
+    assert all(node["meta"]["dtype"] == expected_dtype for node in mm_nodes)
+    assert not torch.is_autocast_enabled("cuda")
+    assert all(
+        variant.observed_autocast is None
+        for record in session._scopes.values()
+        for variant in record.variants.values()
+    )
+
+
 @pytest.mark.parametrize("mode", ["symbolic", "export", "dynamo"])
 def test_each_capture_mode_has_stable_metadata(mode):
     session = fx_capture.FXCaptureSession(tracer=mode)
