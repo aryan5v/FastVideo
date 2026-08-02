@@ -501,17 +501,26 @@ class ComposedPipelineBase(ABC):
         Returns:
             ForwardBatch: The batch with the generated video or image.
         """
-        if not self.post_init_called:
-            self.post_init()
+        from fastvideo.optimization import optimization_workload
 
-        # Execute each stage
-        logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
-        # logger.info("Batch: %s", batch)
-        for stage in self.stages:
-            batch = stage(batch, fastvideo_args)
+        model_id = str(fastvideo_args.model_path)
+        pipeline_config = fastvideo_args.pipeline_config
+        with optimization_workload(
+                workload_id=f"{model_id}:inference",
+                model_id=model_id,
+                variant_id=type(pipeline_config).__name__,
+        ):
+            if not self.post_init_called:
+                self.post_init()
 
-        # Return the output
-        return batch
+            # Execute each stage
+            logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
+            # logger.info("Batch: %s", batch)
+            for stage in self.stages:
+                batch = stage(batch, fastvideo_args)
+
+            # Return the output
+            return batch
 
     def train(self) -> None:
         raise NotImplementedError("if training_mode is True, the pipeline must implement this method")

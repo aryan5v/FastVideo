@@ -404,8 +404,7 @@ class WanTransformerBlock(nn.Module):
         assert shift_msa.dtype == torch.float32
 
         # 1. Self-attention
-        norm_hidden_states = (self.norm1(hidden_states.float()) *
-                              (1 + scale_msa) + shift_msa).to(orig_dtype)
+        norm_hidden_states = self.norm1.forward_wan_modulated(hidden_states, scale_msa, shift_msa)
         query, _ = self.to_q(norm_hidden_states)
         key, _ = self.to_k(norm_hidden_states)
         value, _ = self.to_v(norm_hidden_states)
@@ -430,9 +429,11 @@ class WanTransformerBlock(nn.Module):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift = null_scale = torch.tensor([0], device=hidden_states.device)
-        norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift, null_scale)
+        norm_hidden_states, hidden_states = (
+            self.self_attn_residual_norm.forward_wan_self_attention(
+                hidden_states, attn_output, gate_msa
+            )
+        )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype), hidden_states.to(orig_dtype)
 
@@ -447,7 +448,7 @@ class WanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         ff_output = self.ffn(norm_hidden_states)
-        hidden_states = self.mlp_residual(hidden_states, ff_output, c_gate_msa)
+        hidden_states = self.mlp_residual.forward_wan_mlp(hidden_states, ff_output, c_gate_msa)
         hidden_states = hidden_states.to(orig_dtype)
 
         return hidden_states
@@ -554,8 +555,7 @@ class WanTransformerBlock_VSA(nn.Module):
         assert shift_msa.dtype == torch.float32
 
         # 1. Self-attention
-        norm_hidden_states = (self.norm1(hidden_states.float()) *
-                              (1 + scale_msa) + shift_msa).to(orig_dtype)
+        norm_hidden_states = self.norm1.forward_wan_modulated(hidden_states, scale_msa, shift_msa)
         query, _ = self.to_q(norm_hidden_states)
         key, _ = self.to_k(norm_hidden_states)
         value, _ = self.to_v(norm_hidden_states)
@@ -584,9 +584,11 @@ class WanTransformerBlock_VSA(nn.Module):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
-        null_shift = null_scale = torch.tensor([0], device=hidden_states.device)
-        norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift, null_scale)
+        norm_hidden_states, hidden_states = (
+            self.self_attn_residual_norm.forward_wan_self_attention(
+                hidden_states, attn_output, gate_msa
+            )
+        )
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype), hidden_states.to(orig_dtype)
 
@@ -601,7 +603,7 @@ class WanTransformerBlock_VSA(nn.Module):
 
         # 3. Feed-forward
         ff_output = self.ffn(norm_hidden_states)
-        hidden_states = self.mlp_residual(hidden_states, ff_output, c_gate_msa)
+        hidden_states = self.mlp_residual.forward_wan_mlp(hidden_states, ff_output, c_gate_msa)
         hidden_states = hidden_states.to(orig_dtype)
 
         return hidden_states

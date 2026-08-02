@@ -2,10 +2,13 @@
 # Adapted from vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/layers/layernorm.py
 """Custom normalization layers."""
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import fastvideo.envs as envs
 from fastvideo.layers.custom_op import CustomOp
 
 
@@ -108,6 +111,61 @@ class ScaleResidual(nn.Module):
             # gate.shape: [batch_size, 1, inner_dim]
             return residual + x * gate
 
+    def forward_wan_mlp(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        """Capture and optionally fuse Wan's post-MLP residual update."""
+        supported = (gate.ndim == 3 and residual.ndim == 3 and gate.shape == (residual.shape[0], 1, residual.shape[2]))
+        if not supported:
+            return self.forward(residual, x, gate)
+
+        def native() -> torch.Tensor:
+            return residual + x * gate
+
+        if not envs.FASTVIDEO_OPTIMIZATION_CAPTURE:
+            return self._maybe_fused_wan_mlp(residual, x, gate, native)
+
+        from fastvideo.optimization import optimization_target
+
+        with optimization_target(
+                name="wan.mlp_gated_residual",
+                operation="wan_gated_residual",
+                tensors={
+                    "residual": residual,
+                    "x": x,
+                    "gate": gate.squeeze(1),
+                },
+                spec_locator="models/wan_gated_residual.py:SPEC",
+                attributes={"model_family": "wan"},
+                tags=("mlp", "residual"),
+        ):
+            return self._maybe_fused_wan_mlp(residual, x, gate, native)
+
+    @staticmethod
+    def _maybe_fused_wan_mlp(
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+        native: Callable[[], torch.Tensor],
+    ) -> torch.Tensor:
+        compiling = getattr(torch.compiler, "is_compiling", lambda: False)()
+        can_fuse = (envs.FASTVIDEO_WAN_FUSIONS and residual.is_cuda and not torch.is_grad_enabled() and not compiling
+                    and residual.dtype in (torch.bfloat16, torch.float16) and x.shape == residual.shape
+                    and residual.is_contiguous() and x.is_contiguous() and gate.is_contiguous()
+                    and gate.device == residual.device and residual.shape[2] <= 65536)
+        if can_fuse:
+            try:
+                from fastvideo.layers.wan_fusions import (
+                    wan_gated_residual, )
+            except ImportError:
+                pass
+            else:
+                return wan_gated_residual(residual, x, gate.squeeze(1))
+        return native()
+
 
 # adapted from Diffusers: https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/normalization.py
 # NOTE(will): Needed to match behavior of diffusers and wan2.1 even while using
@@ -123,6 +181,69 @@ class FP32LayerNorm(nn.LayerNorm):
             self.bias.float() if self.bias is not None else None,
             self.eps,
         ).to(origin_dtype)
+
+    def forward_wan_modulated(
+        self,
+        inputs: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor:
+        """Capture and optionally fuse Wan's pre-attention normalization."""
+        supported = (inputs.ndim == 3 and scale.ndim == 3 and shift.shape == scale.shape
+                     and scale.shape == (inputs.shape[0], 1, inputs.shape[2]) and self.weight is None
+                     and self.bias is None)
+
+        def native() -> torch.Tensor:
+            normalized = self(inputs.float())
+            return (normalized * (1.0 + scale) + shift).to(inputs.dtype)
+
+        if not supported:
+            return native()
+        if not envs.FASTVIDEO_OPTIMIZATION_CAPTURE:
+            return self._maybe_fused_wan_modulated(inputs, scale, shift, native)
+
+        from fastvideo.optimization import optimization_target
+
+        with optimization_target(
+                name="wan.pre_attn_modulated_norm",
+                operation="wan_modulated_layer_norm",
+                tensors={
+                    "x": inputs,
+                    "scale": scale.squeeze(1),
+                    "shift": shift.squeeze(1),
+                },
+                spec_locator="models/wan_modulated_layer_norm.py:SPEC",
+                attributes={"model_family": "wan"},
+                tags=("self_attention", "normalization", "modulation"),
+        ):
+            return self._maybe_fused_wan_modulated(inputs, scale, shift, native)
+
+    def _maybe_fused_wan_modulated(
+        self,
+        inputs: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+        native: Callable[[], torch.Tensor],
+    ) -> torch.Tensor:
+        compiling = getattr(torch.compiler, "is_compiling", lambda: False)()
+        can_fuse = (envs.FASTVIDEO_WAN_FUSIONS and inputs.is_cuda and not torch.is_grad_enabled() and not compiling
+                    and inputs.dtype in (torch.bfloat16, torch.float16) and inputs.is_contiguous()
+                    and scale.is_contiguous() and shift.is_contiguous() and scale.device == inputs.device
+                    and shift.device == inputs.device and inputs.shape[2] <= 65536)
+        if can_fuse:
+            try:
+                from fastvideo.layers.wan_fusions import (
+                    wan_modulated_layer_norm, )
+            except ImportError:
+                pass
+            else:
+                return wan_modulated_layer_norm(
+                    inputs,
+                    scale.squeeze(1),
+                    shift.squeeze(1),
+                    self.eps,
+                )
+        return native()
 
 
 class ScaleResidualLayerNormScaleShift(nn.Module):
@@ -211,6 +332,88 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
         else:
             modulated = normalized * (1.0 + scale) + shift
         return modulated, residual_output
+
+    def forward_wan_self_attention(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fast path for Wan's post-self-attention transition.
+
+        The Triton implementation is inference-only and currently covers the
+        channel-wise Wan 2.1 gate layout. Every other execution mode retains
+        the differentiable native PyTorch implementation.
+        """
+        if (not envs.FASTVIDEO_OPTIMIZATION_CAPTURE or not isinstance(self.norm, FP32LayerNorm)
+                or self.norm.weight is None or self.norm.bias is None or gate.ndim != 3):
+            return self._forward_wan_self_attention_impl(residual, x, gate)
+
+        from fastvideo.optimization import optimization_target
+
+        with optimization_target(
+                name="wan.self_attn_residual_norm",
+                operation="wan_gated_residual_norm",
+                tensors={
+                    "residual": residual,
+                    "x": x,
+                    "gate": gate.squeeze(1),
+                    "weight": self.norm.weight,
+                    "bias": self.norm.bias,
+                },
+                spec_locator="models/wan_gated_residual_norm.py:SPEC",
+                attributes={"model_family": "wan"},
+                tags=("self_attention", "normalization"),
+        ):
+            return self._forward_wan_self_attention_impl(residual, x, gate)
+
+    def _forward_wan_self_attention_impl(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._can_use_wan_fusion(residual, x, gate):
+            try:
+                from fastvideo.layers.wan_fusions import (
+                    wan_gated_residual_layer_norm, )
+            except ImportError:
+                pass
+            else:
+                assert isinstance(self.norm, FP32LayerNorm)
+                assert self.norm.weight is not None
+                assert self.norm.bias is not None
+                return wan_gated_residual_layer_norm(
+                    residual,
+                    x,
+                    gate.squeeze(1),
+                    self.norm.weight,
+                    self.norm.bias,
+                    self.norm.eps,
+                )
+
+        if gate.dim() == 4:
+            num_frames = gate.shape[1]
+            frame_seqlen = x.shape[1] // num_frames
+            residual_output = residual + (x.unflatten(1, (num_frames, frame_seqlen)) * gate).flatten(1, 2)
+        else:
+            residual_output = residual + x * gate
+        return self.norm(residual_output), residual_output
+
+    def _can_use_wan_fusion(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> bool:
+        compiling = getattr(torch.compiler, "is_compiling", lambda: False)()
+        return (envs.FASTVIDEO_WAN_FUSIONS and residual.is_cuda and not torch.is_grad_enabled() and not compiling
+                and isinstance(self.norm, FP32LayerNorm) and self.norm.weight is not None and self.norm.bias is not None
+                and residual.dtype in (torch.bfloat16, torch.float16) and residual.ndim == 3
+                and x.shape == residual.shape and residual.is_contiguous() and x.is_contiguous() and gate.ndim == 3
+                and gate.shape == (residual.shape[0], 1, residual.shape[2]) and gate.is_contiguous()
+                and self.norm.weight.device == residual.device and self.norm.bias.device == residual.device
+                and self.norm.weight.is_contiguous() and self.norm.bias.is_contiguous() and residual.shape[2] <= 65536)
 
 
 class LayerNormScaleShift(nn.Module):
