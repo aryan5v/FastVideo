@@ -167,11 +167,7 @@ class GraphDispatchSession:
         except Exception as exc:  # noqa: BLE001 - dispatch never breaks generation
             self._record_exception("target_selection_failed", exc)
             return 0
-        parents = {
-            id(child): parent
-            for parent in root.modules()
-            for child in parent.children()
-        }
+        parents = {id(child): parent for parent in root.modules() for child in parent.children()}
         wrapped = 0
         for scope, module in targets:
             qualified = f"{prefix}.{scope}" if prefix else scope
@@ -182,9 +178,7 @@ class GraphDispatchSession:
                 self._install(
                     qualified,
                     module,
-                    parameter_manager=self._parameter_manager(
-                        root, module, parents
-                    ),
+                    parameter_manager=self._parameter_manager(root, module, parents),
                 )
                 self._scopes.add(qualified)
                 wrapped += 1
@@ -200,9 +194,7 @@ class GraphDispatchSession:
     ) -> nn.Module:
         current = module
         while True:
-            if callable(getattr(current, "unshard", None)) and callable(
-                getattr(current, "reshard", None)
-            ):
+            if callable(getattr(current, "unshard", None)) and callable(getattr(current, "reshard", None)):
                 return current
             parent = parents.get(id(current))
             if parent is None or parent is current:
@@ -290,8 +282,7 @@ class GraphDispatchSession:
 
         try:
             with timing.phase("dispatch.candidate_total"), self._materialized_candidate_parameters(
-                wrapper.parameter_manager
-            ):
+                    wrapper.parameter_manager):
                 hook_manager = ModuleHookManager.get_from(wrapper.module)
                 if hook_manager is None:
                     result = candidate_forward(*args, **kwargs)
@@ -334,21 +325,21 @@ class GraphDispatchSession:
         manager = wrapper.parameter_manager
         hook_manager = ModuleHookManager.get_from(wrapper.module)
         return {
-            "hook_manager": hook_manager is not None,
-            "hook_names": (
-                sorted(str(name) for name in hook_manager.forward_hooks)
-                if hook_manager is not None
-                else []
-            ),
-            "manager_has_lifecycle": callable(getattr(manager, "unshard", None))
-            and callable(getattr(manager, "reshard", None)),
-            "manager_is_module": manager is wrapper.module,
-            "manager_type": type(manager).__name__,
-            "module_direct_parameter_count": len(module_parameters),
-            "module_direct_parameter_shapes": [
-                list(parameter.shape) for parameter in module_parameters[:16]
-            ],
-            "module_type": type(wrapper.module).__name__,
+            "hook_manager":
+            hook_manager is not None,
+            "hook_names":
+            (sorted(str(name) for name in hook_manager.forward_hooks) if hook_manager is not None else []),
+            "manager_has_lifecycle":
+            callable(getattr(manager, "unshard", None)) and callable(getattr(manager, "reshard", None)),
+            "manager_is_module":
+            manager is wrapper.module,
+            "manager_type":
+            type(manager).__name__,
+            "module_direct_parameter_count":
+            len(module_parameters),
+            "module_direct_parameter_shapes": [list(parameter.shape) for parameter in module_parameters[:16]],
+            "module_type":
+            type(wrapper.module).__name__,
         }
 
     @staticmethod
@@ -364,8 +355,7 @@ class GraphDispatchSession:
         """Mirror FSDP2's forward lifecycle when dispatch bypasses its wrapper."""
         unshard = getattr(module, "unshard", None)
         reshard = getattr(module, "reshard", None)
-        managed = callable(unshard) and callable(reshard)
-        if not managed:
+        if not callable(unshard) or not callable(reshard):
             yield
             return
         try:
@@ -638,11 +628,8 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
     timing.reset()
     try:
         root = Path(configured).expanduser()
-        enabled_ids = tuple(
-            part.strip()
-            for part in envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE.split(",")
-            if part.strip()
-        )
+        enabled_ids = tuple(part.strip() for part in envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_ENABLE.split(",")
+                            if part.strip())
         registry = ArtifactRegistry(root, enabled_ids=enabled_ids or None)
         if enabled_ids:
             logger.info(

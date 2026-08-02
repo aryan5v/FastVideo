@@ -23,7 +23,6 @@ from fastvideo.logger import init_logger
 from fastvideo.optimization import timing
 from fastvideo.optimization.artifact import ArtifactManifest, signature_key
 
-
 logger = init_logger(__name__)
 
 
@@ -133,10 +132,8 @@ class _MetadataInterpreter(fx.Interpreter):
             return super().run_node(node)
         except RuntimeError as exc:
             args, kwargs = self.fetch_args_kwargs_from_env(node)
-            raise SubgraphRewriteError(
-                f"rewritten node {node.name!r} ({node.target}) failed; "
-                f"args={_value_metadata(args)}, kwargs={_value_metadata(kwargs)}"
-            ) from exc
+            raise SubgraphRewriteError(f"rewritten node {node.name!r} ({node.target}) failed; "
+                                       f"args={_value_metadata(args)}, kwargs={_value_metadata(kwargs)}") from exc
 
 
 #: Export emits a runtime metadata assertion for every tensor whose dtype or
@@ -169,9 +166,7 @@ def _strip_runtime_assertions(graph: fx.Graph) -> int:
     return removed
 
 
-def _dump_graph_profile(
-    graph: fx.Graph, manifest: ArtifactManifest, *, block_identity: str
-) -> None:
+def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest, *, block_identity: str) -> None:
     """Write an op histogram of the rewritten graph, when asked to.
 
     The rewritten graph is what the dispatcher executes in place of the
@@ -185,9 +180,7 @@ def _dump_graph_profile(
     if not destination:
         return
     try:
-        histogram = Counter(
-            str(node.target) for node in graph.nodes if node.op == "call_function"
-        )
+        histogram = Counter(str(node.target) for node in graph.nodes if node.op == "call_function")
         payload = {
             "artifact_id": manifest.artifact_id,
             "parent_module": manifest.parent_module,
@@ -203,9 +196,7 @@ def _dump_graph_profile(
         }
         configured = Path(destination).expanduser()
         suffix = configured.suffix or ".json"
-        output = configured.with_name(
-            f"{configured.stem}.{manifest.artifact_id}.{block_identity}{suffix}"
-        )
+        output = configured.with_name(f"{configured.stem}.{manifest.artifact_id}.{block_identity}{suffix}")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     except Exception:  # noqa: BLE001 - diagnostics must never break a run
@@ -258,15 +249,9 @@ class _CudaGraphScope:
         """A static buffer for one moving input position, shared across blocks."""
         existing = self.buffers.get(index)
         if existing is not None:
-            if (
-                existing.shape != template.shape
-                or existing.stride() != template.stride()
-                or existing.dtype != template.dtype
-                or existing.device != template.device
-            ):
-                raise CudaGraphUnavailable(
-                    f"scope input {index} changed layout between blocks"
-                )
+            if (existing.shape != template.shape or existing.stride() != template.stride()
+                    or existing.dtype != template.dtype or existing.device != template.device):
+                raise CudaGraphUnavailable(f"scope input {index} changed layout between blocks")
             return existing
         buffer = template.clone().detach()
         self.buffers[index] = buffer
@@ -289,13 +274,11 @@ def _classify_output_leaves(leaves: tuple[Any, ...]) -> dict[int, Any]:
     for position, leaf in enumerate(leaves):
         if isinstance(leaf, torch.Tensor):
             continue
-        if leaf is None or isinstance(leaf, (bool, int, float, complex, str, bytes)):
+        if leaf is None or isinstance(leaf, bool | int | float | complex | str | bytes):
             constants[position] = leaf
             continue
-        raise CudaGraphUnavailable(
-            f"output {position} is a mutable {type(leaf).__name__}; "
-            "returning it uncopied would alias the graph's static buffers"
-        )
+        raise CudaGraphUnavailable(f"output {position} is a mutable {type(leaf).__name__}; "
+                                   "returning it uncopied would alias the graph's static buffers")
     return constants
 
 
@@ -364,18 +347,12 @@ class _CudaGraphRunner:
 
         # An input whose address never moved across warmup can be read where it
         # lives; one that moved needs a static buffer refreshed per call.
-        pointers = [
-            _layout_identity(value) if isinstance(value, torch.Tensor) else None
-            for value in flat_inputs
-        ]
+        pointers = [_layout_identity(value) if isinstance(value, torch.Tensor) else None for value in flat_inputs]
         for index, (value, identity) in enumerate(zip(flat_inputs, pointers, strict=True)):
             if isinstance(value, torch.Tensor) and identity is None:
-                raise CudaGraphUnavailable(
-                    f"runtime input {index} has no readable layout"
-                )
+                raise CudaGraphUnavailable(f"runtime input {index} has no readable layout")
         stable = [
-            all(observed[index] == pointers[index] for observed in self._observed)
-            for index in range(len(flat_inputs))
+            all(observed[index] == pointers[index] for observed in self._observed) for index in range(len(flat_inputs))
         ]
 
         capture_inputs: list[Any] = []
@@ -392,8 +369,11 @@ class _CudaGraphRunner:
                 self._constants[index] = value
                 continue
             if stable[index]:
+                identity = pointers[index]
+                if identity is None:  # defensive; tensor layouts were checked above
+                    raise CudaGraphUnavailable(f"runtime input {index} has no readable layout")
                 capture_inputs.append(value)
-                self._pinned[index] = pointers[index]
+                self._pinned[index] = identity
                 continue
             buffer = self._scope.buffer_for(index, value)
             buffer.copy_(value)
@@ -416,7 +396,7 @@ class _CudaGraphRunner:
         with torch.cuda.stream(stream), torch.cuda.graph(graph):
             outputs = self._runnable(*capture_inputs)
 
-        leaves = outputs if isinstance(outputs, tuple) else (outputs,)
+        leaves = outputs if isinstance(outputs, tuple) else (outputs, )
         self._output_was_tuple = isinstance(outputs, tuple)
         # Tensor outputs live in the graph's static buffers and are copied out.
         # A non-tensor output is returned as captured, which is only safe for a
@@ -440,9 +420,7 @@ class _CudaGraphRunner:
                 continue
             identity = _layout_identity(bound)
             if identity is None:
-                raise CudaGraphUnavailable(
-                    f"bound attribute {target!r} has no readable layout"
-                )
+                raise CudaGraphUnavailable(f"bound attribute {target!r} has no readable layout")
             self._attributes.append((target, identity))
 
         self._arity = len(flat_inputs)
@@ -455,29 +433,21 @@ class _CudaGraphRunner:
         # is byte_equal. Verify once per block, then trust the replay.
         with torch.cuda.stream(stream):
             graph.replay()
-            replayed = tuple(
-                leaf if position in self._output_constants else leaf.clone()
-                for position, leaf in enumerate(self._static_outputs)
-            )
+            replayed = tuple(leaf if position in self._output_constants else leaf.clone()
+                             for position, leaf in enumerate(self._static_outputs))
             reference = self._runnable(*capture_inputs)
         torch.cuda.current_stream().wait_stream(stream)
-        reference_leaves = reference if isinstance(reference, tuple) else (reference,)
+        reference_leaves = reference if isinstance(reference, tuple) else (reference, )
         if len(reference_leaves) != len(replayed):
             raise CudaGraphUnavailable("capture changed the output arity")
-        for position, (captured_leaf, eager_leaf) in enumerate(
-            zip(replayed, reference_leaves, strict=True)
-        ):
+        for position, (captured_leaf, eager_leaf) in enumerate(zip(replayed, reference_leaves, strict=True)):
             if position in self._output_constants:
                 if captured_leaf != eager_leaf:
-                    raise CudaGraphUnavailable(
-                        f"replayed constant output {position} differs from eager"
-                    )
+                    raise CudaGraphUnavailable(f"replayed constant output {position} differs from eager")
                 continue
             if not torch.equal(captured_leaf, eager_leaf):
-                raise CudaGraphUnavailable(
-                    f"replayed output {position} is not bitwise equal to the "
-                    "eager replay; refusing to use the capture"
-                )
+                raise CudaGraphUnavailable(f"replayed output {position} is not bitwise equal to the "
+                                           "eager replay; refusing to use the capture")
 
         # Published only once verified. Until this assignment the runner has no
         # graph to replay, so a rejected capture can never be used.
@@ -510,10 +480,8 @@ class _CudaGraphRunner:
                 # addresses seen here are what decide which inputs need a
                 # static buffer.
                 self._warmups += 1
-                self._observed.append([
-                    _layout_identity(value) if isinstance(value, torch.Tensor) else None
-                    for value in flat_inputs
-                ])
+                self._observed.append(
+                    [_layout_identity(value) if isinstance(value, torch.Tensor) else None for value in flat_inputs])
                 raise CudaGraphWarmingUp("warming up")
             try:
                 self._capture(flat_inputs)
@@ -532,9 +500,7 @@ class _CudaGraphRunner:
                 self._release_capture()
                 with suppress(Exception):
                     torch.cuda.synchronize()
-                raise CudaGraphUnavailable(
-                    f"capture failed: {type(exc).__name__}: {exc}"
-                ) from exc
+                raise CudaGraphUnavailable(f"capture failed: {type(exc).__name__}: {exc}") from exc
 
         if len(flat_inputs) != self._arity:
             raise CudaGraphUnavailable("runtime input count changed after capture")
@@ -550,9 +516,7 @@ class _CudaGraphRunner:
                 except Exception:  # noqa: BLE001 - an uncomparable leaf is not trusted
                     unchanged = False
                 if not unchanged:
-                    raise CudaGraphUnavailable(
-                        f"runtime input {index} changed from the captured constant"
-                    )
+                    raise CudaGraphUnavailable(f"runtime input {index} changed from the captured constant")
                 continue
             if not isinstance(live, torch.Tensor):
                 raise CudaGraphUnavailable(f"runtime input {index} is no longer a tensor")
@@ -562,15 +526,11 @@ class _CudaGraphRunner:
                 # replaying would read whatever now occupies that address, so
                 # decline and let the eager replay answer instead.
                 if _layout_identity(live) != pinned:
-                    raise CudaGraphUnavailable(
-                        f"runtime input {index} moved or changed layout after capture"
-                    )
+                    raise CudaGraphUnavailable(f"runtime input {index} moved or changed layout after capture")
                 continue
             buffer = self._moving.get(index)
             if buffer is None:
-                raise CudaGraphUnavailable(
-                    f"runtime input {index} has no captured storage"
-                )
+                raise CudaGraphUnavailable(f"runtime input {index} has no captured storage")
             if live.shape != buffer.shape or live.dtype != buffer.dtype:
                 raise CudaGraphUnavailable(f"runtime input {index} changed shape or dtype")
             buffer.copy_(live)
@@ -580,9 +540,7 @@ class _CudaGraphRunner:
                 # A weight moved since capture. Replaying would read whatever
                 # now occupies that address -- freed memory after an FSDP
                 # reshard, or another tensor entirely.
-                raise CudaGraphUnavailable(
-                    f"bound attribute {target!r} moved after capture"
-                )
+                raise CudaGraphUnavailable(f"bound attribute {target!r} moved after capture")
 
         capture_stream = self._capture_stream
         if capture_stream is None:
@@ -594,16 +552,12 @@ class _CudaGraphRunner:
         current_stream.wait_stream(capture_stream)
         # The static tensor outputs are overwritten by the next replay, so hand
         # the caller its own copies; constants are returned as captured.
-        copies = tuple(
-            leaf if position in self._output_constants else leaf.clone()
-            for position, leaf in enumerate(self._static_outputs)
-        )
+        copies = tuple(leaf if position in self._output_constants else leaf.clone()
+                       for position, leaf in enumerate(self._static_outputs))
         return copies if self._output_was_tuple else copies[0]
 
 
-def _placeholder_contract(
-    graph: fx.Graph,
-) -> tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...]:
+def _placeholder_contract(graph: fx.Graph, ) -> tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...]:
     """Freeze the graph's placeholder contract once, at build time.
 
     The rewritten graph is immutable for the lifetime of the dispatcher, so
@@ -611,11 +565,8 @@ def _placeholder_contract(
     constant. That walk is O(graph size) in Python and runs inside the region
     it is meant to be accelerating.
     """
-    return tuple(
-        (str(node.target), _tensor_key((node.meta or {}).get("val")))
-        for node in graph.nodes
-        if node.op == "placeholder"
-    )
+    return tuple((str(node.target), _tensor_key((node.meta or {}).get("val"))) for node in graph.nodes
+                 if node.op == "placeholder")
 
 
 def _validate_runtime_inputs(
@@ -623,20 +574,14 @@ def _validate_runtime_inputs(
     flat_inputs: list[Any],
 ) -> None:
     if len(contract) != len(flat_inputs):
-        raise SubgraphRewriteError(
-            "runtime flattened input count differs from the exported graph"
-        )
-    for index, ((target, expected), value) in enumerate(
-        zip(contract, flat_inputs, strict=True)
-    ):
+        raise SubgraphRewriteError("runtime flattened input count differs from the exported graph")
+    for index, ((target, expected), value) in enumerate(zip(contract, flat_inputs, strict=True)):
         if expected is None:
             continue
         actual = _tensor_key(value)
         if actual != expected:
-            raise SubgraphRewriteError(
-                f"runtime input {index} ({target}) metadata changed: "
-                f"expected {expected}, observed {actual}"
-            )
+            raise SubgraphRewriteError(f"runtime input {index} ({target}) metadata changed: "
+                                       f"expected {expected}, observed {actual}")
 
 
 def _lifted_attribute_pairs(
@@ -645,11 +590,7 @@ def _lifted_attribute_pairs(
 ) -> list[tuple[Any, fx.Node]]:
     """Pair lifted input specs with runtime attributes without order assumptions."""
     input_specs = list(exported.graph_signature.input_specs)
-    lifted_specs = [
-        spec
-        for spec in input_specs
-        if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"
-    ]
+    lifted_specs = [spec for spec in input_specs if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"]
     attributes = [node for node in graph.nodes if node.op == "get_attr"]
     if len(attributes) != len(lifted_specs):
         raise SubgraphRewriteError("export lifted input mapping changed")
@@ -670,11 +611,7 @@ def _lifted_attribute_pairs(
             paired[index] = (spec, node)
             assigned.add(node)
 
-    unmatched_specs = [
-        (index, spec)
-        for index, spec in enumerate(lifted_specs)
-        if paired[index] is None
-    ]
+    unmatched_specs = [(index, spec) for index, spec in enumerate(lifted_specs) if paired[index] is None]
     unmatched_nodes = [node for node in attributes if node not in assigned]
     if len(unmatched_specs) != len(unmatched_nodes):
         raise SubgraphRewriteError("export lifted input mapping is ambiguous")
@@ -712,9 +649,7 @@ def _graph_bindings(
             # representative storage may already have been released to an
             # empty placeholder even though the live block owns real storage.
             try:
-                bindings[runtime_target] = _get_attr(
-                    parent_module, runtime_target
-                )
+                bindings[runtime_target] = _get_attr(parent_module, runtime_target)
                 continue
             except AttributeError:
                 pass
@@ -725,9 +660,7 @@ def _graph_bindings(
             else:
                 bindings[runtime_target] = _get_attr(exported_module, runtime_target)
         except (AttributeError, KeyError) as exc:
-            raise SubgraphRewriteError(
-                "live module does not satisfy exported attributes"
-            ) from exc
+            raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
 
     # Export normally functionalizes nested modules into call_function nodes.
     # Preserve a fail-closed fallback for any call_module target that remains.
@@ -741,9 +674,7 @@ def _graph_bindings(
             try:
                 bindings[target] = _get_attr(exported_module, target)
             except AttributeError as exc:
-                raise SubgraphRewriteError(
-                    "live module does not satisfy exported submodules"
-                ) from exc
+                raise SubgraphRewriteError("live module does not satisfy exported submodules") from exc
     return bindings
 
 
@@ -773,9 +704,7 @@ def _runtime_nodes(exported: Any, runnable: fx.GraphModule) -> dict[str, fx.Node
         try:
             attribute = next(lifted_nodes)
         except StopIteration as exc:
-            raise SubgraphRewriteError(
-                "runtime lifted input mapping changed"
-            ) from exc
+            raise SubgraphRewriteError("runtime lifted input mapping changed") from exc
         refs[f"p{index}"] = attribute
     try:
         next(lifted_nodes)
@@ -880,24 +809,14 @@ def rewrite_exported_subgraph(
             runnable = fx.GraphModule(representative, graph)
             for target, value in bindings.items():
                 attribute_node = next(
-                    (
-                        node
-                        for node in graph.nodes
-                        if node.op == "get_attr" and str(node.target) == target
-                    ),
+                    (node for node in graph.nodes if node.op == "get_attr" and str(node.target) == target),
                     None,
                 )
-                expected = _tensor_key(
-                    (attribute_node.meta or {}).get("val")
-                    if attribute_node is not None
-                    else None
-                )
+                expected = _tensor_key((attribute_node.meta or {}).get("val") if attribute_node is not None else None)
                 actual = _tensor_key(value)
                 if expected is not None and actual != expected:
-                    raise SubgraphRewriteError(
-                        f"live attribute {target!r} metadata changed: "
-                        f"expected {expected}, observed {actual}"
-                    )
+                    raise SubgraphRewriteError(f"live attribute {target!r} metadata changed: "
+                                               f"expected {expected}, observed {actual}")
                 _set_attr(runnable, target, value)
         except Exception as exc:  # noqa: BLE001 - graph/module mismatch fails closed
             raise SubgraphRewriteError("live module does not satisfy exported attributes") from exc
@@ -925,19 +844,9 @@ def rewrite_exported_subgraph(
         # dependency-connected recipe can still violate this when it spans an
         # unsupported operation. Reject that recipe before mutating the graph.
         latest_boundary = max(boundary, key=positions.__getitem__)
-        external_consumers = {
-            user
-            for output in outputs
-            for user in output.users
-            if user not in selected_set
-        }
-        if any(
-            positions[user] <= positions[latest_boundary]
-            for user in external_consumers
-        ):
-            raise SubgraphRewriteError(
-                "rewrite recipe has no valid topological insertion point"
-            )
+        external_consumers = {user for output in outputs for user in output.users if user not in selected_set}
+        if any(positions[user] <= positions[latest_boundary] for user in external_consumers):
+            raise SubgraphRewriteError("rewrite recipe has no valid topological insertion point")
 
         def invoke(*values: Any) -> Any:
             return candidate(parent_module, *values)
@@ -997,10 +906,8 @@ def rewrite_exported_subgraph(
                     # the authority; a capture is only ever an accelerator for
                     # it, never a different answer.
                     timing.note(f"cuda_graph_declined: {reason}")
-                    logger.warning_once(
-                        f"CUDA graph replay unavailable for {manifest.artifact_id} "
-                        f"({reason}); continuing with eager replay"
-                    )
+                    logger.warning_once(f"CUDA graph replay unavailable for {manifest.artifact_id} "
+                                        f"({reason}); continuing with eager replay")
                     entry.cuda_graph = None
             with timing.phase("subgraph.execute"):
                 flat_output = runnable(*flat_inputs)
@@ -1008,26 +915,19 @@ def rewrite_exported_subgraph(
             anomalies = {
                 "attributes": {
                     str(node.target): detail
-                    for node in runnable.graph.nodes
-                    if node.op == "get_attr"
-                    if (detail := _tensor_anomaly(
-                        _get_attr(runnable, str(node.target))
-                    ))
-                    is not None
+                    for node in runnable.graph.nodes if node.op == "get_attr"
+                    if (detail := _tensor_anomaly(_get_attr(runnable, str(node.target)))) is not None
                 },
                 "inputs": {
                     str(index): detail
-                    for index, value in enumerate(flat_inputs)
-                    if (detail := _tensor_anomaly(value)) is not None
+                    for index, value in enumerate(flat_inputs) if (detail := _tensor_anomaly(value)) is not None
                 },
             }
             try:
                 _MetadataInterpreter(runnable).run(*flat_inputs)
             except SubgraphRewriteError as diagnostic:
                 raise diagnostic from exc
-            raise SubgraphRewriteError(
-                f"rewritten export execution failed; metadata anomalies: {anomalies}"
-            ) from exc
+            raise SubgraphRewriteError(f"rewritten export execution failed; metadata anomalies: {anomalies}") from exc
         return _unflatten(flat_output, output_spec)
 
     return dispatch

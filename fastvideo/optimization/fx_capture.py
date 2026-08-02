@@ -72,14 +72,11 @@ class _AutocastState:
 
 
 def _observe_autocast_state() -> _AutocastState:
-    devices = tuple(
-        (
-            device_type,
-            bool(torch.is_autocast_enabled(device_type)),
-            torch.get_autocast_dtype(device_type),
-        )
-        for device_type in _AUTOCAST_DEVICE_TYPES
-    )
+    devices = tuple((
+        device_type,
+        bool(torch.is_autocast_enabled(device_type)),
+        torch.get_autocast_dtype(device_type),
+    ) for device_type in _AUTOCAST_DEVICE_TYPES)
     return _AutocastState(
         devices=devices,
         cache_enabled=bool(torch.is_autocast_cache_enabled()),
@@ -522,9 +519,7 @@ def _capture_forward_context(observed_context: tuple[Any, Any] | None, ) -> Iter
 
 
 @contextmanager
-def _capture_autocast(
-    observed: _AutocastState | None,
-) -> Iterator[None]:
+def _capture_autocast(observed: _AutocastState | None, ) -> Iterator[None]:
     """Replay autocast exactly as it was configured for the observed call.
 
     Discovery traces after the timed forward has finished. Without this
@@ -543,8 +538,7 @@ def _capture_autocast(
                     enabled=enabled,
                     dtype=dtype,
                     cache_enabled=observed.cache_enabled,
-                )
-            )
+                ))
         yield
 
 
@@ -1115,8 +1109,7 @@ class FXCaptureSession:
                 capture_args,
                 capture_kwargs,
         ), _capture_forward_context(variant.observed_context), _capture_autocast(
-                variant.observed_autocast,
-        ), _traceable_module_forwards(module):
+                variant.observed_autocast, ), _traceable_module_forwards(module):
             if mode == "symbolic":
                 # Symbolic tracing builds proxies from the forward signature and
                 # never pytree-flattens the example inputs, so it needs no

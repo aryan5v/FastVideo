@@ -44,6 +44,7 @@ jobs:
       if: github.event_name == 'pull_request_target'
       with:
         ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
         persist-credentials: false
         allow-unsafe-pr-checkout: true
     - name: Restore trusted hook config
@@ -57,7 +58,10 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/ruff.json"
     - uses: pre-commit/action@v3.0.1
       with:
-        extra_args: --all-files --hook-stage manual
+        # A PR must not be forced to reformat unrelated inherited files. Lint
+        # only the base-to-head diff while retaining the base branch's trusted
+        # hook configuration. workflow_call still audits the complete tree.
+        extra_args: ${{ github.event_name == 'pull_request_target' && format('--from-ref {0} --to-ref HEAD --hook-stage manual', github.event.pull_request.base.sha) || '--all-files --hook-stage manual' }}
     # After pre-commit so a self-test failure cannot mask lint failures.
     # GATE_SCRIPTS_DIR points at the base-branch copy on fork PRs (set above);
     # push / workflow_call runs use the checked-out tree directly.

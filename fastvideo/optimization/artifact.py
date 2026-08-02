@@ -858,15 +858,11 @@ class ArtifactRegistry:
             return
         allowed = set(self.enabled_ids)
         self.manifests = [item for item in verified if item.artifact_id in allowed]
-        self.excluded_ids = tuple(
-            sorted(item.artifact_id for item in verified if item.artifact_id not in allowed)
-        )
+        self.excluded_ids = tuple(sorted(item.artifact_id for item in verified if item.artifact_id not in allowed))
         missing = sorted(allowed - {item.artifact_id for item in verified})
         for artifact_id in missing:
-            self.errors.append(
-                f"artifact {artifact_id!r} was requested but no verified bundle "
-                f"in {str(root)!r} provides it"
-            )
+            self.errors.append(f"artifact {artifact_id!r} was requested but no verified bundle "
+                               f"in {str(root)!r} provides it")
 
     @property
     def enabled(self) -> bool:

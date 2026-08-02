@@ -2,8 +2,9 @@
 """Reason1 (Qwen2.5-VL) text encoder."""
 
 import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from collections.abc import Iterable
+from typing import Any
 
 import torch
 from transformers import AutoProcessor
@@ -21,6 +22,33 @@ from fastvideo.models.encoders.qwen2_5_vl_custom import (
 )
 
 logger = init_logger(__name__)
+
+
+def _normalize_chat_template_input_ids(tokenizer_output: Any) -> list[int]:
+    """Normalize Transformers chat-template outputs across API versions."""
+    value = tokenizer_output
+    if isinstance(value, Mapping):
+        if "input_ids" not in value:
+            raise RuntimeError(
+                "Chat template returned a mapping without input_ids"
+            )
+        value = value["input_ids"]
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if (
+        isinstance(value, list)
+        and len(value) == 1
+        and isinstance(value[0], list)
+    ):
+        value = value[0]
+    if not isinstance(value, list) or any(
+        isinstance(token_id, bool) or not isinstance(token_id, int)
+        for token_id in value
+    ):
+        raise RuntimeError(
+            f"Unexpected chat_template output type: {type(tokenizer_output)}"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -266,21 +294,7 @@ class Reason1TextEncoder(TextEncoder):
                 add_generation_prompt=False,
             )
 
-            if isinstance(tokenizer_output, dict) and "input_ids" in tokenizer_output:
-                input_ids = tokenizer_output["input_ids"]
-                if hasattr(input_ids, "tolist"):
-                    input_ids = input_ids.tolist()
-            else:
-                input_ids = tokenizer_output
-                if hasattr(input_ids, "tolist"):
-                    input_ids = input_ids.tolist()
-                if isinstance(input_ids, list) and len(input_ids) == 1 and isinstance(
-                        input_ids[0], list):
-                    input_ids = input_ids[0]
-                if not isinstance(input_ids, list):
-                    raise RuntimeError(
-                        f"Unexpected chat_template output type: {type(tokenizer_output)}"
-                    )
+            input_ids = _normalize_chat_template_input_ids(tokenizer_output)
             
             if self.num_embedding_padding_tokens > len(input_ids):
                 pad_len = self.num_embedding_padding_tokens - len(input_ids)

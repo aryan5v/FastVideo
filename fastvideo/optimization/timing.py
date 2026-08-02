@@ -25,7 +25,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastvideo import envs
 
@@ -73,7 +73,7 @@ class _NoOp:
     def __enter__(self) -> _NoOp:
         return self
 
-    def __exit__(self, *exc: Any) -> bool:
+    def __exit__(self, *exc: Any) -> Literal[False]:
         return False
 
 
@@ -154,9 +154,7 @@ def snapshot() -> dict[str, Any]:
     return {
         "timing_schema_version": 1,
         "synchronized": SYNCHRONIZE,
-        "phases": dict(
-            sorted(phases.items(), key=lambda item: -item[1]["total_seconds"])
-        ),
+        "phases": dict(sorted(phases.items(), key=lambda item: -item[1]["total_seconds"])),
         "notes": dict(sorted(_notes.items(), key=lambda item: -item[1])),
     }
 
@@ -170,12 +168,12 @@ def write_report(path: str | Path) -> Path | None:
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=output.parent,
-            prefix=f".{output.name}.",
-            suffix=".tmp",
-            delete=False,
+                mode="w",
+                encoding="utf-8",
+                dir=output.parent,
+                prefix=f".{output.name}.",
+                suffix=".tmp",
+                delete=False,
         ) as handle:
             temporary = Path(handle.name)
             handle.write(json.dumps(snapshot(), indent=2, sort_keys=True) + "\n")
