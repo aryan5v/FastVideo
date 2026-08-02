@@ -1614,7 +1614,8 @@ def test_cuda_graph_runner_declines_non_cuda_inputs():
         runner([torch.zeros(2)])
 
 
-def test_cuda_graph_runner_declines_non_tensor_inputs():
+def test_cuda_graph_runner_accepts_non_tensor_leaves(monkeypatch):
+    """A Python scalar is a constant to bake in, not a reason to decline."""
     from fastvideo.optimization.subgraph import (
         CudaGraphUnavailable,
         _CudaGraphRunner,
@@ -1623,8 +1624,26 @@ def test_cuda_graph_runner_declines_non_tensor_inputs():
 
     runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
     runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
-    with pytest.raises(CudaGraphUnavailable, match="not a tensor"):
-        runner([object()])
+    runner._observed = [[None, None]] * _CudaGraphRunner.WARMUP_ITERATIONS
+
+    # On CPU capture still declines, but for the honest reason.
+    with pytest.raises(CudaGraphUnavailable) as raised:
+        runner([True, 3])
+    assert "not a tensor" not in str(raised.value)
+
+
+def test_cuda_graph_runner_declines_a_cpu_tensor():
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._warmups = _CudaGraphRunner.WARMUP_ITERATIONS
+    runner._observed = [[0]] * _CudaGraphRunner.WARMUP_ITERATIONS
+    with pytest.raises(CudaGraphUnavailable):
+        runner([torch.zeros(2)])
 
 
 def test_cuda_graph_scope_shares_one_buffer_per_position_across_blocks():
@@ -1709,3 +1728,57 @@ def test_dispatch_falls_back_to_eager_when_capture_is_unavailable(store, hidden)
     assert sum(item["candidate_calls"] for item in decisions) > 0
     assert sum(item["runtime_fallbacks"] for item in decisions) == 0
     session.detach()
+
+
+def test_non_tensor_leaves_are_captured_as_constants():
+    """Export flattens Python scalars and flags through as graph inputs.
+
+    A bool among the transformer block's 27 placeholders was making every one
+    of its 48 captures decline, so the fast path never engaged at all.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 2
+    runner._pinned = {}
+    runner._moving = {}
+    runner._constants = {1: True}
+    runner._static_outputs = (torch.zeros(1),)
+    runner._output_was_tuple = False
+
+    tensor = torch.zeros(2)
+    runner._pinned = {0: tensor.data_ptr()}
+    with pytest.raises(CudaGraphUnavailable, match="changed from the captured constant"):
+        runner([tensor, False])
+
+
+def test_a_matching_constant_does_not_block_replay():
+    from fastvideo.optimization.subgraph import _CudaGraphRunner, _CudaGraphScope
+
+    class _FakeGraph:
+        def __init__(self):
+            self.replays = 0
+
+        def replay(self):
+            self.replays += 1
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    graph = _FakeGraph()
+    runner._graph = graph
+    runner._arity = 2
+    tensor = torch.zeros(2)
+    runner._pinned = {0: tensor.data_ptr()}
+    runner._moving = {}
+    runner._constants = {1: True}
+    runner._static_outputs = (torch.ones(3),)
+    runner._output_was_tuple = True
+
+    result = runner([tensor, True])
+    assert graph.replays == 1
+    assert torch.equal(result[0], torch.ones(3))
+    assert result[0] is not runner._static_outputs[0], "outputs must be copied out"

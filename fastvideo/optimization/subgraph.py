@@ -293,23 +293,24 @@ class _CudaGraphRunner:
         self._pinned: dict[int, int] = {}
         #: index -> static buffer, for inputs that move between calls.
         self._moving: dict[int, Any] = {}
+        #: index -> value, for non-tensor leaves baked into the capture.
+        self._constants: dict[int, Any] = {}
 
     def _capture(self, flat_inputs: list[Any]) -> None:
         import torch
 
-        for index, value in enumerate(flat_inputs):
-            if not isinstance(value, torch.Tensor):
-                raise CudaGraphUnavailable(
-                    f"runtime input {index} is {type(value).__name__}, not a tensor"
-                )
-            if not value.is_cuda:
-                raise CudaGraphUnavailable(f"runtime input {index} is not on CUDA")
         if not torch.cuda.is_available():
             raise CudaGraphUnavailable("CUDA is not available")
+        for index, value in enumerate(flat_inputs):
+            if isinstance(value, torch.Tensor) and not value.is_cuda:
+                raise CudaGraphUnavailable(f"runtime input {index} is not on CUDA")
 
         # An input whose address never moved across warmup can be read where it
         # lives; one that moved needs a static buffer refreshed per call.
-        pointers = [value.data_ptr() for value in flat_inputs]
+        pointers = [
+            value.data_ptr() if isinstance(value, torch.Tensor) else None
+            for value in flat_inputs
+        ]
         stable = [
             all(observed[index] == pointers[index] for observed in self._observed)
             for index in range(len(flat_inputs))
@@ -318,7 +319,16 @@ class _CudaGraphRunner:
         capture_inputs: list[Any] = []
         self._pinned = {}
         self._moving = {}
+        self._constants = {}
         for index, value in enumerate(flat_inputs):
+            if not isinstance(value, torch.Tensor):
+                # A non-tensor leaf -- export flattens Python scalars and flags
+                # through as graph inputs. It holds no device memory, so it is
+                # baked into the capture as the constant it is. The graph is
+                # only valid while it keeps that value, which __call__ checks.
+                capture_inputs.append(value)
+                self._constants[index] = value
+                continue
             if stable[index]:
                 capture_inputs.append(value)
                 self._pinned[index] = pointers[index]
@@ -392,6 +402,16 @@ class _CudaGraphRunner:
             raise CudaGraphUnavailable("runtime input count changed after capture")
 
         for index, live in enumerate(flat_inputs):
+            if index in self._constants:
+                captured = self._constants[index]
+                # The captured kernels encode this value. A different one means
+                # the graph computes the wrong thing, so decline rather than
+                # replay it.
+                if type(live) is not type(captured) or live != captured:
+                    raise CudaGraphUnavailable(
+                        f"runtime input {index} changed from the captured constant"
+                    )
+                continue
             if not isinstance(live, torch.Tensor):
                 raise CudaGraphUnavailable(f"runtime input {index} is no longer a tensor")
             pinned = self._pinned.get(index)
