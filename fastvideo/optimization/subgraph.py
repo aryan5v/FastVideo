@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import operator
+import os
 import weakref
+from collections import Counter
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from torch import fx, nn
@@ -105,6 +109,43 @@ class _MetadataInterpreter(fx.Interpreter):
                 f"rewritten node {node.name!r} ({node.target}) failed; "
                 f"args={_value_metadata(args)}, kwargs={_value_metadata(kwargs)}"
             ) from exc
+
+
+def _dump_graph_profile(graph: fx.Graph, manifest: ArtifactManifest) -> None:
+    """Write an op histogram of the rewritten graph, when asked to.
+
+    The rewritten graph is what the dispatcher executes in place of the
+    module's own forward. When that path is slower than what it replaced, the
+    first question is which operations it is actually running -- an export
+    graph is decomposed, so a single high-level call in the module can become
+    dozens of primitives here. Metadata only: op names and counts, never tensor
+    values.
+    """
+    destination = os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH", "")
+    if not destination:
+        return
+    try:
+        histogram = Counter(
+            str(node.target) for node in graph.nodes if node.op == "call_function"
+        )
+        payload = {
+            "artifact_id": manifest.artifact_id,
+            "parent_module": manifest.parent_module,
+            "nodes_total": sum(1 for _ in graph.nodes),
+            "call_function_total": sum(histogram.values()),
+            "op_counts": dict(histogram.most_common()),
+            "op_kinds": {
+                "placeholder": sum(1 for n in graph.nodes if n.op == "placeholder"),
+                "get_attr": sum(1 for n in graph.nodes if n.op == "get_attr"),
+                "call_module": sum(1 for n in graph.nodes if n.op == "call_module"),
+                "call_method": sum(1 for n in graph.nodes if n.op == "call_method"),
+            },
+        }
+        output = Path(destination).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 - diagnostics must never break a run
+        return
 
 
 def _placeholder_contract(
@@ -468,6 +509,7 @@ def rewrite_exported_subgraph(
             graph.erase_node(node)
         graph.lint()
         runnable.recompile()
+        _dump_graph_profile(graph, manifest)
         return runnable
 
     def dispatch(parent_module: nn.Module, *args: Any, **kwargs: Any) -> Any:
