@@ -41,14 +41,19 @@ __all__ = [
     "write_report",
 ]
 
-_SETTING = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING
-ENABLED = bool(_SETTING)
-SYNCHRONIZE = _SETTING.lower() in {"sync", "cuda", "device", "shadow"}
+# One normalization rule for every operator-facing flag: TIMING=0, =false,
+# =no and =off all mean off. `bool(_SETTING)` previously enabled timing for
+# any non-empty value, including "0".
+_SETTING = envs.env_flag_normalized("FASTVIDEO_OPTIMIZATION_ARTIFACT_TIMING")
+ENABLED = _SETTING not in envs.ENV_FLAG_OFF_VALUES
+# The richer modes are meaningless when timing is off, so they are gated on it
+# rather than parsed independently.
+SYNCHRONIZE = ENABLED and _SETTING in {"sync", "cuda", "device", "shadow"}
 #: Also run the native forward on every dispatched call and time it, so the
 #: candidate path can be compared against the path it replaced on identical
 #: inputs. Diagnostic only: it roughly doubles the region's cost and the
 #: native result is discarded.
-SHADOW = _SETTING.lower() == "shadow"
+SHADOW = ENABLED and _SETTING == "shadow"
 # Shadow mode performs an extra native forward per dispatched call. A stateful
 # forward that consumes RNG, updates a cache, or mutates module state can
 # therefore change generation results even though the shadow output is

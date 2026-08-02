@@ -240,6 +240,14 @@ class ComposedPipelineBase(ABC):
         self._trace_mgr = attach_activation_trace(self.modules.get("transformer"))
         # Generic graph dispatch. Returns None unless a trusted artifact
         # directory is configured, in which case nothing is wrapped at all.
+        #
+        # Deliberately attached *after* the torch.compile block above, and the
+        # two are not supported together: compile traces the forward that is
+        # installed when it runs, while dispatch replaces that forward. Applied
+        # in either order the result is neither a cleanly compiled module nor a
+        # cleanly dispatched artifact, and guard invalidation forces repeated
+        # recompilation. attach_graph_dispatch warns when it detects a compiled
+        # module; enable one or the other, not both.
         self._dispatch_session = attach_graph_dispatch(self.modules)
 
         if not self.fastvideo_args.training_mode:

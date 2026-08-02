@@ -775,8 +775,11 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
     # Registered before execution so the module can look itself up, and removed
     # again on failure so a half-initialized module is never reachable.
     sys.modules[module_name] = module
-    previous_dont_write_bytecode = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
+    # No sys.dont_write_bytecode juggling here. compile()/exec() never writes a
+    # .pyc -- only the import system's source loader does -- so toggling that
+    # global bought nothing while briefly disabling bytecode caching for every
+    # other thread in the process. Bundle immutability is preserved because the
+    # entry point is executed from source that was already hash-verified.
     try:
         code = compile(source, str(entry_file), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102 - verified artifact is executable
@@ -787,8 +790,6 @@ def load_entry_point(manifest: ArtifactManifest, *, trusted_root: Path) -> Calla
             "entry_point",
             f"importing {verified.entry_file!r} raised {type(exc).__name__}",
         ) from exc
-    finally:
-        sys.dont_write_bytecode = previous_dont_write_bytecode
 
     candidate = getattr(module, verified.entry_symbol, None)
     if candidate is None or not callable(candidate):

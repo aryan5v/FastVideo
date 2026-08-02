@@ -95,6 +95,29 @@ def maybe_convert_int(value: str | None) -> int | None:
 
 # begin-env-vars-definition
 
+#: Values an operator would reasonably use to turn a feature off. Compared
+#: after ``.strip().lower()`` so ``FALSE``, ``No`` and `` off `` all disable.
+#: Ad-hoc per-site parsing previously left ``CUDA_GRAPHS=FALSE`` enabled.
+ENV_FLAG_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def env_flag_normalized(name: str, default: str = "") -> str:
+    """Return an operator-facing flag's value, stripped and lowercased."""
+    value = os.getenv(name)
+    if value is None:
+        value = default
+    return value.strip().lower()
+
+
+def env_flag_enabled(name: str, default: str = "") -> bool:
+    """Whether an on/off environment flag is enabled.
+
+    One rule for every such flag, so a value that looks like "off" to a human
+    is "off" to the code.
+    """
+    return env_flag_normalized(name, default) not in ENV_FLAG_OFF_VALUES
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
@@ -365,7 +388,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Replay rewritten subgraphs through CUDA graphs. Set to 0/false to force
     # eager graph execution while retaining artifact dispatch.
     "FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS":
-    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS", "1") not in {"0", "false", "False", ""},
+    lambda: env_flag_enabled("FASTVIDEO_OPTIMIZATION_ARTIFACT_CUDA_GRAPHS", "1"),
     # Optional metadata-only operation histogram for a rewritten graph.
     "FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH":
     lambda: os.getenv("FASTVIDEO_OPTIMIZATION_ARTIFACT_DUMP_GRAPH", ""),

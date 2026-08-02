@@ -56,14 +56,33 @@ repos:
 - repo: local
   hooks:
   - id: check-filenames
-    name: Check for spaces in all filenames
+    name: Check for spaces in filenames
     entry: bash
     args:
       - -c
-      - 'git ls-files | grep -v "^\"*fastvideo/tests/ssim/" | grep -v "^\"*fastvideo/tests/inference/lora/L40S_reference_videos/" | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+      - |
+        # Reads the filenames pre-commit passes in, so a PR-scoped run
+        # (--from-ref/--to-ref) only judges files that PR touched. With
+        # always_run + git ls-files this hook failed a PR for a space in an
+        # inherited file the author never edited. The workflow_call path still
+        # audits the whole tree via --all-files.
+        status=0
+        for name in "$@"; do
+          case "$name" in
+            fastvideo/tests/ssim/*) continue ;;
+            fastvideo/tests/inference/lora/L40S_reference_videos/*) continue ;;
+          esac
+          case "$name" in
+            *" "*)
+              echo "Filenames should not contain spaces: $name"
+              status=1
+              ;;
+          esac
+        done
+        exit "$status"
+      - --
     language: system
-    always_run: true
-    pass_filenames: false
+    pass_filenames: true
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

@@ -81,6 +81,7 @@ _REASON_IDENTITY_PREFIX = "graph_identity_unavailable"
 _REASON_LOAD_PREFIX = "artifact_load_failed"
 _REASON_RUNTIME_PREFIX = "candidate_runtime_error"
 _REASON_DECISION_PREFIX = "decision_failed"
+REASON_VARIANT_BUDGET = "shape_variant_budget_exhausted"
 
 
 @dataclass
@@ -144,6 +145,11 @@ class GraphDispatchSession:
         self._wrappers: list[_Wrapper] = []
         self._scopes: set[str] = set()
         self._decisions: dict[tuple[str, str], _Decision] = {}
+        #: Shape variants resolved per scope. Counted directly rather than
+        #: derived from _decisions: scanning that dict was O(len(decisions))
+        #: on the first call of every new signature, so a model with dynamic
+        #: shapes paid quadratic cost and the table grew without bound.
+        self._variant_counts: dict[str, int] = defaultdict(int)
         self._dropped_variants: dict[str, int] = defaultdict(int)
         self._dropped_scopes = 0
         self._errors: list[str] = []
@@ -257,7 +263,15 @@ class GraphDispatchSession:
             # layout, then decide once for every later call.
             with timing.phase("dispatch.native_reference"):
                 output = native(*args, **kwargs)
-            self._decisions[key] = self._decide(wrapper, args, kwargs, output, input_metas)
+            resolved = self._decide(wrapper, args, kwargs, output, input_metas)
+            if resolved.reason == REASON_VARIANT_BUDGET:
+                # One shared entry per scope, not one per unseen signature.
+                # Storing per signature let _decisions and the diagnostics
+                # report grow without bound on a dynamic-shape model, while
+                # still re-running _decide for each new key.
+                self._decisions.setdefault((wrapper.scope, ""), resolved)
+            else:
+                self._decisions[key] = resolved
             return output
 
         decision.calls += 1
@@ -314,9 +328,23 @@ class GraphDispatchSession:
                 ),
                 exc_info=True,
             )
-            return native(*args, **kwargs)
+            # Through the hook lifecycle, not around it. The candidate failed
+            # inside run_with_forward, which unwound its pre-hooks; calling
+            # `native` directly here would then run the module's real forward
+            # with no hooks at all, so an offload hook that materializes
+            # parameters would never run and the fallback would execute against
+            # unmaterialized weights.
+            return self._run_native(wrapper, args, kwargs)
         decision.candidate_calls += 1
         return result
+
+    @staticmethod
+    def _run_native(wrapper: _Wrapper, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Run the native forward through the module's hook lifecycle."""
+        hook_manager = ModuleHookManager.get_from(wrapper.module)
+        if hook_manager is None:
+            return wrapper.native_forward(*args, **kwargs)
+        return hook_manager.run_with_forward(wrapper.native_forward, *args, **kwargs)
 
     @staticmethod
     def _parameter_snapshot(wrapper: _Wrapper) -> dict[str, Any]:
@@ -393,7 +421,8 @@ class GraphDispatchSession:
         scope = wrapper.scope
         if self._variant_count(scope) >= self.max_shape_variants:
             self._dropped_variants[scope] += 1
-            return _Decision(None, "shape_variant_budget_exhausted")
+            return _Decision(None, REASON_VARIANT_BUDGET)
+        self._variant_counts[scope] += 1
 
         if not input_metas:
             return _Decision(None, REASON_NO_TENSOR_INPUTS)
@@ -439,10 +468,26 @@ class GraphDispatchSession:
                 if export_region is None:
                     rejections.append(f"{manifest.artifact_id}:export_capture_missing")
                     continue
-                candidate_input_keys, candidate_output_keys = subgraph_signature_keys(
-                    export_region,
-                    manifest,
-                )
+                try:
+                    candidate_input_keys, candidate_output_keys = subgraph_signature_keys(
+                        export_region,
+                        manifest,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad recipe, not all
+                    # Reject this manifest alone. Letting the exception escape
+                    # aborted the whole _resolve, so a single malformed bundle
+                    # in the directory demoted the entire scope to native and
+                    # suppressed every other, valid candidate for it.
+                    rejections.append(f"{manifest.artifact_id}:malformed_subgraph_recipe:"
+                                      f"{type(exc).__name__}")
+                    logger.warning(
+                        "Artifact %s has a malformed subgraph recipe for %s; "
+                        "skipping it and continuing with the other candidates",
+                        manifest.artifact_id,
+                        scope,
+                        exc_info=True,
+                    )
+                    continue
                 fingerprint = str(export_region.get("fingerprint", ""))
             else:
                 if module_region is None:
@@ -522,7 +567,7 @@ class GraphDispatchSession:
             wrapper.module.forward = installed_forward  # type: ignore[method-assign]
 
     def _variant_count(self, scope: str) -> int:
-        return sum(1 for existing_scope, _ in self._decisions if existing_scope == scope)
+        return self._variant_counts[scope]
 
     # -- diagnostics ----------------------------------------------------
 
@@ -606,12 +651,51 @@ def _distributed_mode() -> str:
         return declared
     try:
         import torch.distributed as distributed
-
-        if distributed.is_available() and distributed.is_initialized():
-            return "single" if distributed.get_world_size() == 1 else "unspecified"
-    except Exception:  # noqa: BLE001 - absence of distributed means single process
+    except ImportError:
+        # torch.distributed genuinely absent: this build cannot shard, so a
+        # single-process run is the only possibility.
         return "single"
-    return "single"
+
+    try:
+        if not (distributed.is_available() and distributed.is_initialized()):
+            return "single"
+        return "single" if distributed.get_world_size() == 1 else "unspecified"
+    except Exception:  # noqa: BLE001 - an unreadable topology is not a safe one
+        # Previously any failure here returned "single", which is the *most*
+        # permissive answer: it matches unsharded artifacts. If the world size
+        # cannot be read, the run may well be multi-rank, and applying an
+        # unsharded kernel to a sharded module is a correctness bug. Report
+        # "unspecified", which matches no artifact.
+        logger.warning(
+            "Could not determine distributed topology; reporting 'unspecified' "
+            "so no artifact matches",
+            exc_info=True,
+        )
+        return "unspecified"
+
+
+def _warn_if_compiled(modules: dict[str, Any] | None) -> None:
+    """Warn when dispatch is attached to a module that is already compiled.
+
+    Artifact dispatch replaces ``module.forward`` with a Python wrapper that
+    traces, decides and may replay a rewritten graph. ``torch.compile`` traces
+    through the *installed* forward, so the two compose badly: whichever is
+    applied second wins, guard invalidation forces recompilation, and the
+    result is neither the compiled module nor the dispatched artifact. They are
+    not supported together.
+    """
+    for name, module in (modules or {}).items():
+        if not isinstance(module, nn.Module):
+            continue
+        compiled = getattr(module, "_orig_mod", None) is not None or type(module).__name__ == "OptimizedModule"
+        if compiled:
+            logger.warning(
+                "Artifact dispatch is attaching to %r, which appears to be "
+                "torch.compile'd. These are not supported together: compile "
+                "traces the installed forward, and dispatch replaces it. "
+                "Disable one of them.",
+                name,
+            )
 
 
 def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSession | None:
@@ -649,6 +733,7 @@ def attach_graph_dispatch(modules: dict[str, Any] | None) -> GraphDispatchSessio
             execution_mode=_execution_mode(modules),
             distributed_mode=_distributed_mode(),
         )
+        _warn_if_compiled(modules)
         session = GraphDispatchSession(
             registry,
             runtime,

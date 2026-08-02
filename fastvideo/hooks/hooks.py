@@ -3,7 +3,12 @@
 import functools
 from collections.abc import Callable
 from typing import Any
+
 from torch import nn
+
+from fastvideo.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class ForwardHook:
@@ -77,13 +82,46 @@ class ModuleHookManager:
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        """Run ``forward`` through this module's installed hook lifecycle."""
-        for hook in self.forward_hooks.values():
-            args, kwargs = hook.pre_forward(self.module, *args, **kwargs)
-        output = forward(*args, **kwargs)
-        for hook in reversed(self.forward_hooks.values()):
+        """Run ``forward`` through this module's installed hook lifecycle.
+
+        The lifecycle is balanced even when something raises. Hooks here carry
+        real state -- parameter offload and materialization -- so a pre-hook
+        that ran without its post-hook leaves the module in a half-materialized
+        state that survives the exception and corrupts every later call. That
+        matters most for artifact dispatch, whose whole design is that an
+        untrusted candidate may raise and be replaced by the native forward.
+
+        On failure the post-hooks for exactly the pre-hooks that completed are
+        run, in reverse order, and the original exception is re-raised. A
+        post-hook that itself fails during unwinding is logged and does not
+        mask the original error.
+        """
+        completed: list[ForwardHook] = []
+        try:
+            for hook in self.forward_hooks.values():
+                args, kwargs = hook.pre_forward(self.module, *args, **kwargs)
+                completed.append(hook)
+            output = forward(*args, **kwargs)
+        except Exception:
+            self._unwind(completed)
+            raise
+        for hook in reversed(completed):
             output = hook.post_forward(self.module, output)
         return output
+
+    def _unwind(self, completed: list["ForwardHook"]) -> None:
+        """Run post-hooks for the pre-hooks that completed, newest first."""
+        for hook in reversed(completed):
+            try:
+                hook.post_forward(self.module, None)
+            except Exception:  # noqa: BLE001 - never mask the original failure
+                logger.warning(
+                    "post_forward failed while unwinding %s on %s; continuing "
+                    "so the original error is not masked",
+                    type(hook).__name__,
+                    type(self.module).__name__,
+                    exc_info=True,
+                )
 
     @staticmethod
     def remove_from_manager(module: nn.Module) -> None:

@@ -1998,3 +1998,167 @@ def test_a_refused_capture_releases_its_pool():
     assert runner._pending_graph is None
     assert runner._static_outputs == ()
     assert runner._attributes == []
+
+
+# ---------------------------------------------------------------------------
+# Review-driven regressions (PR #26)
+# ---------------------------------------------------------------------------
+
+
+def test_shape_variant_budget_bounds_the_decisions_table(store, hidden, monkeypatch):
+    """Over-budget signatures must not each add a decision.
+
+    _variant_count used to scan _decisions, and the over-budget decision was
+    stored per shape key, so the table and the diagnostics report grew without
+    bound on a dynamic-shape model and the scan cost went quadratic.
+    """
+    modules = _pipeline_modules()
+    transformer = modules["transformer"]
+    fingerprint, inputs, outputs = _observed_identity(transformer.blocks[0], hidden)
+    _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    session = GraphDispatchSession(
+        ArtifactRegistry(store), _runtime(), max_shape_variants=2
+    )
+    session.attach_modules(modules)
+
+    with torch.no_grad():
+        for width in range(3, 15):
+            transformer(torch.randn(2, WIDTH) if width % 2 else torch.randn(3, WIDTH))
+
+    decisions = _decisions(session)
+    over_budget = [d for d in decisions if d["reason"] == "shape_variant_budget_exhausted"]
+    assert len(over_budget) <= 1, "over-budget decisions must collapse to one per scope"
+    assert len(decisions) <= 4, f"decision table grew unbounded: {len(decisions)}"
+
+
+def test_variant_count_is_tracked_not_scanned():
+    """The count must not be derived by scanning the decisions dict."""
+    import inspect
+
+    from fastvideo.optimization.dispatch import GraphDispatchSession
+
+    source = inspect.getsource(GraphDispatchSession._variant_count)
+    assert "_variant_counts" in source
+    assert "for existing_scope" not in source, "still scanning _decisions"
+
+
+def test_a_malformed_subgraph_manifest_does_not_suppress_other_candidates(monkeypatch):
+    """One bad recipe used to abort _resolve and demote the whole scope."""
+    import fastvideo.optimization.dispatch as dmod
+
+    calls = {"n": 0}
+
+    def exploding_signature_keys(region, manifest):
+        calls["n"] += 1
+        raise SubgraphRewriteError("rewrite boundary metadata missing")
+
+    monkeypatch.setattr(dmod, "subgraph_signature_keys", exploding_signature_keys)
+
+    import inspect
+
+    source = inspect.getsource(dmod.GraphDispatchSession._resolve)
+    assert "malformed_subgraph_recipe" in source, (
+        "a failing per-manifest recipe must be recorded as a rejection and skipped"
+    )
+    assert "continue" in source
+
+
+def test_distributed_detection_fails_closed_on_an_unreadable_topology(monkeypatch):
+    """Returning 'single' on error was the most permissive possible answer:
+    it matches unsharded artifacts, which is a correctness bug on a sharded
+    module."""
+    import torch.distributed as distributed
+
+    from fastvideo.optimization.dispatch import _distributed_mode
+
+    monkeypatch.setattr(
+        "fastvideo.envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE", ""
+    )
+    monkeypatch.setattr(distributed, "is_available", lambda: True)
+    monkeypatch.setattr(distributed, "is_initialized", lambda: True)
+
+    def unreadable():
+        raise RuntimeError("process group not reachable")
+
+    monkeypatch.setattr(distributed, "get_world_size", unreadable)
+    assert _distributed_mode() == "unspecified"
+
+
+def test_distributed_detection_reports_single_without_torch_distributed(monkeypatch):
+    import torch.distributed as distributed
+
+    from fastvideo.optimization.dispatch import _distributed_mode
+
+    monkeypatch.setattr(
+        "fastvideo.envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DISTRIBUTED_MODE", ""
+    )
+    monkeypatch.setattr(distributed, "is_available", lambda: False)
+    assert _distributed_mode() == "single"
+
+
+def test_loading_an_artifact_does_not_mutate_global_bytecode_setting(store, hidden):
+    """The global toggle affected every other thread and bought nothing:
+    compile()/exec() never writes a .pyc."""
+    import inspect
+    import sys
+
+    from fastvideo.optimization import artifact as amod
+
+    source = inspect.getsource(amod.load_entry_point)
+    assert "sys.dont_write_bytecode =" not in source, (
+        "loading an artifact must not mutate the process-global setting"
+    )
+
+    fingerprint, inputs, outputs = _observed_identity(
+        _pipeline_modules()["transformer"].blocks[0], hidden
+    )
+    directory = _write_bundle(store, _sections(fingerprint, inputs, outputs))
+    before = sys.dont_write_bytecode
+    manifest = ArtifactManifest.from_dict(
+        json.loads((directory / MANIFEST_FILENAME).read_text()), directory=directory
+    )
+    load_entry_point(manifest, trusted_root=store)
+    assert sys.dont_write_bytecode is before
+
+
+def test_assertion_targets_match_canonically():
+    """str(node.target) varies with how the graph was produced; a single
+    literal comparison silently stopped matching."""
+    from fastvideo.optimization.subgraph import _is_assertion_target
+
+    class _Overload:
+        namespace = "aten"
+        _opname = "_assert_tensor_metadata"
+        _overloadname = "default"
+
+        def __str__(self) -> str:  # the torch.ops.-prefixed spelling
+            return "torch.ops.aten._assert_tensor_metadata.default"
+
+    class _Packet:
+        namespace = "aten"
+        _opname = "_assert_tensor_metadata"
+        _overloadname = None
+
+    class _Unrelated:
+        namespace = "aten"
+        _opname = "mul"
+        _overloadname = "Tensor"
+
+    assert _is_assertion_target(_Overload())
+    assert _is_assertion_target(_Packet())
+    assert not _is_assertion_target(_Unrelated())
+    assert not _is_assertion_target("aten.add.Tensor")
+
+
+def test_attach_warns_when_the_module_is_already_compiled(store, hidden, caplog):
+    """torch.compile and artifact dispatch both own module.forward."""
+    from fastvideo.optimization.dispatch import _warn_if_compiled
+
+    class _Compiled(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self._orig_mod = inner
+
+    with caplog.at_level("WARNING"):
+        _warn_if_compiled({"transformer": _Compiled(_Block(WIDTH))})
+    assert any("torch.compile" in record.message for record in caplog.records)

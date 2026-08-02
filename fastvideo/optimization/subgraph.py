@@ -141,7 +141,33 @@ class _MetadataInterpreter(fx.Interpreter):
 #: checks the placeholder contract once per call in _validate_runtime_inputs,
 #: against the same values export recorded. Replaying 68 of them per call --
 #: measured on transformer.model.transformer_blocks -- is pure dispatch cost.
+#: Matched on the operator's canonical name rather than ``str(node.target)``.
+#: An OpOverload can stringify as "aten._assert_tensor_metadata.default" or
+#: "torch.ops.aten._assert_tensor_metadata.default" depending on how the graph
+#: was produced, and an OpOverloadPacket drops the ".default" entirely, so a
+#: single literal comparison silently stopped matching and left the assertions
+#: in the replayed graph.
 _ASSERTION_TARGETS = frozenset({"aten._assert_tensor_metadata.default"})
+
+
+def _canonical_target_name(target: Any) -> str:
+    """Best-effort canonical ``namespace.op.overload`` name for an FX target."""
+    namespace = getattr(target, "namespace", None)
+    name = getattr(target, "_opname", None) or getattr(target, "__name__", None)
+    overload = getattr(target, "_overloadname", None)
+    if namespace and name:
+        return f"{namespace}.{name}.{overload}" if overload else f"{namespace}.{name}"
+    text = str(target)
+    return text[len("torch.ops."):] if text.startswith("torch.ops.") else text
+
+
+def _is_assertion_target(target: Any) -> bool:
+    """Whether an FX call target is an export runtime metadata assertion."""
+    canonical = _canonical_target_name(target)
+    if canonical in _ASSERTION_TARGETS:
+        return True
+    # Tolerate a packet (no overload) and the torch.ops.-prefixed spelling.
+    return any(canonical == declared.rsplit(".", 1)[0] for declared in _ASSERTION_TARGETS)
 
 
 def _strip_runtime_assertions(graph: fx.Graph) -> int:
@@ -157,7 +183,7 @@ def _strip_runtime_assertions(graph: fx.Graph) -> int:
     for node in reversed(list(graph.nodes)):
         if node.op != "call_function":
             continue
-        if str(node.target) not in _ASSERTION_TARGETS:
+        if not _is_assertion_target(node.target):
             continue
         if node.users:
             continue
