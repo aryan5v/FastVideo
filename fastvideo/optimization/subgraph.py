@@ -13,6 +13,7 @@ from torch import fx, nn
 from torch.fx._pytree import tree_flatten_spec
 from torch.utils._pytree import tree_unflatten
 
+from fastvideo.optimization import timing
 from fastvideo.optimization.artifact import ArtifactManifest, signature_key
 
 
@@ -476,10 +477,13 @@ def rewrite_exported_subgraph(
             entry = (runnable, _placeholder_contract(runnable.graph))
             cache[parent_module] = entry
         runnable, contract = entry
-        flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
-        _validate_runtime_inputs(contract, flat_inputs)
+        with timing.phase("subgraph.flatten"):
+            flat_inputs = tree_flatten_spec((args, kwargs), input_spec)
+        with timing.phase("subgraph.validate"):
+            _validate_runtime_inputs(contract, flat_inputs)
         try:
-            flat_output = runnable(*flat_inputs)
+            with timing.phase("subgraph.execute"):
+                flat_output = runnable(*flat_inputs)
         except RuntimeError as exc:
             anomalies = {
                 "attributes": {
@@ -504,7 +508,8 @@ def rewrite_exported_subgraph(
             raise SubgraphRewriteError(
                 f"rewritten export execution failed; metadata anomalies: {anomalies}"
             ) from exc
-        leaves = list(flat_output) if isinstance(flat_output, tuple) else [flat_output]
-        return tree_unflatten(leaves, output_spec)
+        with timing.phase("subgraph.unflatten"):
+            leaves = list(flat_output) if isinstance(flat_output, tuple) else [flat_output]
+            return tree_unflatten(leaves, output_spec)
 
     return dispatch

@@ -48,6 +48,7 @@ from torch import nn
 from fastvideo import envs
 from fastvideo.hooks.hooks import ModuleHookManager
 from fastvideo.logger import init_logger
+from fastvideo.optimization import timing
 from fastvideo.optimization.artifact import (
     ArtifactManifest,
     ArtifactRegistry,
@@ -250,8 +251,9 @@ class GraphDispatchSession:
     def _dispatch(self, wrapper: _Wrapper, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         native = wrapper.native_forward
         try:
-            input_metas = input_signatures(args, kwargs)
-            shape_key = shape_key_for(input_metas)
+            with timing.phase("dispatch.shape_key"):
+                input_metas = input_signatures(args, kwargs)
+                shape_key = shape_key_for(input_metas)
         except Exception as exc:  # noqa: BLE001
             self._record_exception("shape_key_failed", exc, scope=wrapper.scope)
             return native(*args, **kwargs)
@@ -261,13 +263,15 @@ class GraphDispatchSession:
         if decision is None:
             # First call for this signature: run native, learn the output
             # layout, then decide once for every later call.
-            output = native(*args, **kwargs)
+            with timing.phase("dispatch.native_reference"):
+                output = native(*args, **kwargs)
             self._decisions[key] = self._decide(wrapper, args, kwargs, output, input_metas)
             return output
 
         decision.calls += 1
         if decision.candidate is None:
-            return native(*args, **kwargs)
+            with timing.phase("dispatch.native_fallback"):
+                return native(*args, **kwargs)
 
         def candidate_forward(*candidate_args: Any, **candidate_kwargs: Any) -> Any:
             assert decision.candidate is not None
@@ -277,8 +281,15 @@ class GraphDispatchSession:
                 **candidate_kwargs,
             )
 
+        if timing.SHADOW:
+            # Same module, same live tensors, same stream: the only honest
+            # comparison for "is the artifact path cheaper than what it
+            # replaced". The result is discarded.
+            with timing.phase("shadow.native_forward"):
+                native(*args, **kwargs)
+
         try:
-            with self._materialized_candidate_parameters(
+            with timing.phase("dispatch.candidate_total"), self._materialized_candidate_parameters(
                 wrapper.parameter_manager
             ):
                 hook_manager = ModuleHookManager.get_from(wrapper.module)
@@ -672,3 +683,4 @@ def detach_graph_dispatch(session: GraphDispatchSession | None) -> None:
     output = envs.FASTVIDEO_OPTIMIZATION_ARTIFACT_DIAGNOSTICS
     if output:
         session.write_diagnostics(output)
+        timing.write_report(Path(str(output)).with_name("timing.json"))
