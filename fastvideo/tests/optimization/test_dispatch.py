@@ -14,6 +14,7 @@ import json
 import os
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -35,6 +36,7 @@ from fastvideo.optimization.dispatch import (REASON_NO_COMPATIBLE_ARTIFACT, REAS
                                              GraphDispatchSession, attach_graph_dispatch, detach_graph_dispatch)
 from fastvideo.optimization.fx_capture import capture_export_invocation
 from fastvideo.optimization.identity import (graph_identity, input_signatures, output_signatures)
+from fastvideo.optimization import subgraph
 from fastvideo.optimization.subgraph import (SubgraphRewriteError,
                                              rewrite_exported_subgraph)
 
@@ -92,6 +94,35 @@ def fused_subgraph(module, value, offset):
     module.subgraph_calls = getattr(module, "subgraph_calls", 0) + 1
     return value + offset
 '''
+
+
+def test_lifted_attribute_mapping_ignores_callable_graph_attributes():
+    """Higher-order subgraphs are not lifted parameter or buffer inputs."""
+    root = nn.Module()
+    root.register_parameter("weight", nn.Parameter(torch.ones(WIDTH)))
+    root.add_module("submod_1", nn.Identity())
+
+    graph = torch.fx.Graph()
+    weight = graph.get_attr("weight")
+    graph.get_attr("submod_1")
+    graph.output(weight)
+
+    exported = SimpleNamespace(
+        graph_signature=SimpleNamespace(
+            input_specs=[
+                SimpleNamespace(
+                    kind=SimpleNamespace(name="PARAMETER"),
+                    target="weight",
+                )
+            ]
+        ),
+        module=lambda: root,
+    )
+
+    pairs = subgraph._lifted_attribute_pairs(exported, graph)
+
+    assert len(pairs) == 1
+    assert pairs[0][1] is weight
 
 
 class _Block(nn.Module):

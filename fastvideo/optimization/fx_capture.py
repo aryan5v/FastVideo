@@ -828,7 +828,16 @@ def _extract_executable_ir(exported: Any, graph: Any) -> dict[str, Any]:
         if node.op in {"placeholder", "output"}:
             continue
         if node.op == "get_attr":
-            raise RuntimeError("unlifted_graph_attribute")
+            # Higher-order export operators can retain callable GraphModule
+            # attributes (for example an autocast subgraph) alongside lifted
+            # tensor placeholders. The attribute is neither safe nor useful
+            # to serialize, but rejecting the entire IR also discards pure
+            # tensor runs before and after that opaque boundary. Preserve its
+            # identity only as an unsupported expression: any node consuming
+            # it is excluded by MotionKernel's fail-closed allowlist while
+            # independent tensor subregions remain available for extraction.
+            node_expressions[node] = {"unsupported": "graph_attribute"}
+            continue
         if node.op not in {"call_function", "call_method", "call_module"}:
             raise RuntimeError("unsupported_graph_node_kind")
         node_id = f"n{len(nodes)}"

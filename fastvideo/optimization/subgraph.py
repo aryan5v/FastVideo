@@ -617,7 +617,20 @@ def _lifted_attribute_pairs(
     """Pair lifted input specs with runtime attributes without order assumptions."""
     input_specs = list(exported.graph_signature.input_specs)
     lifted_specs = [spec for spec in input_specs if getattr(getattr(spec, "kind", None), "name", "") != "USER_INPUT"]
-    attributes = [node for node in graph.nodes if node.op == "get_attr"]
+    exported_module = exported.module()
+    attributes = []
+    for node in graph.nodes:
+        if node.op != "get_attr":
+            continue
+        try:
+            value = _get_attr(exported_module, str(node.target))
+        except AttributeError as exc:
+            raise SubgraphRewriteError("exported graph attribute is missing") from exc
+        # Export may retain callable higher-order subgraphs as get_attr nodes.
+        # They are part of the runnable graph, not lifted tensor inputs, and
+        # must not make the parameter/buffer mapping appear ambiguous.
+        if _tensor_key(value) is not None:
+            attributes.append(node)
     if len(attributes) != len(lifted_specs):
         raise SubgraphRewriteError("export lifted input mapping changed")
 

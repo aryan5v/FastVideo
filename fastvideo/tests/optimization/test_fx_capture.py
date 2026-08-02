@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import operator
 import warnings
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -26,6 +28,39 @@ class _Block(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.silu(hidden_states * self.scale) + hidden_states
+
+
+def test_executable_ir_keeps_safe_nodes_around_opaque_graph_attribute():
+    """A callable get_attr is an opaque boundary, not a reason to drop all IR."""
+    graph = torch.fx.Graph()
+    lifted = graph.placeholder("lifted_weight")
+    lifted.meta["val"] = torch.ones(4)
+    hidden = graph.placeholder("hidden")
+    hidden.meta["val"] = torch.ones(2, 4)
+    opaque_subgraph = graph.get_attr("submod_1")
+    wrapped = graph.call_function(operator.mul, (opaque_subgraph, hidden))
+    wrapped.meta["val"] = torch.ones(2, 4)
+    added = graph.call_function(torch.ops.aten.add.Tensor, (wrapped, hidden))
+    added.meta["val"] = torch.ones(2, 4)
+    graph.output(added)
+
+    exported = SimpleNamespace(
+        graph_signature=SimpleNamespace(
+            input_specs=[
+                SimpleNamespace(kind=SimpleNamespace(name="PARAMETER")),
+                SimpleNamespace(kind=SimpleNamespace(name="USER_INPUT")),
+            ]
+        )
+    )
+
+    executable_ir = fx_capture._extract_executable_ir(exported, graph)
+
+    assert len(executable_ir["nodes"]) == 2
+    assert executable_ir["nodes"][0]["args"][0] == {
+        "unsupported": "graph_attribute"
+    }
+    assert executable_ir["nodes"][1]["target"] == "aten.add.Tensor"
+    assert executable_ir["outputs"] == [{"ref": "n1"}]
 
 
 class _UntraceableBlock(nn.Module):
