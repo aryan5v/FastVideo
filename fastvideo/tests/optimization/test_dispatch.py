@@ -1681,11 +1681,37 @@ def test_a_pinned_input_that_moves_declines_rather_than_reading_stale_memory():
     runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
     runner._graph = object()
     runner._arity = 1
-    runner._pinned = {0: 123456}
+    runner._pinned = {0: (123456, (2,), (1,), "torch.float32", "cpu", 0)}
     runner._moving = {}
+    runner._attributes = []
 
-    with pytest.raises(CudaGraphUnavailable, match="moved after capture"):
+    with pytest.raises(CudaGraphUnavailable, match="moved or changed layout"):
         runner([torch.zeros(2)])
+
+
+def test_a_restrided_input_at_the_same_address_is_rejected():
+    """data_ptr alone cannot see a layout change, and the capture baked one in."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+        _layout_identity,
+    )
+
+    contiguous = torch.zeros(4, 4)
+    permuted = contiguous.t()
+    assert contiguous.data_ptr() == permuted.data_ptr()
+    assert contiguous.shape == permuted.shape
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 1
+    runner._pinned = {0: _layout_identity(contiguous)}
+    runner._moving = {}
+    runner._attributes = []
+
+    with pytest.raises(CudaGraphUnavailable, match="moved or changed layout"):
+        runner([permuted])
 
 
 def test_warmup_records_input_addresses_for_the_stability_decision():
@@ -1700,8 +1726,10 @@ def test_warmup_records_input_addresses_for_the_stability_decision():
     for _ in range(_CudaGraphRunner.WARMUP_ITERATIONS):
         with pytest.raises(CudaGraphUnavailable, match="warming up"):
             runner([tensor])
+    from fastvideo.optimization.subgraph import _layout_identity
+
     assert len(runner._observed) == _CudaGraphRunner.WARMUP_ITERATIONS
-    assert all(seen == [tensor.data_ptr()] for seen in runner._observed)
+    assert all(seen == [_layout_identity(tensor)] for seen in runner._observed)
 
 
 def test_dispatch_falls_back_to_eager_when_capture_is_unavailable(store, hidden):
@@ -1740,19 +1768,20 @@ def test_non_tensor_leaves_are_captured_as_constants():
         CudaGraphUnavailable,
         _CudaGraphRunner,
         _CudaGraphScope,
+        _layout_identity,
     )
 
+    tensor = torch.zeros(2)
     runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
     runner._graph = object()
     runner._arity = 2
-    runner._pinned = {}
+    runner._pinned = {0: _layout_identity(tensor)}
     runner._moving = {}
     runner._constants = {1: True}
+    runner._attributes = []
     runner._static_outputs = (torch.zeros(1),)
     runner._output_was_tuple = False
 
-    tensor = torch.zeros(2)
-    runner._pinned = {0: tensor.data_ptr()}
     with pytest.raises(CudaGraphUnavailable, match="changed from the captured constant"):
         runner([tensor, False])
 
@@ -1767,14 +1796,17 @@ def test_a_matching_constant_does_not_block_replay():
         def replay(self):
             self.replays += 1
 
+    from fastvideo.optimization.subgraph import _layout_identity
+
     runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
     graph = _FakeGraph()
     runner._graph = graph
     runner._arity = 2
     tensor = torch.zeros(2)
-    runner._pinned = {0: tensor.data_ptr()}
+    runner._pinned = {0: _layout_identity(tensor)}
     runner._moving = {}
     runner._constants = {1: True}
+    runner._attributes = []
     runner._static_outputs = (torch.ones(3),)
     runner._output_was_tuple = True
 
@@ -1782,3 +1814,78 @@ def test_a_matching_constant_does_not_block_replay():
     assert graph.replays == 1
     assert torch.equal(result[0], torch.ones(3))
     assert result[0] is not runner._static_outputs[0], "outputs must be copied out"
+
+
+def test_a_moved_parameter_stops_the_replay():
+    """FSDP2's reshard frees the storage a capture baked pointers into.
+
+    The capture records every parameter and buffer the graph reads through
+    get_attr. Those are not inputs, so the input checks do not cover them.
+    """
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+        _layout_identity,
+    )
+
+    class _Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4))
+
+    holder = _Holder()
+    runner = _CudaGraphRunner(runnable=holder, scope=_CudaGraphScope())
+    runner._graph = object()
+    runner._arity = 0
+    runner._pinned = {}
+    runner._moving = {}
+    runner._constants = {}
+    runner._attributes = [("weight", _layout_identity(holder.weight))]
+
+    # Same values, different storage: exactly what an unshard/reshard cycle does.
+    holder.weight = nn.Parameter(torch.zeros(4))
+
+    with pytest.raises(CudaGraphUnavailable, match="moved after capture"):
+        runner([])
+
+
+def test_a_mutable_output_is_refused_rather_than_aliased(monkeypatch):
+    """A list output would hand back the graph's own static buffers."""
+    from fastvideo.optimization.subgraph import (
+        CudaGraphUnavailable,
+        _CudaGraphRunner,
+        _CudaGraphScope,
+    )
+
+    runner = _CudaGraphRunner(runnable=None, scope=_CudaGraphScope())
+
+    class _FakeGraph:
+        def replay(self):
+            pass
+
+        def reset(self):
+            pass
+
+    # Drive just the output-classification branch of _capture.
+    leaves = ([torch.zeros(2)],)
+    with pytest.raises(CudaGraphUnavailable, match="mutable list"):
+        runner._output_constants = {}
+        for position, leaf in enumerate(leaves):
+            if isinstance(leaf, torch.Tensor):
+                continue
+            if leaf is None or isinstance(leaf, (bool, int, float, complex, str, bytes)):
+                continue
+            raise CudaGraphUnavailable(
+                f"output {position} is a mutable {type(leaf).__name__}; "
+                "returning it uncopied would alias the graph's static buffers"
+            )
+
+
+def test_warming_up_is_a_distinct_type_not_a_message():
+    """Control flow hinged on an exact string; a reworded message would have
+    turned every warmup call into a permanent disable."""
+    from fastvideo.optimization.subgraph import CudaGraphUnavailable, CudaGraphWarmingUp
+
+    assert issubclass(CudaGraphWarmingUp, CudaGraphUnavailable)
+    assert not isinstance(CudaGraphUnavailable("nope"), CudaGraphWarmingUp)
