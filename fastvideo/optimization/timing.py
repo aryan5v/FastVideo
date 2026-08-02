@@ -61,7 +61,7 @@ class _NoOp:
 
     __slots__ = ()
 
-    def __enter__(self) -> "_NoOp":
+    def __enter__(self) -> _NoOp:
         return self
 
     def __exit__(self, *exc: Any) -> bool:

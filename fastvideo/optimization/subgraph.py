@@ -10,6 +10,7 @@ import os
 import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -219,7 +220,7 @@ class _Entry:
 
     runnable: fx.GraphModule
     contract: tuple[tuple[str, tuple[tuple[int, ...], str] | None], ...]
-    cuda_graph: "_CudaGraphRunner | None" = None
+    cuda_graph: _CudaGraphRunner | None = None
 
 
 def _unflatten(flat_output: Any, output_spec: Any) -> Any:
@@ -500,10 +501,8 @@ class _CudaGraphRunner:
                 # the artifact for the rest of the run, when the kernel is fine
                 # and only the acceleration is unavailable.
                 self._release_capture()
-                try:
+                with suppress(Exception):
                     torch.cuda.synchronize()
-                except Exception:  # noqa: BLE001
-                    pass
                 raise CudaGraphUnavailable(
                     f"capture failed: {type(exc).__name__}: {exc}"
                 ) from exc
@@ -815,7 +814,7 @@ def rewrite_exported_subgraph(
         raise SubgraphRewriteError("export call specification is missing")
     # Value is (rewritten module, frozen placeholder contract): the contract is
     # derived once per build so the per-call path never walks the graph.
-    cache: weakref.WeakKeyDictionary[nn.Module, "_Entry"] = weakref.WeakKeyDictionary()
+    cache: weakref.WeakKeyDictionary[nn.Module, _Entry] = weakref.WeakKeyDictionary()
     graph_scope = _CudaGraphScope()
 
     def build(parent_module: nn.Module) -> fx.GraphModule:
