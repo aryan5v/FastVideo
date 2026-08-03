@@ -63,6 +63,23 @@ higher in scope for the 14B. Every model ships through the QAD recipe
 Not borrowed: the ViT VAE decoder (Wan VAE is fixed), MSA sparse attention
 (deferred everywhere), the packed AV sequence (H3-specific).
 
+
+## Runtime deltas for the 5B (checkpoint inspection, 2026-08-03)
+
+The FastWan2.2-TI2V-5B checkpoint uses the **same key layout as Wan2.1**
+(blocks.N.{attn1,attn2,ffn,norm2}, condition_embedder.*, patch_embedding,
+proj_out, scale_shift_table) and **has** attn/ffn biases, so the MLX loader
+surface is compatible. Three semantic deltas the MLX runtime must handle
+before the 5B ships:
+
+1. `qk_norm: "rms_norm_across_heads"` — norm_q/norm_k weights are [3072]
+   (full inner dim), not per-head [128]; attention needs across-heads RMSNorm.
+2. 48-channel latents — patch_embedding [3072, 48, 1, 2, 2]; the Wan2.2 TI2V
+   VAE emits 48 channels (vs 16 in Wan2.1); TAEHV does not cover it, so the
+   decode path needs the full Wan2.2 VAE (or a new tiny decoder later).
+3. `expand_timesteps: true` — time_proj is [18432, 3072] and the DiT consumes
+   per-frame timestep embeddings; the sampling loop must expand scalar steps.
+
 ## Sequencing (not reckless)
 
 1. 14B: smoke 1091 → full 1092 (auto-chained). ~40 h train when it starts.
