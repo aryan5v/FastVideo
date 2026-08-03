@@ -64,6 +64,77 @@ The 1.3B → 14B jump is what users will actually notice. mxfp4's contribution i
 reach — it moves the 14B from a 32 GB machine to a 24 GB one — not output
 quality.
 
+## Making mxfp4 work — check the recipe before blaming the format
+
+The int8 config that produced quality you liked is `dmd2_t2v_mlx_int8_**v2**`.
+There is a v1, it failed, and v2's own header says exactly why:
+
+> - Student and critic initialize from `FastVideo/FastWan2.1-T2V-1.3B-Diffusers`
+>   (already 3-step DMD-distilled): training becomes "adapt a good 3-step model
+>   to the INT8 grid" instead of learning distillation from scratch through a
+>   quantizer. The teacher stays the base 50-step Wan2.1.
+> - `gradient_accumulation_steps: 4` (effective batch 16): run 1's global batch
+>   of 4 left the critic noisy and **the student under-trained (weights moved
+>   only ~0.2% from init)**; motion coherence is the expected beneficiary.
+
+**That failure description is the signature we observed in the mxfp4 runs** —
+low student gradient norm, low loss, poor output. v1 failed the same way, on
+int8, for reasons that had nothing to do with the numeric format.
+
+The mxfp4 configs (`dmd2_t2v_1p3b_mlx_mxfp4.yaml`,
+`dmd2_t2v_14b_mlx_mxfp4.yaml`) are **not in the committed tree** at the run
+commit `411cfa7e` — they were local working-tree files. So whether they inherited
+v2's two fixes or branched from v1 is unverified.
+
+### Do this first — minutes, no GPUs
+
+1. **Open the mxfp4 configs.** Confirm `gradient_accumulation_steps: 4` and that
+   student/critic `init_from` points at the already-distilled FastWan, not base
+   Wan. If either is missing, the mxfp4 runs used the known-bad recipe and the
+   format was never fairly tested.
+2. **Measure how far the student moved from init.** v2's own diagnostic. If the
+   mxfp4 student moved ~0.2%, that is conclusively the v1 failure mode.
+
+Partial evidence that grad-accum *was* carried over: v2's header notes ~4×
+wall-time per step versus v1, and `step_time_sec` is 49.2 (int8 v2) against 51.2
+(mxfp4) — close enough to suggest matched work per step. Not conclusive, since
+fake-quant adds its own cost. Check the file rather than infer.
+
+Only if both come back clean do the STE and grid-parity checks become the
+leading hypotheses.
+
+### Do not retrain from scratch
+
+The v2 lesson runs directly against that instinct. Learning distillation
+*through* a quantizer from base weights is what v1 did, and it failed. The fix
+was to start from an already-distilled model and adapt it to the grid. Keep that
+structure for mxfp4.
+
+### Iterate on 1.3B, not 14B
+
+~16 h per run on 8 GPUs against ~20 h on 32 for the 14B — roughly 5× cheaper per
+experiment, on the model whose MLX runtime is best proven. Get mxfp4 working
+there, then scale the recipe to 14B once it does.
+
+## Assets — public, already registered
+
+| Kind | ID |
+|---|---|
+| Dataset | `FastVideo/Wan-Syn_77x448x832_600k` (600k samples, 77×448×832, ~1 TB) |
+| Validation | `examples/training/finetune/Wan2.1-VSA/Wan-Syn-Data/validation_4.json` |
+| Base recipe | `examples/train/configs/distribution_matching/wan/dmd2_t2v.yaml` |
+| MLX recipe | `dmd2_t2v_mlx_int8_v2.yaml` — the one that works; branch all new configs from this |
+| Teacher 1.3B | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
+| Teacher 14B | `Wan-AI/Wan2.1-T2V-14B-Diffusers` |
+| Student init 1.3B | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` |
+| Student init 14B | `FastVideo/FastWan2.1-T2V-14B-480P-Diffusers` |
+| Alternative base | `FastVideo/FastWan2.2-TI2V-5B-Diffusers` — newer and better than 2.1, but the 5B MLX port is not parity-green (`FIVE_B_MODEL_REPO = None`), so it adds runtime risk |
+
+Recipe defaults worth knowing: 77 frames at 448×832, `num_latent_t: 20`,
+`train_batch_size: 1`, lr 2e-6, betas `[0.0, 0.999]`, `max_train_steps: 4000`,
+`generator_update_interval: 5`, MLX variants on the 3-step schedule
+`[1000, 757, 522]`.
+
 ## Risks
 
 - **14B int8 quality is unmeasured.** Low risk: int8 is proven at 1.3B, 8-bit is

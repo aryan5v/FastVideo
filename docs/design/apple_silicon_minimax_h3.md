@@ -233,12 +233,22 @@ number. A model converged to a worse optimum would show comparable gradient
 magnitudes and *higher* loss. Low loss plus halved gradients reads as a student
 that is barely being optimized at all.
 
-The leading hypothesis: **the straight-through estimator is attenuating
-gradients on the mxfp4 path.** mxfp4's representable range is far narrower than
-affine int8's, so many more weights sit at grid saturation — and a clipped STE
-zeroes gradients for saturated values. That would produce exactly this
-signature, and it is a bug in the QAT path rather than a property of 4-bit
-weights.
+**Check the recipe before the format.** The working int8 config is
+`dmd2_t2v_mlx_int8_v2.yaml`, and its header documents why v1 failed: global
+batch 4 left "the critic noisy and the student under-trained (weights moved only
+~0.2% from init)", fixed by `gradient_accumulation_steps: 4` plus initializing
+student and critic from the already-distilled FastWan rather than base Wan.
+**That is the same signature the mxfp4 runs show**, and it failed that way on
+int8, for reasons unrelated to the numeric format. The mxfp4 configs are not in
+the committed tree at `411cfa7e`, so whether they inherited v2's fixes is
+unverified — confirm before spending anything else.
+
+If the recipe checks out, the next hypothesis is that **the straight-through
+estimator is attenuating gradients on the mxfp4 path.** mxfp4's representable
+range is far narrower than affine int8's, so many more weights sit at grid
+saturation — and a clipped STE zeroes gradients for saturated values. That would
+produce the same signature, and it is a bug in the QAT path rather than a
+property of 4-bit weights.
 
 Supporting this: the two configs are not the same code. int8 goes through the
 affine path (`bits` + `group_size`); mxfp4 goes through a separate `mode`-keyed
