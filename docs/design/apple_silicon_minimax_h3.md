@@ -17,8 +17,8 @@ on Apple Silicon — not the largest model that technically loads.
 
 | Question | Decision |
 |---|---|
-| Primary quantization | **mxfp4 with MX-grid QAT, M5 and newer.** This is the strategic bet, not the safe one (§2). |
-| Fallback artifact | Affine int8, produced from the same student by one extra B2 run. Serves M1–M4 and covers the bet failing. Cheap; not the headline. |
+| Primary quantization | **Affine int8**, mixed precision. It is what works (§2). |
+| mxfp4 | **Provisionally dropped.** Has failed at 1.3B and 14B, with and without QAT. Four confounds are worth eliminating first (§2); if they come back clean, abandon it. |
 | Memory target | **24 GB floor, 32–36 GB comfortable** (§3). Not 96 GB. |
 | Student capacity | **~14B class** (§3). mxfp4 puts 14B in ~7.4 GB, and it is the size already in hand for validation. Not justified by quantization tolerance — see §2. |
 | First ship | **Release 0: FastWan-14B on Metal** (§4), ahead of and independent of H3. |
@@ -36,21 +36,21 @@ supports.
 
 | Claim | Confidence | Basis |
 |---|---|---|
-| MX PTQs worse than affine int8, for the stated grid reasons | high | numerics; matches both observed runs |
-| QAT recovers most of a PTQ gap in general | high | well established across formats |
+| Affine int8 works at 14B | high | measured |
 | mxfp4 is a large memory win over int8 | certain | arithmetic |
+| MX PTQs worse than affine int8, for the stated grid reasons | high | numerics; matches observed runs |
+| **mxfp4 is viable for a video DiT at all** | **low** | has now failed at 1.3B and 14B, with *and without* QAT (§2). Four confounds remain unchecked, but the evidence points against it. |
 | MLX routes mxfp4 to M5 neural accelerators | **unknown** | untested — E1 |
-| MX-grid QAT makes 4-bit good enough *for a video DiT* | **low–medium** | 4-bit weights are well proven for LLMs, much less so for diffusion, where error compounds across steps. This is frontier, not routine. |
-| A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends entirely on H3's size and whether it is MoE (M001) |
+| A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends on H3's size and whether it is MoE (M001) |
 
-The plan multiplies several independent uncertainties. It is structured as a
-sequenced bet with cheap gates precisely because of that — §8 costs days and can
-kill the expensive path before it starts. It is not structured that way as a
-formality.
+An earlier revision of this table rated MX-grid QAT "low–medium" on the belief
+that it was untried. It has been tried, at both sizes, and did not work. The
+correct posture now is **diagnose the existing run, then most likely drop
+mxfp4** — not "run the experiment we have not run yet."
 
-The honest summary: **worth testing cheaply, not worth betting the schedule on
-before §8 reports.** Release 0a (§4) is structured so no ship date depends on
-the outcome.
+The honest summary: **affine int8 is the plan; mxfp4 is a diagnosis away from
+being abandoned.** Release 0a (§4) already assumes this and depends on none of
+it.
 
 One expectation to set precisely, because it is easy to get backwards: **mxfp4's
 upside is memory and throughput, not fidelity.** Affine int8 currently produces
@@ -140,27 +140,56 @@ consistently. This is the single easiest way to get a confusing bad result.
 
 ### What the existing measurements actually say
 
-From the Wan track:
+**MX-grid QAT has already been run, and it did not fix mxfp4.** Two earlier
+revisions of this document asserted the opposite — that both MX results were
+post-training quantization and that QAT aimed at the MX grid was untried. That
+was wrong, and it was the load-bearing assumption under the whole bet.
 
-- At **1.3B**, both mxfp8 and mxfp4 looked bad.
-- At **14B** on a 36 GB machine, int8 was good. mxfp4 ran fine but looked bad.
-  (Whether mxfp8 was tested at 14B is unconfirmed — M009.)
+The actual state of evidence:
 
-**mxfp4 has therefore failed at both sizes tested.** An earlier revision of this
-document claimed quantization tolerance rises with size and used that to justify
-14B; the data does not support it. The only clean signal here is that affine
-int8 works at 14B and that mxfp4 does not work untrained at either size.
+| Run | Setup | Result |
+|---|---|---|
+| 1.3B and 14B, PTQ | mxfp8 and mxfp4 | bad |
+| 14B, affine int8 | 36 GB machine | good |
+| **1.3B and 14B, mxfp4 QAD** | `dmd2_t2v_14b_mlx_mxfp4.yaml`, `mode: mxfp4`, `simulate_dtype: fp16`, DMD2 3-step `[1000, 757, 522]`, 4000 iterations, 8×B200, student+critic from `fastwan14b_distilled`, frozen Wan2.1-14B teacher | still bad |
 
-What the data does *not* rule out is the thing the plan actually depends on:
-both results are **post-training** quantization, with no QAT aimed at the MX
-grid and none of the recovery ladder in §7/E2 applied. The grid analysis above
-predicts naive MX PTQ will fail exactly this way. So the live question is not
-"is mxfp4 good" — it plainly is not, as shipped — but "does QAT plus calibration
-make it good," which nobody has tested.
+So mxfp4 has now failed at two sizes, with and without quantization-aware
+distillation. **The evidence is against the bet, not merely silent on it.**
 
-That is a genuine open question, not a formality. Treat §8 as a real gate with a
-real chance of failing, and read §0's fallback row as load-bearing rather than
-decorative.
+### Confounds worth eliminating before dropping mxfp4
+
+The run does not cleanly kill mxfp4 either, because four things could each
+produce this outcome independently of the grid being unworkable. All are cheap
+to check relative to another 4000-iteration run.
+
+1. **Grid fidelity — check this first.** `simulate_dtype: fp16` fake-quantizes
+   in PyTorch. If that simulation is not *bit-exact* with MLX's
+   `mx.quantize(..., mode="mxfp4")` — block size, E8M0 exponent rounding,
+   element rounding mode — then QAT optimized against a grid that is not the
+   deploy grid, which is precisely the train/deploy mismatch this document warns
+   about elsewhere. `fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` bounds
+   the affine path to one source-dtype epsilon; there is no MX equivalent.
+   Without that test, the run's grid is unverified.
+
+2. **Student may be badly undertrained.** `generator_update_interval: 5` means
+   the student took roughly **800 updates** across 4000 iterations. For a 14B
+   model learning to absorb 4-bit noise that is very few — QAT normally needs
+   far more. This is the most likely benign explanation.
+
+3. **No mixed precision.** The config shows no layer-skip list. If mxfp4 was
+   applied to every targeted linear including modulation/AdaLN, timestep
+   embedding, patch embed, and final projection, the highest-leverage cheap fix
+   was never in play (L1 in §8/E2).
+
+4. **No matched control.** Without an identical run at affine int8 — same
+   iterations, same schedule, same EMA — "bad" is not attributable to the grid
+   rather than to the recipe, the iteration count, or evaluation on
+   `decay: 0.98` EMA weights, which average over only ~50 iterations and can
+   look worse than the raw weights on a noisy run.
+
+Order: (1) then (3) then (2). If a verified-exact grid with mixed precision and
+a proper student-update budget still produces bad output, mxfp4 is dead for
+video DiTs at this scale and affine int8 is the answer.
 
 ### The bet
 
@@ -585,11 +614,20 @@ DMD2's three resident networks (frozen teacher, trainable student, critic):
 |---|---|---|
 | B0 corpus generation | 1–3 weeks | low — scales with teacher inference speed, unknown until H3 runs |
 | B1 capacity reduction | **weeks to months, or infeasible** | very low — see below |
-| B2 step + QAT, per release per grid | 1–3 days | medium — direct scaling from a real measurement |
+| B2 step + QAT, per release per grid | **~1.5 weeks** | medium — measured, see below |
 | B3 audio | days, if separable | low |
 
-B2 across both releases and both grids (mxfp4 + int8 fallback) is roughly
-**1–2 weeks of 8×B200**. That is the tractable part.
+The B2 figure is measured, not extrapolated. The 14B mxfp4 QAD run logged
+`step_time_sec: 239.8` on 8×B200, so 4000 iterations is roughly **11 days
+wall-clock**. An earlier revision of this document estimated 1–3 days by scaling
+from the 1.3B run; that was optimistic by 4–5×, and the corrected figure should
+be used for planning.
+
+Two things follow. First, ~240 s/iteration is itself worth investigating —
+`rollout_mode: simulate` plus per-forward fake quantization is a plausible
+culprit, and halving it halves every B2 in the plan. Second, at this rate B2 is
+no longer the cheap stage, which strengthens the case for one full run plus
+short per-grid adaptation fine-tunes rather than a full run per grid.
 
 **B1 is the schedule risk and it is not a small one.** Memory alone is
 manageable — a 14B student with Adam states plus a frozen teacher and critic is
@@ -745,11 +783,37 @@ the student is *supposed* to diverge. Use SSIM only as a regression tripwire for
 the MLX runtime against its own torch reference, which is what
 `fastvideo/tests/ssim/` and `test_mlx_dit_parity.py` are for.
 
-## 8. Proving mxfp4 on an M5 / 24 GB machine
+## 8. Diagnosing mxfp4 before abandoning it
 
-The bet needs validating before H3 GPU time is committed. All three experiments
-below run on **existing Wan weights**, need no H3 access, and answer separable
-questions. Ordered by cost.
+Reframed. This section previously read as "validate a promising untried bet."
+mxfp4 QAD has since been run at both sizes and failed (§2), so the question is
+no longer whether to try it — it is whether the failure has a cheap explanation
+or is intrinsic.
+
+**Do not spend another 4000-iteration run on mxfp4 before E0 completes.** At
+~240 s/iteration that is ~11 days of 8×B200, and repeating it against an
+unverified grid would waste the same compute twice.
+
+Everything below runs on existing Wan weights and needs no H3 access.
+
+### E0 — Is the QAT grid actually the deploy grid? (a day, no GPU)
+
+**The highest-priority item in this document**, and it should have been written
+before the 14B run rather than after.
+
+Take the PyTorch fake-quantizer behind `mode: mxfp4` with
+`simulate_dtype: fp16`, and compare its output tensor-for-tensor against MLX's
+`mx.quantize(..., mode="mxfp4")` on identical inputs. Check block size, E8M0
+exponent selection and rounding, element rounding mode, and the dequantized
+reconstruction. Bound the difference the way
+`fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` bounds the affine path.
+
+If they diverge, the 14B run trained against a grid it would never deploy on,
+the "mxfp4 failed" result is void, and one corrected run is worth doing. If they
+match bit-for-bit, the failure is real and E2/E3 below become the last cheap
+things to try before dropping mxfp4.
+
+Zero GPU cost. Do it first.
 
 ### E1 — Does MLX actually use the hardware? (hours, no model)
 
