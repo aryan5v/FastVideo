@@ -60,6 +60,12 @@ failure causes are now closed: the format is dropped, the affine INT8
 fake-quantizer is committed with a bitwise MLX parity test, and the training
 grid *is* the deploy grid.
 
+**Attention stays dense and fp16.** On the RTX 5090, native FP4 *attention*
+was worth an Attn-QAT training stage because Blackwell's FP4 tensor cores pay
+real speed. On Metal there is no low-bit attention win to recover, so we keep
+attention 100% dense in fp16 and quantize weights only — no attention
+degradation to train away, and no Attn-QAT stage needed.
+
 So: **INT8, because on Apple Silicon quantization is a memory decision, and
 INT8 is the most accurate way to spend 8 bits.** 14.9 GB for 14B parameters —
 a model class that used to need a datacenter GPU now fits in 24 GB of unified
