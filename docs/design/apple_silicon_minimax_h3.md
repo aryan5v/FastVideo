@@ -456,29 +456,79 @@ probes numerical correctness and passes either way, emulated or not.
 Do this first. It is a few hours and it can kill the bet before anything
 expensive starts.
 
-### E2 — Is uniform mxfp4 the problem? (a day, no training)
+### E2 — How much of mxfp4 is recoverable without retraining? (a day to a week)
 
-The existing bad mxfp4 result quantized every linear layer uniformly. Re-run the
-14B PTQ with the §2 mixed-precision split — AdaLN/modulation, timestep embedding,
-patch embed, final projection, and norm affines held at bf16 or mxfp8, everything
-else mxfp4 — and A/B against the uniform build on identical seeds and prompts.
+**The already-trained 14B does not need a new GPU job to get better mxfp4
+output.** The existing result is *naive* PTQ, and most of the gap between naive
+PTQ and QAT is closable by calibration-grade methods that never touch the
+training loop. Work down this ladder and stop when quality is acceptable.
 
-14B at mxfp4 is ~7.4 GB, so this fits the 24 GB machine directly. Sequence and
-free the text encoder before denoising, or precompute prompt embeddings offline
-to sidestep it entirely for the test.
+Prerequisite for everything below: a **bit-exact mxfp4 grid simulator in
+PyTorch**, matching `mx.quantize(..., mode="mxfp4")` output exactly. Build it
+once and it unlocks both this ladder and E3.
+`fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` already establishes the
+pattern for proving grid equivalence — write the MX sibling beside it.
 
-This is the highest information-per-hour experiment in the plan. If mixed-
-precision PTQ alone visibly closes most of the gap, QAT is very likely to close
-the rest, and the bet is close to proven without a single training run. If it
-changes nothing, the problem is deeper than layer selection and E3 needs to
-carry more weight.
+**L1 — Layer targeting. Free, no data.** Confirm the failing run did not
+quantize modulation/AdaLN, timestep embedding, patch embed, and the final
+projection. `nvfp4_qat_config.DEFAULT_FP4_LAYERS` already encodes the right
+target set for the CUDA path — attention and FFN projections only. If the MLX
+run quantized uniformly, this alone may account for much of the gap.
+
+**L2 — Shared-exponent search. Free, no data, minutes.** The lever most specific
+to MX and most likely to be untouched. MXFP4's block scale is E8M0 —
+power-of-two only — and the default absmax choice takes the smallest exponent
+that avoids clipping outright. With E2M1 elements carrying so few magnitude
+levels, deliberately choosing `E-1` and accepting slight clipping often halves
+reconstruction error across the bulk of the distribution. Search `{E, E-1, E-2}`
+per block against MSE. Power-of-two-only scaling is exactly why MX wastes range
+on the default choice, so this recovers something affine int8 never had to give
+up in the first place.
+
+**L3 — GPTQ-style error compensation. Hours, small calibration set, no
+backprop.** Quantize column by column, updating the remaining unquantized
+weights to absorb the error already introduced, via the layer-input Hessian. At
+4 bits this is routinely the difference between unusable and near-lossless, and
+it applies to any deterministic round-to-grid function, MX included. AWQ-style
+salient-channel scaling composes with it cheaply.
+
+**L4 — Layer-wise output reconstruction (AdaRound / BRECQ). About a day.**
+Optimize rounding decisions per layer against calibration activations. This is
+optimization, but *layer-local* — no full-model backprop, no teacher, no
+distillation corpus. The closest thing to QAT that is not QAT.
+
+**Timestep-aware calibration is mandatory for L3 and L4.** DiT activation
+statistics vary enormously across the noise schedule, and calibrating at one
+timestep yields a quantizer that is wrong everywhere else — the failure mode
+Q-Diffusion and PTQ4DM exist to address. Favorable twist: a model already
+distilled to a few steps only needs calibration covering *those* steps. Few-step
+models are markedly easier to PTQ well than 50-step ones, which compounds nicely
+with the rest of the plan.
+
+Run this on the 24 GB M5 machine directly — 14B at mxfp4 is ~7.4 GB. Precompute
+prompt embeddings offline to sidestep text-encoder residency during the test.
+
+**Expected outcome.** L1 and L2 are free and worth doing regardless. L3 is where
+the large recovery usually lives. Realistic expectation is that this ladder
+closes most of the distance to QAT but not all of it — weight error still
+compounds across steps, and only QAT trains the model to absorb that. "Most of
+the way, in a day, without a GPU job" is the right frame. "PTQ makes QAT
+unnecessary" is not.
 
 ### E3 — Does MX-grid QAT close the rest? (~a week, small GPU spend)
 
-Write the MX-grid sibling to `mlx_affine_qat.py`, then run the existing
-`dmd2_t2v_mlx_int8.yaml` recipe on the **1.3B** — deliberately the hardest case,
-since 1.3B is the model with the least redundancy and the worst observed MX
-behavior. Compare QAT-mxfp4 against PTQ-mxfp4 at equal steps.
+Cheaper than it first looks, because the scaffolding already exists.
+`nvfp4_qat_train_config.py` is a wired STE path — trainable bf16 master weight,
+fake-quantized to a microscaled 4-bit grid every forward, full-precision
+backward through `fp4linear._LinearFWD4BWD16Fn`. NVFP4 and MXFP4 are close
+cousins: both E2M1 elements, differing in block size (16 vs 32) and scale type
+(FP8 E4M3 vs power-of-two E8M0). **MX-grid QAT is a quantizer swap inside an
+existing path, not a new training stack.**
+
+Write the MX-grid sibling to `mlx_affine_qat.py` reusing that STE, then run the
+existing `dmd2_t2v_mlx_int8.yaml` recipe on the **1.3B** — deliberately the
+hardest case, since it has the least redundancy and the worst observed MX
+behavior. Compare QAT-mxfp4 against the best E2 build at equal steps.
 
 If QAT visibly rescues mxfp4 at 1.3B, it will do better at 14B, and the bet is
 proven end to end. Use 1.3B rather than 14B because it is cheap and because a
