@@ -36,8 +36,11 @@ from typing import Any
 # overhead. Used only for the memory column of the report.
 MODE_BITS_PER_PARAM = {
     "fp16": 16.0,
-    "int8": 8.5,  # 8 + (fp16 scale + fp16 bias) / 64
-    "int4": 4.5,  # 4 + (fp16 scale + fp16 bias) / 64
+    # Affine: bits + (fp16 scale + fp16 bias) / group_size, group_size 64.
+    "int8": 8.5,
+    "int6": 6.5,
+    "int5": 5.5,
+    "int4": 4.5,
     "mxfp8": 8.25,  # 8 + E8M0 scale / 32
     "mxfp4": 4.25,  # 4 + E8M0 scale / 32
     "nvfp4": 4.5,  # 4 + E4M3 scale / 16 (ignoring the per-tensor fp32 global)
@@ -49,11 +52,15 @@ SKIP_SUBSTRINGS = ("norm", "scale_shift_table", "embedding")
 
 
 def _spec_for(mode: str) -> dict[str, Any]:
-    """Map a mode name onto mx.quantize kwargs."""
-    if mode == "int8":
-        return {"mode": "affine", "bits": 8, "group_size": 64}
-    if mode == "int4":
-        return {"mode": "affine", "bits": 4, "group_size": 64}
+    """Map a mode name onto mx.quantize kwargs.
+
+    MLX's affine mode accepts 2/3/4/5/6/8 bits, so the intermediate widths are
+    reachable and worth surveying: int6 costs 6.5 bits/param against int8's 8.5,
+    a 24% memory saving on the one grid already known to hold up. MX and NVFP4
+    block sizes are fixed by their specs and are not tunable.
+    """
+    if mode.startswith("int"):
+        return {"mode": "affine", "bits": int(mode[3:]), "group_size": 64}
     if mode in ("mxfp8", "mxfp4"):
         return {"mode": mode, "group_size": 32}
     if mode == "nvfp4":
@@ -184,7 +191,7 @@ def measure_throughput(mx, modes: list[str], dim: int, tokens: int, iters: int) 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, help="Diffusers transformer dir with .safetensors")
-    parser.add_argument("--modes", nargs="+", default=["int8", "int4", "mxfp8", "mxfp4", "nvfp4"])
+    parser.add_argument("--modes", nargs="+", default=["int8", "int6", "int5", "int4", "mxfp8", "mxfp4", "nvfp4"])
     parser.add_argument("--max-tensors", type=int, default=60, help="Weight tensors to sample for the error survey")
     parser.add_argument("--dim", type=int, default=1536, help="Square matmul dim for the throughput probe")
     parser.add_argument("--tokens", type=int, default=8192, help="Sequence length for the throughput probe")

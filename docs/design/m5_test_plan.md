@@ -44,6 +44,38 @@ trajectory, so a single calibration is wrong everywhere.
 outliers across channels within each block.
 ([Block Rotation is All You Need for MXFP4](https://arxiv.org/pdf/2511.04214))
 
+### Two constraints found late, both gating
+
+**MLX only uses the M5 Neural Accelerators on macOS 26.2 or later.** On an older
+build the matmuls fall back to the ordinary GPU path silently — reconstruction
+error stays valid, but every throughput number becomes meaningless. Check this
+before believing any speed result.
+([AppleInsider](https://appleinsider.com/articles/25/11/18/macos-tahoe-262-will-give-m5-macs-a-giant-machine-learning-speed-boost),
+[Apple ML Research](https://machinelearning.apple.com/research/exploring-llms-mlx-m5))
+
+**MLX ships every three to four weeks** (v0.31.2 was April 2026) and MX/NVFP4
+support has landed progressively, so an old build can report modes unsupported
+that a current one handles. Upgrade before surveying and record the version.
+
+### The intermediate bit widths are free options
+
+MLX's affine mode accepts **2/3/4/5/6/8 bits**, not just 4 and 8. That makes
+`int6` (6.5 bits/param against int8's 8.5) a real candidate on the one grid
+already known to hold up — and it changes the memory arithmetic:
+
+| Grid | bits/param | 14B weights |
+|---|---|---|
+| int8 | 8.5 | ~15 GB |
+| **int6** | 6.5 | **~11.4 GB** |
+| int5 | 5.5 | ~9.6 GB |
+| nvfp4 | 4.5 | ~7.9 GB |
+| mxfp4 | 4.25 | ~7.4 GB |
+
+If int6 holds quality, **14B fits a 24 GB Mac on the proven affine grid** with
+no 4-bit risk at all. That is a materially different fallback from "int8 or
+bust", and it costs nothing to measure — it is one more column in the same
+survey.
+
 ### What this changes
 
 **Target NVFP4, not MXFP4.** Better quality per bit, real M5 support, and —
@@ -192,6 +224,43 @@ earlier result is further discounted.
 | nvfp4 near int8 | 4-bit ~= int8 | Distill NVFP4 anyway. Half the memory is the point; speed is a bonus. |
 | all 4-bit ≫ int8 error | either | Launch on int8. Revisit 4-bit with SVDQuant-style outlier absorption, not plain QAT. |
 | mxfp4 ≫ nvfp4 | either | Confirms the structural argument; drop mxfp4, keep nvfp4. |
+
+## Context worth knowing, beyond quantization
+
+Turned up while checking whether anything was being missed. None of it changes
+the test plan; all of it changes what "done" looks like.
+
+**Apple's own M5 headline is a 4-bit diffusion benchmark.** They report M5 at
+**3.8× M4 for image generation on FLUX-dev-4bit at 1024px**, with 153 GB/s
+memory bandwidth (+28% over M4 Max). Apple is optimising for exactly this
+workload class, which is a good sign for 4-bit video on M5 — and a reference
+point for what "fast" should look like.
+
+**LTX-Video 2.3 already runs natively on MLX** — full pipeline ported and
+validated tensor-by-tensor, text-to-video plus image animation plus
+voice-driven talking characters, with synchronised audio muxed to mp4. That is
+direct prior art for local video generation on Mac, and FastVideo already has
+an LTX-2 pipeline in-tree. Worth knowing what the bar is before positioning a
+launch.
+([mlx-serve](https://mlxserve.com/video-generation/))
+
+**mlx-lm ships learned quantization methods** (`mlx_lm/LEARNED_QUANTS.md`) —
+MLX's own equivalents of the AWQ/GPTQ family. If those generalise past LLMs,
+they are a cheaper path to good 4-bit weights than any CUDA-side QAT run, since
+they operate on the deploy grid by construction. Worth reading before
+committing to another distillation.
+
+**Speed levers that are not quantization**, if the numbers come back short:
+sparse attention for video DiTs (HyperVAttention, HASTE — training-free,
+head-wise adaptive), adaptive layer reuse (Foresight), and temporal cache
+compression. Reported end-to-end speedups run from ~2.3× to ~10× depending on
+technique and tolerance. FastVideo already carries several sparse-attention
+backends (`VSA`, `VMoBA`, `SLA`), so some of this may port rather than need
+writing.
+
+**Mixed-format quantization for video DiTs is now a published technique**
+(SemanticDialect), which is the formal version of the per-layer precision split
+this plan already assumes. Worth reading before hand-tuning a skip list.
 
 ## What to send back
 

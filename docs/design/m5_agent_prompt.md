@@ -63,7 +63,7 @@ Re-export those five environment variables in every new shell you open. If any
 model download or cache lands outside `~/fastvideo-m5-survey`, that is a bug —
 find it and fix it before continuing.
 
-## Step 2 — Record the machine
+## Step 2 — Record the machine, and check two gates
 
 ```bash
 sysctl -n machdep.cpu.brand_string
@@ -72,9 +72,29 @@ sw_vers
 python -c "import mlx.core as mx; print('mlx', mx.__version__)"
 ```
 
-Save this output. **Confirm the chip string actually says M5** — the whole
-question is about M5 neural accelerators, and an M4 would invalidate the
-throughput numbers.
+Save this output, and check both gates before going further:
+
+**Gate 1 — the chip must actually be M5.** The whole question is about M5
+neural accelerators. An M4 invalidates every throughput number.
+
+**Gate 2 — macOS must be 26.2 or later.** MLX only uses the M5 Neural
+Accelerators on macOS 26.2+. On an older build the matmuls silently fall back
+to the normal GPU path and every throughput reading is meaningless — the
+reconstruction-error numbers stay valid, but the speed comparison does not.
+
+If either gate fails, **report it immediately and ask before continuing.** Do
+not upgrade the operating system on a borrowed machine under any circumstances.
+
+Also confirm you are on a recent MLX. Releases ship every three to four weeks
+and MX/NVFP4 support has been landing progressively, so an old build may report
+modes as unsupported that newer ones handle:
+
+```bash
+uv pip install --upgrade mlx
+python -c "import mlx.core as mx; print('mlx', mx.__version__)"
+```
+
+Record the final version — results are only interpretable against it.
 
 ## Step 3 — Get the survey script
 
@@ -134,13 +154,13 @@ export PYTHONPATH="$HOME/fastvideo-m5-survey/repo"
 # A. Plain distilled checkpoint — the baseline.
 python -m fastvideo.benchmarks.mlx_quant_survey \
     --checkpoint <path-to-plain-transformer-dir> \
-    --modes int8 int4 mxfp8 mxfp4 nvfp4 \
+    --modes int8 int6 int5 int4 mxfp8 mxfp4 nvfp4 \
     --json-out results/survey_plain.json 2>&1 | tee results/survey_plain.txt
 
 # B. QAD checkpoint — the one that may already carry NVFP4 training.
 python -m fastvideo.benchmarks.mlx_quant_survey \
     --checkpoint <path-to-qad-transformer-dir> \
-    --modes int8 int4 mxfp8 mxfp4 nvfp4 \
+    --modes int8 int6 int5 int4 mxfp8 mxfp4 nvfp4 \
     --json-out results/survey_qad.json 2>&1 | tee results/survey_qad.txt
 ```
 
@@ -158,7 +178,7 @@ any speedup is real or shape-specific:
 ```bash
 for dim in 1536 5120; do
   python -m fastvideo.benchmarks.mlx_quant_survey \
-      --modes int8 mxfp4 nvfp4 --dim $dim --tokens 8192 --iters 30 \
+      --modes int8 int6 mxfp4 nvfp4 --dim $dim --tokens 8192 --iters 30 \
       --json-out results/tput_${dim}.json 2>&1 | tee results/tput_${dim}.txt
 done
 ```
