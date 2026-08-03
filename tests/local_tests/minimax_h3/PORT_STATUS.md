@@ -53,7 +53,7 @@ Populated from public reporting only. Every row is unverified until
 | Q003 | H3-VAE compression ratio and latent layout (temporal + spatial stride, channel count). Public material says "4x effective sequence length gain" over the prior tokenizer but gives no absolute strides. | prep | 1 | open | |
 | Q004 | Does `WorkloadType` need an `AV` member, or is video-with-audio expressible as `T2V` plus a sampling flag? LTX-2 registers as `T2V` with optional audio — confirm that precedent applies. | orchestrator | 8 | open | |
 | Q005 | Ship MSA (MiniMax Sparse Attention) as a FastVideo attention backend in the first PR, or defer? Upstream states the initial open-source release is full-attention only, so deferring is the default. | orchestrator | 3 | open | Recommend defer to a follow-up PR |
-| Q006 | Which of the two task-specific checkpoints is in scope for the first PR? Per `add-model` Phase 0, scope must be locked on both the variant and modality axes before coding. | orchestrator | 0 | open | |
+| Q006 | Which of the two task-specific checkpoints is in scope for the first PR? Per `add-model` Phase 0, scope must be locked on both the variant and modality axes before coding. | orchestrator | 0 | partially_resolved | Modality axis locked: one checkpoint, full output including native audio. Which of the two checkpoints still needs the real repo listing to choose. |
 
 ## Issues And Blockers
 | ID | Phase | Component | Severity | Issue | Evidence | Owner | Status | Resolution |
@@ -64,7 +64,7 @@ Populated from public reporting only. Every row is unverified until
 ## Escape Hatches
 | ID | Phase | Decision Type | Question | Recommended Option | Status | Resolution |
 |---|---|---|---|---|---|---|
-| E001 | 0 | environment | How should H3 reference assets reach the port? | Add `huggingface.co` + `cdn-lfs*.huggingface.co` to the environment network policy, then re-run prep. Alternative: run prep on the user's own GPU box and commit the emitted layout/key dumps. | open | |
+| E001 | 0 | environment | How should H3 reference assets reach the port? | Add `huggingface.co` + `cdn-lfs*.huggingface.co` to the environment network policy, then re-run prep. Alternative: run prep on the user's own GPU box and commit the emitted layout/key dumps. | resolved | 2026-08-03: enable HF egress on the environment's network policy. Still 403 as of this commit; the policy change has not taken effect yet. |
 
 ## Decisions
 | Date | Decision | Rationale | Impact |
@@ -72,6 +72,8 @@ Populated from public reporting only. Every row is unverified until
 | 2026-08-03 | Do not write speculative component code before Phase 0 completes. | `ArchConfig` fields must match `transformer/config.json` one-to-one (`add-model` Phase 1). Guessing that surface produces code that must be discarded, and invented layer names silently poison the conversion mapping. | First PR waits on I001. |
 | 2026-08-03 | Model LTX-2 as the structural precedent rather than Wan. | H3 emits joint audio+video and runs a second in-context regeneration pass; LTX-2 is the only in-tree family with a separate audio VAE, an audio decoding stage, and a refine stage. | Stage chain and test layout follow `fastvideo/pipelines/basic/ltx2/`. |
 | 2026-08-03 | Defer MSA to a follow-up PR. | Upstream ships full attention only in the initial open-source release. | First PR targets the existing attention backends. |
+| 2026-08-03 | First PR covers one checkpoint with its full output, audio included. | `add-model` Phase 0 requires explicit agreement before dropping a base-model output head; keeping audio avoids that negotiation and matches the LTX-2 precedent. | Audio VAE and an AV decoding stage are in scope. Phase 10 needs an audio metric (mel-L1 or multi-resolution STFT) separate from video SSIM. |
+| 2026-08-03 | Unblock I001 by enabling HF egress on the environment rather than hand-carrying configs. | Parity and conversion need real weights, not just `config.json`; a config-only path stalls again at Phase 5. | Port resumes at `add-model-01-prep` once the policy change lands. |
 
 ## Handoff Notes
 - Resolve `I001` first. Everything else in this file is unverified public
