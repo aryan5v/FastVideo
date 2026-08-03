@@ -201,6 +201,23 @@ Report these, and attach every file in `results/`:
 
 Do not interpret the results or recommend a decision. Report the numbers.
 
+
+## Follow-up run (2026-08-03) — intermediate affine bit widths
+
+The first survey skipped `int6`/`int5`. They are now the most valuable
+remaining measurement: affine error scales as 2^-bits, so int6 is predicted at
+~0.022 rel L2 (against int8's 0.00546 and int4's 0.092) for 6.5 bits/param —
+which would fit a 14B model in ~11.4 GB on the grid already known to work.
+
+Repeat Steps 1-5 with this mode list, on both checkpoints:
+
+```bash
+--modes int8 int7 int6 int5 int4
+```
+
+Skip Step 6; throughput is already answered — all modes are within noise on M5,
+because activations rather than weights dominate memory traffic at these shapes.
+
 ## Step 8 — Clean up
 
 ```bash
