@@ -1,95 +1,148 @@
-# Apple Silicon Launch — Action Plan
+# Apple Silicon Launch — MXFP4 Plan
 
-Written fresh from what the runs actually showed. Supersedes the quantization
-strategy in `apple_silicon_minimax_h3.md`; that document remains the reference
-for the H3 track, which is not on this critical path.
+Make mxfp4 work, distill on it, harden the runtime, launch. Supersedes the
+quantization strategy in `apple_silicon_minimax_h3.md`, which remains the
+reference for the H3 track (not on this path).
 
-**Ship int8. mxfp4 is a follow-up, and it has never actually been tested.**
+## Why mxfp4 is worth fixing rather than abandoning
 
-## What we know
+mxfp4 puts a 14B model in ~7.4 GB against ~15 GB at int8. That is the
+difference between 14B needing a 32 GB Mac and running comfortably on a 24 GB
+one, and int8 cannot get there. On M5 the format also has a hardware path
+through the GPU neural accelerators that affine int8 does not.
 
-| | |
-|---|---|
-| 1.3B int8 QAD | **works, quality accepted** — shippable now |
-| 14B int8 QAD | **never run** — the only missing launch artifact |
-| 1.3B / 14B mxfp4 QAD | both bad, but both used an **uncommitted, untested** quantizer |
-| MLX runtime at 14B | proven — the mxfp4 runs loaded and ran |
-| Working recipe | `dmd2_t2v_mlx_int8_v2.yaml` |
-| Measured cost | 14B QAD = 26 GPU-days; 1.3B QAD = 5.3 GPU-days |
-| Available | up to 36× B200 |
+**And it has never actually been tested.** Both prior mxfp4 runs used an
+uncommitted fake-quantizer with no parity test against the deploy grid. The
+matched 1.3B control is the tell: at *lower* loss, the mxfp4 run showed **0.47×
+the student gradient norm** of the int8 run. A model converged somewhere worse
+shows comparable gradients and higher loss. Low loss with halved gradients is a
+student that is barely being optimized — a broken QAT path, not a bad format.
 
-Two things carry most of the weight.
+## Stage 1 — Make the grid real (no GPUs)
 
-**The recipe that works is v2, and v2 exists because v1 failed.** v1 learned
-distillation from scratch through a quantizer and had a broken EMA checkpoint.
-v2 fixed both: initialize student and critic from the already-distilled FastWan,
-raise effective batch to 16, use the world-size-portable EMA state. Every new
-config branches from v2.
+**1a. The MX quantizer is now committed.**
+`fastvideo/layers/quantization/mlx_mx_qat.py` — the MX sibling of
+`mlx_affine_qat.py`, covering mxfp4 and mxfp8. Block size 32, E8M0 shared
+scale, E2M1/E4M3 element grids, round-half-to-even on the grid, and an
+**unclipped** STE.
 
-**The mxfp4 runs were never a fair test of mxfp4.** At run commit `411cfa7e`
-the tree contains no training-side MX fake-quantizer at all — `mlx_affine_qat.py`
-is affine-only, `mlx_qat.py` takes only `bits`/`group_size`, and the parity test
-asserts `mode="affine"` throughout. The runs logged `mode: mxfp4`, so they ran on
-local uncommitted code with no parity test. That component is shared by both
-failures and absent from the working run, and it accounts for the identical
-failure mode across sizes and the halved student gradient norm.
+> One caveat stated plainly: `mlx_affine_qat` was transcribed from MLX's CPU
+> kernel, so it agrees with MLX structurally. `mlx_mx_qat` is derived from the
+> OCP Microscaling spec, so it agrees *only if MLX also follows the spec*. That
+> is what 1b exists to prove.
 
-## Day 1
-
-**1. Ship 1.3B int8.** Done, accepted, don't hold it.
-
-**2. Launch the 14B int8 run.** Config is written and ready:
+**1b. Run the parity test on the Mac.**
 
 ```bash
-NUM_GPUS=32 bash examples/train/run.sh \
-  examples/train/configs/distribution_matching/wan/dmd2_t2v_14b_mlx_int8.yaml
+pytest fastvideo/tests/mlx/test_mlx_mx_qat_parity.py -v
 ```
 
-~20 h on 32 GPUs. It is a mechanical scale-up of v2 — same recipe, same
-committed and parity-tested int8 quantizer, 14B checkpoints, 4×8 HSDP mesh.
-This is the whole critical path; start it before anything else.
+`fastvideo/tests/mlx/test_mlx_mx_qat_parity.py` pins the round-trip against
+`mx.quantize(..., mode="mxfp4"/"mxfp8")` bitwise, covers all-zero blocks,
+power-of-two straddles, and single-outlier blocks, and asserts the STE passes
+gradients even at grid saturation. Likely divergence points, if it fails, are
+listed in the module docstring — shared-exponent rule first, rounding mode
+second.
 
-**3. In parallel — no GPUs, all of it:**
+**This is the gate. No GPU time until it is green.**
 
-- **14B int8 PTQ.** Quantize the existing 14B weights to affine int8 and look.
-  A few hours. If it holds, 14B ships without waiting for the run above.
-- **Recover the mxfp4 quantizer** from `/raid/arkumar/FastVideo-apple-qad/` and
-  commit it. It is not in git.
-- **Write the MX parity test** — the sibling of
-  `test_mlx_affine_qat_parity.py`, asserting bitwise agreement with
-  `mx.quantize(..., mode="mxfp4")` on codes, scales, and dequantized output.
-  **Until this passes, no mxfp4 result means anything.**
-- **Evaluate the existing mxfp4 checkpoint on raw, non-EMA weights.** Pure
-  inference. Validation computes `quantize(EMA(w))` while training optimized
-  `quantize(w_t)`; that gap is nearly linear at int8 and sharply nonlinear at
-  4-bit. If raw beats EMA, that is the answer.
+**1c. Teach the callback about `mode`.** `mlx_qat.py` lives on the MLX branch,
+so apply this there rather than here:
 
-## Day 2–3
+```python
+# fastvideo/train/callbacks/mlx_qat.py
+from fastvideo.layers.quantization.mlx_mx_qat import MX_BLOCK_SIZE, fake_quantize_mlx_mx
 
-- 14B int8 lands → validate on Mac → headline model.
-- MX parity test reports. If the quantizer is wrong, the two failed runs are
-  void and mxfp4 is untested rather than disproven.
-- Only then, one corrected 1.3B mxfp4 run: ~16 h on 8 GPUs. Iterate at 1.3B, not
-  14B — 5× cheaper per experiment, on the best-proven runtime.
+# __init__: accept mode: str | None = None; when set, ignore bits/group_size
+# and use MX_BLOCK_SIZE for the _is_target divisibility check.
+
+def _fake_quantize_weight(weight, *, mode, group_size, bits, simulate_dtype):
+    original_shape = weight.shape
+    weight2d = weight.reshape(original_shape[0], -1) if weight.dim() > 2 else weight
+    if mode is not None:
+        fq = fake_quantize_mlx_mx(weight2d, mode=mode, simulate_dtype=simulate_dtype)
+    else:
+        fq = fake_quantize_mlx_affine(weight2d, group_size=group_size, bits=bits,
+                                      simulate_dtype=simulate_dtype)
+    return fq.reshape(original_shape).to(weight.dtype)
+```
+
+Keep `DEFAULT_EXCLUDE_PATTERNS = (r"norm", r"scale_shift_table")` — norms and
+modulation tables must stay out of the quantized set on any grid.
+
+**1d. Free diagnostics on the existing checkpoints.**
+
+- Evaluate the old mxfp4 checkpoint on **raw, non-EMA** weights. Validation
+  computes `quantize(EMA(w))` while training optimized `quantize(w_t)`; that
+  gap is nearly linear at int8 and sharply nonlinear at 4-bit.
+- Log per-layer **grid saturation** and **STE gradient passthrough** on both
+  paths. If the old quantizer clipped, this shows it directly and confirms the
+  diagnosis.
+
+## Stage 2 — One controlled 1.3B run
+
+```bash
+NUM_GPUS=8 bash examples/train/run.sh \
+  examples/train/configs/distribution_matching/wan/dmd2_t2v_1p3b_mlx_mxfp4.yaml
+```
+
+~16 h on 8 GPUs. `dmd2_t2v_1p3b_mlx_mxfp4.yaml` is `int8_v2` with **exactly one
+change** — the QAT grid — so the int8 run is a controlled baseline and any
+delta is attributable to the format.
+
+Watch `grad_norm/student` against the int8 baseline of **1.332**. If it is
+still near 0.6, the quantizer is not the whole story and Stage 1d's saturation
+numbers are the next thread. If it tracks the baseline, the grid is working.
+
+Iterate here, not at 14B: 5.3 GPU-days against 26.
+
+## Stage 3 — Distill the launch models
+
+Once 1.3B mxfp4 matches int8 quality, scale the same config to 14B.
+`dmd2_t2v_14b_mlx_int8.yaml` is already written and is the template — swap the
+`mlx_qat` block to `mode: mxfp4`.
+
+| Run | GPUs | Wall-clock |
+|---|---|---|
+| 14B mxfp4 | 32 | ~20 h |
+| 1.3B mxfp4 | 8 | ~16 h |
+| int8 fallback, either size | — | one extra run each, for pre-M5 Macs |
+
+With 36 GPUs available the 1.3B and 14B runs go concurrently.
+
+## Stage 4 — Harden the runtime
+
+- MX deploy path in `mlx_runtime/`: `MLXQuantizationSpec.from_name` already
+  knows `mxfp4`/`mxfp8`; verify the checkpoint format in `checkpoint.py`
+  round-trips MX scales, and make the loader **refuse a grid mismatch loudly**
+  rather than silently dequantizing.
+- **E1 throughput benchmark on M5.** Add mxfp4/mxfp8 arms to
+  `benchmark_mlx_linear` and `benchmark_mlx_attention` at realistic shapes.
+  mxfp4 should be *substantially* faster than int8; within noise means MLX is
+  emulating rather than dispatching to the neural accelerators. Worth knowing
+  before launch, though the memory win stands either way.
+- `hardware_tier.py` gains a generation axis: memory band picks the model, chip
+  generation picks the grid.
+- Sequenced residency: encode → free encoder → denoise → decode, so peak is a
+  max rather than a sum.
 
 ## Launch shape
 
 | Tier | Model | Weights | Mac |
 |---|---|---|---|
-| Fast | 1.3B int8 | ~1.4 GB | 16 GB+, any chip |
-| Quality | 14B int8 | ~15 GB | 32 GB+ |
-| Follow-up | 14B mxfp4 | ~7.4 GB | 24 GB, M5+ |
-
-The 1.3B → 14B jump is what users notice. mxfp4 buys reach — 14B from a 32 GB
-machine down to a 24 GB one — not better output.
+| Fast | 1.3B mxfp4 | ~0.8 GB | 16 GB+, M5+ |
+| Quality | 14B mxfp4 | ~7.4 GB | 24 GB+, M5+ |
+| Compatibility | either at int8 | 1.4 / 15 GB | pre-M5 |
 
 ## Rules
 
-- **Every new config branches from `dmd2_t2v_mlx_int8_v2.yaml`.** Never from v1,
-  never from scratch. Adapting an already-distilled model to a grid is the thing
-  that works; learning distillation through a quantizer is the thing that failed.
-- **No more mxfp4 GPU time until the parity test passes.** 26 GPU-days per 14B
-  attempt is too expensive to spend twice against unverified code.
+- **Every config branches from `dmd2_t2v_mlx_int8_v2.yaml`.** Never v1, never
+  from scratch. Adapting an already-distilled model to a grid works; learning
+  distillation *through* a quantizer is what failed as v1.
+- **Change one variable per run.** The reason the current evidence is
+  ambiguous is that the mxfp4 runs differed from the working int8 run in more
+  than the grid.
+- **No mxfp4 GPU time before the parity test passes.**
 - **Debug at 1.3B, ship at 14B.**
 
 ## Assets
@@ -103,18 +156,18 @@ machine down to a 24 GB one — not better output.
 
 ## Risks
 
-- **14B int8 quality is unmeasured.** Low risk — int8 is proven at 1.3B, 8-bit
-  is far more forgiving than 4-bit, and the runtime already handles 14B. But it
-  is an assumption until the run lands; don't commit to a date before it does.
-- **14B int8 is ~15 GB of weights**, marginal on a 24 GB Mac even with sequenced
-  residency and a raised wired limit. Position it as 32 GB+; let mxfp4 claim
-  24 GB later.
-- **The 4×8 HSDP mesh at 14B is untried here.** v2 ran 4-GPU pure FSDP. If the
-  student, frozen teacher, and critic do not fit at `hsdp_shard_dim: 8`, raise
-  the shard dim and lower replication.
+- **The MX reference may not match MLX.** It is spec-derived, not transcribed.
+  1b catches this; the fix is reading MLX's kernel and adjusting, which is
+  hours, not a redesign.
+- **mxfp4 may genuinely be too coarse for a video DiT**, even with a correct
+  grid and healthy STE. The 1.3B run in Stage 2 is what settles it, at 5.3
+  GPU-days. If it fails there with `grad_norm/student` tracking the int8
+  baseline, that is a real answer and int8 is the launch grid.
+- **1.3B is the hardest case for 4-bit** — least redundancy of the two sizes.
+  A failure at 1.3B does not strictly rule out 14B, but it is the cheap
+  experiment, so run it first and treat a 14B retry as a deliberate second bet.
 
 ## Not on this path
 
-The H3 CUDA port is blocked on Hugging Face egress from the porting environment
-(`tests/local_tests/minimax_h3/PORT_STATUS.md`, I001). It proceeds independently
-and gates nothing here.
+The H3 CUDA port is blocked on Hugging Face egress
+(`tests/local_tests/minimax_h3/PORT_STATUS.md`, I001) and gates nothing here.
