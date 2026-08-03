@@ -96,7 +96,7 @@ callbacks:
     max_grad_norm: 1.0
   validation:
     pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
-    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_64.json
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_4.json
     every_steps: 100
     sampling_steps: [3]
     sampling_timesteps: [1000, 757, 522]
