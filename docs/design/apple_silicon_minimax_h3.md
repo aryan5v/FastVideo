@@ -14,13 +14,16 @@ on Apple Silicon — not the largest model that technically loads.
 
 | Question | Decision |
 |---|---|
-| Primary quantization | **Affine int8**, `group_size=64`, mixed precision (§2). Works on every M-series including M5, no open questions. |
-| MXFP | **Conditional second artifact, M5+ only**, gated on the step-4 bake-off (§6). Three things must all hold: MX-grid QAT closes the quality gap, MLX actually routes to the neural accelerators, and the throughput win is measurable. Do not build mxfp4 unless mxfp8 wins decisively first. |
-| First student | **~5B, tier 2 (24–32 GB)** (§3). Volume target, existing 5B infrastructure, validates the pipeline before either extreme. |
-| First ship | **Tier 4 — native H3 int8 on 96 GB+** (§3). No distillation required, so it is the fastest route to a genuinely high-quality local result. |
-| Precision at tier 2 | **bf16 if it fits, int8 otherwise** — measure, do not assume the LLM reflex (§3). |
-| Training method | Full-weight. Separate capacity reduction (B1) from joint step+QAT (B2) (§Track B). |
-| Expected H3 size | **Unknown (M001).** The ceilings in §3 are what fits, not a prediction. |
+| Primary quantization | **mxfp4 with MX-grid QAT, M5 and newer.** This is the strategic bet, not the safe one (§2). |
+| Fallback artifact | Affine int8, produced from the same student by one extra B2 run. Serves M1–M4 and covers the bet failing. Cheap; not the headline. |
+| Memory target | **24 GB floor, 32–36 GB comfortable** (§3). Not 96 GB. |
+| Student capacity | **~14B class** (§3). Chosen because mxfp4 puts 14B in ~7.4 GB — it fits 24 GB with room — and because quantization tolerance rises with size. |
+| Release shape | **One student, two step-distillations**: Turbo (rapid) and Quality. Shared expensive stages, cheap divergence (§3). |
+| Validation before commitment | Three experiments, days not months, on existing models (§6). The bet is gated on these, not on faith. |
+| Expected H3 size | **Unknown (M001).** Ceilings in §3 say what fits, not what H3 is. |
+
+Deliberate consequence: pre-M5 Macs get the int8 artifact and are not the design
+target. That is an accepted cost of leading with mxfp4.
 
 ## 1. Design thesis: decouple the quality axes
 
@@ -57,7 +60,7 @@ because of sequence length — attention is where MLX is weakest relative to
 CUDA. At 4k tokens, attention is not the bottleneck. **Weight memory is the
 only real constraint.** That is a favorable shape for Apple Silicon.
 
-## 2. Quantization: two deploy grids, selected by chip generation
+## 2. Quantization: lead with mxfp4 on M5, keep int8 as fallback
 
 ### Why MX looked worse — and what that does and does not predict
 
@@ -86,23 +89,61 @@ QAT'd onto the affine grid and then deployed as mxfp8 reintroduces exactly the
 error QAT existed to remove, and will look worse than either path done
 consistently. This is the single easiest way to get a confusing bad result.
 
-### Generation-dependent target
+### What the existing measurements actually say
 
-| Silicon | Deploy grid | Rationale |
-|---|---|---|
-| M1–M4 | affine int8, `group_size=64`, mixed precision | No hardware path for microscaled formats; MX costs quality and buys no throughput. At `gs=64` affine int8 is 8.5 bits/param against mxfp8's 8.25 — better quality for a third of a bit. |
-| M5 and newer | mxfp8 for attention + FFN, with **MX-grid QAT**; mxfp4 for FFN only if metrics hold | M5 adds per-core GPU Neural Accelerators for matrix work and Metal 4 exposes tensor primitives, so microscaled formats get a real throughput path. Worth the grid deficit once QAT is aimed correctly. |
+Two observations from the Wan track, and they point in the same direction:
 
-This makes `hardware_tier.py` **generation-aware, not just memory-aware**. Today
-it reads `hw.memsize` and nothing else. It needs to detect chip generation and
-Metal 4 / neural-accelerator availability and select the deploy grid from that,
-independently of the memory band that selects model size.
+- At **1.3B**, both mxfp8 and mxfp4 looked bad.
+- At **14B** on a 36 GB machine, int8 was good and mxfp4 ran fine but looked
+  bad. (Whether mxfp8 held at 14B needs confirming — M009. If it did, that
+  sharpens the story considerably.)
 
-Concretely this means shipping two quantized artifacts per student — an affine
-int8 build and an mxfp8 build — from two QAT runs, not one build requantized. The
-checkpoint manifest in `mlx_runtime/checkpoint.py` already records the
-quantization spec, so it can distinguish them; the loader needs to refuse a grid
-mismatch loudly rather than silently dequantizing.
+Both were **post-training** quantization. Neither had QAT aimed at the MX grid,
+because that code does not exist yet. So the honest read is not "MX formats are
+bad" — it is "MX formats PTQ badly," which is exactly what the grid analysis
+above predicts and exactly what QAT exists to fix.
+
+The second signal is that quantization tolerance rises with model size. A 14B
+has redundancy a 1.3B does not, and 4-bit formats lean on that redundancy hard.
+This cuts against shrinking the model to fit, and is a large part of why §3
+targets 14B rather than something smaller.
+
+### The bet
+
+**mxfp4 with MX-grid QAT, on a 14B-class student, targeting 24–32 GB.**
+
+The arithmetic is what makes this worth doing. At 4.25 bits/param, 14B costs
+~7.4 GB — against ~15 GB at int8 and ~28 GB at bf16. That is the difference
+between a 14B-class model being a 36 GB-machine proposition and being a 24 GB
+one. Running a model that size on median hardware is the actual game-changer;
+int8 cannot get there.
+
+Three things carry the quality:
+
+1. **MX-grid QAT.** The core bet. `mlx_affine_qat.py` needs an MX-grid sibling —
+   shared callback, swappable grid. Nothing existing PTQ'd to mxfp4 has had this.
+2. **Mixed precision within the MX build.** Keep AdaLN/modulation, timestep
+   embedding, patch embed, final projection, and norm affines at bf16 or mxfp8.
+   Low single-digit percent of parameters, disproportionate share of the error.
+3. **Few steps.** A 2–4 step schedule gives 4-bit error far fewer chances to
+   compound than a 50-step one.
+
+If the bet fails, the same B1 student takes one extra B2 run to int8 and ships
+against the §3 ceilings at reduced reach. That fallback is days of GPU time, not
+a restart — which is what makes leading with mxfp4 a reasonable risk rather than
+a gamble.
+
+### Runtime consequences
+
+`hardware_tier.py` becomes **generation-aware, not just memory-aware**. Today it
+reads `hw.memsize` and nothing else; it needs chip generation and Metal 4 /
+neural-accelerator detection, selecting the deploy grid independently of the
+memory band that selects model size.
+
+Ship two artifacts per student — mxfp4 and affine int8 — from two QAT runs, never
+one build requantized. `mlx_runtime/checkpoint.py` already records the
+quantization spec in its manifest, so it can distinguish them; the loader must
+refuse a grid mismatch loudly rather than silently dequantizing.
 
 ### Mixed precision is the highest-leverage unshipped change
 
@@ -159,47 +200,61 @@ which is why the DiT weight budget tracks the MLX cap so closely.
 
 ### Ceilings
 
-Affine int8 at 1.06 GB per billion params; bf16 at 2.0; 4-bit at 0.56.
+bf16 at 2.0 GB per billion params; affine int8 at 1.06; mxfp4 at 0.53.
 
-| Unified memory | Realistic MLX cap | DiT weight budget | bf16 ceiling | int8 ceiling |
-|---|---|---|---|---|
-| 16 GB | ~10 GiB | ~8 GiB | ~4B | ~7B |
-| 24 GB | ~15 GiB | ~13 GiB | ~6B | ~12B |
-| 32 GB | ~21 GiB | ~19 GiB | ~9B | ~17B |
-| 64 GB | ~44 GiB | ~40 GiB | ~20B | ~38B |
-| 128 GB | ~96 GiB | ~90 GiB | ~45B | ~85B |
+| Unified memory | Realistic MLX cap | DiT weight budget | bf16 | int8 | **mxfp4** |
+|---|---|---|---|---|---|
+| 16 GB | ~10 GiB | ~8 GiB | ~4B | ~7B | **~15B** |
+| 24 GB | ~15 GiB | ~13 GiB | ~6B | ~12B | **~24B** |
+| 32–36 GB | ~21 GiB | ~19 GiB | ~9B | ~17B | **~35B** |
+| 64 GB | ~44 GiB | ~40 GiB | ~20B | ~38B | ~75B |
+| 128 GB | ~96 GiB | ~90 GiB | ~45B | ~85B | ~170B |
 
-These are ceilings, not targets. **They say what fits, not what to build.**
+These are ceilings, not targets. The mxfp4 column is the whole argument: it moves
+a 14B-class model from "needs 36 GB" to "comfortable on 24 GB, roomy on 32."
 
-### Bigger-and-quantized vs smaller-and-exact
+### Why 14B and not smaller
 
-The reflex from LLM work is that a larger quantized model beats a smaller exact
-one at equal memory. That reflex is weaker here. Quantization error compounds
-across denoising steps in a way it does not across token samples, so the
-crossover sits at a larger quality gap than LLM intuition suggests.
+Not carried over from the Wan tiering — that assumed 1.3B and 14B, and 5B was
+never a validated point on this stack.
 
-Concretely on a 24 GB Mac: a 6B bf16 student and a 12B int8 student cost about
-the same memory. Do not assume the 12B wins — measure it. If bf16 holds at the
-volume tier, it sidesteps the entire grid question there, and quantization stays
-where it is genuinely load-bearing: 16 GB machines, and running H3 natively on
-64 GB+ machines.
+The size falls out of two constraints meeting. Downward pressure is gone:
+mxfp4 puts 14B at ~7.4 GB, well inside a 24 GB budget, so there is no memory
+reason to shrink. Upward pressure is real: 4-bit quantization leans on model
+redundancy, and the existing evidence is that 1.3B does not have enough of it
+while 14B does. Shrinking the student to fit smaller Macs would actively
+undermine the mxfp4 bet.
 
-### Student ladder
+So 14B-class is where the two arguments meet — big enough to survive 4-bit,
+small enough that 4-bit gets it onto median hardware. If H3's own architecture
+suggests a nearby natural size, prefer that over the round number.
 
-Sizes are decisions, not predictions of H3's own parameter count (M001).
+### Two releases, one student
 
-| Tier | Memory | Student | Precision | Decoder |
-|---|---|---|---|---|
-| 1 | 16 GB | ~2B | int8 | TAEHV preview, tiled H3-VAE final |
-| 2 | 24–32 GB | **~5B** | bf16 if it fits, else int8 | H3-VAE |
-| 3 | 48–64 GB | ~14B or native H3 if dense and small enough | int8 | H3-VAE |
-| 4 | 96 GB+ | native H3, no student | int8 | H3-VAE |
+Both target the same memory band and the same weights. They differ in
+step schedule and render path, which is where the expensive stages get shared:
 
-**Build tier 2 first.** It is the volume target, `mlx_runtime/wan22.py` and the
-`hardware_tier.py` medium band already assume a 5B-class model there, and it
-validates the whole pipeline before committing to either extreme. Tier 4 needs
-no distillation at all — it is Track C plus quantization — so it is the cheapest
-path to a genuinely high-quality local result and should ship early.
+| | **Turbo** | **Quality** |
+|---|---|---|
+| Goal | rapid generation | maximum local quality |
+| Steps | 2 | 6–8 |
+| Base resolution | low, MetalFX upscale | high, minimal upscale |
+| Decoder | TAEHV-class | full H3-VAE |
+| Audio | optional | on |
+| Memory | 24 GB | 24 GB, comfortable at 32 |
+
+This structure matters for cost. B0 (corpus) and B1 (capacity reduction) are the
+GPU-weeks, and both releases share them entirely. Only B2 diverges — one step
+distillation run per release, days each. Two products for roughly one product's
+training budget.
+
+It also means neither release is a compromise of the other. A 2-step Turbo is
+not a degraded Quality build; it is a separately distilled model that happens to
+share a parent.
+
+Explicitly not shipping first: a 96 GB+ native-H3 tier. It would be the highest
+quality available, but it reaches almost nobody, and the point of leading with
+mxfp4 is reach. Revisit after Turbo and Quality land.
 
 ### How the students get built
 
@@ -378,28 +433,90 @@ the student is *supposed* to diverge. Use SSIM only as a regression tripwire for
 the MLX runtime against its own torch reference, which is what
 `fastvideo/tests/ssim/` and `test_mlx_dit_parity.py` are for.
 
-## 6. Sequencing
+## 6. Proving mxfp4 on an M5 / 24 GB machine
 
-1. Read `config.json`. Resolve dense-vs-MoE and total parameter count. Pick
-   path A, B, or C from §3. **Everything downstream depends on this.**
-2. Land the CUDA port (Track A).
-3. Mixed-precision QAT sweep on the *existing* Wan student, before H3 weights
-   are involved. Validates §2's layer-skip list on a model already known-good.
-4. MX-grid QAT sweep on that same Wan student, benched on M5 hardware against
-   the affine int8 build — quality from §5 metrics, throughput from
-   `mlx_fastwan_bench.py`. This is what decides whether the two-grid split in §2
-   earns its complexity.
-5. Track B distillation, gated on §5 metrics.
-6. Track C runtime, parity against Track A.
-7. Track D operating-point sweep, including the MetalFX-interpolation arm.
+The bet needs validating before H3 GPU time is committed. All three experiments
+below run on **existing Wan weights**, need no H3 access, and answer separable
+questions. Ordered by cost.
 
-Steps 3 and 4 are out of order on purpose. Both are cheap, both run on a model
-that already works, and neither blocks on H3 weights being reachable. Step 4 in
-particular should happen before any H3 GPU time is committed — if MX-grid QAT
-does not close the quality gap on Wan, it will not close it on H3 either, and
-the M5 path collapses back to affine int8 with no loss to the plan.
+### E1 — Does MLX actually use the hardware? (hours, no model)
 
-## 7. Open questions
+Pure microbenchmark. `benchmark_mlx_linear` and `benchmark_mlx_attention` in
+`mlx_runtime/fastwan.py` already have the right shape; add mxfp4 and mxfp8 arms
+alongside int8 and bf16, and run at H3-realistic shapes (~4k tokens).
+
+What to look for: mxfp4 should be *substantially* faster than int8, not
+marginally. A result within noise of int8 means MLX is emulating the format
+rather than dispatching to the neural accelerators, and the entire throughput
+half of the bet evaporates.
+
+This resolves M006, and `quantization_support_error()` will not tell you — it
+probes numerical correctness and passes either way, emulated or not.
+
+Do this first. It is a few hours and it can kill the bet before anything
+expensive starts.
+
+### E2 — Is uniform mxfp4 the problem? (a day, no training)
+
+The existing bad mxfp4 result quantized every linear layer uniformly. Re-run the
+14B PTQ with the §2 mixed-precision split — AdaLN/modulation, timestep embedding,
+patch embed, final projection, and norm affines held at bf16 or mxfp8, everything
+else mxfp4 — and A/B against the uniform build on identical seeds and prompts.
+
+14B at mxfp4 is ~7.4 GB, so this fits the 24 GB machine directly. Sequence and
+free the text encoder before denoising, or precompute prompt embeddings offline
+to sidestep it entirely for the test.
+
+This is the highest information-per-hour experiment in the plan. If mixed-
+precision PTQ alone visibly closes most of the gap, QAT is very likely to close
+the rest, and the bet is close to proven without a single training run. If it
+changes nothing, the problem is deeper than layer selection and E3 needs to
+carry more weight.
+
+### E3 — Does MX-grid QAT close the rest? (~a week, small GPU spend)
+
+Write the MX-grid sibling to `mlx_affine_qat.py`, then run the existing
+`dmd2_t2v_mlx_int8.yaml` recipe on the **1.3B** — deliberately the hardest case,
+since 1.3B is the model with the least redundancy and the worst observed MX
+behavior. Compare QAT-mxfp4 against PTQ-mxfp4 at equal steps.
+
+If QAT visibly rescues mxfp4 at 1.3B, it will do better at 14B, and the bet is
+proven end to end. Use 1.3B rather than 14B because it is cheap and because a
+win there is a strictly stronger result.
+
+### Gate
+
+Commit to mxfp4-first only if E1 shows a real hardware path and E2 or E3 shows a
+real quality recovery. If E1 fails, fall back to int8 and keep the §3 ceilings.
+If E1 passes but E2 and E3 both fail, mxfp8 becomes the M5 target instead of
+mxfp4 — still a win over int8 on throughput, at a much smaller memory advantage.
+
+## 7. Sequencing
+
+**Now, unblocked:** E1 → E2 → E3 (§6). None of these need H3 weights, network
+access to Hugging Face, or the CUDA port. They run entirely on existing Wan
+checkpoints and they decide the deploy grid.
+
+**In parallel:** land the CUDA port (Track A), and read `config.json` the moment
+weights are reachable — dense-vs-MoE and total parameter count gate the
+capacity path in §3.
+
+**After the §6 gate passes:**
+
+1. Track B0 — synthetic corpus generation.
+2. Track B1 — capacity reduction to the 14B-class student.
+3. Track B2 ×2 — Turbo and Quality step distillations, each with QAT on the
+   chosen grid. Plus one int8 run per release for the fallback artifact.
+4. Track B3 — audio branch.
+5. Track C — MLX runtime, parity against Track A.
+6. Track D — operating-point sweep per release, including the
+   MetalFX-interpolation arm.
+
+The ordering point worth holding onto: §6 costs days and gates months. Running
+E1 before anything else is the single highest-leverage scheduling decision here,
+because a failed E1 changes the entire plan and costs an afternoon to discover.
+
+## 8. Open questions
 
 | ID | Question | Blocks |
 |---|---|---|
@@ -411,3 +528,5 @@ the M5 path collapses back to affine int8 with no loss to the plan.
 | M006 | Does the installed MLX build route mxfp8/mxfp4 through M5 neural accelerators, or still emulate? `quantization_support_error()` probes correctness, not whether a hardware path was taken — it will pass either way. | §2 M5 grid |
 | M007 | How is chip generation / Metal 4 / neural-accelerator availability detected? `hw.memsize` is not enough; `hw.optional.*` sysctls or an MLX device-info field need checking. | `hardware_tier.py` |
 | M008 | Does MetalFX frame interpolation accept the frame cadence a 3-step diffusion sampler emits, or does it assume game-engine motion vectors? | Track D |
+| M009 | Did mxfp8 hold up at 14B, or was it only mxfp4 that degraded? The 1.3B run showed both failing; the 14B run is reported as mxfp4-bad. If mxfp8 was fine at 14B it strongly supports the size-tolerance argument in §2 and gives the bet a safer intermediate landing spot. | §2, E2 scope |
+| M010 | Does `mx.quantize` mxfp4 accept a per-layer grid override, or does the mixed-precision split in E2 need weights held in separate arrays by dtype? | E2 implementation |
