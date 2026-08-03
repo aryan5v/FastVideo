@@ -171,10 +171,12 @@ to check relative to another 4000-iteration run.
    the affine path to one source-dtype epsilon; there is no MX equivalent.
    Without that test, the run's grid is unverified.
 
-2. **Student may be badly undertrained.** `generator_update_interval: 5` means
-   the student took roughly **800 updates** across 4000 iterations. For a 14B
-   model learning to absorb 4-bit noise that is very few — QAT normally needs
-   far more. This is the most likely benign explanation.
+2. **Student is very likely undertrained.** `generator_update_interval: 5` means
+   the student took roughly **470–800 updates** depending on the actual
+   completed iteration count (§Track B — the 6.5 d wall-clock and the logged
+   239.8 s/iteration imply ~2350 iterations, not 4000). For a 14B model learning
+   to absorb 4-bit noise that is a very small budget, and it is the most likely
+   benign explanation after grid mismatch.
 
 3. **No mixed precision.** The config shows no layer-skip list. If mxfp4 was
    applied to every targeted linear including modulation/AdaLN, timestep
@@ -614,20 +616,29 @@ DMD2's three resident networks (frozen teacher, trainable student, critic):
 |---|---|---|
 | B0 corpus generation | 1–3 weeks | low — scales with teacher inference speed, unknown until H3 runs |
 | B1 capacity reduction | **weeks to months, or infeasible** | very low — see below |
-| B2 step + QAT, per release per grid | **~1.5 weeks** | medium — measured, see below |
+| B2 step + QAT, per release per grid | **~6.5 days** | high — measured wall-clock |
 | B3 audio | days, if separable | low |
 
-The B2 figure is measured, not extrapolated. The 14B mxfp4 QAD run logged
-`step_time_sec: 239.8` on 8×B200, so 4000 iterations is roughly **11 days
-wall-clock**. An earlier revision of this document estimated 1–3 days by scaling
-from the 1.3B run; that was optimistic by 4–5×, and the corrected figure should
-be used for planning.
+The B2 figure is measured, not extrapolated: the 14B mxfp4 QAD run took
+**6 d 12 h 30 m on 8×B200**. Two earlier revisions of this document got this
+wrong in both directions — 1–3 days by scaling from the 1.3B run, then ~11 days
+by multiplying the logged `step_time_sec: 239.8` by 4000 iterations. Use the
+measured 6.5 days.
 
-Two things follow. First, ~240 s/iteration is itself worth investigating —
-`rollout_mode: simulate` plus per-forward fake quantization is a plausible
-culprit, and halving it halves every B2 in the plan. Second, at this rate B2 is
-no longer the cheap stage, which strengthens the case for one full run plus
-short per-grid adaptation fine-tunes rather than a full run per grid.
+Scaled linearly: **~3.3 days on 16 GPUs, ~1.6 days on 32.** That makes the
+recommendation to run Turbo and Quality concurrently at 16 each concretely
+worth it — both releases in ~3 days rather than ~13 serialized on 8.
+
+The two figures do not reconcile cleanly, which is itself informative:
+6.5 days at 239.8 s/iteration is ~2350 iterations, not 4000. Either the run did
+not complete 4000, or 239.8 is a final reading rather than the mean and the true
+average was ~141 s. **Confirm the completed iteration count** — it feeds
+directly into the undertrained hypothesis in §2, and at ~2350 iterations with
+`generator_update_interval: 5` the student saw roughly **470 updates**, not 800,
+which makes undertraining a materially more likely explanation for the result.
+
+Note also that the run resumed from `checkpoint-40`, so earlier segments exist
+and total training time may exceed this run's 6.5 days.
 
 **B1 is the schedule risk and it is not a small one.** Memory alone is
 manageable — a 14B student with Adam states plus a frozen teacher and critic is
@@ -790,9 +801,9 @@ mxfp4 QAD has since been run at both sizes and failed (§2), so the question is
 no longer whether to try it — it is whether the failure has a cheap explanation
 or is intrinsic.
 
-**Do not spend another 4000-iteration run on mxfp4 before E0 completes.** At
-~240 s/iteration that is ~11 days of 8×B200, and repeating it against an
-unverified grid would waste the same compute twice.
+**Do not spend another full run on mxfp4 before E0 completes.** The last one was
+6.5 days of 8×B200; repeating it against an unverified grid would spend that
+twice for the same ambiguity.
 
 Everything below runs on existing Wan weights and needs no H3 access.
 
