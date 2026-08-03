@@ -72,13 +72,20 @@ proj_out, scale_shift_table) and **has** attn/ffn biases, so the MLX loader
 surface is compatible. Three semantic deltas the MLX runtime must handle
 before the 5B ships:
 
-1. `qk_norm: "rms_norm_across_heads"` — norm_q/norm_k weights are [3072]
-   (full inner dim), not per-head [128]; attention needs across-heads RMSNorm.
-2. 48-channel latents — patch_embedding [3072, 48, 1, 2, 2]; the Wan2.2 TI2V
-   VAE emits 48 channels (vs 16 in Wan2.1); TAEHV does not cover it, so the
-   decode path needs the full Wan2.2 VAE (or a new tiny decoder later).
-3. `expand_timesteps: true` — time_proj is [18432, 3072] and the DiT consumes
-   per-frame timestep embeddings; the sampling loop must expand scalar steps.
+1. ~~`qk_norm: "rms_norm_across_heads"`~~ — **no DiT change needed.** Wan2.1
+   checkpoints already ship full-dim [1536] norm_q/norm_k weights and the MLX
+   runtime normalizes the full inner dim before head-split; the 5B's [3072]
+   weights ride the same path. Verified 2026-08-03 with a synthetic 5B-shaped
+   checkpoint (48ch, [3072] norms, [18432] time_proj): loads and forwards
+   unchanged in the release runtime.
+2. 48-channel latents — patch_embedding [3072, 48, 1, 2, 2] loads fine
+   (config-driven). The real gap is the **decode path**: TAEHV does not cover
+   the Wan2.2 TI2V VAE (48ch), so the 5B ships with the full Wan2.2 VAE decode
+   (torch/MPS) until a tiny 48ch decoder exists.
+3. `expand_timesteps: true` — for T2V all frames share the step, so the
+   runtime's scalar-timestep path is mathematically identical (time_proj
+   [18432, 3072] reshapes to (B, 6, 3072) exactly as Wan2.1's [9216, 1536]).
+   Per-frame expansion is only needed when I2V enters the Mac track.
 
 ## Sequencing (not reckless)
 
