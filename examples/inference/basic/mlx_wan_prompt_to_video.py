@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import subprocess
 import sys
@@ -166,6 +167,26 @@ def encode_prompt_subprocess(
         )
         prompt_embeds = np.load(output_path)
     return torch.from_numpy(prompt_embeds).contiguous()
+
+
+def _default_prompt_cache_path(
+    *,
+    model_root: Path,
+    prompt: str,
+    max_sequence_length: int,
+    dtype_arg: str,
+) -> Path:
+    """Content-addressed prompt-embedding cache location.
+
+    The key covers everything that changes the embedding: the prompt text, the
+    truncation length, the encoder dtype, and the model directory (which pins
+    the tokenizer/encoder weights for a resolved snapshot). A collision would
+    require identical encoders and prompts, so a plain SHA-256 of the tuple is
+    a safe filename.
+    """
+    key = "\0".join([str(model_root), prompt, str(max_sequence_length), dtype_arg])
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+    return Path.home() / ".cache" / "fastvideo" / "prompt_embeds" / f"{digest}.npy"
 
 
 def get_prompt_embeds(
@@ -381,7 +402,13 @@ def main() -> None:
     parser.add_argument("--taehv-checkpoint-path", type=Path, default=None)
     parser.add_argument("--taehv-parallel", action="store_true", help="Decode all TAEHV frames at once; faster but higher memory.")
     parser.add_argument("--prompt-encode-mode", choices=("inline", "subprocess"), default="inline")
-    parser.add_argument("--prompt-embeds-cache", type=Path, default=None)
+    parser.add_argument("--prompt-embeds-cache", type=Path, default=None,
+                        help="Explicit prompt-embedding cache file. Overrides the "
+                        "automatic content-addressed cache (--prompt-cache).")
+    parser.add_argument("--prompt-cache", action=argparse.BooleanOptionalAction, default=True,
+                        help="Cache prompt embeddings under ~/.cache/fastvideo/prompt_embeds "
+                        "keyed by (model, prompt, length, dtype), so repeat runs skip "
+                        "the text encoder entirely. Default: on.")
     parser.add_argument("--mlx-checkpoint", type=Path, default=None,
                         help="Load the DiT from a pre-quantized MLX checkpoint directory "
                         "(created with --save-mlx-checkpoint) instead of casting/quantizing "
@@ -454,7 +481,13 @@ def main() -> None:
         device_arg=args.torch_device,
         dtype_arg=args.text_encoder_dtype,
         encode_mode=args.prompt_encode_mode,
-        cache_path=args.prompt_embeds_cache,
+        cache_path=args.prompt_embeds_cache
+        or (_default_prompt_cache_path(
+            model_root=model_root,
+            prompt=args.prompt,
+            max_sequence_length=args.max_sequence_length,
+            dtype_arg=args.text_encoder_dtype,
+        ) if args.prompt_cache else None),
     )
     prompt_time = time.perf_counter() - prompt_start
 
