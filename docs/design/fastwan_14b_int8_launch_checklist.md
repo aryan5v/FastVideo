@@ -47,6 +47,14 @@ Mirrors the FastWan-QAD RTX 5090 launch shape. Status: 2026-08-03.
 - [ ] Example: `examples/inference/basic/mlx_wan_prompt_to_video.py` flags
       verified against the 14B checkpoint.
 
+## 4b. Dev/test machine matrix (verified 2026-08-03)
+
+| Machine | Role | Evidence |
+|---|---|---|
+| MacBook Air M2 8 GB (this workstation) | Code + unit tests + 1.3B-scale runtime dev only. accel_probe: no Neural Accelerator, quantized GEMM 0.79-0.91x fp16 as expected pre-M5. **Cannot hold the 14B int8 checkpoint (14.9 GB).** | `accel_probe` run locally, MLX 0.32.0, macOS 27.0 |
+| Apple M5 24 GB (survey machine) | 14B int8 dev + benchmark target; M5 survey + probes live here | `m5_survey_results.md` |
+| M5 32/64 GB | Comfortable tiers, local Qwen3-VL encode (H3 track) | sizing doc |
+
 ## 5. Positioning notes (for the blog/social)
 
 - Headline: 14B video generation fully local on a laptop-class Mac — the
