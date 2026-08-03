@@ -86,7 +86,62 @@ The mxfp4 configs (`dmd2_t2v_1p3b_mlx_mxfp4.yaml`,
 commit `411cfa7e` — they were local working-tree files. So whether they inherited
 v2's two fixes or branched from v1 is unverified.
 
-### Do this first — minutes, no GPUs
+### The likeliest root cause: the mxfp4 fake-quantizer is uncommitted and untested
+
+At the run commit `411cfa7e`:
+
+- `fastvideo/layers/quantization/mlx_affine_qat.py` implements **the affine grid
+  only** — `mx.quantize(..., mode="affine")`.
+- `fastvideo/train/callbacks/mlx_qat.py` accepts **only `bits` and
+  `group_size`**. There is no `mode` parameter.
+- `fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` tests **affine only** —
+  every assertion passes `mode="affine"`.
+- The only files mentioning mxfp4 at that commit are inference-side:
+  `mlx_runtime/fastwan.py`, the benchmarks, the capability probe. **No
+  training-side MX fake-quantizer exists in the tree.**
+
+But the mxfp4 runs logged `mode: mxfp4` with no `bits`/`group_size`, a different
+key set from the int8 run's `bits: 8, group_size: 64`. So they used a
+**locally-modified, uncommitted QAT callback and MX quantizer** — code that is
+unversioned, unreviewed, and has no parity test against
+`mx.quantize(..., mode="mxfp4")`.
+
+That single component is shared by both failed runs and absent from the working
+one. It explains every observation at once: why both mxfp4 runs failed the same
+way, why int8 did not, and why the student gradient norm was halved. A buggy
+fake-quant or saturation-clipped STE produces exactly that signature.
+
+**Find that code first.** It is on the training box under
+`/raid/arkumar/FastVideo-apple-qad/`, not in git. Commit it, then write the
+parity test — the MX sibling of `test_mlx_affine_qat_parity.py`, asserting
+bitwise agreement with `mx.quantize(..., mode="mxfp4")` on codes, scales, and
+the dequantized reconstruction. Until that test passes, no mxfp4 result means
+anything.
+
+### On EMA
+
+v1's failure was EMA, and it is worth checking whether that recurred — but the
+mechanism differs here. `mlx_qat.py` swaps the fake-quantized weight in only for
+the duration of each `forward`, restoring the master immediately after, and the
+EMA callback updates in `on_training_step_end`, outside forwards. So **EMA
+tracks master weights, not quantized ones.** EMA-of-quantized-weights is not the
+bug.
+
+What remains real: validation computes `quantize(EMA(w))`, while the student was
+trained so that `quantize(w_t)` is good at each step. Quantization is nearly
+linear on a fine grid and sharply nonlinear on a coarse one, so
+`quantize(EMA(w))` can diverge from what training optimized much more at mxfp4
+than at int8 — a genuinely format-dependent effect.
+
+Also note `decay: 0.98` in all three configs against the callback's documented
+default of `0.9999`. With `generator_update_interval: 5` the EMA updates five
+times per student change, so the effective window is ~10 student updates —
+short enough that EMA should track raw closely.
+
+**Free test: evaluate the existing mxfp4 checkpoint on raw (non-EMA) weights.**
+Pure inference, no training. If raw looks better than EMA, that is the answer.
+
+### Then, minutes, no GPUs
 
 1. **Open the mxfp4 configs.** Confirm `gradient_accumulation_steps: 4` and that
    student/critic `init_from` points at the already-distilled FastWan, not base

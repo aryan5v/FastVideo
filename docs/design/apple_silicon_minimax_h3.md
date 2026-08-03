@@ -928,6 +928,14 @@ Everything below runs on existing Wan weights and needs no H3 access.
 **The highest-priority item in this document**, and it should have been written
 before the 14B run rather than after.
 
+Sharper than originally framed: at run commit `411cfa7e` there is **no
+training-side MX fake-quantizer in the tree at all**. `mlx_affine_qat.py` is
+affine-only, `mlx_qat.py` takes only `bits`/`group_size`, and the parity test
+asserts `mode="affine"` throughout. The mxfp4 runs therefore used uncommitted
+local code with no parity test — the one component shared by both failures and
+absent from the working int8 run. Recover it from the training box, commit it,
+then write the test.
+
 Take the PyTorch fake-quantizer behind `mode: mxfp4` with
 `simulate_dtype: fp16`, and compare its output tensor-for-tensor against MLX's
 `mx.quantize(..., mode="mxfp4")` on identical inputs. Check block size, E8M0
