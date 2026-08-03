@@ -49,8 +49,15 @@ kill the expensive path before it starts. It is not structured that way as a
 formality.
 
 The honest summary: **worth testing cheaply, not worth betting the schedule on
-before §8 reports.** If ship-date certainty matters more than being first to
-4-bit on Metal, the int8 fallback is the plan and mxfp4 is the upside.
+before §8 reports.** Release 0a (§4) is structured so no ship date depends on
+the outcome.
+
+One expectation to set precisely, because it is easy to get backwards: **mxfp4's
+upside is memory and throughput, not fidelity.** Affine int8 currently produces
+better output and will likely keep doing so at equal effort. The goal of MX-grid
+QAT is to reach *near-int8 quality at half the weight memory and, if E1 lands,
+higher throughput on M5*. Anyone expecting mxfp4 to look better than int8 will
+read a successful result as a failure.
 
 ## 1. Design thesis: decouple the quality axes
 
@@ -348,13 +355,36 @@ model-agnostic. The existing 14B Wan already exercises it at exactly the target
 size, and the MLX Wan runtime already exists. So the stack can be validated and
 shipped without waiting on the H3 port, the corpus, or capacity distillation.
 
+### Ship it in two stages, not one
+
+The prior plan of record was **FastWan-1.3B at int8**. Against that baseline,
+the largest available quality win is not the grid — it is the 10× capacity jump
+to 14B, on a grid that already works.
+
+| | **0a — ships first** | **0b — the upgrade** |
+|---|---|---|
+| Model | FastWan 14B | FastWan 14B |
+| Grid | affine int8, mixed precision | mxfp4 |
+| Weights | ~15 GB | ~7.4 GB |
+| Target | 32 GB+ Macs, any generation | 24 GB Macs, M5+ |
+| Blocked by | **nothing** — int8 at 14B is already known good | E1–E3 (§8) |
+| Risk | low | the bet |
+
+This is the honest framing of what mxfp4 buys: **it moves 14B from "needs
+32 GB" to "comfortable on 24 GB."** At int8, 14B is ~15 GB of weights, which is
+marginal on a 24 GB machine even with sequenced residency and a raised wired
+limit, and comfortable on 32. That reach difference is the return on the bet —
+not better output.
+
+Staging this way means Release 0 is not gated on the mxfp4 experiments at all.
+0a ships on the grid you already trust, delivers the capacity jump users will
+actually notice, and 0b follows as a same-model upgrade if §8 lands.
+
 | Property | Value |
 |---|---|
 | Model | existing FastWan 14B, no capacity reduction |
-| Training needed | E2 recovery ladder, then B2-equivalent QAD if E2 falls short |
-| Deploy grid | mxfp4, M5+ — same gate as H3 (§7) |
-| Memory | ~7.4 GB weights, 24 GB machine |
-| Blocked by | nothing — no H3 port, no HF access, no corpus |
+| Training needed | 0a: none beyond existing QAD. 0b: E2 ladder, then MX-grid QAD if E2 falls short |
+| Blocked by | nothing for 0a — no H3 port, no HF access, no corpus |
 
 What this buys, in order of value:
 
@@ -572,6 +602,46 @@ trained H3 on orders of magnitude more compute than this.
 
 Treat B1 as the line item most likely to force a plan change, and resolve M001
 before committing to it.
+
+#### Do NVIDIA targets need their own training run?
+
+No — not a separate distillation. A shared parent plus short per-grid
+adaptation.
+
+QAT bakes the *deploy grid* into the weights, so strictly, one grid means one
+QAT. But the expensive thing being learned in B2 is **how to denoise in 2 or 8
+steps**, and that is entirely grid-independent. Absorbing a particular grid's
+quantization noise is the cheap part.
+
+Grids actually in play:
+
+| Target | Grid | Shape |
+|---|---|---|
+| Mac, M5+ | mxfp4 | E2M1, block 32, E8M0 power-of-two scale |
+| Mac, M1–M4 | affine int8 | block 64, fp16 scale + bias |
+| NVIDIA Blackwell (5090, B200) | nvfp4 | E2M1, block 16, E4M3 scale — already supported in-tree via `nvfp4_config.py` |
+
+**mxfp4 is the most constrained 4-bit grid of these** — coarser blocks and a
+coarser (power-of-two) scale than nvfp4. That asymmetry is useful: a model
+QAT'd for mxfp4 is trained to tolerate the worst-case 4-bit noise, so deploying
+it on nvfp4 lands on a strictly finer grid and should transfer gracefully. The
+reverse does not hold. **Doing the Metal MX work first makes the Blackwell
+artifact nearly free; doing it in the other order does not.**
+
+Recommended structure, per release:
+
+1. One full B2 on **mxfp4** — the constrained grid. Days.
+2. Short **grid-adaptation fine-tunes** from that checkpoint for nvfp4 and
+   affine int8. Hours, not days — the step schedule is already learned and only
+   the quantization noise profile changes.
+
+That yields 2 releases × 3 grids = 6 artifacts from 2 expensive runs and 4 cheap
+adaptations, rather than 6 full distillations.
+
+Worth noting the 5090 wants this regardless of Metal: 14B at bf16 is ~28 GB
+against 32 GB of VRAM, so 4-bit buys real headroom for longer clips and larger
+batches there too. The NVIDIA artifact is not charity for a second platform — it
+is a better 5090 product than the bf16 build.
 
 #### GPU allocation
 
