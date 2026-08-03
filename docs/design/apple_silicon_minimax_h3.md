@@ -25,6 +25,29 @@ on Apple Silicon — not the largest model that technically loads.
 Deliberate consequence: pre-M5 Macs get the int8 artifact and are not the design
 target. That is an accepted cost of leading with mxfp4.
 
+## 0b. Confidence
+
+Stated plainly, because the plan reads more confident than the evidence
+supports.
+
+| Claim | Confidence | Basis |
+|---|---|---|
+| MX PTQs worse than affine int8, for the stated grid reasons | high | numerics; matches both observed runs |
+| QAT recovers most of a PTQ gap in general | high | well established across formats |
+| mxfp4 is a large memory win over int8 | certain | arithmetic |
+| MLX routes mxfp4 to M5 neural accelerators | **unknown** | untested — E1 |
+| MX-grid QAT makes 4-bit good enough *for a video DiT* | **low–medium** | 4-bit weights are well proven for LLMs, much less so for diffusion, where error compounds across steps. This is frontier, not routine. |
+| A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends entirely on H3's size and whether it is MoE (M001) |
+
+The plan multiplies several independent uncertainties. It is structured as a
+sequenced bet with cheap gates precisely because of that — §7 costs days and can
+kill the expensive path before it starts. It is not structured that way as a
+formality.
+
+The honest summary: **worth testing cheaply, not worth betting the schedule on
+before §7 reports.** If ship-date certainty matters more than being first to
+4-bit on Metal, the int8 fallback is the plan and mxfp4 is the upside.
+
 ## 1. Design thesis: decouple the quality axes
 
 The instinct is to fit H3 on the Mac and turn everything down until it fits.
@@ -106,22 +129,27 @@ consistently. This is the single easiest way to get a confusing bad result.
 
 ### What the existing measurements actually say
 
-Two observations from the Wan track, and they point in the same direction:
+From the Wan track:
 
 - At **1.3B**, both mxfp8 and mxfp4 looked bad.
-- At **14B** on a 36 GB machine, int8 was good and mxfp4 ran fine but looked
-  bad. (Whether mxfp8 held at 14B needs confirming — M009. If it did, that
-  sharpens the story considerably.)
+- At **14B** on a 36 GB machine, int8 was good. mxfp4 ran fine but looked bad.
+  (Whether mxfp8 was tested at 14B is unconfirmed — M009.)
 
-Both were **post-training** quantization. Neither had QAT aimed at the MX grid,
-because that code does not exist yet. So the honest read is not "MX formats are
-bad" — it is "MX formats PTQ badly," which is exactly what the grid analysis
-above predicts and exactly what QAT exists to fix.
+**mxfp4 has therefore failed at both sizes tested.** An earlier revision of this
+document claimed quantization tolerance rises with size and used that to justify
+14B; the data does not support it. The only clean signal here is that affine
+int8 works at 14B and that mxfp4 does not work untrained at either size.
 
-The second signal is that quantization tolerance rises with model size. A 14B
-has redundancy a 1.3B does not, and 4-bit formats lean on that redundancy hard.
-This cuts against shrinking the model to fit, and is a large part of why §3
-targets 14B rather than something smaller.
+What the data does *not* rule out is the thing the plan actually depends on:
+both results are **post-training** quantization, with no QAT aimed at the MX
+grid and none of the recovery ladder in §7/E2 applied. The grid analysis above
+predicts naive MX PTQ will fail exactly this way. So the live question is not
+"is mxfp4 good" — it plainly is not, as shipped — but "does QAT plus calibration
+make it good," which nobody has tested.
+
+That is a genuine open question, not a formality. Treat §7 as a real gate with a
+real chance of failing, and read §0's fallback row as load-bearing rather than
+decorative.
 
 ### The bet
 
@@ -228,21 +256,32 @@ bf16 at 2.0 GB per billion params; affine int8 at 1.06; mxfp4 at 0.53.
 These are ceilings, not targets. The mxfp4 column is the whole argument: it moves
 a 14B-class model from "needs 36 GB" to "comfortable on 24 GB, roomy on 32."
 
-### Why 14B and not smaller
+### Why 14B — honestly
 
-Not carried over from the Wan tiering — that assumed 1.3B and 14B, and 5B was
-never a validated point on this stack.
+Not carried over from the Wan tiering, and **not** justified by demonstrated
+quantization tolerance at that size (see §2 — mxfp4 failed at 14B too). The
+actual reasons are weaker than that would have been:
 
-The size falls out of two constraints meeting. Downward pressure is gone:
-mxfp4 puts 14B at ~7.4 GB, well inside a 24 GB budget, so there is no memory
-reason to shrink. Upward pressure is real: 4-bit quantization leans on model
-redundancy, and the existing evidence is that 1.3B does not have enough of it
-while 14B does. Shrinking the student to fit smaller Macs would actively
-undermine the mxfp4 bet.
+1. **mxfp4 removes the downward pressure.** 14B at ~7.4 GB sits comfortably in a
+   24 GB budget, so there is no memory argument for shrinking further.
+2. **It is a size already worked with.** The existing 14B Wan gives a same-size
+   testbed for E1–E3, so the quantization work is validated at the target scale
+   before H3 weights exist.
+3. **Distillation cost rises steeply with student size**, and B1 is the schedule
+   risk (§Track B). 14B is near the upper bound of what 8×B200 can plausibly
+   reach in weeks rather than months.
 
-So 14B-class is where the two arguments meet — big enough to survive 4-bit,
-small enough that 4-bit gets it onto median hardware. If H3's own architecture
-suggests a nearby natural size, prefer that over the round number.
+Reason 3 is the binding one. If B1 proves harder than expected, the right
+response is a smaller student, not a longer schedule — and a smaller student
+makes the mxfp4 bet harder, since 1.3B is where MX behaved worst. Those two
+pressures point in opposite directions and the tension is unresolved until §7
+reports.
+
+Also not carried over from the Wan tiering — that assumed 1.3B and 14B, and 5B
+was never a validated point on this stack.
+
+If H3's architecture suggests a nearby natural size, prefer that over the round
+number. 14B is a target, not a constraint.
 
 ### Two releases, one student
 
@@ -467,15 +506,34 @@ regeneration, because the Mac path never runs it (§1).
 
 Order-of-magnitude, for planning:
 
-| Stage | Scale |
-|---|---|
-| B0 corpus generation | GPU-weeks |
-| B1 capacity reduction | GPU-weeks, and the least predictable line |
-| B2 step + QAT | days on 8 GPUs, per grid |
-| B3 audio | days, if separable |
+Anchored on the one real datapoint available: the Wan-1.3B QAD run is **4–8
+hours on 4×B200** for DMD2 to 3 steps. That is B2 alone, on a model that needed
+neither B0 nor B1.
 
-For reference, the existing Wan-1.3B QAD run is 4–8 hours on 4×B200 — that is
-B2 alone, on a model that needed no B0 or B1. B0 and B1 are the budget.
+Scaling that to a 14B student on 8×B200 — ~10× the parameters, 2× the GPUs, and
+DMD2's three resident networks (frozen teacher, trainable student, critic):
+
+| Stage | 8×B200 estimate | Confidence |
+|---|---|---|
+| B0 corpus generation | 1–3 weeks | low — scales with teacher inference speed, unknown until H3 runs |
+| B1 capacity reduction | **weeks to months, or infeasible** | very low — see below |
+| B2 step + QAT, per release per grid | 1–3 days | medium — direct scaling from a real measurement |
+| B3 audio | days, if separable | low |
+
+B2 across both releases and both grids (mxfp4 + int8 fallback) is roughly
+**1–2 weeks of 8×B200**. That is the tractable part.
+
+**B1 is the schedule risk and it is not a small one.** Memory alone is
+manageable — a 14B student with Adam states plus a frozen teacher and critic is
+on the order of 250 GB of optimizer and weight state, which shards across
+8×B200's ~1.4 TB. The problem is that capacity distillation from a frontier
+model is not a fine-tune. If H3 turns out to be a large MoE, the compression
+ratio to a 14B dense student is severe enough that 8 GPUs may simply not be
+enough to recover acceptable quality in any reasonable wall time. MiniMax
+trained H3 on orders of magnitude more compute than this.
+
+Treat B1 as the line item most likely to force a plan change, and resolve M001
+before committing to it.
 
 ### Track C — MLX runtime
 
