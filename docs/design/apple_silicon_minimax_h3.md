@@ -39,7 +39,7 @@ supports.
 | Affine int8 works at 14B | high | measured |
 | mxfp4 is a large memory win over int8 | certain | arithmetic |
 | MX PTQs worse than affine int8, for the stated grid reasons | high | numerics; matches observed runs |
-| **mxfp4 is viable for a video DiT at all** | **low** | has now failed at 1.3B and 14B, with *and without* QAT (§2). Four confounds remain unchecked, but the evidence points against it. |
+| **mxfp4 is viable for a video DiT at all** | **low, but poorly measured** | failed at 1.3B and 14B with and without QAT — however both QAD runs share one unverified quantizer, so they are not independent evidence (§2). |
 | MLX routes mxfp4 to M5 neural accelerators | **unknown** | untested — E1 |
 | A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends on H3's size and whether it is MoE (M001) |
 
@@ -147,14 +147,62 @@ was wrong, and it was the load-bearing assumption under the whole bet.
 
 The actual state of evidence:
 
-| Run | Setup | Result |
-|---|---|---|
-| 1.3B and 14B, PTQ | mxfp8 and mxfp4 | bad |
-| 14B, affine int8 | 36 GB machine | good |
-| **1.3B and 14B, mxfp4 QAD** | `dmd2_t2v_14b_mlx_mxfp4.yaml`, `mode: mxfp4`, `simulate_dtype: fp16`, DMD2 3-step `[1000, 757, 522]`, 4000 iterations, 8×B200, student+critic from `fastwan14b_distilled`, frozen Wan2.1-14B teacher | still bad |
+| Model | Grid | Method | Result |
+|---|---|---|---|
+| 1.3B | affine int8 | QAD | **good** — the prior plan of record |
+| 1.3B | mxfp8, mxfp4 | PTQ | bad |
+| 1.3B | mxfp4 | QAD | bad |
+| 14B | mxfp4 | QAD — `dmd2_t2v_14b_mlx_mxfp4.yaml`, `simulate_dtype: fp16`, DMD2 3-step `[1000, 757, 522]`, 4000 iterations, 4×B200, student+critic from `fastwan14b_distilled`, frozen Wan2.1-14B teacher | bad |
+| **14B** | **affine int8** | — | **never tried** |
 
-So mxfp4 has now failed at two sizes, with and without quantization-aware
-distillation. **The evidence is against the bet, not merely silent on it.**
+Two things follow, and the second corrects an error repeated across several
+earlier revisions of this document.
+
+**mxfp4 has failed at two sizes, with and without QAD.** The evidence is against
+it — but see the independence caveat immediately below, which materially weakens
+how much that evidence proves.
+
+### The two mxfp4 failures are not independent
+
+Both QAD runs are from the same commit (`411cfa7e`) and share every component
+that could plausibly be at fault:
+
+| | 1.3B | 14B |
+|---|---|---|
+| Config | `dmd2_t2v_1p3b_mlx_mxfp4.yaml` | `dmd2_t2v_14b_mlx_mxfp4.yaml` |
+| Quantizer | `mode: mxfp4`, `simulate_dtype: fp16` | identical |
+| Schedule | DMD2 3-step `[1000, 757, 522]` | identical |
+| `generator_update_interval` | 5 | 5 |
+| EMA | `decay: 0.98`, `start_iter: 0` | identical |
+| `rollout_mode` | simulate | simulate |
+| Runtime | 1 d 8 h 34 m | 6 d 12 h 30 m |
+| Logged `step_time_sec` | 51.2 | 239.8 |
+
+They are two samples of *one* pipeline, not two independent tests of the mxfp4
+grid. If the PyTorch fake-quantizer behind `mode: mxfp4` does not match MLX's
+deploy grid, **both results are void for the same single reason** — and roughly
+**31 GPU-days** of B200 time is void with them.
+
+This is why E0 (§8) is the first thing to do and why it is worth more than
+another training run. Two correlated failures through one unverified code path
+is weak evidence about the format and strong evidence that the code path needs
+verifying.
+
+One supporting detail: the logged `step_time_sec` implies ~2300 iterations in
+both runs, against 4000 configured — but the logged-to-implied ratio is 1.75 and
+1.70 respectively, near-identical across two very differently sized jobs. A
+consistent ratio points to metric semantics rather than two coincidentally
+truncated runs; most likely `step_time_sec` samples only the costlier
+student-update iterations. If so both runs did complete 4000 iterations, giving
+the student **800 updates**, and true mean iteration time was ~29 s (1.3B) and
+~141 s (14B) on 4×B200. Worth confirming, since it decides whether the
+undertraining hypothesis is about 470 updates or 800.
+
+**Nothing at 14B has been shown to work on Metal.** Earlier revisions asserted
+that affine int8 was good at 14B and used that to present Release 0a as a
+zero-risk ship. That run was never done — int8 is validated at 1.3B only. The
+14B/int8 cell is the most important empty box in this table, and filling it is
+now the highest-value experiment in the plan (§8/E0b).
 
 ### Confounds worth eliminating before dropping mxfp4
 
@@ -398,8 +446,13 @@ to 14B, on a grid that already works.
 | Grid | affine int8, mixed precision | mxfp4 |
 | Weights | ~15 GB | ~7.4 GB |
 | Target | 32 GB+ Macs, any generation | 24 GB Macs, M5+ |
-| Blocked by | **nothing** — int8 at 14B is already known good | E1–E3 (§8) |
-| Risk | low | the bet |
+| Blocked by | **E0b** — 14B at int8 has never been run (§2) | E0, then E1–E3 (§8) |
+| Risk | low, but not zero — validate before promising a date | the bet |
+
+0a is *low* risk rather than *no* risk. int8 is proven at 1.3B, and 8-bit is far
+more forgiving than 4-bit, so it is very likely to hold at 14B — but "very
+likely" is not "measured," and an earlier revision of this document wrongly
+claimed it was. Run E0b before committing to a ship date.
 
 This is the honest framing of what mxfp4 buys: **it moves 14B from "needs
 32 GB" to "comfortable on 24 GB."** At int8, 14B is ~15 GB of weights, which is
@@ -616,29 +669,35 @@ DMD2's three resident networks (frozen teacher, trainable student, critic):
 |---|---|---|
 | B0 corpus generation | 1–3 weeks | low — scales with teacher inference speed, unknown until H3 runs |
 | B1 capacity reduction | **weeks to months, or infeasible** | very low — see below |
-| B2 step + QAT, per release per grid | **~6.5 days** | high — measured wall-clock |
+| B2 step + QAT, per release per grid | **~26 GPU-days** | high — measured |
 | B3 audio | days, if separable | low |
 
-The B2 figure is measured, not extrapolated: the 14B mxfp4 QAD run took
-**6 d 12 h 30 m on 8×B200**. Two earlier revisions of this document got this
-wrong in both directions — 1–3 days by scaling from the 1.3B run, then ~11 days
-by multiplying the logged `step_time_sec: 239.8` by 4000 iterations. Use the
-measured 6.5 days.
+The B2 figure is measured: the 14B mxfp4 QAD run took **6 d 12 h 30 m on
+4×B200** for 4000 iterations — **26 GPU-days**, or ~141 s/iteration on 4 GPUs.
+Earlier revisions of this document mis-stated this twice, first by extrapolating
+from the 1.3B run and then by assuming the run used 8 GPUs.
 
-Scaled linearly: **~3.3 days on 16 GPUs, ~1.6 days on 32.** That makes the
-recommendation to run Turbo and Quality concurrently at 16 each concretely
-worth it — both releases in ~3 days rather than ~13 serialized on 8.
+| GPUs | Wall-clock for one B2 |
+|---|---|
+| 4 | 6.5 days |
+| 8 | 3.3 days |
+| 16 | **1.6 days** |
+| 32 | 0.8 days |
 
-The two figures do not reconcile cleanly, which is itself informative:
-6.5 days at 239.8 s/iteration is ~2350 iterations, not 4000. Either the run did
-not complete 4000, or 239.8 is a final reading rather than the mean and the true
-average was ~141 s. **Confirm the completed iteration count** — it feeds
-directly into the undertrained hypothesis in §2, and at ~2350 iterations with
-`generator_update_interval: 5` the student saw roughly **470 updates**, not 800,
-which makes undertraining a materially more likely explanation for the result.
+This is much better news than the previous revision implied, and it changes two
+decisions:
 
-Note also that the run resumed from `checkpoint-40`, so earlier segments exist
-and total training time may exceed this run's 6.5 days.
+- **Running Turbo and Quality concurrently at 16 GPUs each finishes both in
+  ~1.6 days.** With 32 available that is close to free.
+- **The undertraining hypothesis is cheap to test.** 4× the iterations (16,000)
+  at 16 GPUs is ~6.5 days — the same wall-clock the original run cost, for four
+  times the student updates. Given the student saw only ~800 updates at
+  `generator_update_interval: 5`, this is an affordable and well-targeted
+  retry — but only *after* E0 confirms the grid (§8).
+
+Note the run resumed from `checkpoint-40`, so earlier segments exist and
+cumulative training may exceed 4000 iterations. Confirm before concluding
+anything about training budget.
 
 **B1 is the schedule risk and it is not a small one.** Memory alone is
 manageable — a 14B student with Adam states plus a frozen teacher and critic is
@@ -819,12 +878,32 @@ exponent selection and rounding, element rounding mode, and the dequantized
 reconstruction. Bound the difference the way
 `fastvideo/tests/mlx/test_mlx_affine_qat_parity.py` bounds the affine path.
 
-If they diverge, the 14B run trained against a grid it would never deploy on,
-the "mxfp4 failed" result is void, and one corrected run is worth doing. If they
-match bit-for-bit, the failure is real and E2/E3 below become the last cheap
-things to try before dropping mxfp4.
+If they diverge, **both** QAD runs trained against a grid they would never deploy
+on, the "mxfp4 failed" result is void, ~31 GPU-days is written off, and one
+corrected run is clearly worth doing. If they match bit-for-bit, the failure is
+real and E2/E3 below become the last cheap things to try before dropping mxfp4.
 
-Zero GPU cost. Do it first.
+Zero GPU cost. Do it first among the mxfp4 items.
+
+### E0b — Does 14B work at affine int8? (a day for PTQ; ~1.6 days on 16 GPUs if QAT is needed)
+
+**The highest-value experiment in the plan**, because it gates Release 0a — the
+one thing here with a near-term ship date — and because the 14B/int8 cell in §2
+is simply empty.
+
+Two rungs:
+
+1. **PTQ first, same day, no training.** Quantize the existing
+   `fastwan14b_distilled` weights to affine int8 with the §2 mixed-precision
+   split and look at the output. 8-bit PTQ is far more forgiving than 4-bit, and
+   larger models generally PTQ better, so this may just work. If it does,
+   Release 0a ships with **no training at all**.
+2. **QAD if PTQ falls short.** The shipping 1.3B int8 was QAD'd, not PTQ'd, so
+   14B may need the same. That is a `dmd2_t2v_mlx_int8.yaml` run at 14B —
+   ~1.6 days on 16 GPUs (§Track B).
+
+Either way this is cheap, and unlike everything mxfp4-related it is on the
+critical path to a shipped product rather than to a research question.
 
 ### E1 — Does MLX actually use the hardware? (hours, no model)
 
