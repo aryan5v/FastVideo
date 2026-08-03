@@ -1,6 +1,9 @@
 # Apple Silicon Plan: MiniMax-H3 Local Video Generation
 
-Status: design, pre-implementation. Depends on the `minimax_h3` CUDA port
+Status: design, pre-implementation.
+
+Release 0 (§4) depends on nothing and can start immediately. The H3 releases
+(§5) depend on the `minimax_h3` CUDA port
 (`tests/local_tests/minimax_h3/PORT_STATUS.md`).
 
 This is the **local/Metal track**. It is deliberately separate from upstream
@@ -17,9 +20,10 @@ on Apple Silicon — not the largest model that technically loads.
 | Primary quantization | **mxfp4 with MX-grid QAT, M5 and newer.** This is the strategic bet, not the safe one (§2). |
 | Fallback artifact | Affine int8, produced from the same student by one extra B2 run. Serves M1–M4 and covers the bet failing. Cheap; not the headline. |
 | Memory target | **24 GB floor, 32–36 GB comfortable** (§3). Not 96 GB. |
-| Student capacity | **~14B class** (§3). Chosen because mxfp4 puts 14B in ~7.4 GB — it fits 24 GB with room — and because quantization tolerance rises with size. |
-| Release shape | **One student, two step-distillations**: Turbo (rapid) and Quality. Shared expensive stages, cheap divergence (§4). |
-| Validation before commitment | Three experiments, days not months, on existing models (§7). The bet is gated on these, not on faith. |
+| Student capacity | **~14B class** (§3). mxfp4 puts 14B in ~7.4 GB, and it is the size already in hand for validation. Not justified by quantization tolerance — see §2. |
+| First ship | **Release 0: FastWan-14B on Metal** (§4), ahead of and independent of H3. |
+| Release shape | **One student, two step-distillations**: Turbo (rapid) and Quality. Shared expensive stages, cheap divergence (§5). |
+| Validation before commitment | Three experiments, days not months, on existing models (§8). The bet is gated on these, not on faith. |
 | Expected H3 size | **Unknown (M001).** Ceilings in §3 say what fits, not what H3 is. |
 
 Deliberate consequence: pre-M5 Macs get the int8 artifact and are not the design
@@ -40,12 +44,12 @@ supports.
 | A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends entirely on H3's size and whether it is MoE (M001) |
 
 The plan multiplies several independent uncertainties. It is structured as a
-sequenced bet with cheap gates precisely because of that — §7 costs days and can
+sequenced bet with cheap gates precisely because of that — §8 costs days and can
 kill the expensive path before it starts. It is not structured that way as a
 formality.
 
 The honest summary: **worth testing cheaply, not worth betting the schedule on
-before §7 reports.** If ship-date certainty matters more than being first to
+before §8 reports.** If ship-date certainty matters more than being first to
 4-bit on Metal, the int8 fallback is the plan and mxfp4 is the upside.
 
 ## 1. Design thesis: decouple the quality axes
@@ -94,7 +98,7 @@ not free at that length.
 
 So the accurate claim is narrower than "attention doesn't matter": weight memory
 is the **dominant** constraint and attention is a real but secondary cost, which
-is why base resolution and clip length are the levers Turbo pulls hardest (§4).
+is why base resolution and clip length are the levers Turbo pulls hardest (§5).
 Confirm the actual latent token count from H3-VAE's strides before sizing
 activation budgets (M011).
 
@@ -147,7 +151,7 @@ predicts naive MX PTQ will fail exactly this way. So the live question is not
 "is mxfp4 good" — it plainly is not, as shipped — but "does QAT plus calibration
 make it good," which nobody has tested.
 
-That is a genuine open question, not a formality. Treat §7 as a real gate with a
+That is a genuine open question, not a formality. Treat §8 as a real gate with a
 real chance of failing, and read §0's fallback row as load-bearing rather than
 decorative.
 
@@ -274,7 +278,7 @@ actual reasons are weaker than that would have been:
 Reason 3 is the binding one. If B1 proves harder than expected, the right
 response is a smaller student, not a longer schedule — and a smaller student
 makes the mxfp4 bet harder, since 1.3B is where MX behaved worst. Those two
-pressures point in opposite directions and the tension is unresolved until §7
+pressures point in opposite directions and the tension is unresolved until §8
 reports.
 
 Also not carried over from the Wan tiering — that assumed 1.3B and 14B, and 5B
@@ -334,7 +338,41 @@ flagship is unacceptable. This is Track B0 + B1 in full, and it is a multi-week
 GPU project with a genuinely uncertain quality outcome rather than an
 engineering task. Scope it deliberately.
 
-## 4. The two releases
+## 4. Release 0 — FastWan-14B on Metal, ahead of H3
+
+Ships **before** any H3 work lands, and depends on none of it.
+
+The reasoning: the entire Apple Silicon stack — mxfp4, MX-grid QAT, MetalFX and
+RIFE postprocess, sequenced residency, generation-aware tiering — is
+model-agnostic. The existing 14B Wan already exercises it at exactly the target
+size, and the MLX Wan runtime already exists. So the stack can be validated and
+shipped without waiting on the H3 port, the corpus, or capacity distillation.
+
+| Property | Value |
+|---|---|
+| Model | existing FastWan 14B, no capacity reduction |
+| Training needed | E2 recovery ladder, then B2-equivalent QAD if E2 falls short |
+| Deploy grid | mxfp4, M5+ — same gate as H3 (§7) |
+| Memory | ~7.4 GB weights, 24 GB machine |
+| Blocked by | nothing — no H3 port, no HF access, no corpus |
+
+What this buys, in order of value:
+
+1. **A shippable Mac product in weeks rather than months**, with the launch date
+   independent of B0 and B1 — the two line items most likely to slip.
+2. **The stack validated at 14B before H3 exists.** Every unknown in the
+   confidence table except M001 gets answered here, on a model already in hand.
+3. **The headline.** First 4-bit video DiT on Metal is a claim that does not
+   require H3 to make.
+
+Once H3 lands, Turbo and Quality below swap the parent model into a proven
+runtime instead of debugging quantization, distillation, and Metal numerics
+simultaneously.
+
+Sequencing consequence: §8's experiments stop being pre-work for H3 and become
+**Release 0's critical path**. Start them now.
+
+## 5. The two H3 releases
 
 Both are MLX builds of the same distilled H3 student. Everything marked
 *derived* follows from a decision elsewhere in this doc; everything marked
@@ -345,7 +383,7 @@ Both are MLX builds of the same distilled H3 student. Everything marked
 | Property | Value |
 |---|---|
 | Parent | one ~14B-class student distilled from H3 (§3) |
-| Deploy grid | mxfp4, M5 and newer — gated on §7 |
+| Deploy grid | mxfp4, M5 and newer — gated on §8 |
 | Fallback artifact | affine int8, same student, one extra B2 run — serves M1–M4 |
 | Mixed precision | attention + FFN projections quantized; AdaLN/modulation, timestep embedding, patch embed, final projection, norm affines held bf16 (§2) |
 | DiT weights | ~7.3 GB quantized + ~0.6 GB bf16 ≈ **~8 GB** |
@@ -405,7 +443,7 @@ to avoid.
 
 ### Ship criteria
 
-Per release, from §6: video gates on `vbench.subject_consistency`,
+Per release, from §7: video gates on `vbench.subject_consistency`,
 `vbench.motion_smoothness`, `vbench.dynamic_degree`, `common.fvd`; audio on
 `audio.clap_score` and `audio.frechet_distance`; joint on `audio.desync`. All
 scored against the CUDA H3 reference, not against an fp16 MLX build, so
@@ -422,7 +460,7 @@ the base pass can run standalone without in-context regeneration (M004), and on
 the omni encoder's memory cost (M005). Expect these numbers to move once
 `config.json` is readable; the structure of the two releases should not.
 
-## 5. Tracks
+## 6. Tracks
 
 ### Track A — CUDA port (prerequisite)
 
@@ -535,6 +573,49 @@ trained H3 on orders of magnitude more compute than this.
 Treat B1 as the line item most likely to force a plan change, and resolve M001
 before committing to it.
 
+#### GPU allocation
+
+Working ceiling: **36 B200s.** They are not all equally useful at every stage,
+and the recommended split is not "all 36 on the training job."
+
+| Stage | Useful count | Scaling |
+|---|---|---|
+| B0 corpus | **all 36** | near-linear — embarrassingly parallel inference. This is where extra GPUs convert most directly to wall-clock. |
+| B1 capacity reduction | **32** | good to ~32 with 2D HSDP; the longest job and the one that most justifies the cluster. |
+| B2 step + QAT | ~16 each | saturates earlier — DMD's global batch grows with GPU count, and past ~16 the extra batch buys convergence little. |
+| B3 audio | ~8–16 | similar to B2. |
+
+**Recommended standing split: 32 training + 4 held back.** Two reasons. First,
+32 factors cleanly (4×8 or 8×4) for HSDP meshes and collective kernels; 36 does
+not, and 6×6 or 4×9 meshes are a needless source of poor collective performance.
+Second, a dedicated 4-GPU eval box means VBench and FVD runs never contend with
+training, which matters when every B-stage gates on §7 metrics.
+
+**Run the two B2 distillations concurrently, not serially.** Turbo and Quality
+at 16 GPUs each finish both in roughly the wall time of one. That is the single
+best use of having more than 16 GPUs, and it directly compresses time-to-launch.
+
+Two caveats on the 36:
+
+- **The frozen teacher may be large.** If H3 is a 200B+ MoE, the teacher alone
+  is 400 GB+ at bf16 — three or more B200s per replica before the student,
+  critic, or optimizer states are counted. That changes every row above. M001
+  decides whether 36 is comfortable or tight.
+- **36 GPUs does not make B1 feasible if the compression ratio is too severe.**
+  Going 8 → 32 is ~4×, which turns months into weeks; it does not turn
+  infeasible into feasible. It substantially de-risks B1 without eliminating the
+  risk.
+
+Also size the storage path, not just the GPUs. B0 at 36-way parallelism will
+generate on the order of a terabyte of latents, and the write bandwidth becomes
+the bottleneck well before the GPUs do.
+
+The current runbook pins `hsdp_shard_dim` to the GPU count, which is correct for
+a 1.3B on 4 GPUs (effectively pure FSDP) but wrong at this scale. A 14B student
+plus frozen teacher and critic needs a shard dim large enough to fit the state,
+then replication across the rest — a genuine 2D mesh. Budget config work for
+this before the first large run.
+
 ### Track C — MLX runtime
 
 New `fastvideo/mlx_runtime/minimax_h3.py`, roughly the scale of `fastwan.py`
@@ -572,7 +653,7 @@ Extend `eval_metalfx_rife.py` to sweep the resolution trade alongside the
 existing frame-count trade, and to cover the MetalFX-interpolation arm. Pick the
 operating point from measurement.
 
-## 6. Quality gates
+## 7. Quality gates
 
 Measure the student against the **CUDA H3 reference**, not against an fp16 MLX
 build, so distillation and quantization error are scored together. The existing
@@ -594,7 +675,7 @@ the student is *supposed* to diverge. Use SSIM only as a regression tripwire for
 the MLX runtime against its own torch reference, which is what
 `fastvideo/tests/ssim/` and `test_mlx_dit_parity.py` are for.
 
-## 7. Proving mxfp4 on an M5 / 24 GB machine
+## 8. Proving mxfp4 on an M5 / 24 GB machine
 
 The bet needs validating before H3 GPU time is committed. All three experiments
 below run on **existing Wan weights**, need no H3 access, and answer separable
@@ -702,17 +783,20 @@ real quality recovery. If E1 fails, fall back to int8 and keep the §3 ceilings.
 If E1 passes but E2 and E3 both fail, mxfp8 becomes the M5 target instead of
 mxfp4 — still a win over int8 on throughput, at a much smaller memory advantage.
 
-## 8. Sequencing
+## 9. Sequencing
 
-**Now, unblocked:** E1 → E2 → E3 (§7). None of these need H3 weights, network
-access to Hugging Face, or the CUDA port. They run entirely on existing Wan
-checkpoints and they decide the deploy grid.
+**Now, unblocked — and now the critical path for Release 0, not pre-work:**
+E1 → E2 → E3 (§8). None of these need H3 weights, Hugging Face access, or the
+CUDA port. They run on existing Wan checkpoints and they decide the deploy grid.
 
-**In parallel:** land the CUDA port (Track A), and read `config.json` the moment
-weights are reachable — dense-vs-MoE and total parameter count gate the
-capacity path in §3.
+**Then Release 0 (§4):** FastWan-14B on Metal. Ships independently of everything
+below.
 
-**After the §7 gate passes:**
+**In parallel throughout:** land the CUDA port (Track A), and read `config.json`
+the moment weights are reachable — dense-vs-MoE and total parameter count gate
+the capacity path in §3, and M001 can be answered long before the port finishes.
+
+**After the §8 gate passes and the H3 port lands:**
 
 1. Track B0 — synthetic corpus generation.
 2. Track B1 — capacity reduction to the 14B-class student.
@@ -723,11 +807,11 @@ capacity path in §3.
 6. Track D — operating-point sweep per release, including the
    MetalFX-interpolation arm.
 
-The ordering point worth holding onto: §7 costs days and gates months. Running
+The ordering point worth holding onto: §8 costs days and gates months. Running
 E1 before anything else is the single highest-leverage scheduling decision here,
 because a failed E1 changes the entire plan and costs an afternoon to discover.
 
-## 9. Open questions
+## 10. Open questions
 
 | ID | Question | Blocks |
 |---|---|---|
@@ -741,4 +825,4 @@ because a failed E1 changes the entire plan and costs an afternoon to discover.
 | M008 | Does MetalFX frame interpolation accept the frame cadence a 3-step diffusion sampler emits, or does it assume game-engine motion vectors? | Track D |
 | M009 | Did mxfp8 hold up at 14B, or was it only mxfp4 that degraded? The 1.3B run showed both failing; the 14B run is reported as mxfp4-bad. If mxfp8 was fine at 14B it strongly supports the size-tolerance argument in §2 and gives the bet a safer intermediate landing spot. | §2, E2 scope |
 | M010 | Does `mx.quantize` mxfp4 accept a per-layer grid override, or does the mixed-precision split in E2 need weights held in separate arrays by dtype? | E2 implementation |
-| M011 | What is the actual denoised latent token count at each target resolution and clip length? Follows from H3-VAE's spatial/temporal strides and patch size. Distinct from the ~4k conditioning context. | §1 thesis, §4 resolution rows, activation budgets |
+| M011 | What is the actual denoised latent token count at each target resolution and clip length? Follows from H3-VAE's spatial/temporal strides and patch size. Distinct from the ~4k conditioning context. | §1 thesis, §5 resolution rows, activation budgets |
