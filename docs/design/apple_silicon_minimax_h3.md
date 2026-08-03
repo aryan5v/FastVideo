@@ -39,7 +39,7 @@ supports.
 | Affine int8 works at 14B | high | measured |
 | mxfp4 is a large memory win over int8 | certain | arithmetic |
 | MX PTQs worse than affine int8, for the stated grid reasons | high | numerics; matches observed runs |
-| **mxfp4 is viable for a video DiT at all** | **low, but poorly measured** | failed at 1.3B and 14B with and without QAT — however both QAD runs share one unverified quantizer, so they are not independent evidence (§2). |
+| **mxfp4 is viable for a video DiT at all** | **unresolved — not yet fairly tested** | failed at both sizes, but the matched control shows the mxfp4 run had *lower* loss and *half* the student gradient norm, which points at a broken QAT path rather than a bad format (§2). |
 | MLX routes mxfp4 to M5 neural accelerators | **unknown** | untested — E1 |
 | A 14B student can be distilled from H3 at acceptable quality on 8×B200 | **low** | depends on H3's size and whether it is MoE (M001) |
 
@@ -204,7 +204,55 @@ zero-risk ship. That run was never done — int8 is validated at 1.3B only. The
 14B/int8 cell is the most important empty box in this table, and filling it is
 now the highest-value experiment in the plan (§8/E0b).
 
-### Confounds worth eliminating before dropping mxfp4
+### The matched control points at an optimization bug, not a bad format
+
+A near-matched pair exists at 1.3B — same commit `411cfa7e`, same student and
+critic init, same DMD2 3-step schedule, same `generator_update_interval: 5`,
+same EMA, same `rollout_mode`, runtimes within 3%. The only material difference
+is the quantization block. **This is the cleanest evidence available and it does
+not say "mxfp4 is a bad format."**
+
+| Metric | int8 (liked) | mxfp4 (bad) | ratio |
+|---|---|---|---|
+| Config | `bits: 8`, `group_size: 64` | `mode: mxfp4` | *different code paths* |
+| Runtime | 1 d 7 h 34 m | 1 d 8 h 34 m | 1.03 |
+| `step_time_sec` | 49.2 | 51.2 | 1.04 |
+| `total_loss` | 0.622 | 0.575 | **0.92** |
+| `generator_loss` | 0.419 | 0.390 | 0.93 |
+| `grad_norm/student` | 1.332 | 0.623 | **0.47** |
+| `grad_norm/critic` | 0.260 | 0.215 | 0.82 |
+
+Two readings jump out:
+
+**The mxfp4 run has lower loss and worse output.** Loss is not tracking quality,
+which means the objective is not measuring what it should — a degraded critic
+signal, or a student that is not actually moving.
+
+**The student's gradient norm is less than half.** That is the diagnostic
+number. A model converged to a worse optimum would show comparable gradient
+magnitudes and *higher* loss. Low loss plus halved gradients reads as a student
+that is barely being optimized at all.
+
+The leading hypothesis: **the straight-through estimator is attenuating
+gradients on the mxfp4 path.** mxfp4's representable range is far narrower than
+affine int8's, so many more weights sit at grid saturation — and a clipped STE
+zeroes gradients for saturated values. That would produce exactly this
+signature, and it is a bug in the QAT path rather than a property of 4-bit
+weights.
+
+Supporting this: the two configs are not the same code. int8 goes through the
+affine path (`bits` + `group_size`); mxfp4 goes through a separate `mode`-keyed
+path with no group size specified. The mxfp4 path is the far less exercised of
+the two.
+
+**Cheap diagnostic, no training run:** instrument one forward/backward on each
+path and log, per layer, the fraction of weights at grid saturation and the
+fraction of gradients passing through the STE non-zero. If mxfp4's passthrough
+rate is materially lower, that is the bug, and it is fixable — a non-clipped or
+soft-clipped STE, or per-group scale search (§8/E2 L2) to reduce saturation in
+the first place.
+
+### Other confounds worth eliminating
 
 The run does not cleanly kill mxfp4 either, because four things could each
 produce this outcome independently of the grid being unworkable. All are cheap
@@ -219,27 +267,26 @@ to check relative to another 4000-iteration run.
    the affine path to one source-dtype epsilon; there is no MX equivalent.
    Without that test, the run's grid is unverified.
 
-2. **Student is very likely undertrained.** `generator_update_interval: 5` means
-   the student took roughly **470–800 updates** depending on the actual
-   completed iteration count (§Track B — the 6.5 d wall-clock and the logged
-   239.8 s/iteration imply ~2350 iterations, not 4000). For a 14B model learning
-   to absorb 4-bit noise that is a very small budget, and it is the most likely
-   benign explanation after grid mismatch.
+2. **Undertraining — now demoted.** The matched int8 run converged to liked
+   quality on the *same* iteration and student-update budget, so the budget is
+   evidently sufficient for this recipe. mxfp4 needing materially more would
+   itself be a symptom of the weak-gradient problem above, not an independent
+   cause. Do not spend a longer run on this until the STE is checked.
 
 3. **No mixed precision.** The config shows no layer-skip list. If mxfp4 was
    applied to every targeted linear including modulation/AdaLN, timestep
    embedding, patch embed, and final projection, the highest-leverage cheap fix
    was never in play (L1 in §8/E2).
 
-4. **No matched control.** Without an identical run at affine int8 — same
-   iterations, same schedule, same EMA — "bad" is not attributable to the grid
-   rather than to the recipe, the iteration count, or evaluation on
-   `decay: 0.98` EMA weights, which average over only ~50 iterations and can
-   look worse than the raw weights on a noisy run.
+4. **Matched control — resolved.** One exists (see above), and it is what turned
+   this from "the format is bad" into "the training path looks broken."
 
-Order: (1) then (3) then (2). If a verified-exact grid with mixed precision and
-a proper student-update budget still produces bad output, mxfp4 is dead for
-video DiTs at this scale and affine int8 is the answer.
+Order: **STE gradient/saturation diagnostic** (above) → **E0 grid parity** → **(3)
+mixed precision** → then, only if all three come back clean, a corrected run.
+
+If a verified-exact grid with a healthy STE and mixed precision still produces
+bad output, mxfp4 is dead for video DiTs at this scale and affine int8 is the
+answer. Nothing measured so far establishes that yet.
 
 ### The bet
 
