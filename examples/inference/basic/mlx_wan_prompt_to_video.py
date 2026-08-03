@@ -466,9 +466,16 @@ def main() -> None:
     config_path = model_root / "transformer/config.json"
     checkpoint_path = model_root / "transformer/diffusion_pytorch_model.safetensors"
     config = json.loads(config_path.read_text())
-    latent_frames = (args.num_frames - 1) // 4 + 1
-    latent_height = args.height // 8
-    latent_width = args.width // 8
+    # Latent geometry follows the model's own VAE: Wan2.1 compresses 4x8x8,
+    # the Wan2.2 TI2V VAE (48 channels) compresses 4x16x16. Read the factors
+    # from the checkpoint's vae config rather than assuming Wan2.1.
+    vae_config_path = model_root / "vae/config.json"
+    vae_config = json.loads(vae_config_path.read_text()) if vae_config_path.is_file() else {}
+    vae_temporal_factor = int(vae_config.get("scale_factor_temporal", 4))
+    vae_spatial_factor = int(vae_config.get("scale_factor_spatial", 8))
+    latent_frames = (args.num_frames - 1) // vae_temporal_factor + 1
+    latent_height = args.height // vae_spatial_factor
+    latent_width = args.width // vae_spatial_factor
     mx_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[args.mlx_dtype]
     quantization = None if args.mlx_quantization == "none" else args.mlx_quantization
 
