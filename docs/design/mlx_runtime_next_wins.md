@@ -30,15 +30,16 @@ umT5 encode is seconds per invocation and dominates short experiments. Cache
 `prompt_embeds` keyed by `(prompt, max_sequence_length, encoder dtype)` under
 the model root. Iterating on seeds/steps/RIFE factors becomes encode-free.
 
-### 2. MetalFX spatial fast mode (small, big UX)
+### 2. MetalFX spatial fast mode (medium, big UX)
 
 The Turbo path from the design docs: generate at half resolution, upscale with
-MetalFX (temporal anti-aliased upscaling, Apple-silicon native). The eval piece
-exists (`fastvideo/benchmarks/eval_metalfx_rife.py`); what is missing is a
-`--fast-spatial` flag in the generation CLI composing with `--fast` (RIFE) —
-spatial and temporal shortcuts are orthogonal. This is the single biggest
-perceived-speed lever available without retraining: 4× fewer pixels ≈ 4× less
-DiT work at fixed frames/steps.
+MetalFX (temporal anti-aliased upscaling, Apple-silicon native). Correction
+from code inspection: `fastvideo/benchmarks/eval_metalfx_rife.py` is RIFE-only
+despite the name — no MetalFX upscaler exists yet, so this win includes
+building the upscaler (small MLX SR model or MPS-backed MetalFX binding) plus
+the `--fast-spatial` CLI flag composing with `--fast` (RIFE). Spatial and
+temporal shortcuts are orthogonal: 4× fewer pixels ≈ 4× less DiT work at
+fixed frames/steps.
 
 ### 3. Full-step compile coverage (small)
 

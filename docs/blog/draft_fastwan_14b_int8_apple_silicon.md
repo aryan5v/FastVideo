@@ -97,9 +97,9 @@ Every layer is attacked, as with the 5090 release — but for Metal:
 - **INT8 pre-quantized checkpoints**: save/load the deploy artifact directly;
   the loader casts to fp16 and quantizes exactly along the training grid.
 - **TAEHV fast decoding** with checksum-verified weights.
-- **Two composable fast modes**: **RIFE** (generate every Nth frame,
-  interpolate the rest with Apple-silicon-native rife-mlx) and **MetalFX**
-  (render at half resolution, temporally-upscale) — temporal and spatial
+- **Fast mode**: **RIFE** (generate every Nth frame, interpolate the
+  rest with Apple-silicon-native rife-mlx), with a MetalFX spatial
+  half-resolution render path on the roadmap — temporal and spatial
   shortcuts that multiply.
 - **Memory-tier presets**: 24/32/64 GB, with sequenced residency (encode →
   free encoder → denoise → free DiT → decode) so peak memory is the largest
