@@ -1,0 +1,110 @@
+# Mac-targeted QAD distillation at 5B: FastWan2.2-TI2V-5B (already 3-step,
+# full attention) -> INT8 student for Apple Silicon.
+#
+# Same v2 recipe mechanics as dmd2_t2v_14b_mlx_int8.yaml ("adapt a good
+# 3-step model to the INT8 grid"), pointed at the Wan2.2 TI2V-5B family:
+#
+# - Student/critic init from FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+#   (3-step DMD, dense attention — no VSA kernel needed on Metal).
+# - Teacher is the base 50-step Wan-AI/Wan2.2-TI2V-5B-Diffusers.
+# - 720p-native (121x704x1280) on the FastVideo/Wan2.2-Syn-121x704x1280_32k
+#   corpus (~4242 files, far smaller than the 600k Wan2.1 corpus).
+# - 5B int8 = ~5.3 GB of weights: the 16 GB Mac tier product, complementing
+#   the 14B (24 GB+) quality tier.
+# - flow_shift 5.0 matches the Wan2.2 TI2V scheduler configs; the 3-step
+#   DMD schedule [1000, 757, 522] matches the FastWan2.2 release.
+#
+# Mesh: 8 GPUs (2 replicate x 4 shard) for the full run, 4 (1x4) for smoke.
+# 5B x3 roles is well under half the 14B state; shard_dim 4 is comfortable.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    trainable: true
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  real_score_guidance_scale: 4.5
+  dmd_denoising_steps: [1000, 757, 522]
+
+  fake_score_learning_rate: 8.0e-6
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 8
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 2
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/Wan2.2-Syn-121x704x1280_32k
+    dataloader_num_workers: 4
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 1000
+    num_latent_t: 31
+    num_height: 704
+    num_width: 1280
+    num_frames: 121
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 4
+
+  checkpoint:
+    output_dir: outputs/wan2.2_5b_dmd2_3steps_mlx_int8
+    training_state_checkpointing_steps: 100
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: distillation_wan
+    run_name: wan2.2_5b_dmd2_3steps_mlx_int8
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+callbacks:
+  mlx_qat:
+    mode: affine
+    group_size: 64
+    bits: 8
+    simulate_dtype: fp16
+  grad_clip:
+    max_grad_norm: 1.0
+  validation:
+    pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_64.json
+    every_steps: 100
+    sampling_steps: [3]
+    sampling_timesteps: [1000, 757, 522]
+    guidance_scale: 6.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.98
+    start_iter: 0
+
+pipeline:
+  flow_shift: 5.0
