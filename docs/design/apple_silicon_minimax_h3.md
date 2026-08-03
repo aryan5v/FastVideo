@@ -10,6 +10,18 @@ folded into that PR.
 Goal: the highest-quality local video generation that runs at interactive speed
 on Apple Silicon — not the largest model that technically loads.
 
+## 0. Decisions
+
+| Question | Decision |
+|---|---|
+| Primary quantization | **Affine int8**, `group_size=64`, mixed precision (§2). Works on every M-series including M5, no open questions. |
+| MXFP | **Conditional second artifact, M5+ only**, gated on the step-4 bake-off (§6). Three things must all hold: MX-grid QAT closes the quality gap, MLX actually routes to the neural accelerators, and the throughput win is measurable. Do not build mxfp4 unless mxfp8 wins decisively first. |
+| First student | **~5B, tier 2 (24–32 GB)** (§3). Volume target, existing 5B infrastructure, validates the pipeline before either extreme. |
+| First ship | **Tier 4 — native H3 int8 on 96 GB+** (§3). No distillation required, so it is the fastest route to a genuinely high-quality local result. |
+| Precision at tier 2 | **bf16 if it fits, int8 otherwise** — measure, do not assume the LLM reflex (§3). |
+| Training method | Full-weight. Separate capacity reduction (B1) from joint step+QAT (B2) (§Track B). |
+| Expected H3 size | **Unknown (M001).** The ceilings in §3 are what fits, not a prediction. |
+
 ## 1. Design thesis: decouple the quality axes
 
 The instinct is to fit H3 on the Mac and turn everything down until it fits.
@@ -124,79 +136,94 @@ hold up. It needs a sibling that fake-quantizes onto the MX grid — shared
 callback, swappable grid — for the M5 build. Step distillation helps twice over:
 a 3-step schedule gives error three chances to compound instead of fifty.
 
-### Mixed precision is the highest-leverage unshipped change
-
-Not all DiT weights deserve the same treatment. In a DiT, the AdaLN/modulation
-projections emit scale and shift terms that multiply entire activation tensors,
-so error there propagates multiplicatively; FFN weights only contribute
-additively. Same story for patch embedding and the final output projection,
-which sit at the boundaries where there is no downstream layer left to absorb
-error.
-
-Keep in fp16: modulation/AdaLN projections, time-step embedding MLP, patch
-embed, final output projection, all norm affines. These are a low single-digit
-percentage of parameters and they dominate quantization error.
-
-Quantize to affine int8: attention QKV/out projections and FFN matrices — the
-overwhelming majority of the weights.
-
-For layers that still show drift, drop to `group_size=32` (9 bits/param) before
-considering fp16.
-
-### Why QAT is load-bearing here and not for LLMs
-
-An LLM samples a token, and quantization error is partly absorbed by the
-sampling temperature. A diffusion denoiser feeds its own output back in for
-every step, so weight error compounds across the schedule. Post-training
-quantization of a video DiT looks fine at step 1 and drifts visibly by step N.
-
-`fastvideo/layers/quantization/mlx_affine_qat.py` fake-quantizing onto the exact
-MLX affine deploy grid during distillation is what makes deployed Metal weights
-hold up. Step distillation helps twice over: a 3-step schedule gives error three
-chances to compound instead of fifty.
-
 ## 3. The capacity decision
 
 The one genuinely hard question, and it needs answering before GPU time is
 spent.
 
-Weight-memory ceilings on a Mac, affine int8 at 1.06 GB per billion params (int4
-at 0.56, quality permitting):
+### Peak residency is a max, not a sum
 
-| Unified memory | Realistic MLX cap | DiT weight budget | int8 ceiling |
-|---|---|---|---|
-| 24 GB | ~14 GiB | ~10 GiB | ~9B params |
-| 32 GB | ~20 GiB | ~15 GiB | ~14B params |
-| 64 GB | ~44 GiB | ~36 GiB | ~34B params |
-| 128 GB | ~96 GiB | ~85 GiB | ~80B params |
+The runtime must sequence and free, not co-resident everything. Encode the
+prompt and multimodal references, materialize the conditioning tensors, then
+release the omni encoder before denoising starts. Release the DiT before the
+full H3-VAE decode if the decode is the larger peak.
+
+Done properly, peak memory is
+`max(encoder, DiT + activations, VAE decode)` rather than their sum. On an omni
+model whose encoder may itself be several billion parameters, that roughly
+doubles the usable DiT budget. This is a hard runtime requirement, not an
+optimization — the budgets below assume it.
+
+At ~4k tokens, activations and attention workspace are small (order 1–2 GiB),
+which is why the DiT weight budget tracks the MLX cap so closely.
+
+### Ceilings
+
+Affine int8 at 1.06 GB per billion params; bf16 at 2.0; 4-bit at 0.56.
+
+| Unified memory | Realistic MLX cap | DiT weight budget | bf16 ceiling | int8 ceiling |
+|---|---|---|---|---|
+| 16 GB | ~10 GiB | ~8 GiB | ~4B | ~7B |
+| 24 GB | ~15 GiB | ~13 GiB | ~6B | ~12B |
+| 32 GB | ~21 GiB | ~19 GiB | ~9B | ~17B |
+| 64 GB | ~44 GiB | ~40 GiB | ~20B | ~38B |
+| 128 GB | ~96 GiB | ~90 GiB | ~45B | ~85B |
+
+These are ceilings, not targets. **They say what fits, not what to build.**
+
+### Bigger-and-quantized vs smaller-and-exact
+
+The reflex from LLM work is that a larger quantized model beats a smaller exact
+one at equal memory. That reflex is weaker here. Quantization error compounds
+across denoising steps in a way it does not across token samples, so the
+crossover sits at a larger quality gap than LLM intuition suggests.
+
+Concretely on a 24 GB Mac: a 6B bf16 student and a 12B int8 student cost about
+the same memory. Do not assume the 12B wins — measure it. If bf16 holds at the
+volume tier, it sidesteps the entire grid question there, and quantization stays
+where it is genuinely load-bearing: 16 GB machines, and running H3 natively on
+64 GB+ machines.
+
+### Student ladder
+
+Sizes are decisions, not predictions of H3's own parameter count (M001).
+
+| Tier | Memory | Student | Precision | Decoder |
+|---|---|---|---|---|
+| 1 | 16 GB | ~2B | int8 | TAEHV preview, tiled H3-VAE final |
+| 2 | 24–32 GB | **~5B** | bf16 if it fits, else int8 | H3-VAE |
+| 3 | 48–64 GB | ~14B or native H3 if dense and small enough | int8 | H3-VAE |
+| 4 | 96 GB+ | native H3, no student | int8 | H3-VAE |
+
+**Build tier 2 first.** It is the volume target, `mlx_runtime/wan22.py` and the
+`hardware_tier.py` medium band already assume a 5B-class model there, and it
+validates the whole pipeline before committing to either extreme. Tier 4 needs
+no distillation at all — it is Track C plus quantization — so it is the cheapest
+path to a genuinely high-quality local result and should ship early.
+
+### How the students get built
 
 If H3 is MoE — every recent MiniMax model is — then *total* parameters drive
 memory, not active ones, and the ceilings above bite far harder than the
-active-parameter count suggests. Resolve this from `config.json` before
-committing to a track.
+active-parameter count suggests. Resolve this from `config.json` first; it
+decides which path below applies.
 
-Three paths, in order of preference:
+**A. H3 ships a small variant.** Step-distill and QAT it directly (Track B2).
+Weeks of work, reuses the existing Wan recipe almost unchanged, no B0 or B1.
+Check for this before anything else — it is an order of magnitude cheaper than
+the alternatives.
 
-**A. H3 ships a small variant.** Step-distill and QAT it directly. Weeks of
-work, reuses the existing Wan recipe almost unchanged. Check for this first.
+**B. Native at the top, distilled below (recommended default).** Do not
+compromise the flagship to fit the smallest Mac. Tier 4 runs H3 itself, and it
+will be fast there — 4k context plus a few-step schedule is a small compute job
+even for a large model. Tiers 1–2 get students. This answers "highest possible
+quality" honestly: the highest quality is H3 itself on a machine that fits it,
+and the students exist to extend reach downward, not to define the ceiling.
 
-**B. Two-tier ship (recommended default).** Do not compromise the flagship to
-fit the smallest Mac. Run H3 itself at int8 on 64/128 GB Macs — it will be fast
-there, because 4k context plus a distilled 3-step schedule is a small compute
-job — and ship a distilled student for 24–32 GB. This answers "highest possible
-quality" honestly: the highest quality is H3 itself on a machine that fits it.
-
-**C. Capacity distillation into a small student.** Only if A is unavailable and
-B is unacceptable. Prefer *depth* pruning (drop blocks on a schedule, then
-distill to recover) over width pruning — DiTs tolerate depth reduction better,
-and it preserves per-layer weight shapes so the existing conversion mapping
-survives. Budget this as a multi-week GPU project with a genuinely uncertain
-quality outcome, not as an engineering task.
-
-Under B and C, run capacity reduction and step+precision distillation as
-**separate stages** — prune/recover first at full step count in bf16, then DMD2
-plus QAT on the recovered student. Folding all three objectives into one run
-sounds efficient and in practice makes failures unattributable.
+**C. Full capacity distillation.** Only if A is unavailable and B's tier-4-only
+flagship is unacceptable. This is Track B0 + B1 in full, and it is a multi-week
+GPU project with a genuinely uncertain quality outcome rather than an
+engineering task. Scope it deliberately.
 
 ## 4. Tracks
 
@@ -209,18 +236,88 @@ classes, and MLX parity tests compare against the torch modules.
 ### Track B — Distillation on GPU
 
 Recipe base: `examples/train/configs/distribution_matching/wan/dmd2_t2v_mlx_int8.yaml`,
-teacher swapped to H3. Operator flow follows the existing QAD runbook.
+teacher swapped to H3. Operator flow follows the existing QAD runbook. Full-weight
+training throughout — LoRA and adapter methods are not applicable, because both
+capacity and precision are changing.
 
-New for H3:
+#### B0 — Synthetic corpus
 
-- **Audio.** The student must keep the audio branch, which needs its own loss
-  term. This is the piece with no precedent in the Wan work, and it is also the
-  differentiator — local audio-video generation is something nothing else ships.
-- **Multimodal conditioning.** Distillation data needs the image/video/audio
-  reference paths exercised, not just text prompts, or I2V and editing quality
-  will collapse in the student.
-- **Regeneration pass.** Distill the base pass only. The student does not need
-  to learn in-context regeneration if the Mac path never runs it.
+The most underestimated line item. FastWan distilled against
+`FastVideo/Wan-Syn_77x448x832_600k` (600k samples, order 1 TB); H3 needs an
+equivalent generated by the H3 teacher on your GPUs.
+
+Coverage matters more than raw count. The corpus must exercise every conditioning
+path the student is expected to keep — text-only, image reference, video
+reference, audio reference, and editing prompts. Whatever is absent from the
+corpus is absent from the student, and I2V and editing quality collapse silently
+rather than loudly.
+
+Budget real GPU-weeks here before any distillation starts.
+
+#### B1 — Capacity reduction (skip if path A applies)
+
+Full step count, bf16, no quantization. Keep the variables separate — folding
+capacity reduction into the DMD run makes failures unattributable.
+
+- **Dense teacher:** depth pruning over width pruning. DiTs tolerate block
+  removal better, and it preserves per-layer weight shapes so the Track A
+  conversion mapping survives unchanged. Choose blocks by sensitivity sweep —
+  ablate each, measure output drift, drop the least sensitive. Do not drop
+  uniformly; middle blocks are typically more redundant than the first and last.
+- **MoE teacher:** depth pruning is the wrong lever. Distill MoE → dense
+  directly, which is well-trodden for LLMs and collapses the total-parameter
+  memory problem that makes MoE hostile to unified memory in the first place.
+
+Recover with layer-wise feature distillation — match retained blocks' hidden
+states against their teacher counterparts — plus an output-space loss. Feature
+matching converges substantially faster than output-only supervision and is
+what makes this affordable at all.
+
+#### B2 — Step distillation + QAT, jointly
+
+DMD2 on the recovered student with the QAT callback active throughout.
+
+These two are deliberately *not* separated, unlike B1. They interact: QAT must
+see the actual few-step inference distribution to place its grid usefully, and
+DMD must learn around quantization error rather than inherit it afterward.
+Step-distilling first and quantizing after gives up most of QAT's benefit. This
+is already how `dmd2_t2v_mlx_int8.yaml` is structured.
+
+Derive the step schedule from H3's own sigma schedule; the Wan `[1000, 757, 522]`
+values do not transfer. Target 3–4 steps.
+
+Two runs, identical except for the QAT grid: one affine int8, one MX. See §2.
+
+#### B3 — Audio branch
+
+No precedent in the Wan work, and the actual differentiator — local
+audio-video generation is not something else ships.
+
+The audio branch needs its own DMD objective on audio latents plus an explicit
+AV-sync term. `audio.desync` is the gate; it is the only metric that catches a
+student whose audio and video are individually fine and jointly wrong.
+
+Whether this trains jointly with B2 or as a separate stage depends on M003
+(dedicated head vs distinct module).
+
+#### B4 — What not to distill
+
+Distill the base pass only. The student never needs to learn in-context
+regeneration, because the Mac path never runs it (§1).
+
+#### Compute expectations
+
+Order-of-magnitude, for planning:
+
+| Stage | Scale |
+|---|---|
+| B0 corpus generation | GPU-weeks |
+| B1 capacity reduction | GPU-weeks, and the least predictable line |
+| B2 step + QAT | days on 8 GPUs, per grid |
+| B3 audio | days, if separable |
+
+For reference, the existing Wan-1.3B QAD run is 4–8 hours on 4×B200 — that is
+B2 alone, on a model that needed no B0 or B1. B0 and B1 are the budget.
 
 ### Track C — MLX runtime
 
