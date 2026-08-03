@@ -1,0 +1,119 @@
+# Mac-targeted QAD distillation at 14B: Wan 2.1 T2V 14B -> 3-step INT8 student.
+#
+# Direct scale-up of dmd2_t2v_mlx_int8_v2.yaml, which is the recipe that produced
+# accepted quality at 1.3B. Everything that made v2 work is preserved verbatim:
+#
+# - Student and critic initialize from the already-3-step-distilled FastWan
+#   checkpoint, so training is "adapt a good 3-step model to the INT8 grid"
+#   rather than learning distillation from scratch through a quantizer. The
+#   teacher stays the base 50-step Wan2.1. (v1 did the latter and failed.)
+# - gradient_accumulation_steps 4, keeping effective batch at 16.
+# - The world-size-portable EMA checkpoint state from ema.py.
+# - The committed, bitwise-parity-tested affine INT8 fake-quantizer
+#   (fastvideo/tests/mlx/test_mlx_affine_qat_parity.py).
+#
+# Changes vs v2, all mechanical:
+# - 14B student/critic/teacher checkpoints.
+# - 32-GPU 2D HSDP mesh (4 replicate x 8 shard). v2's 4-GPU pure-FSDP layout
+#   does not hold a 14B student plus frozen teacher and critic.
+# - Checkpoint cadence relaxed from every 20 steps to every 100: at 14B the
+#   save cost is no longer negligible against the step time.
+#
+# Measured cost at 4x B200: 26 GPU-days for 4000 iterations. On 32 GPUs that is
+# roughly 20 hours.
+#
+# hsdp_shard_dim must divide num_gpus and hold one full model shard set. If
+# running on a different count, keep shard_dim >= 8 and put the remainder in
+# hsdp_replicate_dim.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.1-T2V-14B-480P-Diffusers
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.1-T2V-14B-480P-Diffusers
+    trainable: true
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  real_score_guidance_scale: 4.5
+  dmd_denoising_steps: [1000, 757, 522]
+
+  # Critic optimizer (required — no fallback to training.optimizer)
+  fake_score_learning_rate: 8.0e-6
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 32
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 4
+    hsdp_shard_dim: 8
+
+  data:
+    data_path: data/Wan-Syn_77x448x832_600k
+    dataloader_num_workers: 4
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 1000
+    num_latent_t: 20
+    num_height: 448
+    num_width: 832
+    num_frames: 77
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 4
+
+  checkpoint:
+    output_dir: outputs/wan2.1_14b_dmd2_3steps_mlx_int8
+    training_state_checkpointing_steps: 100
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: distillation_wan
+    run_name: wan2.1_14b_dmd2_3steps_mlx_int8
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+callbacks:
+  mlx_qat:
+    group_size: 64
+    bits: 8
+    simulate_dtype: fp16
+  grad_clip:
+    max_grad_norm: 1.0
+  validation:
+    pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
+    dataset_file: examples/training/finetune/Wan2.1-VSA/Wan-Syn-Data/validation_4.json
+    every_steps: 100
+    sampling_steps: [3]
+    sampling_timesteps: [1000, 757, 522]
+    guidance_scale: 6.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.98
+    start_iter: 0
+
+pipeline:
+  flow_shift: 8

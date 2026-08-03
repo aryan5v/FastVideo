@@ -2,6 +2,12 @@
 
 Status: design, pre-implementation.
 
+> **The near-term plan of record is
+> [`apple_silicon_launch_checklist.md`](./apple_silicon_launch_checklist.md).**
+> It supersedes the quantization strategy below, which was written before the
+> mxfp4 runs were understood. This document remains the reference for the H3
+> track — capacity, releases, tracks, and eval gates.
+
 Release 0 (§4) depends on nothing and can start immediately. The H3 releases
 (§5) depend on the `minimax_h3` CUDA port
 (`tests/local_tests/minimax_h3/PORT_STATUS.md`).
