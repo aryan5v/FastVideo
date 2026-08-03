@@ -58,6 +58,58 @@ the published recipe. Expect to need timestep-aware calibration at minimum.
 
 ## The tests
 
+### T0 — Does the existing FastWan-QAD checkpoint already work on MLX? (1 h)
+
+**Run this first. If it works, most of the distillation plan below is moot for
+the 1.3B.**
+
+FastWan-QAD-1.3B is already QAT'd against NVFP4 — it is the RTX 5090 flagship,
+1.8 s for a 5 s 480p clip. The reason it may transfer to Metal unchanged:
+
+**The checkpoint is bf16, not FP4.** `convert_model_to_nvfp4()` in
+`nvfp4_config.py` converts at *load time*, from bf16 weights, and only then
+optionally purges the bf16 copies from GPU memory. So the shipped artifact is a
+bf16 master that was trained to survive NVFP4 quantization. The MLX runtime does
+the same thing with a different backend —
+`mlx_dit_from_diffusers_safetensors(..., quantization="nvfp4")` quantizes at
+load. Same weights, same format, different quantizer.
+
+Both sides implement the same NVFP4 definition: E2M1 elements, 16-element
+blocks, E4M3 block scales. FastVideo's CUDA path also applies a per-tensor
+global scale of `(448 * 6) / amax` (`nvfp4_config.py:494`); whether MLX's
+`mode="nvfp4"` uses the same convention is the one real unknown, and it is a
+scale convention rather than a grid-structure difference.
+
+**The measurement.** Run the survey on *both* checkpoints and compare the nvfp4
+column:
+
+```bash
+python -m fastvideo.benchmarks.mlx_quant_survey \
+    --checkpoint ~/models/FastWan-QAD-1.3B/transformer \
+    --modes int8 nvfp4 mxfp4 --json-out survey_qad.json
+
+python -m fastvideo.benchmarks.mlx_quant_survey \
+    --checkpoint ~/models/FastWan2.1-T2V-1.3B-Diffusers/transformer \
+    --modes int8 nvfp4 mxfp4 --json-out survey_plain.json
+```
+
+QAT'd weights should quantize *better* on the grid they were trained for. If
+the QAD checkpoint's nvfp4 reconstruction error is markedly lower than the plain
+distilled checkpoint's, **the QAT transferred and MLX's grid matches NVIDIA's**.
+Then generate from it in MLX at `nvfp4` and compare against fp16.
+
+**What will not transfer:** the "FP4 + FP4" in that flagship row is NVFP4
+*linears* plus FP4 *attention* via the `attn_qat_infer` kernel, which hard-gates
+on sm_120. MLX has no FP4 attention and will run attention in fp16. That is
+strictly *less* quantization than the model was trained for, so it is benign —
+output should be as good or better. But the 1.8 s figure will not transfer
+either; that is Blackwell silicon with FP4 attention, and a Mac will be slower.
+
+**If T0 works**, the 1.3B ships with **zero new distillation**, and the 14B path
+becomes "run the existing, committed NVFP4 QAD recipe at 14B on CUDA" rather
+than inventing an MLX-specific quantizer. That is a far better position than the
+mxfp4 track.
+
 ### T1 — Mode support, throughput, and reconstruction error (30 min)
 
 One script does all three:
@@ -127,6 +179,12 @@ than EMA. Validation computed `quantize(EMA(w))` while training optimized
 earlier result is further discounted.
 
 ## Decision table
+
+| T0 result | Do this |
+|---|---|
+| QAD nvfp4 error ≪ plain nvfp4 error, output good | **Ship the 1.3B as-is.** No new distillation. Run the committed NVFP4 QAD recipe at 14B on CUDA for the quality tier. |
+| QAD nvfp4 error ≈ plain, output good anyway | nvfp4 is forgiving enough here that PTQ suffices; still ship, but QAD at 14B is worth doing properly. |
+| Output bad | MLX's nvfp4 convention differs from NVIDIA's — most likely the per-tensor global scale. Diff the two quantizers before concluding anything about the format. |
 
 | T1c result | T1b result | Do this |
 |---|---|---|
