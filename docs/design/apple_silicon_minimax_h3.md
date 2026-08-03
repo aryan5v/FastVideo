@@ -18,8 +18,8 @@ on Apple Silicon — not the largest model that technically loads.
 | Fallback artifact | Affine int8, produced from the same student by one extra B2 run. Serves M1–M4 and covers the bet failing. Cheap; not the headline. |
 | Memory target | **24 GB floor, 32–36 GB comfortable** (§3). Not 96 GB. |
 | Student capacity | **~14B class** (§3). Chosen because mxfp4 puts 14B in ~7.4 GB — it fits 24 GB with room — and because quantization tolerance rises with size. |
-| Release shape | **One student, two step-distillations**: Turbo (rapid) and Quality. Shared expensive stages, cheap divergence (§3). |
-| Validation before commitment | Three experiments, days not months, on existing models (§6). The bet is gated on these, not on faith. |
+| Release shape | **One student, two step-distillations**: Turbo (rapid) and Quality. Shared expensive stages, cheap divergence (§4). |
+| Validation before commitment | Three experiments, days not months, on existing models (§7). The bet is gated on these, not on faith. |
 | Expected H3 size | **Unknown (M001).** Ceilings in §3 say what fits, not what H3 is. |
 
 Deliberate consequence: pre-M5 Macs get the int8 artifact and are not the design
@@ -54,11 +54,26 @@ H3 makes this unusually clean. In-context regeneration means the base model
 regenerate at high resolution. Skipping the second pass is a supported mode of
 the architecture, not a hack, and it roughly halves per-clip compute.
 
-The second H3 property that matters: Contextual Omni Representation compresses
-the multimodal context to roughly 4k tokens. Video models normally die on Metal
-because of sequence length — attention is where MLX is weakest relative to
-CUDA. At 4k tokens, attention is not the bottleneck. **Weight memory is the
-only real constraint.** That is a favorable shape for Apple Silicon.
+The second H3 property that matters is sequence length, but it needs stating
+carefully, because there are **two different token counts** and conflating them
+overstates the case:
+
+- **Conditioning context**: Contextual Omni Representation compresses
+  multimodal inputs from ~100k tokens to ~4k. Genuinely small.
+- **Denoised latent sequence**: separate, and driven by H3-VAE compression,
+  clip length, and resolution — not by the 4k figure at all.
+
+Order of magnitude on the second: 5s at 24fps and 720p is ~120 frames; a
+conventional 8×8 spatial / 4× temporal VAE with 2×2 patching puts that near
+100k tokens, and H3-VAE's claimed ~4× compression gain brings it to roughly 25k.
+That is much better than typical for video, but it is not 4k, and attention is
+not free at that length.
+
+So the accurate claim is narrower than "attention doesn't matter": weight memory
+is the **dominant** constraint and attention is a real but secondary cost, which
+is why base resolution and clip length are the levers Turbo pulls hardest (§4).
+Confirm the actual latent token count from H3-VAE's strides before sizing
+activation budgets (M011).
 
 ## 2. Quantization: lead with mxfp4 on M5, keep int8 as fallback
 
@@ -280,7 +295,95 @@ flagship is unacceptable. This is Track B0 + B1 in full, and it is a multi-week
 GPU project with a genuinely uncertain quality outcome rather than an
 engineering task. Scope it deliberately.
 
-## 4. Tracks
+## 4. The two releases
+
+Both are MLX builds of the same distilled H3 student. Everything marked
+*derived* follows from a decision elsewhere in this doc; everything marked
+*unknown* waits on H3's config.
+
+### Shared across both
+
+| Property | Value |
+|---|---|
+| Parent | one ~14B-class student distilled from H3 (§3) |
+| Deploy grid | mxfp4, M5 and newer — gated on §7 |
+| Fallback artifact | affine int8, same student, one extra B2 run — serves M1–M4 |
+| Mixed precision | attention + FFN projections quantized; AdaLN/modulation, timestep embedding, patch embed, final projection, norm affines held bf16 (§2) |
+| DiT weights | ~7.3 GB quantized + ~0.6 GB bf16 ≈ **~8 GB** |
+| Memory floor | 24 GB unified |
+| Residency | encode → free encoder → denoise → decode; peak is a max, not a sum (§3) |
+| Audio | H3 audio VAE, native stereo |
+| Runtime | `fastvideo/mlx_runtime/minimax_h3.py` (Track C) |
+
+The int8 fallback is ~15 GB of weights, which still fits 24 GB but with no
+headroom. Pre-M5 machines are a compatibility target, not a design target.
+
+### Turbo — rapid generation
+
+| Property | Value |
+|---|---|
+| Positioning | fastest usable local video; interactive iteration |
+| Steps | **2** (DMD2) |
+| Base resolution | low — 480p class |
+| Output resolution | MetalFX upscale to ~1080p |
+| Frame generation | half cadence, RIFE or MetalFX interpolation to 24 fps |
+| Clip length | 5s |
+| Decoder | TAEHV-class tiny decoder |
+| In-context regeneration | never |
+| Audio | optional, off by default |
+| Peak memory | ~10 GB |
+
+Turbo pulls hardest on the two levers that cut the *latent sequence* rather than
+the weights — base resolution and frame cadence — because at 2 steps the
+per-step attention cost is the largest remaining term.
+
+### Quality — maximum local fidelity
+
+| Property | Value |
+|---|---|
+| Positioning | best local output that still runs on median hardware |
+| Steps | **8** (DMD2) |
+| Base resolution | 720p class |
+| Output resolution | MetalFX upscale toward 1440p/2K |
+| Frame generation | native 24 fps, no interpolation |
+| Clip length | 5s, 10s where memory allows |
+| Decoder | full H3-VAE, tiled |
+| In-context regeneration | never on device — MetalFX substitutes |
+| Audio | on |
+| Peak memory | ~12–14 GB; comfortable at 32 GB |
+
+### Why one parent and two distillations
+
+B0 (corpus) and B1 (capacity reduction) are the GPU-weeks and are shared
+entirely. Only B2 diverges — one step-distillation per release, days each, plus
+one int8 run per release for the fallback. Two products for roughly one
+product's training budget.
+
+Neither is a degraded build of the other. A 2-step Turbo is separately
+distilled, not Quality with steps truncated at inference — truncating a
+schedule the model was not trained for is exactly the failure mode DMD exists
+to avoid.
+
+### Ship criteria
+
+Per release, from §6: video gates on `vbench.subject_consistency`,
+`vbench.motion_smoothness`, `vbench.dynamic_degree`, `common.fvd`; audio on
+`audio.clap_score` and `audio.frechet_distance`; joint on `audio.desync`. All
+scored against the CUDA H3 reference, not against an fp16 MLX build, so
+distillation and quantization error are measured together.
+
+Turbo additionally gates on wall-clock — it has no reason to exist if it is not
+decisively faster than Quality on the same machine.
+
+### What is still unknown
+
+Resolution and clip-length rows are **targets, not commitments**. They depend on
+H3-VAE's actual strides and the resulting latent token count (M011), on whether
+the base pass can run standalone without in-context regeneration (M004), and on
+the omni encoder's memory cost (M005). Expect these numbers to move once
+`config.json` is readable; the structure of the two releases should not.
+
+## 5. Tracks
 
 ### Track A — CUDA port (prerequisite)
 
@@ -411,7 +514,7 @@ Extend `eval_metalfx_rife.py` to sweep the resolution trade alongside the
 existing frame-count trade, and to cover the MetalFX-interpolation arm. Pick the
 operating point from measurement.
 
-## 5. Quality gates
+## 6. Quality gates
 
 Measure the student against the **CUDA H3 reference**, not against an fp16 MLX
 build, so distillation and quantization error are scored together. The existing
@@ -433,7 +536,7 @@ the student is *supposed* to diverge. Use SSIM only as a regression tripwire for
 the MLX runtime against its own torch reference, which is what
 `fastvideo/tests/ssim/` and `test_mlx_dit_parity.py` are for.
 
-## 6. Proving mxfp4 on an M5 / 24 GB machine
+## 7. Proving mxfp4 on an M5 / 24 GB machine
 
 The bet needs validating before H3 GPU time is committed. All three experiments
 below run on **existing Wan weights**, need no H3 access, and answer separable
@@ -541,9 +644,9 @@ real quality recovery. If E1 fails, fall back to int8 and keep the §3 ceilings.
 If E1 passes but E2 and E3 both fail, mxfp8 becomes the M5 target instead of
 mxfp4 — still a win over int8 on throughput, at a much smaller memory advantage.
 
-## 7. Sequencing
+## 8. Sequencing
 
-**Now, unblocked:** E1 → E2 → E3 (§6). None of these need H3 weights, network
+**Now, unblocked:** E1 → E2 → E3 (§7). None of these need H3 weights, network
 access to Hugging Face, or the CUDA port. They run entirely on existing Wan
 checkpoints and they decide the deploy grid.
 
@@ -551,7 +654,7 @@ checkpoints and they decide the deploy grid.
 weights are reachable — dense-vs-MoE and total parameter count gate the
 capacity path in §3.
 
-**After the §6 gate passes:**
+**After the §7 gate passes:**
 
 1. Track B0 — synthetic corpus generation.
 2. Track B1 — capacity reduction to the 14B-class student.
@@ -562,11 +665,11 @@ capacity path in §3.
 6. Track D — operating-point sweep per release, including the
    MetalFX-interpolation arm.
 
-The ordering point worth holding onto: §6 costs days and gates months. Running
+The ordering point worth holding onto: §7 costs days and gates months. Running
 E1 before anything else is the single highest-leverage scheduling decision here,
 because a failed E1 changes the entire plan and costs an afternoon to discover.
 
-## 8. Open questions
+## 9. Open questions
 
 | ID | Question | Blocks |
 |---|---|---|
@@ -580,3 +683,4 @@ because a failed E1 changes the entire plan and costs an afternoon to discover.
 | M008 | Does MetalFX frame interpolation accept the frame cadence a 3-step diffusion sampler emits, or does it assume game-engine motion vectors? | Track D |
 | M009 | Did mxfp8 hold up at 14B, or was it only mxfp4 that degraded? The 1.3B run showed both failing; the 14B run is reported as mxfp4-bad. If mxfp8 was fine at 14B it strongly supports the size-tolerance argument in §2 and gives the bet a safer intermediate landing spot. | §2, E2 scope |
 | M010 | Does `mx.quantize` mxfp4 accept a per-layer grid override, or does the mixed-precision split in E2 need weights held in separate arrays by dtype? | E2 implementation |
+| M011 | What is the actual denoised latent token count at each target resolution and clip length? Follows from H3-VAE's spatial/temporal strides and patch size. Distinct from the ~4k conditioning context. | §1 thesis, §4 resolution rows, activation budgets |
