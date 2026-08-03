@@ -41,6 +41,20 @@ the `--fast-spatial` CLI flag composing with `--fast` (RIFE). Spatial and
 temporal shortcuts are orthogonal: 4× fewer pixels ≈ 4× less DiT work at
 fixed frames/steps.
 
+
+### 2b. Local prompt enrichment, Context-IR-style (small, quality)
+
+Borrowed from MiniMax-H3's Context-IR stage (its docs call it "critical to
+the quality of the final output"). Wan's training captions are long and
+cinematic; user prompts are short, and the gap costs visible quality. Ship an
+optional `--enhance-prompt` pre-pass in the MLX runtime: a small local LLM via
+mlx-lm expands the user prompt into Wan-style cinematography language. Reuse
+the system prompts and operation contract from
+`fastvideo/entrypoints/streaming/prompt/` (the streaming server's
+enhance/rewrite orchestration) but with a local backend instead of the remote
+providers. No training required; evaluate with the standard SSIM prompt set
+before defaulting on.
+
 ### 3. Full-step compile coverage (small)
 
 `mx.compile` currently covers the DiT. The denoise step (scheduler math +
