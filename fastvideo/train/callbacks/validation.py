@@ -63,6 +63,7 @@ class ValidationCallback(Callback):
         pipeline_target: str,
         dataset_file: str,
         every_steps: int = 100,
+        validate_at_step_zero: bool = True,
         sampling_steps: list[int] | None = None,
         guidance_scale: float | None = None,
         num_frames: int | None = None,
@@ -73,6 +74,7 @@ class ValidationCallback(Callback):
         self.pipeline_target = str(pipeline_target)
         self.dataset_file = str(dataset_file)
         self.every_steps = int(every_steps)
+        self.validate_at_step_zero = bool(validate_at_step_zero)
         self.sampling_steps = ([int(s) for s in sampling_steps] if sampling_steps else [40])
         self.guidance_scale = (float(guidance_scale) if guidance_scale is not None else None)
         self.num_frames = (int(num_frames) if num_frames is not None else None)
@@ -125,6 +127,8 @@ class ValidationCallback(Callback):
         if self.every_steps <= 0:
             return
         if iteration % self.every_steps != 0:
+            return
+        if iteration == 0 and not self.validate_at_step_zero:
             return
 
         self._run_validation(method, iteration)

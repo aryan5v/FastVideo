@@ -98,6 +98,7 @@ callbacks:
     pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
     dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_4.json
     every_steps: 100
+    validate_at_step_zero: false
     sampling_steps: [3]
     sampling_timesteps: [1000, 757, 522]
     guidance_scale: 6.0
