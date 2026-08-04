@@ -12,10 +12,18 @@ Apple release:
 
 Defaults produce the validated release shape: 480x832, 81 frames, 3-step DMD.
 
-Optional ``--refine`` enables the H3 / LTX-2 two-pass pattern: denoise at
-``height/refine-scale x width/refine-scale``, spatially upsample the clean
-latents, re-noise, and re-denoise at the full target resolution with the
-same DiT (no new model, no training). Works for Wan2.1-14B and Wan2.2-5B.
+Optional quality / speed levers (compose freely):
+
+* ``--refine`` — H3 / LTX-2 two-pass: denoise at base res, upsample +
+  re-noise, re-denoise at target res with the same DiT.
+* ``--fast`` — RIFE temporal fast mode (fewer frames → interpolate).
+* ``--fast-spatial`` — spatial twin of RIFE: denoise at half res, latent
+  upsample to target (no second denoise). Orthogonal to ``--fast``.
+* ``--enhance-prompt`` — local Context-IR-style prompt enrichment
+  (template or mlx-lm) before UMT5 encode.
+
+``--fast`` + ``--refine`` is the B composition: fewer frames at base res,
+then a full-res refine pass. Works for Wan2.1-1.3B/14B and Wan2.2-5B.
 """
 
 from __future__ import annotations
@@ -403,14 +411,61 @@ def main() -> None:
         action="store_true",
         help="When --refine is set, also dump stage-1 clean latents next to the output.",
     )
+    parser.add_argument(
+        "--fast-spatial",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Spatial fast mode: denoise at height/width // fast-spatial-scale, then "
+        "bilinear-upsample clean latents to the target grid before decode (no second "
+        "denoise — that is --refine). Composes with --fast (RIFE). If both "
+        "--fast-spatial and --refine are set, refine wins (quality path).",
+    )
+    parser.add_argument(
+        "--fast-spatial-scale",
+        type=int,
+        default=2,
+        help="Spatial downsample factor for --fast-spatial (default: 2).",
+    )
+    parser.add_argument(
+        "--fast-spatial-upsample-mode",
+        choices=("bilinear", "nearest"),
+        default="bilinear",
+        help="Latent upsample mode for --fast-spatial.",
+    )
+    parser.add_argument(
+        "--enhance-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Local H3 Context-IR-style prompt enrichment before UMT5 encode. "
+        "Uses --enhance-prompt-backend (template always available; mlx-lm optional).",
+    )
+    parser.add_argument(
+        "--enhance-prompt-backend",
+        choices=("auto", "template", "mlx-lm"),
+        default="auto",
+        help="auto: try mlx-lm then fall back to template. template: deterministic "
+        "cinematic expansion. mlx-lm: require a local instruct model.",
+    )
+    parser.add_argument(
+        "--enhance-prompt-model",
+        default=None,
+        help="mlx-lm model id/path (default: mlx-community/Qwen2.5-0.5B-Instruct-4bit).",
+    )
+    parser.add_argument(
+        "--enhance-prompt-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache enhanced prompts under ~/.cache/fastvideo/enhanced_prompts (default: on).",
+    )
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--fps", type=int, default=16)
     parser.add_argument("--fast", action=argparse.BooleanOptionalAction, default=False,
                         help="Fast mode: generate 1/factor of the frames, then RIFE-interpolate up "
                         "to --num-frames on Apple Silicon (~2.7x faster denoise, reconstruction "
-                        "MS-SSIM ~0.97). Requires the rife-mlx package. See "
-                        "docs/experiments/rife-speedup-summary.md.")
+                        "MS-SSIM ~0.97). Composes with --refine (B: fewer frames at base res, "
+                        "full-res refine) and --fast-spatial. Requires the rife-mlx package. "
+                        "See docs/experiments/rife-speedup-summary.md.")
     parser.add_argument("--fast-factor", type=int, default=2,
                         help="Fast-mode interpolation factor (2 = generate half the frames).")
     parser.add_argument("--fast-sharpen", type=float, default=0.6,
@@ -464,6 +519,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Fast mode: generate fewer frames now, RIFE-interpolate back up after decode.
+    # Composes with --refine (B): stage-1/2 both see the reduced frame count;
+    # RIFE restores the target length after the final decode.
     fast_target_frames = None
     if args.fast:
         if args.fast_factor < 2:
@@ -471,6 +528,12 @@ def main() -> None:
         fast_target_frames = args.num_frames
         args.num_frames = (fast_target_frames + args.fast_factor - 1) // args.fast_factor
         print(f"[fast] generating {args.num_frames} frames, RIFE {args.fast_factor}x -> {fast_target_frames}")
+
+    if args.fast_spatial and args.fast_spatial_scale < 2:
+        parser.error("--fast-spatial-scale must be >= 2 when --fast-spatial is set")
+    if args.refine and args.fast_spatial:
+        print("[fast-spatial] note: --refine is set; refine wins (quality path). "
+              "--fast-spatial upsample-only path is skipped.")
 
     runtime_limits = apply_memory_limits(
         mlx_memory_limit_gib=args.mlx_memory_limit_gib,
@@ -500,7 +563,16 @@ def main() -> None:
     from diffusers import UniPCMultistepScheduler
 
     from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+    from fastvideo.mlx_runtime.fast_spatial import (
+        apply_fast_spatial_upsample,
+        plan_fast_spatial,
+        resolve_spatial_mode,
+    )
     from fastvideo.mlx_runtime.fastwan import mlx_dit_from_diffusers_safetensors
+    from fastvideo.mlx_runtime.prompt_enhance import (
+        enhance_result_as_metrics,
+        load_or_enhance_prompt,
+    )
     from fastvideo.mlx_runtime.refine import plan_refine_resolutions, run_two_pass_dmd
     from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
 
@@ -511,6 +583,8 @@ def main() -> None:
         raise SystemExit("--refine currently requires --denoising-mode dmd")
     if args.refine and args.refine_scale < 2:
         raise SystemExit("--refine-scale must be >= 2 when --refine is set")
+
+    spatial_mode = resolve_spatial_mode(refine=args.refine, fast_spatial=args.fast_spatial)
 
     config_path = model_root / "transformer/config.json"
     checkpoint_path = model_root / "transformer/diffusion_pytorch_model.safetensors"
@@ -523,29 +597,66 @@ def main() -> None:
     vae_temporal_factor = int(vae_config.get("scale_factor_temporal", 4))
     vae_spatial_factor = int(vae_config.get("scale_factor_spatial", 8))
     patch_size = tuple(config.get("patch_size", (1, 2, 2)))
+
+    # Spatial plan: refine (quality two-pass) or fast-spatial (upsample-only).
+    # Both reuse the same resolution splitter; only the post-denoise path differs.
     refine_plan = plan_refine_resolutions(
         height=args.height,
         width=args.width,
         num_frames=args.num_frames,
-        spatial_scale=args.refine_scale if args.refine else 1,
+        spatial_scale=args.refine_scale if spatial_mode == "refine" else 1,
         vae_spatial_compression=vae_spatial_factor,
         vae_temporal_compression=vae_temporal_factor,
         patch_size=patch_size,
-        enabled=args.refine,
+        enabled=(spatial_mode == "refine"),
     )
+    fast_spatial_plan = plan_fast_spatial(
+        height=args.height,
+        width=args.width,
+        num_frames=args.num_frames,
+        spatial_scale=args.fast_spatial_scale,
+        vae_spatial_compression=vae_spatial_factor,
+        vae_temporal_compression=vae_temporal_factor,
+        patch_size=patch_size,
+        upsample_mode=args.fast_spatial_upsample_mode,
+        enabled=(spatial_mode == "fast_spatial"),
+    )
+    active_plan = refine_plan if spatial_mode == "refine" else fast_spatial_plan.plan
     # Stage-1 geometry drives the first denoise (and the only denoise when
     # refine is off). Stage-2 / target geometry is used after the hand-off.
-    latent_frames = refine_plan.latent_frames
-    latent_height = refine_plan.stage1_latent_height
-    latent_width = refine_plan.stage1_latent_width
+    latent_frames = active_plan.latent_frames
+    latent_height = active_plan.stage1_latent_height
+    latent_width = active_plan.stage1_latent_width
     mx_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[args.mlx_dtype]
     quantization = None if args.mlx_quantization == "none" else args.mlx_quantization
 
     total_start = time.perf_counter()
+
+    # C: optional local prompt enrichment (template or mlx-lm) before UMT5.
+    enhance_result = None
+    enhance_time = 0.0
+    prompt_for_encode = args.prompt
+    if args.enhance_prompt:
+        enhance_start = time.perf_counter()
+        enhance_result = load_or_enhance_prompt(
+            args.prompt,
+            backend=args.enhance_prompt_backend,
+            model=args.enhance_prompt_model,
+            cache=args.enhance_prompt_cache,
+        )
+        enhance_time = time.perf_counter() - enhance_start
+        prompt_for_encode = enhance_result.enhanced
+        print(
+            f"[enhance] backend={enhance_result.backend} "
+            f"({enhance_result.elapsed_s:.2f}s cached={enhance_result.backend == 'cache'})"
+        )
+        print(f"[enhance] original: {enhance_result.original}")
+        print(f"[enhance] enhanced: {enhance_result.enhanced}")
+
     prompt_start = time.perf_counter()
     prompt_embeds = get_prompt_embeds(
         model_root=model_root,
-        prompt=args.prompt,
+        prompt=prompt_for_encode,
         max_sequence_length=args.max_sequence_length,
         device_arg=args.torch_device,
         dtype_arg=args.text_encoder_dtype,
@@ -553,7 +664,7 @@ def main() -> None:
         cache_path=args.prompt_embeds_cache
         or (_default_prompt_cache_path(
             model_root=model_root,
-            prompt=args.prompt,
+            prompt=prompt_for_encode,
             max_sequence_length=args.max_sequence_length,
             dtype_arg=args.text_encoder_dtype,
         ) if args.prompt_cache else None),
@@ -687,6 +798,18 @@ def main() -> None:
 
             mx.eval(latents)
             print(f"denoise step {step_index + 1}/{len(timesteps)} complete")
+
+        # A: spatial fast mode — upsample clean latents to target grid (no re-denoise).
+        if spatial_mode == "fast_spatial":
+            print(
+                f"[fast-spatial] upsample {fast_spatial_plan.stage1_width}x"
+                f"{fast_spatial_plan.stage1_height} -> "
+                f"{fast_spatial_plan.target_width}x{fast_spatial_plan.target_height} "
+                f"({fast_spatial_plan.upsample_mode})"
+            )
+            latents = apply_fast_spatial_upsample(latents, fast_spatial_plan)
+            mx.eval(latents)
+
     denoise_time = time.perf_counter() - denoise_start
     denoise_peak_memory = mx.get_peak_memory()
     active_memory = mx.get_active_memory()
@@ -733,31 +856,45 @@ def main() -> None:
 
     total_time = time.perf_counter() - total_start
 
+    if enhance_result is not None:
+        print(f"Prompt enhance time: {enhance_time:.2f}s ({enhance_result.backend})")
     print(f"Prompt encode time: {prompt_time:.2f}s")
     print(f"MLX DiT load time: {load_time:.2f}s")
     print(f"MLX denoise time: {denoise_time:.2f}s")
     print(f"Decode/export time: {decode_time:.2f}s")
+    if rife_time:
+        print(f"RIFE interpolate time: {rife_time:.2f}s")
     print(f"Total prompt-to-video time: {total_time:.2f}s")
     print(f"MLX load peak memory: {load_peak_memory / (1024 ** 3):.2f} GiB")
     print(f"MLX denoise peak memory: {denoise_peak_memory / (1024 ** 3):.2f} GiB")
     print(f"MLX active memory after denoise: {active_memory / (1024 ** 3):.2f} GiB")
+    print(f"Spatial mode: {spatial_mode}")
     print(f"Output written to: {args.output_path}")
 
     if args.metrics_json is not None:
         metrics = {
-            "prompt": args.prompt,
+            "prompt": prompt_for_encode,
+            "prompt_user": args.prompt,
             "height": args.height,
             "width": args.width,
             "num_frames": args.num_frames,
+            "num_frames_target": fast_target_frames if fast_target_frames is not None else args.num_frames,
             "denoising_mode": args.denoising_mode,
             "dmd_denoising_steps": [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()],
-            "refine": bool(args.refine),
-            "refine_scale": refine_plan.spatial_scale if args.refine else 1,
-            "refine_stage1_height": refine_plan.stage1_height if args.refine else None,
-            "refine_stage1_width": refine_plan.stage1_width if args.refine else None,
+            "spatial_mode": spatial_mode,
+            "fast": bool(args.fast),
+            "fast_factor": args.fast_factor if args.fast else None,
+            "fast_spatial": spatial_mode == "fast_spatial",
+            "fast_spatial_scale": fast_spatial_plan.scale if spatial_mode == "fast_spatial" else 1,
+            "fast_spatial_stage1_height": fast_spatial_plan.stage1_height if spatial_mode == "fast_spatial" else None,
+            "fast_spatial_stage1_width": fast_spatial_plan.stage1_width if spatial_mode == "fast_spatial" else None,
+            "refine": spatial_mode == "refine",
+            "refine_scale": refine_plan.spatial_scale if spatial_mode == "refine" else 1,
+            "refine_stage1_height": refine_plan.stage1_height if spatial_mode == "refine" else None,
+            "refine_stage1_width": refine_plan.stage1_width if spatial_mode == "refine" else None,
             "refine_sigma": refine_sigma,
-            "refine_upsample_mode": args.refine_upsample_mode if args.refine else None,
-            "refine_add_noise": args.refine_add_noise if args.refine else None,
+            "refine_upsample_mode": args.refine_upsample_mode if spatial_mode == "refine" else None,
+            "refine_add_noise": args.refine_add_noise if spatial_mode == "refine" else None,
             "mlx_dtype": args.mlx_dtype,
             "mlx_quantization": args.mlx_quantization,
             "mlx_compile": args.mlx_compile,
@@ -768,12 +905,15 @@ def main() -> None:
             "taehv_parallel": args.taehv_parallel if args.decode_backend == "taehv" else None,
             "prompt_encode_mode": args.prompt_encode_mode,
             "prompt_embeds_cache": str(args.prompt_embeds_cache) if args.prompt_embeds_cache else None,
+            "prompt_enhance_s": enhance_time,
             "prompt_encode_s": prompt_time,
             "mlx_dit_load_s": load_time,
             "mlx_denoise_s": denoise_time,
             "vae_decode_export_s": decode_time,
             "decode_export_s": decode_time,
+            "rife_interpolate_s": rife_time,
             "total_s": total_time,
+            **enhance_result_as_metrics(enhance_result),
             "mlx_load_peak_bytes": int(load_peak_memory),
             "mlx_denoise_peak_bytes": int(denoise_peak_memory),
             "mlx_active_after_denoise_bytes": int(active_memory),
