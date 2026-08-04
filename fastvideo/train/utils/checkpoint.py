@@ -399,6 +399,30 @@ class CheckpointManager:
             rng_path,
         )
 
+    def _reinit_ema_from_student(self) -> None:
+        """Rebuild EMA shadows from the live student after a no-EMA resume."""
+        if self._callbacks is None:
+            return
+        cbs = getattr(self._callbacks, "_callbacks", {}) or {}
+        cb_iter = cbs.values() if isinstance(cbs, dict) else cbs
+        reinited = False
+        for cb in cb_iter:
+            if getattr(cb, "student_ema", None) is None:
+                continue
+            transformer = getattr(cb, "_transformer", None)
+            if transformer is None:
+                student = getattr(self.method, "student", None)
+                transformer = getattr(student, "transformer", None)
+            if transformer is not None:
+                cb.student_ema._init_shadow(transformer)
+            cb._ema_started = True
+            reinited = True
+        if reinited and _rank() == 0:
+            logger.warning(
+                "EMA shadow re-initialized from resumed student "
+                "(checkpoint EMA shards skipped or not portable).",
+            )
+
     def maybe_resume(self, *, resume_from_checkpoint: str | None) -> int | None:
         if not resume_from_checkpoint:
             return None
@@ -413,50 +437,46 @@ class CheckpointManager:
 
         states = self._build_states()
         logger.info("Loading Phase 2 checkpoint from %s", resolved)
-        try:
-            dcp.load(states, checkpoint_id=str(resolved / "dcp"))
-        except Exception as exc:
-            # EMA FSDP root-param shards can be saved with a drifted local
-            # shape (empty [0,...] vs live [4,...] for scale_shift_table).
-            # DCP then refuses the whole load. Retry without EMA callback
-            # state and re-init EMA from the live student after load.
-            msg = str(exc)
-            is_ema_shape = ("student_ema_sharded" in msg or "callbacks.ema" in msg) and (
-                "Size mismatch" in msg or "shape" in msg.lower())
-            if not is_ema_shape or "callbacks" not in states:
-                raise
-            logger.warning(
-                "DCP load failed on EMA shard shapes (%s); "
-                "retrying without callbacks.ema and re-initing EMA from student.",
-                msg.splitlines()[0][:200],
-            )
-            states_no_ema = dict(states)
-            states_no_ema.pop("callbacks", None)
-            dcp.load(states_no_ema, checkpoint_id=str(resolved / "dcp"))
-            # Drop any half-applied EMA and rebuild shadow from the resumed student.
-            if self._callbacks is not None:
-                cbs = getattr(self._callbacks, "_callbacks", {}) or {}
-                if isinstance(cbs, dict):
-                    cb_iter = cbs.values()
-                else:
-                    cb_iter = cbs
-                reinited = False
-                for cb in cb_iter:
-                    if getattr(cb, "student_ema", None) is None:
-                        continue
-                    transformer = getattr(cb, "_transformer", None)
-                    if transformer is None:
-                        student = getattr(self.method, "student", None)
-                        transformer = getattr(student, "transformer", None)
-                    if transformer is not None:
-                        cb.student_ema._init_shadow(transformer)
-                    cb._ema_started = True
-                    reinited = True
-                if reinited and _rank() == 0:
+
+        # checkpoint-100 (5B job 1111) wrote empty FSDP local shards for root
+        # EMA params (scale_shift_table [0,2,3072] vs live [4,2,3072]). DCP's
+        # planner raises CheckpointException *before* any load_state_dict runs,
+        # and str(exc) is often just "CheckpointException ranks:..." without the
+        # nested Size mismatch text — so string-matching the error is unreliable.
+        #
+        # Policy: always load roles/optim/dataloader first WITHOUT callback
+        # state, then optionally try EMA; on any EMA failure, re-init from the
+        # resumed student. Student weights are the training source of truth;
+        # EMA continues updating from step+1 with decay=0.98.
+        skip_ema = os.environ.get("FASTVIDEO_RESUME_SKIP_EMA", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        states_core = dict(states)
+        callback_state = states_core.pop("callbacks", None)
+
+        dcp.load(states_core, checkpoint_id=str(resolved / "dcp"))
+
+        if callback_state is not None and not skip_ema:
+            try:
+                dcp.load({"callbacks": callback_state}, checkpoint_id=str(resolved / "dcp"))
+            except Exception as exc:  # noqa: BLE001 - any DCP/EMA planner failure
+                if _rank() == 0:
                     logger.warning(
-                        "EMA shadow re-initialized from resumed student "
-                        "(checkpoint EMA shards were not portable).",
+                        "EMA DCP load failed (%s: %s); re-initing EMA from student.",
+                        type(exc).__name__,
+                        str(exc).splitlines()[0][:240],
                     )
+                self._reinit_ema_from_student()
+        elif callback_state is not None and skip_ema:
+            if _rank() == 0:
+                logger.warning(
+                    "Skipping EMA load from checkpoint (FASTVIDEO_RESUME_SKIP_EMA=1); "
+                    "re-initing EMA from resumed student.",
+                )
+            self._reinit_ema_from_student()
+
         _barrier()
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
