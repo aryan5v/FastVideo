@@ -19,7 +19,9 @@
 #
 # Changes vs v2, all mechanical:
 # - 14B student/critic/teacher checkpoints.
-# - 16-GPU 2D HSDP mesh (2 replicate x 8 shard), sized for 4 GB200 nodes.
+# - 32-GPU 2D HSDP mesh (2 replicate x 16 shard), sized for 8 GB200 nodes.
+#   Bumped from 16 (2x8) after the 16-GPU run OOM'd in FSDP all-gather at
+#   step 2: shard_dim 16 halves per-GPU state to ~30 GB.
 #   v2's 4-GPU pure-FSDP layout does not hold a 14B student plus frozen
 #   teacher and critic.
 # - Checkpoint cadence relaxed from every 20 steps to every 100: at 14B the
@@ -62,11 +64,11 @@ method:
 
 training:
   distributed:
-    num_gpus: 16
+    num_gpus: 32
     sp_size: 1
     tp_size: 1
     hsdp_replicate_dim: 2
-    hsdp_shard_dim: 8
+    hsdp_shard_dim: 16
 
   data:
     data_path: data/Wan-Syn_77x448x832_600k
