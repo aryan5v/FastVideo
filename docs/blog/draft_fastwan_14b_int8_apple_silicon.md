@@ -1,33 +1,41 @@
-# DRAFT — FastWan-14B INT8: 14-Billion-Parameter Video Generation, Locally on Apple Silicon
+# DRAFT — FastWan INT8 for Apple Silicon: 1.3B, 5B, and 14B Video Models, Locally on Your Mac
 
 > Status: DRAFT for the Mac launch, mirroring the FastWan-QAD RTX 5090 post
-> format. Every number marked `TODO(measure)` is a placeholder until the
-> 14B INT8 QAD run (wandb `distillation_wan/wan2.1_14b_dmd2_3steps_mlx_int8`)
-> completes and the benchmark harness records final figures. Do not publish
-> with placeholders.
+> format. Every number marked `TODO(measure)` is a placeholder until the QAD
+> runs (wandb `distillation_wan`: `wan2.1_14b_dmd2_3steps_mlx_int8`,
+> `wan2.2_5b_dmd2_3steps_mlx_int8`) complete and the benchmark harness records
+> final figures. Do not publish with placeholders.
 
-**TL;DR: A 14B-parameter video model, running fully on your Mac. FastVideo
-introduces FastWan-14B-INT8, a Quantization-Aware Distillation (QAD) checkpoint
-of Wan2.1-T2V-14B that generates a 5-second 480p video in TODO(measure)
-seconds on an Apple M5 — no cloud, no GPU server, no compromise on the model
-class. 14.9 GB of weights, three denoising steps, one unified-memory machine.**
+**TL;DR: Three video models, all running fully on your Mac. FastVideo
+introduces the FastWan INT8 family — 1.3B, 5B, and 14B checkpoints trained
+with Quantization-Aware Distillation (QAD) against the exact INT8 grid Apple
+Silicon deploys on. From a 16 GB MacBook Air to a 64 GB Mac Studio: a 3-step,
+5-second video in TODO(measure) seconds, up to 720p on the 5B, up to the
+largest model we have ever shipped on a laptop — no cloud, no GPU server.**
 
 ## What We Are Releasing
 
-- **FastWan-14B-INT8** (Hugging Face: `FastVideo/FastWan-QAD-14B-INT8` TODO(upload)):
-  Wan2.1-T2V-14B distilled to a 3-step student and trained quantization-aware
-  against the exact INT8 grid Apple Silicon deploys on.
+Three QAD checkpoints, one recipe, one deploy grid:
+
+| Checkpoint | Base model | Native output | INT8 size | Mac tier | Role |
+|---|---|---|---|---|---|
+| **FastWan-QAD-1.3B-INT8** | Wan2.1-T2V-1.3B | 480p, ~5 s | ~1.4 GB | 16 GB+ | Fastest; the proven release |
+| **FastWan-QAD-5B-INT8** | Wan2.2-TI2V-5B (3-step, full attention) | **720p (121×704×1280), ~5 s** | ~5.3 GB | 16 GB+ | **Fast + high-res: the value pick** |
+| **FastWan-QAD-14B-INT8** | Wan2.1-T2V-14B | 480p, ~5 s | ~14.9 GB | 24 GB+ | Maximum local quality |
+
+- All three are **3-step** students trained with DMD2 + affine-INT8 QAT, so
+  the training grid *is* the deploy grid.
 - The full **QAD training recipe** — configs, the affine-INT8 fake-quantizer
   with its bitwise MLX parity test, and the DMD2 training code in FastVideo.
 - The **MLX runtime**: on-device DMD sampling, fused Metal attention,
-  `mx.compile`, TAEHV fast decoding, memory-tier presets for 24/32/64 GB Macs,
-  and two fast modes (RIFE temporal, MetalFX spatial).
+  `mx.compile`, TAEHV fast decoding, memory-tier presets, and the RIFE fast
+  mode.
 - Apache-2.0, weights and code.
 
-| Checkpoint | Target hardware | Precision | Tier |
-|---|---|---|---|
-| FastWan-14B-INT8 | Apple M5 24 GB+ | INT8 weights / FP16 compute | Flagship: 14B quality on a laptop |
-| FastWan-QAD-1.3B-INT8 | Apple M1–M4, 16 GB | INT8 weights / FP16 compute | Compatibility: the existing 1.3B release |
+**Two ways to buy speed, one way to buy quality.** The 5B at 720p is the
+fast/high-res option for 16 GB Macs; the 14B is the quality ceiling for 24 GB+
+machines; the 1.3B is the instant-gratification download. All launch together
+with the same runtime and the same recipe.
 
 ## Why INT8 — and Why Not MXFP4 or NVFP4
 
@@ -59,6 +67,25 @@ our early runs used an uncommitted quantizer with no parity test. All three
 failure causes are now closed: the format is dropped, the affine INT8
 fake-quantizer is committed with a bitwise MLX parity test, and the training
 grid *is* the deploy grid.
+
+## The Receipts: INT8 vs MXFP4, Side by Side
+
+We did not pick INT8 from theory — we ran MXFP4 first, twice, and it failed
+twice. Below are generations from the **MXFP4 QAD runs that did not qualify**
+alongside their INT8 counterparts.
+
+| Run | Format | Outcome |
+|---|---|---|
+| Wan2.1-1.3B QAD | **MXFP4** | TODO(embed): visible artifacts / motion smear — rejected |
+| Wan2.1-1.3B QAD | **INT8** | TODO(embed): accepted — shipped as FastWan-QAD-1.3B |
+| Wan2.1-14B QAD | **MXFP4** (4000 steps, 26 GPU-days) | TODO(embed): washed-out, undertrained-looking — rejected |
+| Wan2.1-14B QAD | **INT8** (this release) | TODO(embed): the launch checkpoint |
+
+The reconstruction numbers explain the videos: at equal memory, MXFP4 is the
+worst-reconstructing format we measured (22× INT8's relative error), and no
+4-bit format buys any speed on Metal anyway (weights are ~9% of memory
+traffic at our shapes — the integer units never engage). MXFP4 lost on
+quality *and* had nothing to offer on speed. There was no reason to ship it.
 
 **Attention stays dense and fp16.** On the RTX 5090, native FP4 *attention*
 was worth an Attn-QAT training stage because Blackwell's FP4 tensor cores pay
