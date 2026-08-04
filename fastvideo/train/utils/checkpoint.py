@@ -399,28 +399,31 @@ class CheckpointManager:
             rng_path,
         )
 
-    def _reinit_ema_from_student(self) -> None:
-        """Rebuild EMA shadows from the live student after a no-EMA resume."""
+    def _mark_ema_needs_reinit(self) -> None:
+        """Defer EMA shadow rebuild to the first training step.
+
+        Cloning every student shard to CPU right after a multi-role DCP load
+        spikes allocator pressure and was OOM'ing the post-load NCCL barrier
+        on 5B resume (job 1122). ``EMACallback.on_training_step_end`` already
+        re-inits when ``_ema_started`` is False — use that path instead.
+        """
         if self._callbacks is None:
             return
         cbs = getattr(self._callbacks, "_callbacks", {}) or {}
         cb_iter = cbs.values() if isinstance(cbs, dict) else cbs
-        reinited = False
+        marked = False
         for cb in cb_iter:
             if getattr(cb, "student_ema", None) is None:
                 continue
-            transformer = getattr(cb, "_transformer", None)
-            if transformer is None:
-                student = getattr(self.method, "student", None)
-                transformer = getattr(student, "transformer", None)
-            if transformer is not None:
-                cb.student_ema._init_shadow(transformer)
-            cb._ema_started = True
-            reinited = True
-        if reinited and _rank() == 0:
+            # Drop any half-applied / empty shadow from a failed EMA load.
+            if getattr(cb.student_ema, "shadow", None) is not None:
+                cb.student_ema.shadow = {}
+            cb._ema_started = False
+            marked = True
+        if marked and _rank() == 0:
             logger.warning(
-                "EMA shadow re-initialized from resumed student "
-                "(checkpoint EMA shards skipped or not portable).",
+                "EMA load skipped; shadow will re-init from student on the "
+                "first training step (decay unchanged).",
             )
 
     def maybe_resume(self, *, resume_from_checkpoint: str | None) -> int | None:
@@ -440,14 +443,11 @@ class CheckpointManager:
 
         # checkpoint-100 (5B job 1111) wrote empty FSDP local shards for root
         # EMA params (scale_shift_table [0,2,3072] vs live [4,2,3072]). DCP's
-        # planner raises CheckpointException *before* any load_state_dict runs,
-        # and str(exc) is often just "CheckpointException ranks:..." without the
-        # nested Size mismatch text — so string-matching the error is unreliable.
+        # planner raises CheckpointException *before* any load_state_dict runs.
         #
-        # Policy: always load roles/optim/dataloader first WITHOUT callback
-        # state, then optionally try EMA; on any EMA failure, re-init from the
-        # resumed student. Student weights are the training source of truth;
-        # EMA continues updating from step+1 with decay=0.98.
+        # Policy: load roles/optim/dataloader WITHOUT callback/EMA state.
+        # EMA is marked for lazy re-init on the first train step (same decay).
+        # empty_cache around load — DCP + 3 QAD roles is the memory cliff.
         skip_ema = os.environ.get("FASTVIDEO_RESUME_SKIP_EMA", "1").strip().lower() not in {
             "0",
             "false",
@@ -456,27 +456,32 @@ class CheckpointManager:
         states_core = dict(states)
         callback_state = states_core.pop("callbacks", None)
 
+        _release_cuda_cache("pre-dcp-load")
+        _barrier()
         dcp.load(states_core, checkpoint_id=str(resolved / "dcp"))
+        _release_cuda_cache("post-dcp-load")
+        _barrier()
 
         if callback_state is not None and not skip_ema:
             try:
                 dcp.load({"callbacks": callback_state}, checkpoint_id=str(resolved / "dcp"))
+                _release_cuda_cache("post-ema-dcp-load")
             except Exception as exc:  # noqa: BLE001 - any DCP/EMA planner failure
                 if _rank() == 0:
                     logger.warning(
-                        "EMA DCP load failed (%s: %s); re-initing EMA from student.",
+                        "EMA DCP load failed (%s: %s); will re-init on first step.",
                         type(exc).__name__,
                         str(exc).splitlines()[0][:240],
                     )
-                self._reinit_ema_from_student()
+                self._mark_ema_needs_reinit()
         elif callback_state is not None and skip_ema:
             if _rank() == 0:
                 logger.warning(
-                    "Skipping EMA load from checkpoint (FASTVIDEO_RESUME_SKIP_EMA=1); "
-                    "re-initing EMA from resumed student.",
+                    "Skipping EMA load from checkpoint (FASTVIDEO_RESUME_SKIP_EMA=1).",
                 )
-            self._reinit_ema_from_student()
+            self._mark_ema_needs_reinit()
 
+        _release_cuda_cache("pre-resume-barrier")
         _barrier()
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
