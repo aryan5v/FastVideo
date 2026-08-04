@@ -1648,7 +1648,13 @@ class EMA_FSDP:
                 continue
             local = self._to_local_tensor(p.detach())
             v_cpu = local.float().cpu()
-            if name not in self.shadow:
+            if name not in self.shadow or self.shadow[name].shape != v_cpu.shape:
+                # Re-initialize on first sight or when the param's local
+                # placement drifted from what the shadow captured (e.g. root
+                # params of a reshard_after_forward model seen unsharded at
+                # init, or degenerate empty shards from sharding a size-1
+                # dim). Crashing here kills the run; the EMA for the affected
+                # entry simply restarts from the current shard.
                 self.shadow[name] = v_cpu.clone()
             else:
                 self.shadow[name].mul_(d).add_(v_cpu, alpha=1.0 - d)
