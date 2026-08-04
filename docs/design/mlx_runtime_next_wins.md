@@ -80,16 +80,26 @@ decode, with peak = max(stages) not sum. `memory.py` has the caps; the runtime
 needs the stage lifecycle. This is a hard launch requirement for the 14B
 checkpoint, not an optimization.
 
-### 6. W8A8 fused INT8 GEMM for Metal (large, the ambitious bet)
+### 6. W8A8 fused INT8 GEMM for Metal — **CLOSED, NO-GO (2026-08-04)**
 
-The M5 survey showed weight-only quantization buys zero speed: every GEMM
-runs fp16 arithmetic on dequantized weights and the integer matrix units sit
-idle. The only route to quantization-derived speed on Metal is quantizing
-activations too (W8A8) with a fused integer GEMM — Ideogram shipped exactly
-this for consumer GPUs; nobody has done it for diffusion on Metal against M5
-Neural Accelerators. Needs timestep-aware activation calibration (DiT
-activation distributions shift across the denoise trajectory) and a custom
-Metal kernel. Highest payoff, highest effort; do after 1–5.
+We ran the full gate chain. Details and tables:
+`docs/design/w8a8_int8_gemm_metal.md` (canonical receipt) and the launch blog
+draft section *"We Tried to Make INT8 Fast"*.
+
+| Gate | Result |
+|---|---|
+| 1. Act calib (5B randn + realctx, 14B) | **PASS** — per-token scales OK; ~7% layers (`attn2.to_q`) stay fp16 |
+| 2. Fused int8×int8 `metal_kernel` on **M5 24 GB** | **NO-GO** — correct (3e-6 err) but **0.01–0.85× fp16**; DiT shapes ~0.02–0.04× |
+| 3. W8A8 QAT on GB200 | **Cancelled** (no deploy kernel to train toward) |
+
+Mechanism: `mx.fast.metal_kernel` is a scalar-MAC shader; MLX 0.32 does not
+expose an M5 Neural Accelerator int8×int8 path. Weight-only
+`mx.quantized_matmul` stays ~fp16 (dequant then fp16 arith) — confirms the
+survey. **Do not reopen** unless MLX grows real int8 matmul or a lower-level
+kernel clears the pre-registered **1.2× fp16** ship bar at DiT shapes.
+
+INT8 **weight-only** QAD (1.3B/5B/14B launch) is unaffected: that is the
+memory/quality grid, not this speed bet.
 
 ### 7. Causal streaming mode (large, differentiator)
 
@@ -101,5 +111,8 @@ interactive video. Already prototyped; maturing it is a product decision
 ## Recommendation
 
 Ship 1–3 with the 14B launch (they are cheap and compound), gate 4 behind
-SSIM, treat 5 as launch-blocking for the 24 GB tier, and scope 6 as the
-follow-up research item that would make the Mac story distinctive.
+SSIM, treat 5 as launch-blocking for the 24 GB tier. **Item 6 is closed
+NO-GO** — keep the prototype as an oracle, put the M5 table in the launch
+blog, and spend no further GB200 on W8A8 QAT. Mac speed continues to come
+from pipeline levers (RIFE / fast-spatial / refine / step count), not from
+GEMM format tricks under current MLX.

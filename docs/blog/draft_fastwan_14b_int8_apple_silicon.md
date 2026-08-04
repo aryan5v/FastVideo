@@ -60,6 +60,15 @@ quantization folklore misleads here: LLM *decode* is weight-bandwidth-bound
 (one token at a time), so 4-bit is a real speedup there; a video DiT at 8k+
 tokens is the opposite regime.
 
+**We also tried the ambitious fix — and measured it on M5.** If weight-only
+cannot engage the integer units, the textbook next step is W8A8: quantize
+activations *and* weights and fuse an int8×int8 GEMM. We built that kernel,
+calibrated activations on GB200, and ran the speed gate on a 24 GB M5 MacBook
+Air. Correctness passed; **speed did not** (best fused speedup 0.85× fp16 at
+tiny shapes; ~0.02–0.04× at DiT shapes). Full write-up in the next section.
+INT8 stays a memory decision because even the aggressive path could not make
+it a speed decision under today's MLX/Metal surface.
+
 **MXFP4 specifically failed us twice** — at 1.3B and at 14B, with and without
 QAT — before we understood why: it is the worst-reconstructing format we
 tested (22× INT8's error), it could never have delivered speed regardless, and
@@ -98,6 +107,75 @@ INT8 is the most accurate way to spend 8 bits.** 14.9 GB for 14B parameters —
 a model class that used to need a datacenter GPU now fits in 24 GB of unified
 memory.
 
+## We Tried to Make INT8 Fast (W8A8 on M5) — and Closed the Door with Data
+
+> Canonical engineering receipt: `docs/design/w8a8_int8_gemm_metal.md`.
+> Numbers below are from an ephemeral M5 probe (MacBook Air Mac17,3, 24 GB,
+> macOS 26.5.2, MLX 0.32.0, commit `df5797fc`). Copy freely into the final
+> post; do not re-measure unless the MLX/Metal surface changes.
+
+A fair critique of "INT8 is only for memory" is: *then build W8A8.* Quantize
+activations too, keep the matmul in the integer domain, and the Neural
+Accelerators should finally earn their keep. Ideogram shipped that pattern on
+consumer GPUs. We ran the same experiment end-to-end for Wan on Apple Silicon.
+
+### What we built
+
+1. **Activation calibration on GB200** (jobs 1112 / 1117 / 1118): every Linear
+   in Wan2.2-TI2V-5B and Wan2.1-T2V-14B, across the three DMD timesteps, with
+   both random and real UMT5 context. Result: bulk layers fit int8 with
+   per-token scales; ~7% of layers (almost all cross-attn `to_q`) are outlier
+   spikes we would keep in fp16. Real text embeddings make those outliers
+   *worse*, not better — so the keep-list is not a randn artifact.
+2. **A fused int8×int8 Metal kernel** via `mx.fast.metal_kernel`: per-token
+   activation scales, per-out-channel weight scales, int32 accumulate, scale
+   back to float. Naive and tiled launchers. Bit-close to the dequant
+   reference (max abs error **3×10⁻⁶** on M2 and M5).
+3. **A pre-registered ship bar:** fused W8A8 must be **≥1.2×** faster than
+   fp16 GEMM at DiT shapes. Anything less is not worth the complexity.
+
+### What M5 actually did
+
+| Shape (tokens × out × in) | fp16 | Fused W8A8 (best) | Speedup |
+|---|---:|---:|---:|
+| 128³ (toy) | 0.92 ms | 1.09 ms | **0.85×** |
+| 512³ | 0.39 ms | 4.85 ms | 0.08× |
+| 1024×5120×5120 (DiT-class) | 8.7 ms | 448 ms | **0.02×** |
+| 4096×5120×5120 | 53 ms | 1341 ms | **0.04×** |
+| 8192×5120×5120 | 53 ms | 1755 ms | **0.03×** |
+
+Correctness: **PASS.** Speed: **NO-GO** on every shape, including the ones
+Wan actually runs. Weight-only `mx.quantized_matmul` stayed near fp16 — the
+same dequant-then-fp16 story the survey predicted, not a secret fast path.
+
+### Why we are publishing a negative result
+
+Most launch posts only show the format that shipped. We are showing the one
+that did not, for the same reason we show MXFP4 failures: **readers who will
+try W8A8 themselves deserve the measurement, not a shrug.**
+
+The mechanism is not "M5 is slow." M5's fp16 GEMM is excellent. The mechanism
+is that today's MLX custom-kernel surface gives you a **scalar** int8 MAC in
+shader code; it does not bind the Neural Accelerator integer tensor path.
+Until that path is a public, stable API (or someone writes a lower-level
+kernel that wins the 1.2× bar), **quantization on Mac remains a memory
+lever, not a speed lever.**
+
+### What we do instead for speed
+
+Pipeline math, not format folklore:
+
+- **3-step DMD** (the QAD student) — fewer denoise steps beat any GEMM trick.
+- **RIFE fast mode** — generate fewer frames, interpolate on device.
+- **Spatial fast + two-pass refine** — fewer pixels at draft, quality pass at
+  target (H3 / LTX-2 pattern, same DiT, no extra weights).
+- **`mx.compile`**, fused attention/norms, sequenced residency for 24 GB.
+
+INT8 QAD still matters: it is how a 14B DiT fits in 24 GB and how a 5B DiT
+fits comfortably on 16 GB, at the accuracy affine integer actually delivers.
+It is not how we claim a 2× denoise speedup. We measured that claim and
+declined it.
+
 ## The Training Recipe: QAD at 14B
 
 Quantization-Aware Distillation trains the student *against* the exact
@@ -131,9 +209,11 @@ Every layer is attacked, as with the 5090 release — but for Metal:
   the loader casts to fp16 and quantizes exactly along the training grid.
 - **TAEHV fast decoding** with checksum-verified weights.
 - **Fast mode**: **RIFE** (generate every Nth frame, interpolate the
-  rest with Apple-silicon-native rife-mlx), with a MetalFX spatial
-  half-resolution render path on the roadmap — temporal and spatial
-  shortcuts that multiply.
+  rest with Apple-silicon-native rife-mlx) plus **spatial fast** (denoise
+  at half res, latent upsample) and optional **two-pass refine** (H3/LTX-2
+  pattern, same DiT) — temporal and spatial shortcuts that multiply. (A
+  MetalFX path stays on the roadmap; diffusion has no game-engine motion
+  vectors, so we do not pretend MetalFX just drops in.)
 - **Memory-tier presets**: 24/32/64 GB, with sequenced residency (encode →
   free encoder → denoise → free DiT → decode) so peak memory is the largest
   stage, not the sum.
@@ -142,7 +222,9 @@ Every layer is attacked, as with the 5090 release — but for Metal:
 
 - **M5 Neural Accelerators**: per-core matrix units; Metal FlashAttention-class
   kernels are up to 4.6× faster on M5 than M4 (Draw Things' MFA 2.5 numbers) —
-  attention is where diffusion compute concentrates.
+  attention is where diffusion compute concentrates. We also used an M5 as the
+  **speed gate** for W8A8 (above): the same chip that makes attention fast is
+  the one that told us custom int8 GEMMs are not, yet.
 - **MLX matured**: fused `mx.fast` kernels, `mx.compile`, quantized
   checkpoint formats, and a stable allocator with explicit memory caps.
 - **macOS 26 / Metal 4**: the driver-level path the probes verify is actually
