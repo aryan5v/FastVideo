@@ -113,7 +113,7 @@ callbacks:
   validation:
     pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
     dataset_file: examples/training/finetune/Wan2.1-VSA/Wan-Syn-Data/validation_4.json
-    every_steps: 10
+    every_steps: 100
     sampling_steps: [3]
     sampling_timesteps: [1000, 757, 522]
     guidance_scale: 6.0
