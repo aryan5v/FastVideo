@@ -19,9 +19,10 @@
 #
 # Changes vs v2, all mechanical:
 # - 14B student/critic/teacher checkpoints.
-# - 32-GPU 2D HSDP mesh (2 replicate x 16 shard), sized for 8 GB200 nodes.
-#   Bumped from 16 (2x8) after the 16-GPU run OOM'd in FSDP all-gather at
-#   step 2: shard_dim 16 halves per-GPU state to ~30 GB.
+# - 8-GPU 2D HSDP mesh (2 replicate x 4 shard) on 2 nodes. This matches the
+#   PROVEN mxfp4 14B run's per-GPU state (~119 GB on 4 shards) while limiting
+#   the multi-node NCCL surface to 2 nodes (16/32-GPU attempts kept landing
+#   on bad/draining nodes; single-node 4-GPU is the fallback).
 #   v2's 4-GPU pure-FSDP layout does not hold a 14B student plus frozen
 #   teacher and critic.
 # - Checkpoint cadence relaxed from every 20 steps to every 100: at 14B the
@@ -64,11 +65,11 @@ method:
 
 training:
   distributed:
-    num_gpus: 32
+    num_gpus: 8
     sp_size: 1
     tp_size: 1
     hsdp_replicate_dim: 2
-    hsdp_shard_dim: 16
+    hsdp_shard_dim: 4
 
   data:
     data_path: data/Wan-Syn_77x448x832_600k
