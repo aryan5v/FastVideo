@@ -5,6 +5,11 @@
 > runs (wandb `distillation_wan`: `wan2.1_14b_dmd2_3steps_mlx_int8`,
 > `wan2.2_5b_dmd2_3steps_mlx_int8`) complete and the benchmark harness records
 > final figures. Do not publish with placeholders.
+>
+> **Locked (do not re-litigate at finalize):** W8A8-on-M5 speed gate is
+> **NO-GO** — section *"We Tried to Make INT8 Fast"* below is final copy from
+> the M5 24 GB probe (2026-08-04). Engineering receipt:
+> `docs/design/w8a8_int8_gemm_metal.md`.
 
 **TL;DR: Three video models, all running fully on your Mac. FastVideo
 introduces the FastWan INT8 family — 1.3B, 5B, and 14B checkpoints trained
