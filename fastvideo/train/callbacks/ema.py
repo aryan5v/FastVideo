@@ -180,9 +180,39 @@ class EMACallback(Callback):
             value = value.to_local()
         return value.detach().float().cpu()
 
+    def _sync_shadow_to_live_shards(self) -> None:
+        """Re-align EMA shadow local shapes to the live FSDP param shards.
+
+        Root params (e.g. ``scale_shift_table``) can be captured unsharded or
+        as a degenerate empty local shard when a size-1 dim is sharded across
+        ranks. ``EMA_FSDP.update`` already tolerates that drift; the checkpoint
+        path must too — otherwise DCP saves ``[0, ...]`` shards that refuse to
+        load into ``[4, ...]`` locals on resume (5B job 1119).
+        """
+        if self.student_ema is None:
+            return
+        for name, param in self._transformer.named_parameters():
+            if not param.requires_grad:
+                continue
+            local = self.student_ema._to_local_tensor(param.detach()).float().cpu()
+            prev = self.student_ema.shadow.get(name)
+            if prev is None or prev.shape != local.shape:
+                if prev is not None:
+                    logger.warning(
+                        "EMA shadow shape drift on %s: saved/local %s -> live %s; "
+                        "re-syncing from live shard before checkpoint.",
+                        name,
+                        tuple(prev.shape),
+                        tuple(local.shape),
+                    )
+                self.student_ema.shadow[name] = local.clone()
+
     def state_dict(self) -> dict[str, Any]:
         if self.student_ema is None:
             return {}
+        # Ensure every shadow entry matches the live local shard before DCP
+        # wraps it as a DTensor — empty/drifted shards poison resume.
+        self._sync_shadow_to_live_shards()
         params = {
             self._clean_name(name): param
             for name, param in self._transformer.named_parameters()
@@ -194,6 +224,22 @@ class EMACallback(Callback):
             if param is None:
                 logger.warning("EMA shadow key %r has no matching parameter; dropping from checkpoint.", name)
                 continue
+            live_local = self.student_ema._to_local_tensor(param.detach()).float().cpu()
+            if shard.numel() == 0 and live_local.numel() != 0:
+                logger.warning(
+                    "EMA shadow %s is an empty shard; substituting live local %s for DCP save.",
+                    clean,
+                    tuple(live_local.shape),
+                )
+                shard = live_local
+            if tuple(shard.shape) != tuple(live_local.shape):
+                logger.warning(
+                    "EMA shadow %s shape %s != live %s; substituting live shard for DCP save.",
+                    clean,
+                    tuple(shard.shape),
+                    tuple(live_local.shape),
+                )
+                shard = live_local
             shadow_dcp[clean] = self._as_dcp_tensor(shard, param)
         return {
             "student_ema_sharded": shadow_dcp,
@@ -208,11 +254,39 @@ class EMACallback(Callback):
             sharded = state_dict.get("student_ema_sharded")
             if sharded is not None:
                 shadow: dict[str, torch.Tensor] = {}
-                for name, _param in self._transformer.named_parameters():
+                skipped = 0
+                for name, param in self._transformer.named_parameters():
                     clean = self._clean_name(name)
-                    if clean in sharded:
-                        shadow[name] = self._to_local_cpu(sharded[clean])
+                    if clean not in sharded:
+                        continue
+                    loaded = self._to_local_cpu(sharded[clean])
+                    live = self.student_ema._to_local_tensor(param.detach()).float().cpu()
+                    if loaded.shape != live.shape:
+                        # Prefer live shard over a drifted/empty checkpoint entry
+                        # (same tolerance as EMA_FSDP.update).
+                        logger.warning(
+                            "EMA load skip %s: ckpt %s vs live %s; using live shard",
+                            clean,
+                            tuple(loaded.shape),
+                            tuple(live.shape),
+                        )
+                        shadow[name] = live.clone()
+                        skipped += 1
+                        continue
+                    shadow[name] = loaded
+                # Any requires_grad param missing from the ckpt gets a fresh shadow.
+                for name, param in self._transformer.named_parameters():
+                    if not param.requires_grad or name in shadow:
+                        continue
+                    shadow[name] = self.student_ema._to_local_tensor(param.detach()).float().cpu().clone()
                 self.student_ema.shadow = shadow
+                if skipped and torch.distributed.is_initialized():
+                    if torch.distributed.get_rank() == 0:
+                        logger.warning(
+                            "EMA load: re-synced %d entries with live FSDP shards "
+                            "(placement drift in checkpoint).",
+                            skipped,
+                        )
             elif state_dict.get("student_ema") is not None:
                 # Legacy plain-shard state: world-size-dependent and, on
                 # multi-GPU saves, missing every rank but 0. Refuse to load

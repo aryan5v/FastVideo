@@ -413,7 +413,50 @@ class CheckpointManager:
 
         states = self._build_states()
         logger.info("Loading Phase 2 checkpoint from %s", resolved)
-        dcp.load(states, checkpoint_id=str(resolved / "dcp"))
+        try:
+            dcp.load(states, checkpoint_id=str(resolved / "dcp"))
+        except Exception as exc:
+            # EMA FSDP root-param shards can be saved with a drifted local
+            # shape (empty [0,...] vs live [4,...] for scale_shift_table).
+            # DCP then refuses the whole load. Retry without EMA callback
+            # state and re-init EMA from the live student after load.
+            msg = str(exc)
+            is_ema_shape = ("student_ema_sharded" in msg or "callbacks.ema" in msg) and (
+                "Size mismatch" in msg or "shape" in msg.lower())
+            if not is_ema_shape or "callbacks" not in states:
+                raise
+            logger.warning(
+                "DCP load failed on EMA shard shapes (%s); "
+                "retrying without callbacks.ema and re-initing EMA from student.",
+                msg.splitlines()[0][:200],
+            )
+            states_no_ema = dict(states)
+            states_no_ema.pop("callbacks", None)
+            dcp.load(states_no_ema, checkpoint_id=str(resolved / "dcp"))
+            # Drop any half-applied EMA and rebuild shadow from the resumed student.
+            if self._callbacks is not None:
+                cbs = getattr(self._callbacks, "_callbacks", {}) or {}
+                if isinstance(cbs, dict):
+                    cb_iter = cbs.values()
+                else:
+                    cb_iter = cbs
+                reinited = False
+                for cb in cb_iter:
+                    if getattr(cb, "student_ema", None) is None:
+                        continue
+                    transformer = getattr(cb, "_transformer", None)
+                    if transformer is None:
+                        student = getattr(self.method, "student", None)
+                        transformer = getattr(student, "transformer", None)
+                    if transformer is not None:
+                        cb.student_ema._init_shadow(transformer)
+                    cb._ema_started = True
+                    reinited = True
+                if reinited and _rank() == 0:
+                    logger.warning(
+                        "EMA shadow re-initialized from resumed student "
+                        "(checkpoint EMA shards were not portable).",
+                    )
         _barrier()
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
