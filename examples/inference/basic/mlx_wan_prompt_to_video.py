@@ -11,6 +11,11 @@ Apple release:
   wan-vae``, higher fidelity, bf16) decodes the final latents.
 
 Defaults produce the validated release shape: 480x832, 81 frames, 3-step DMD.
+
+Optional ``--refine`` enables the H3 / LTX-2 two-pass pattern: denoise at
+``height/refine-scale x width/refine-scale``, spatially upsample the clean
+latents, re-noise, and re-denoise at the full target resolution with the
+same DiT (no new model, no training). Works for Wan2.1-14B and Wan2.2-5B.
 """
 
 from __future__ import annotations
@@ -360,6 +365,44 @@ def main() -> None:
     parser.add_argument("--dmd-denoising-steps", default="1000,757,522")
     parser.add_argument("--denoising-mode", choices=("dmd", "scheduler"), default="dmd")
     parser.add_argument("--flow-shift", type=float, default=8.0)
+    parser.add_argument(
+        "--refine",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Two-pass H3/LTX-2 refine: denoise at height/width // refine-scale, then "
+        "upsample latents and re-denoise at the full target resolution with the same "
+        "DiT (no new model / no training). DMD mode only.",
+    )
+    parser.add_argument(
+        "--refine-scale",
+        type=int,
+        default=2,
+        help="Spatial upsample factor between stage-1 and stage-2 (default: 2).",
+    )
+    parser.add_argument(
+        "--refine-dmd-denoising-steps",
+        default=None,
+        help="Optional stage-2 DMD timesteps (comma-separated). Defaults to "
+        "--dmd-denoising-steps when unset.",
+    )
+    parser.add_argument(
+        "--refine-add-noise",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Re-noise upsampled stage-1 latents before the stage-2 denoise "
+        "(default: on; disable with --no-refine-add-noise).",
+    )
+    parser.add_argument(
+        "--refine-upsample-mode",
+        choices=("bilinear", "nearest"),
+        default="bilinear",
+        help="Latent spatial upsample mode for the refine hand-off.",
+    )
+    parser.add_argument(
+        "--save-stage1-latents",
+        action="store_true",
+        help="When --refine is set, also dump stage-1 clean latents next to the output.",
+    )
     parser.add_argument("--max-sequence-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--fps", type=int, default=16)
@@ -458,10 +501,16 @@ def main() -> None:
 
     from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
     from fastvideo.mlx_runtime.fastwan import mlx_dit_from_diffusers_safetensors
+    from fastvideo.mlx_runtime.refine import plan_refine_resolutions, run_two_pass_dmd
     from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
 
     mx.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    if args.refine and args.denoising_mode != "dmd":
+        raise SystemExit("--refine currently requires --denoising-mode dmd")
+    if args.refine and args.refine_scale < 2:
+        raise SystemExit("--refine-scale must be >= 2 when --refine is set")
 
     config_path = model_root / "transformer/config.json"
     checkpoint_path = model_root / "transformer/diffusion_pytorch_model.safetensors"
@@ -473,9 +522,22 @@ def main() -> None:
     vae_config = json.loads(vae_config_path.read_text()) if vae_config_path.is_file() else {}
     vae_temporal_factor = int(vae_config.get("scale_factor_temporal", 4))
     vae_spatial_factor = int(vae_config.get("scale_factor_spatial", 8))
-    latent_frames = (args.num_frames - 1) // vae_temporal_factor + 1
-    latent_height = args.height // vae_spatial_factor
-    latent_width = args.width // vae_spatial_factor
+    patch_size = tuple(config.get("patch_size", (1, 2, 2)))
+    refine_plan = plan_refine_resolutions(
+        height=args.height,
+        width=args.width,
+        num_frames=args.num_frames,
+        spatial_scale=args.refine_scale if args.refine else 1,
+        vae_spatial_compression=vae_spatial_factor,
+        vae_temporal_compression=vae_temporal_factor,
+        patch_size=patch_size,
+        enabled=args.refine,
+    )
+    # Stage-1 geometry drives the first denoise (and the only denoise when
+    # refine is off). Stage-2 / target geometry is used after the hand-off.
+    latent_frames = refine_plan.latent_frames
+    latent_height = refine_plan.stage1_latent_height
+    latent_width = refine_plan.stage1_latent_width
     mx_dtype = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}[args.mlx_dtype]
     quantization = None if args.mlx_quantization == "none" else args.mlx_quantization
 
@@ -553,42 +615,78 @@ def main() -> None:
 
     denoise_start = time.perf_counter()
     mx.reset_peak_memory()
-    for step_index, timestep in enumerate(timesteps):
-        noise_input_latent = latents
-        timestep_mx = mx.array([float(timestep.item())]).astype(mx.float32)
-        noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
+    stage1_latents_np = None
+    refine_sigma = None
+    if args.refine:
+        assert dmd_schedule is not None  # guarded above
+        refine_steps_str = args.refine_dmd_denoising_steps or args.dmd_denoising_steps
+        refine_steps = [int(step.strip()) for step in refine_steps_str.split(",") if step.strip()]
+        freqs_cis_stage2 = make_rotary_embeddings(
+            config,
+            latent_frames=latent_frames,
+            latent_height=refine_plan.stage2_latent_height,
+            latent_width=refine_plan.stage2_latent_width,
+        )
+        print(
+            f"[refine] stage1={refine_plan.stage1_width}x{refine_plan.stage1_height} "
+            f"-> stage2={refine_plan.target_width}x{refine_plan.target_height} "
+            f"(scale={refine_plan.spatial_scale}x, mode={args.refine_upsample_mode})"
+        )
+        two_pass = run_two_pass_dmd(
+            dit=dit,
+            encoder_hidden_states=encoder_hidden_states,
+            noise_latents_stage1=latents,
+            freqs_cis_stage1=freqs_cis,
+            freqs_cis_stage2=freqs_cis_stage2,
+            plan=refine_plan,
+            schedule=dmd_schedule,
+            timesteps=[float(t.item()) for t in timesteps],
+            refine_timesteps=[float(t) for t in refine_steps],
+            mx_dtype=mx_dtype,
+            seed=args.seed,
+            add_noise_flag=args.refine_add_noise,
+            upsample_mode=args.refine_upsample_mode,
+        )
+        latents = two_pass.latents
+        stage1_latents_np = np.array(two_pass.stage1_latents.astype(mx.float32))
+        refine_sigma = two_pass.refine_sigma
+    else:
+        for step_index, timestep in enumerate(timesteps):
+            noise_input_latent = latents
+            timestep_mx = mx.array([float(timestep.item())]).astype(mx.float32)
+            noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
 
-        if args.denoising_mode == "dmd":
-            # On-device DMD update: no per-step MLX->torch->MLX round-trip. The
-            # affine math runs in fp32 to match the torch reference precision,
-            # then casts back to the runtime dtype. Re-noise is drawn with MLX's
-            # RNG (seeded above) instead of the torch CPU generator.
-            ts_val = float(timestep.item())
-            noise_input_f32 = noise_input_latent.astype(mx.float32)
-            pred_noise_f32 = noise_pred.astype(mx.float32)
-            if step_index < len(timesteps) - 1:
-                next_ts: float | None = float(timesteps[step_index + 1].item())
-                renoise = mx.random.normal(noise_input_f32.shape).astype(mx.float32)
+            if args.denoising_mode == "dmd":
+                # On-device DMD update: no per-step MLX->torch->MLX round-trip. The
+                # affine math runs in fp32 to match the torch reference precision,
+                # then casts back to the runtime dtype. Re-noise is drawn with MLX's
+                # RNG (seeded above) instead of the torch CPU generator.
+                ts_val = float(timestep.item())
+                noise_input_f32 = noise_input_latent.astype(mx.float32)
+                pred_noise_f32 = noise_pred.astype(mx.float32)
+                if step_index < len(timesteps) - 1:
+                    next_ts: float | None = float(timesteps[step_index + 1].item())
+                    renoise = mx.random.normal(noise_input_f32.shape).astype(mx.float32)
+                else:
+                    next_ts, renoise = None, None
+                latents = dmd_step(
+                    latents=noise_input_f32,
+                    noise_input_latent=noise_input_f32,
+                    pred_noise=pred_noise_f32,
+                    schedule=dmd_schedule,
+                    timestep=ts_val,
+                    next_timestep=next_ts,
+                    noise=renoise,
+                ).astype(mx_dtype)
             else:
-                next_ts, renoise = None, None
-            latents = dmd_step(
-                latents=noise_input_f32,
-                noise_input_latent=noise_input_f32,
-                pred_noise=pred_noise_f32,
-                schedule=dmd_schedule,
-                timestep=ts_val,
-                next_timestep=next_ts,
-                noise=renoise,
-            ).astype(mx_dtype)
-        else:
-            mx.eval(noise_pred)
-            noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
-            latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
-            latents_torch = scheduler.step(noise_pred_torch, timestep, latents_torch, return_dict=False)[0]
-            latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
+                mx.eval(noise_pred)
+                noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
+                latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
+                latents_torch = scheduler.step(noise_pred_torch, timestep, latents_torch, return_dict=False)[0]
+                latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
 
-        mx.eval(latents)
-        print(f"denoise step {step_index + 1}/{len(timesteps)} complete")
+            mx.eval(latents)
+            print(f"denoise step {step_index + 1}/{len(timesteps)} complete")
     denoise_time = time.perf_counter() - denoise_start
     denoise_peak_memory = mx.get_peak_memory()
     active_memory = mx.get_active_memory()
@@ -599,6 +697,11 @@ def main() -> None:
         latent_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(latent_path, latents_np)
         print(f"Saved latents to: {latent_path}")
+    if args.save_stage1_latents and stage1_latents_np is not None:
+        stage1_path = args.output_path.with_name(args.output_path.stem + ".stage1.latents.npy")
+        stage1_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(stage1_path, stage1_latents_np)
+        print(f"Saved stage-1 latents to: {stage1_path}")
 
     decode_start = time.perf_counter()
     decode_latents_to_video(
@@ -648,6 +751,13 @@ def main() -> None:
             "num_frames": args.num_frames,
             "denoising_mode": args.denoising_mode,
             "dmd_denoising_steps": [int(step.strip()) for step in args.dmd_denoising_steps.split(",") if step.strip()],
+            "refine": bool(args.refine),
+            "refine_scale": refine_plan.spatial_scale if args.refine else 1,
+            "refine_stage1_height": refine_plan.stage1_height if args.refine else None,
+            "refine_stage1_width": refine_plan.stage1_width if args.refine else None,
+            "refine_sigma": refine_sigma,
+            "refine_upsample_mode": args.refine_upsample_mode if args.refine else None,
+            "refine_add_noise": args.refine_add_noise if args.refine else None,
             "mlx_dtype": args.mlx_dtype,
             "mlx_quantization": args.mlx_quantization,
             "mlx_compile": args.mlx_compile,

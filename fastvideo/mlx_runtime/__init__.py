@@ -30,13 +30,27 @@ from fastvideo.mlx_runtime.memory import (
     apply_memory_limits,
     gib_to_bytes,
 )
+from fastvideo.mlx_runtime.refine import (
+    DEFAULT_REFINE_SIGMA,
+    RefinePlan,
+    TwoPassResult,
+    plan_refine_resolutions,
+    prepare_refine_latents,
+    refine_sigma_from_schedule,
+    run_dmd_loop,
+    run_two_pass_dmd,
+    upsample_latents_spatial,
+)
 
 __all__ = [
     "AppliedMemoryLimits",
+    "DEFAULT_REFINE_SIGMA",
     "FastWanShape",
     "MLXQuantizationSpec",
     "MLXWanDiT",
     "MLXWanTransformerBlock",
+    "RefinePlan",
+    "TwoPassResult",
     "UnsupportedMLXQuantizationError",
     "add_memory_limit_args",
     "apply_memory_limits",
@@ -48,6 +62,12 @@ __all__ = [
     "mlx_dit_from_diffusers_safetensors",
     "mlx_block_weights_from_diffusers_safetensors",
     "mlx_block_weights_from_torch",
+    "plan_refine_resolutions",
+    "prepare_refine_latents",
     "quantization_support_error",
+    "refine_sigma_from_schedule",
+    "run_dmd_loop",
+    "run_two_pass_dmd",
     "save_mlx_dit_checkpoint",
+    "upsample_latents_spatial",
 ]
