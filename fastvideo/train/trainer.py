@@ -11,9 +11,12 @@ import torch
 from tqdm.auto import tqdm
 
 from fastvideo.distributed import get_sp_group, get_world_group
+from fastvideo.logger import init_logger
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.methods.base import TrainingMethod
 from fastvideo.train.utils.tracking import build_tracker
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
@@ -105,16 +108,32 @@ class Trainer:
         )
 
         resume_from_checkpoint = (tc.checkpoint.resume_from_checkpoint or "")
+        resumed_step: int | None = None
         if checkpoint_manager is not None:
             if resume_from_checkpoint:
                 method.seed_optimizer_state_for_resume()
             resumed_step = (checkpoint_manager.maybe_resume(resume_from_checkpoint=(resume_from_checkpoint)))
             if resumed_step is not None:
                 start_step = int(resumed_step)
-        self.callbacks.on_validation_begin(
-            method,
-            iteration=start_step,
-        )
+        # On resume, skip the immediate startup validation at the resumed
+        # step. Job 1111 died during checkpoint-100 *before* val ran; reloading
+        # three QAD roles + spinning a val pipeline on the same step is another
+        # OOM spike. The training loop will hit every_steps on later steps.
+        if resumed_step is None:
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.callbacks.on_validation_begin(
+                method,
+                iteration=start_step,
+            )
+        elif self.global_rank == 0:
+            logger.info(
+                "Skipping startup validation after resume from step=%s",
+                start_step,
+            )
         method.optimizers_zero_grad(start_step)
 
         data_stream = self._iter_dataloader(dataloader)
