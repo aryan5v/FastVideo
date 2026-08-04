@@ -192,6 +192,14 @@ class Trainer:
             if checkpoint_manager is not None:
                 checkpoint_manager.maybe_save(step)
 
+            # Drop allocator caches again before validation: the resident
+            # val pipeline is the other common OOM spike on multi-role QAD.
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
+
             self.callbacks.on_validation_begin(
                 method,
                 iteration=step,

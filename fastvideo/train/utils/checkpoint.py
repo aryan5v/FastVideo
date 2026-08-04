@@ -37,6 +37,44 @@ def _barrier() -> None:
         dist.barrier()
 
 
+def _release_cuda_cache(where: str = "") -> None:
+    """Drop allocator caches before DCP gather/barrier spikes.
+
+    Steady-state training can fit while checkpoint all-gathers + NCCL
+    barriers OOM on the same mesh (5B job 1111 died on the step-100
+    barrier with ranks reporting Cuda failure 2). Emptying the cache
+    first is cheap and recovers fragmentation from the just-finished step.
+    """
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception:  # noqa: BLE001 - best-effort before a memory-critical path
+        pass
+    try:
+        torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    # ipc_collect is not on every build; ignore if missing.
+    ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+    if callable(ipc_collect):
+        try:
+            ipc_collect()
+        except Exception:  # noqa: BLE001
+            pass
+    if where and _rank() == 0:
+        try:
+            free, total = torch.cuda.mem_get_info()
+            logger.info(
+                "CUDA cache released before %s (device free %.2f / %.2f GiB)",
+                where,
+                free / (1024 ** 3),
+                total / (1024 ** 3),
+            )
+        except Exception:  # noqa: BLE001
+            logger.info("CUDA cache released before %s", where)
+
+
 def _parse_step_from_dir(checkpoint_dir: Path) -> int:
     match = _CHECKPOINT_DIR_RE.match(checkpoint_dir.name)
     if not match:
@@ -197,6 +235,23 @@ class CheckpointManager:
     def _dcp_dir(self, step: int) -> Path:
         return self._checkpoint_dir(step) / "dcp"
 
+    def _checkpoint_looks_complete(self, step: int) -> bool:
+        """True if a prior save left a usable DCP tree for ``step``.
+
+        Used to skip re-saving after a crash that finished shard I/O but
+        died on the trailing NCCL barrier (job 1111 / checkpoint-100).
+        """
+        dcp_dir = self._dcp_dir(step)
+        if not dcp_dir.is_dir():
+            return False
+        if not (dcp_dir / ".metadata").is_file():
+            return False
+        shards = list(dcp_dir.glob("*.distcp"))
+        if not shards:
+            return False
+        # Require every shard to be non-trivial (partial writes are tiny).
+        return all(p.stat().st_size > 1_000_000 for p in shards)
+
     def maybe_save(self, step: int) -> None:
         save_steps = int(self.config.save_steps or 0)
         if save_steps <= 0:
@@ -204,6 +259,15 @@ class CheckpointManager:
         if step % save_steps != 0:
             return
         if self._last_saved_step == step:
+            return
+        if self._checkpoint_looks_complete(step):
+            if _rank() == 0:
+                logger.info(
+                    "Skipping checkpoint-%s save; complete DCP tree already on disk",
+                    step,
+                )
+            self._last_saved_step = step
+            _barrier()
             return
         self.save(step)
 
@@ -218,6 +282,10 @@ class CheckpointManager:
         dcp_dir = self._dcp_dir(step)
         os.makedirs(dcp_dir, exist_ok=True)
 
+        # Free step fragmentation before DCP all-gather / NCCL barrier.
+        _release_cuda_cache(f"checkpoint-{step} dcp.save")
+        _barrier()
+
         states = self._build_states()
         if _rank() == 0:
             logger.info(
@@ -226,6 +294,7 @@ class CheckpointManager:
             )
             self._write_metadata(checkpoint_dir, step)
         dcp.save(states, checkpoint_id=str(dcp_dir))
+        _release_cuda_cache(f"checkpoint-{step} post-dcp")
         _barrier()
 
         # Save RNG state AFTER dcp.save so it captures the

@@ -76,8 +76,15 @@ training:
 
   checkpoint:
     output_dir: outputs/wan2.2_5b_dmd2_3steps_mlx_int8
-    training_state_checkpointing_steps: 100
+    # 200 (not 100): keep validation every_steps=100 for quality signal, but
+    # do not stack a full DCP save on the same step as the resident validation
+    # pipeline. Job 1111 OOMed on the step-100 checkpoint NCCL barrier after
+    # a healthy 99-step run; empty_cache-before-save is the other half of the fix.
+    training_state_checkpointing_steps: 200
     checkpoints_total_limit: 3
+    # Resume target after 1111 crash (complete 131GB DCP tree on disk).
+    # Override/clear via CLI if starting fresh.
+    resume_from_checkpoint: outputs/wan2.2_5b_dmd2_3steps_mlx_int8/checkpoint-100
 
   tracker:
     project_name: distillation_wan
