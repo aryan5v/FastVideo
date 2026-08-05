@@ -34,10 +34,13 @@ Every model is a 3-step student trained with DMD2 and quantization-aware trainin
 
 **The MLX runtime** — a native Apple Silicon implementation of the Wan DiT with an on-device 3-step DMD sampler, pinned against the PyTorch reference by parity tests that run in CI on both Metal and CPU backends. The DiT forward is `mx.compiled` by default, bit-identical to eager.
 
-**Generation modes, because one size doesn't fit all:**
+**Generation modes, because one size doesn't fit all.** Temporal and spatial shortcuts compose, and every one ships behind a quality gate:
 
 - **Fast mode (RIFE)** — generate every Nth frame and interpolate the rest with Apple-silicon-native rife-mlx. `--fast --fast-factor 2` roughly halves diffusion work; `--fast-sharpen` restores edge crispness.
+- **Spatial fast mode** — RIFE's spatial twin: denoise at a fraction of the target resolution, then bilinear-upsample the clean latents back before decode. No second denoise, ≈ scale² fewer tokens. Composes with `--fast` for fewer frames *and* fewer pixels. (MetalFX is deliberately not used here — it wants game-engine motion vectors and depth that diffusion output doesn't have; latent bilinear upsample is the same primitive without them.)
+- **Refine mode (two-pass)** — the H3 / LTX-2 pattern, ported into the runtime: generate at base resolution, re-noise, and run a second denoising pass with the *same* DiT at higher resolution. No LoRA, no SR weights, no training — the biggest quality lever that doesn't need a new model. `--fast + --refine` composes: fewer frames at base res, full-res refine, RIFE restore after decode.
 - **Quality mode** — full Wan VAE decode (bf16) instead of the default TAEHV, one flag away (`--decode-backend wan-vae`) when fidelity beats speed.
+- **Prompt enhancement (Context-IR-style)** — an on-device pre-pass that expands a short prompt into Wan-style cinematic shot language, via a local mlx-lm model or a deterministic template, with an on-disk cache. Wan's training captions are long and cinematic; short prompts leave quality on the table, and this closes the gap without a remote API.
 - **Draft attention (experimental)** — windowed attention with sinks for interactive prompt exploration, gated behind an SSIM check; dense attention stays the default for final renders.
 - **Prompt cache** — embeddings are content-addressed and cached, so iterating on seeds and settings skips the text encoder entirely.
 
@@ -125,8 +128,7 @@ The defaults are the release configuration. Fast mode is `--fast --fast-factor 2
 
 The optimization ladder that took the CUDA stack from 170 s to 1.8 s is the ladder we're now climbing on Metal.
 
-- **W8A8 fused INT8 GEMM.** Weight-only quantization can't buy speed on Metal; quantizing activations too (so the integer matrix units actually engage) can. Our calibration study says it's viable with per-token scales — the remaining work is a custom Metal kernel against M5 Neural Accelerators, then a W8A8 QAT pass. Nobody has done this for diffusion on Metal. We intend to be first.
-- **Refine mode.** Generate at base resolution, then a second refinement pass with the same model at higher resolution — the two-pass pattern, no new model required.
+- **W8A8 fused INT8 GEMM — in development.** Weight-only quantization can't buy speed on Metal; quantizing activations too (so the integer matrix units actually engage) can. Our calibration study says it's viable with per-token scales, and the custom Metal kernel (int8×int8 → int32 accumulate) is already running as a correctness-verified prototype. The speed gate is next, on M5 Neural Accelerators, then a W8A8 QAT pass. Nobody has done this for diffusion on Metal. We intend to be first.
 - **Image-to-video and longer clips.** The 5B is natively image-conditioned; I2V and streaming/causal generation are on the runtime roadmap.
 - **MiniMax-H3.** The same INT8 QAD machinery now points at H3's 33B omni-modal (video + native audio) teacher. Local audio-video generation is the thing nobody else ships.
 
