@@ -104,8 +104,10 @@
   at load). FastVideo source is Apache-2.0; the vendored TAEHV decoder is MIT.</p>
 
   <h2>The Mac inference stack</h2>
-  <p>The co-design target on a Mac is MLX and unified memory, not tensor cores and HBM. The stack reflects
-  that, layer by layer.</p>
+  <p>With this release, <b>FastVideo supports Apple silicon natively through a new MLX runtime</b> — the
+  same models, pipeline, and training code that run on CUDA, now first-class on Metal. The co-design
+  target here is MLX and unified memory, not tensor cores and HBM, and the stack reflects that layer by
+  layer.</p>
   <ul>
     <li><b>MLX-first DiT, dense attention.</b> The denoising loop runs natively on the Metal GPU with
       <code>mx.fast.scaled_dot_product_attention</code>, 100% dense. The 3-step DMD sampler runs on-device
@@ -113,8 +115,8 @@
     <li><b>INT8 where it counts.</b> Every DiT matrix weight is affine INT8 (group 64) via
       <code>mx.quantized_matmul</code>; norms and modulation tables stay fp16.</li>
     <li><b>Memory choreography.</b> The umT5 text encoder loads in bf16, encodes once, and is freed before
-      the DiT loads. Decode defaults to TAEHV, a tiny autoencoder that removes the full Wan VAE from both
-      latency and the memory peak. Peak memory is the largest single stage, not the sum — which is why a
+      the DiT loads. Decode defaults to TAEHV (Ollin's tiny Wan autoencoder, MIT-licensed and vendored) — a
+      fraction of the full Wan VAE's cost, which removes it from both the latency and the memory peak. Peak memory is the largest single stage, not the sum — which is why a
       5B fits in 16 GB and a 14B in 24.</li>
     <li><b>Pre-quantized checkpoints + prompt cache.</b> Packed INT8 weights, scales, and biases stored
       directly; reloads skip requantization, and a content-addressed prompt cache makes repeat generations
@@ -131,14 +133,15 @@
   already-distilled FastWan checkpoint whose every forward computes on the INT8 deploy grid, gradients
   passing straight through to the real weights.</p>
 
-  <h2>The format story — two formats that didn't make it</h2>
-  <p>We didn't pick INT8 from a spec sheet. We got here through two failures, and we're showing both,
-  because readers who would try them deserve the measurement, not a shrug.</p>
+  <h2>How we chose INT8</h2>
+  <p>Two other formats were serious candidates. We evaluated both the way we evaluate everything — by
+  training on them and measuring — and both fell short. The data is below, because the community runs
+  these same experiments and should not have to repeat our spend.</p>
 
-  <h3>Attempt 1 — MXFP4: the format that looked better on paper</h3>
-  <p>Before the survey, we trained QAD models on the MXFP4 grid at both 1.3B and 14B. Neither made the
-  cut. The 14B MXFP4 run consumed 26 GPU-days over 4000 steps and produced washed-out, undertrained-looking
-  video. The reconstruction numbers explain it — MXFP4 is the worst-reconstructing format we measured:</p>
+  <h3>MXFP4: ruled out on quality</h3>
+  <p>Our first QAD runs used the MXFP4 grid, at both 1.3B and 14B. Neither met the bar. The 14B run
+  consumed 26 GPU-days over 4000 steps and produced washed-out, undertrained video. The reconstruction
+  numbers explain why: MXFP4 is the least accurate format we measured.</p>
 
   <div class="chart">
     <svg viewBox="0 0 760 240" width="100%" role="img" aria-label="Reconstruction error by format">
@@ -167,20 +170,19 @@
   <div class="video">[ VIDEO GRID — 1.3B: MXFP4 vs INT8, same prompt/seed ]</div>
   <div class="video">[ VIDEO GRID — 14B: MXFP4 vs INT8, same prompt/seed ]</div>
 
-  <h3>Attempt 2 — W8A8: the ambitious one, closed with data</h3>
-  <p>A fair critique of "INT8 is only for memory" is: <i>then build W8A8.</i> Quantize activations too,
-  keep the matmul in the integer domain, and the Neural Accelerators should finally earn their keep.
-  Ideogram shipped that pattern on consumer GPUs. We ran the same experiment end-to-end for Wan on Apple
-  silicon.</p>
-  <p><b>What we built.</b> Activation calibration on GB200 (every Linear in the 5B and 14B, across the
-  three DMD timesteps, with random and real umT5 context): bulk layers fit int8 with per-token scales;
-  ~7% of layers (almost all cross-attention <code>to_q</code>) are outlier spikes we would keep in fp16 —
-  and real text embeddings make those outliers <i>worse</i>, not better, so the keep-list is not a randn
-  artifact. Then a fused int8×int8 Metal kernel via <code>mx.fast.metal_kernel</code>: per-token
-  activation scales, per-out-channel weight scales, int32 accumulate, scale back to float. Bit-close to
-  the dequant reference (max abs error 3×10⁻⁶). And a pre-registered ship bar: fused W8A8 must be
-  <b>≥1.2×</b> faster than fp16 at DiT shapes, or it isn't worth the complexity.</p>
-  <p><b>What M5 actually did:</b></p>
+  <h3>W8A8: ruled out on speed</h3>
+  <p>The obvious follow-up is to quantize activations as well as weights, keeping the matmul in the
+  integer domain so the Neural Accelerators actually engage. Ideogram shipped that pattern on consumer
+  GPUs. We built it and measured it for Wan on Apple silicon.</p>
+  <p>Activation calibration on GB200 (every Linear in the 5B and 14B, across the three DMD timesteps,
+  with random and real umT5 context) told us the scheme was viable: the bulk of every layer fits int8
+  with per-token scales, and only ~7% of layers — almost all cross-attention <code>to_q</code> — are
+  outlier spikes we would hold in fp16. Real text embeddings make those outliers worse, not better, so
+  the keep-list is not a randn artifact. We then wrote a fused int8×int8 Metal kernel
+  (<code>mx.fast.metal_kernel</code>: per-token activation scales, per-out-channel weight scales, int32
+  accumulate). It is bit-close to the dequantized reference (max abs error 3×10⁻⁶), and we set the ship
+  bar in advance: <b>≥1.2× faster than fp16 at DiT shapes, or we don't ship it.</b></p>
+  <p>It did not come close:</p>
   <table>
     <thead><tr><th>Shape (tokens × out × in)</th><th class="num">fp16</th><th class="num">Fused W8A8 (best)</th><th class="num">Speedup</th></tr></thead>
     <tbody>
@@ -193,23 +195,22 @@
   </table>
   <div class="callout neg">
     <span class="tag bad">Correctness: PASS · Speed: NO-GO</span>
-    <p class="small" style="margin:6px 0 0">The mechanism is not "M5 is slow" — M5's fp16 GEMM is
-    excellent. The mechanism is that today's MLX custom-kernel surface gives you a <b>scalar</b> int8 MAC
-    in shader code; it does not bind the Neural Accelerator integer tensor path. Until that path is a
-    public, stable API (or someone writes a lower-level kernel that wins the 1.2× bar), <b>quantization on
-    Mac remains a memory lever, not a speed lever.</b> Weight-only <code>mx.quantized_matmul</code> stayed
-    near fp16 — the same dequant-then-fp16 story the survey predicted, not a secret fast path.</p>
+    <p class="small" style="margin:6px 0 0">M5's fp16 GEMM is excellent — the bottleneck is the kernel
+    surface, not the silicon. Today's MLX custom-kernel API gives you a <b>scalar</b> int8 multiply in
+    shader code; it does not bind the Neural Accelerator integer tensor path. Until that path is public
+    and stable (or a lower-level kernel clears the 1.2× bar), <b>quantization on Mac is a memory lever,
+    not a speed lever.</b> Weight-only <code>mx.quantized_matmul</code> stayed near fp16 throughout —
+    the dequant-then-fp16 behavior the survey predicted, not a hidden fast path.</p>
   </div>
-  <p class="small muted">Canonical receipt: <code>docs/design/w8a8_int8_gemm_metal.md</code> (M5 probe,
-  Mac17,3, 24 GB, macOS 26.5.2, MLX 0.32.0). Copy freely; do not re-measure unless the MLX/Metal surface
-  changes.</p>
+  <p class="small muted">Full receipt: <code>docs/design/w8a8_int8_gemm_metal.md</code> (M5, 24 GB,
+  macOS 26.5.2, MLX 0.32.0).</p>
 
   <div class="callout pos">
-    <span class="tag good">So: INT8</span>
-    <p class="small" style="margin:6px 0 0">On Apple silicon, quantization is a memory decision, and INT8
+    <span class="tag good">The decision: INT8</span>
+    <p class="small" style="margin:6px 0 0">Quantization on Apple silicon is a memory decision, and INT8
     is the most accurate way to spend 8 bits. 5.3 GB for the 5B, 14.9 GB for the 14B — model classes that
-    used to need a datacenter, in laptop memory. Speed comes from step count, fused kernels, and the fast
-    modes below — not from chasing 4-bit.</p>
+    used to require a datacenter, in laptop memory. Speed comes from step count, fused kernels, and the
+    fast modes below.</p>
   </div>
 
   <h2>Generation modes</h2>
@@ -290,8 +291,9 @@ python examples/inference/basic/mlx_wan_prompt_to_video.py \
   direction, and we're just getting started.</p>
 
   <h2>Acknowledgements</h2>
-  <p class="small muted">[TODO: contributor list, compute acknowledgements (GB200 cluster), advisor list,
-  community links]</p>
+  <p class="small muted">Training for every model in this post ran on NVIDIA GB200 GPUs — thank you to
+  NVIDIA for the compute and for the Blackwell-era tooling the QAD recipe builds on. [TODO: contributor
+  list, advisor list, community links]</p>
 
   <div class="foot">FastVideo Team · Apache-2.0 (code) · MIT (TAEHV) ·
   <a href="https://github.com/hao-ai-lab/FastVideo">github.com/hao-ai-lab/FastVideo</a></div>
