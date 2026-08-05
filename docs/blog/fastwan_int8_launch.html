@@ -66,22 +66,23 @@
 
   <div class="tldr">
     <p><b class="k">TL;DR:</b> A five-second, 720p, text-to-video clip, generated start to finish on a Mac.
-    No cloud, no datacenter GPU. Three models (1.3B / 5B / 14B), one recipe, one rule we now hold
-    after two failed attempts proved it out: <b class="k">on Apple silicon, quantization is a memory
+    Three models (1.3B / 5B / 14B), one recipe, one rule we now hold after two failed
+    attempts proved it out: <b class="k">on Apple silicon, quantization is a memory
     decision, not a speed decision.</b> This post shows the models, the runtime, and the receipts —
     including the two formats that didn't make it.</p>
   </div>
 
-  <p class="lede">A year ago, "local video generation" meant owning a $2,000 GPU. We think it should mean
-  opening your laptop. Today we're releasing the FastWan INT8 family for Apple silicon, and the native
-  MLX runtime that runs it. The 5B makes 720p video out of the box and fits in 16 GB of unified memory.
+  <p class="lede">Apple silicon Macs are genuinely capable machines, and there are tens of millions of them. We want
+  every one of them to run open-source video generation locally — no account, no queue, no meter
+  running. Today we're releasing the FastWan INT8 family for Apple silicon, and the native MLX runtime
+  that runs it. The 5B makes 720p video out of the box and fits in 16 GB of unified memory.
   The 14B is the largest video model we've ever run on a laptop. The 1.3B is the fastest way to make a
   video on a Mac, period.</p>
 
   <h2>Why a Mac release, and why now</h2>
   <p><a href="https://haoailab.com/blogs/fastwan-qad/">FastWan-QAD</a> proved you can co-design a model,
   a quantization format, and a runtime to make a 5-second video in 1.8 seconds on a single RTX 5090.
-  That's still a datacenter card. Meanwhile, the Mac quietly became a serious AI machine: tens of
+  Meanwhile, the Mac quietly became a serious AI machine: tens of
   millions of capable GPUs with unified memory, M5's new Neural Accelerators (per-core matrix units
   that Metal FlashAttention-class kernels already exploit for up to 4.6× over M4), a matured MLX with
   fused kernels and graph compilation, and macOS 26 / Metal 4 underneath. Local LLMs on Mac went from
@@ -209,7 +210,7 @@
     <span class="tag good">The decision: INT8</span>
     <p class="small" style="margin:6px 0 0">Quantization on Apple silicon is a memory decision, and INT8
     is the most accurate way to spend 8 bits. 5.3 GB for the 5B, 14.9 GB for the 14B — model classes that
-    used to require a datacenter, in laptop memory. Speed comes from step count, fused kernels, and the
+    frontier-class models, in laptop memory. Speed comes from step count, fused kernels, and the
     fast modes below.</p>
   </div>
 
