@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FastWan INT8 on Apple Silicon — 720p Video Generation on Your Mac</title>
+<title>FastMan-QAD — 720p Video Generation Natively on Apple Silicon</title>
 <style>
   :root{
     --bg:#0c0e12; --panel:#141821; --panel2:#1a2030; --ink:#e8ecf2; --muted:#9aa4b5;
@@ -58,15 +58,17 @@
 <body>
 <div class="wrap">
 
-  <div class="banner">[ BANNER — hero: 720p clip generated on a MacBook, with the three model badges
-    <b>FastWan-MLX 1.3B · 5B · 14B</b> ]</div>
+  <div style="margin:22px 0 8px">
+    <img src="assets/FASTMAN_QAD.png" alt="FastMan-QAD by FastVideo — 1.3B, 5B, 14B"
+         style="width:100%;border-radius:14px;display:block">
+  </div>
 
   <div class="meta">[TODO: date] · FastVideo Team</div>
-  <h1>FastWan-MLX: 720p video generation, natively on Apple silicon</h1>
+  <h1>FastMan-QAD: 720p video generation, natively on Apple silicon</h1>
 
   <div class="tldr">
     <p><b class="k">TL;DR:</b> A five-second, 720p, text-to-video clip, generated start to finish on a
-    Mac. Today we're introducing <b class="k">FastWan-MLX</b>, a family of three open-source video
+    Mac. Today we're introducing <b class="k">FastMan-QAD</b>, a family of three open-source video
     models (1.3B, 5B, and 14B) built by FastVideo and Wan, trained to run natively on Apple silicon
     through our new MLX runtime. The 5B makes 720p video out of the box and fits in 16 GB of unified
     memory. The 14B is the largest video model we've ever run on a laptop. And the 1.3B is the fastest
@@ -74,28 +76,28 @@
   </div>
 
   <p class="lede">Apple silicon Macs are genuinely capable machines, and there are tens of millions of
-  them. We want every one of those machines to run open-source video generation locally — no account,
-  no queue, no meter running. FastWan-MLX is that release: FastVideo's models, Wan's architectures, and
-  a new MLX runtime, all working together so a much wider audience gets access to local, open-source video
-  generation.</p>
+  them. We want every one of those machines to run open-source video generation locally, with no account,
+  no queue, and no meter running. FastMan-QAD is that release: FastVideo's models, Wan's architectures,
+  and a new MLX runtime, all working together so a much wider audience gets access to local, open-source
+  video generation.</p>
+  <p class="small muted">The name says it: <b>FAST</b> + <b>M</b> (Mac, MLX, and the M chips) + <b>wan</b>. FastMan.</p>
 
   <h2>Why a Mac release, and why now</h2>
-  <p>The Mac has quietly become a serious AI machine. Tens of millions of capable GPUs with unified
-  memory are already on people's desks. The M5 generation added dedicated Neural Accelerators, per-core
+  <p>The Mac has quietly become a serious AI machine, and it only gets more capable with every
+generation. Tens of millions of capable GPUs with unified memory are already on people's desks. The M5 generation added dedicated Neural Accelerators, per-core
   matrix units that Metal FlashAttention-class kernels already exploit for up to 4.6× faster generation
   over M4. MLX matured into a real framework with fused kernels, graph compilation, and quantized
   formats, and macOS 26 / Metal 4 gives it a stable driver-level path. Local AI on Mac has gone from
-  curiosity to default for language models. Video generation is the obvious next step, and it's the one
-  we build. So we brought the core of FastVideo to Mac: the actual DiT, sampler, and decoder, running
+  curiosity to default for language models. Video generation is the obvious next step, and it's the one we know how to build. So we brought the core of FastVideo to Mac: the actual DiT, sampler, and decoder, running
   natively on Metal.</p>
 
   <h2>What ships</h2>
   <table>
     <thead><tr><th>Checkpoint</th><th>Base</th><th>Native output</th><th class="num">INT8 size</th><th>Mac tier</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td><b>FastWan-MLX-1.3B</b></td><td>Wan2.1-T2V-1.3B</td><td>480p, ~5 s</td><td class="num">~1.4 GB</td><td>16 GB+</td><td>Fastest download</td></tr>
-      <tr><td><b>FastWan-MLX-5B</b></td><td>Wan2.2-TI2V-5B</td><td><b>720p</b>, ~5 s</td><td class="num">~5.3 GB</td><td>16 GB+</td><td><b>Fast + high-res</b></td></tr>
-      <tr><td><b>FastWan-MLX-14B</b></td><td>Wan2.1-T2V-14B</td><td>480p, ~5 s</td><td class="num">~14.9 GB</td><td>24 GB+</td><td>Maximum local quality</td></tr>
+      <tr><td><b>FastMan-1.3B-QAD</b></td><td>Wan2.1-T2V-1.3B</td><td>480p, ~5 s</td><td class="num">~1.4 GB</td><td>16 GB+</td><td>Fastest download</td></tr>
+      <tr><td><b>FastMan-5B-QAD</b></td><td>Wan2.2-TI2V-5B</td><td><b>720p</b>, ~5 s</td><td class="num">~5.3 GB</td><td>16 GB+</td><td><b>Fast + high-res</b></td></tr>
+      <tr><td><b>FastMan-14B-QAD</b></td><td>Wan2.1-T2V-14B</td><td>480p, ~5 s</td><td class="num">~14.9 GB</td><td>24 GB+</td><td>Maximum local quality</td></tr>
     </tbody>
   </table>
   <p class="small muted">Every model is a 3-step student trained with DMD2 and quantization-aware
@@ -104,7 +106,7 @@
   skips requantization at load. FastVideo source is Apache-2.0; the vendored TAEHV decoder is MIT.</p>
 
   <h2>The MLX runtime</h2>
-  <p>With FastWan-MLX, <b>FastVideo supports Apple silicon natively through a new MLX runtime</b>: the
+  <p>With FastMan-QAD, <b>FastVideo supports Apple silicon natively through a new MLX runtime</b>: the
   same models, pipeline, and training code that run on CUDA, now first-class on Metal. The design target
   here is MLX and unified memory, and the runtime reflects that layer by layer:</p>
   <ul>
@@ -113,7 +115,7 @@
       on-device too; no tensor leaves unified memory, and the whole step is one compiled MLX graph.</li>
     <li><b>INT8 where it counts.</b> Every DiT matrix weight is affine INT8 (group 64) via
       <code>mx.quantized_matmul</code>; norms and modulation tables stay fp16.</li>
-    <li><b>Memory choreography.</b> The umT5 text encoder loads in bf16, encodes once, and frees before
+    <li><b>Memory choreography.</b> The umT5 text encoder loads in bf16, encodes once, and is freed before
       the DiT loads. Decode defaults to TAEHV (Ollin's tiny Wan autoencoder, MIT-licensed and vendored),
       a fraction of the full Wan VAE's cost. Peak memory is the largest single stage, not the sum, which
       is why a 5B fits in 16 GB and a 14B in 24.</li>
@@ -169,7 +171,7 @@
     <li><b>Spatial fast mode</b>: denoise at a fraction of the target resolution, then bilinear-upsample
       the clean latents back before decode. No second denoise, roughly scale² fewer tokens, and it
       composes with fast mode for fewer frames <i>and</i> fewer pixels.</li>
-    <li><b>Refine mode (two-pass)</b> — generate at base resolution, then a second denoising pass with
+    <li><b>Refine mode (two-pass)</b>: generate at base resolution, then a second denoising pass with
       the same DiT at higher resolution. No LoRA, no super-resolution weights, no training; a meaningful
       quality lever that needs no new model.</li>
     <li><b>Quality mode</b>: full Wan VAE decode (bf16) instead of the default TAEHV, one flag away
@@ -183,15 +185,15 @@
 
   <h2>Results</h2>
   <p>MS-SSIM of each model's INT8 output against its own FP16 output on the motion7 prompt set (shared
-  seeds) measures how much quantization changes the result — consistency, not absolute quality. Absolute
-  quality is judged by humans: the released checkpoints are selected from visual review grids.</p>
+  seeds) measures how much quantization changes the result — consistency, not absolute quality. The released
+  checkpoints are selected from human visual review grids.</p>
   <table>
     <thead><tr><th>Model</th><th class="num">Mean MS-SSIM</th></tr></thead>
     <tbody>
       <tr><td>FastWan 1.3B, post-training quantization</td><td class="num">0.907</td></tr>
-      <tr><td>FastWan-MLX-1.3B (EMA release)</td><td class="num good">0.933</td></tr>
-      <tr><td>FastWan-MLX-5B</td><td class="num">TODO(measure)</td></tr>
-      <tr><td>FastWan-MLX-14B</td><td class="num">TODO(measure)</td></tr>
+      <tr><td>FastMan-1.3B-QAD (EMA release)</td><td class="num good">0.933</td></tr>
+      <tr><td>FastMan-5B-QAD</td><td class="num">TODO(measure)</td></tr>
+      <tr><td>FastMan-14B-QAD</td><td class="num">TODO(measure)</td></tr>
     </tbody>
   </table>
   <p>Speed and memory (Apple M5, 3-step DMD, INT8 DiT, TAEHV decode):</p>
@@ -212,16 +214,16 @@
 
   <h2>How to run</h2>
   <pre>uv pip install -e '.[mlx]'
-huggingface-cli download [TODO: final HF id] --local-dir ~/models/fastwan-mlx
+huggingface-cli download [TODO: final HF id] --local-dir ~/models/fastman-qad
 
-python examples/inference/basic/mlx_wan_prompt_to_video.py   --model-root ~/models/fastwan-mlx   --mlx-checkpoint ~/models/fastwan-mlx/mlx_dit   --prompt "A fox runs through a misty pine forest, leaves kicking up behind it."</pre>
+python examples/inference/basic/mlx_wan_prompt_to_video.py   --model-root ~/models/fastman-qad   --mlx-checkpoint ~/models/fastman-qad/mlx_dit   --prompt "A fox runs through a misty pine forest, leaves kicking up behind it."</pre>
   <p class="small">The defaults are the release configuration. Fast mode is <code>--fast --fast-factor 2</code>,
   spatial fast mode is <code>--fast-spatial</code>, refine is <code>--refine</code>, quality mode is
   <code>--decode-backend wan-vae</code>, prompt enhancement is <code>--enhance-prompt</code>. The Apple
   Silicon guide covers fast-reload, memory tiers, and troubleshooting.</p>
 
   <h2>What's next</h2>
-  <p>FastWan-MLX is the start of the Mac track, not the end of it. We're continuing to experiment and to
+  <p>FastMan-QAD is the start of the Mac track, not the end of it. We're continuing to experiment and to
   improve: more model families coming to the MLX runtime, larger models at the quality end, and
   even faster generation at the speed end. Image-to-video and longer clips are on the roadmap, and we
   keep pushing the quantization and kernel work forward so each release is better than the last.</p>
