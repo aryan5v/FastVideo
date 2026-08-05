@@ -59,90 +59,76 @@
 <div class="wrap">
 
   <div class="banner">[ BANNER — hero: 720p clip generated on a MacBook, with the three model badges
-    <b>1.3B · 5B · 14B INT8</b> ]</div>
+    <b>FastWan-MLX 1.3B · 5B · 14B</b> ]</div>
 
   <div class="meta">[TODO: date] · FastVideo Team</div>
-  <h1>FastWan INT8 on Apple Silicon: 720p video generation, entirely on your Mac</h1>
+  <h1>FastWan-MLX: 720p video generation, natively on Apple silicon</h1>
 
   <div class="tldr">
-    <p><b class="k">TL;DR:</b> A five-second, 720p, text-to-video clip, generated start to finish on a Mac.
-    Three models (1.3B / 5B / 14B), one recipe, one rule we now hold after two failed
-    attempts proved it out: <b class="k">on Apple silicon, quantization is a memory
-    decision, not a speed decision.</b> This post shows the models, the runtime, and the receipts —
-    including the two formats that didn't make it.</p>
+    <p><b class="k">TL;DR:</b> A five-second, 720p, text-to-video clip, generated start to finish on a
+    Mac. Today we're introducing <b class="k">FastWan-MLX</b>, a family of three open-source video
+    models (1.3B, 5B, and 14B) built by FastVideo and Wan, trained to run natively on Apple silicon
+    through our new MLX runtime. The 5B makes 720p video out of the box and fits in 16 GB of unified
+    memory. The 14B is the largest video model we've ever run on a laptop. And the 1.3B is the fastest
+    way to make a video on a Mac, period.</p>
   </div>
 
-  <p class="lede">Apple silicon Macs are genuinely capable machines, and there are tens of millions of them. We want
-  every one of them to run open-source video generation locally — no account, no queue, no meter
-  running. Today we're releasing the FastWan INT8 family for Apple silicon, and the native MLX runtime
-  that runs it. The 5B makes 720p video out of the box and fits in 16 GB of unified memory.
-  The 14B is the largest video model we've ever run on a laptop. The 1.3B is the fastest way to make a
-  video on a Mac, period.</p>
+  <p class="lede">Apple silicon Macs are genuinely capable machines, and there are tens of millions of
+  them. We want every one of those machines to run open-source video generation locally — no account,
+  no queue, no meter running. FastWan-MLX is that release: FastVideo's models, Wan's architectures, and
+  a new MLX runtime, all working together so a much wider audience gets access to local, open-source video
+  generation.</p>
 
   <h2>Why a Mac release, and why now</h2>
-  <p><a href="https://haoailab.com/blogs/fastwan-qad/">FastWan-QAD</a> proved you can co-design a model,
-  a quantization format, and a runtime to make a 5-second video in 1.8 seconds on a single RTX 5090.
-  Meanwhile, the Mac quietly became a serious AI machine: tens of
-  millions of capable GPUs with unified memory, M5's new Neural Accelerators (per-core matrix units
-  that Metal FlashAttention-class kernels already exploit for up to 4.6× over M4), a matured MLX with
-  fused kernels and graph compilation, and macOS 26 / Metal 4 underneath. Local LLMs on Mac went from
-  curiosity to default. Video generation is the obvious next step, and it's the one we build. So we
-  brought the core of FastVideo to Mac — not a demo, not a cloud-backed shim: the actual DiT, sampler,
-  and decoder, running natively on Metal.</p>
+  <p>The Mac has quietly become a serious AI machine. Tens of millions of capable GPUs with unified
+  memory are already on people's desks. The M5 generation added dedicated Neural Accelerators, per-core
+  matrix units that Metal FlashAttention-class kernels already exploit for up to 4.6× faster generation
+  over M4. MLX matured into a real framework with fused kernels, graph compilation, and quantized
+  formats, and macOS 26 / Metal 4 gives it a stable driver-level path. Local AI on Mac has gone from
+  curiosity to default for language models. Video generation is the obvious next step, and it's the one
+  we build. So we brought the core of FastVideo to Mac: the actual DiT, sampler, and decoder, running
+  natively on Metal.</p>
 
   <h2>What ships</h2>
   <table>
     <thead><tr><th>Checkpoint</th><th>Base</th><th>Native output</th><th class="num">INT8 size</th><th>Mac tier</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td><b>FastWan-QAD-1.3B-INT8</b></td><td>Wan2.1-T2V-1.3B</td><td>480p, ~5 s</td><td class="num">~1.4 GB</td><td>16 GB+</td><td>Fastest download</td></tr>
-      <tr><td><b>FastWan-QAD-5B-INT8</b></td><td>Wan2.2-TI2V-5B</td><td><b>720p</b>, ~5 s</td><td class="num">~5.3 GB</td><td>16 GB+</td><td><b>Fast + high-res</b></td></tr>
-      <tr><td><b>FastWan-QAD-14B-INT8</b></td><td>Wan2.1-T2V-14B</td><td>480p, ~5 s</td><td class="num">~14.9 GB</td><td>24 GB+</td><td>Maximum local quality</td></tr>
+      <tr><td><b>FastWan-MLX-1.3B</b></td><td>Wan2.1-T2V-1.3B</td><td>480p, ~5 s</td><td class="num">~1.4 GB</td><td>16 GB+</td><td>Fastest download</td></tr>
+      <tr><td><b>FastWan-MLX-5B</b></td><td>Wan2.2-TI2V-5B</td><td><b>720p</b>, ~5 s</td><td class="num">~5.3 GB</td><td>16 GB+</td><td><b>Fast + high-res</b></td></tr>
+      <tr><td><b>FastWan-MLX-14B</b></td><td>Wan2.1-T2V-14B</td><td>480p, ~5 s</td><td class="num">~14.9 GB</td><td>24 GB+</td><td>Maximum local quality</td></tr>
     </tbody>
   </table>
-  <p class="small muted">Every model is a 3-step student trained with DMD2 + quantization-aware training on
-  the affine INT8 grid, so the precision it learned in is the precision it ships in. Each publishes as
-  Diffusers safetensors and as a pre-quantized MLX checkpoint (halves the download, skips requantization
-  at load). FastVideo source is Apache-2.0; the vendored TAEHV decoder is MIT.</p>
+  <p class="small muted">Every model is a 3-step student trained with DMD2 and quantization-aware
+  training on the affine INT8 grid, so the precision it learned in is the precision it ships in. Each
+  publishes as Diffusers safetensors and as a pre-quantized MLX checkpoint that halves the download and
+  skips requantization at load. FastVideo source is Apache-2.0; the vendored TAEHV decoder is MIT.</p>
 
-  <h2>The Mac inference stack</h2>
-  <p>With this release, <b>FastVideo supports Apple silicon natively through a new MLX runtime</b> — the
-  same models, pipeline, and training code that run on CUDA, now first-class on Metal. The co-design
-  target here is MLX and unified memory, not tensor cores and HBM, and the stack reflects that layer by
-  layer.</p>
+  <h2>The MLX runtime</h2>
+  <p>With FastWan-MLX, <b>FastVideo supports Apple silicon natively through a new MLX runtime</b>: the
+  same models, pipeline, and training code that run on CUDA, now first-class on Metal. The design target
+  here is MLX and unified memory, and the runtime reflects that layer by layer:</p>
   <ul>
     <li><b>MLX-first DiT, dense attention.</b> The denoising loop runs natively on the Metal GPU with
-      <code>mx.fast.scaled_dot_product_attention</code>, 100% dense. The 3-step DMD sampler runs on-device
-      too — no tensor leaves unified memory, and the whole step is one compiled MLX graph.</li>
+      <code>mx.fast.scaled_dot_product_attention</code>, 100% dense. The 3-step DMD sampler runs
+      on-device too; no tensor leaves unified memory, and the whole step is one compiled MLX graph.</li>
     <li><b>INT8 where it counts.</b> Every DiT matrix weight is affine INT8 (group 64) via
       <code>mx.quantized_matmul</code>; norms and modulation tables stay fp16.</li>
-    <li><b>Memory choreography.</b> The umT5 text encoder loads in bf16, encodes once, and is freed before
-      the DiT loads. Decode defaults to TAEHV (Ollin's tiny Wan autoencoder, MIT-licensed and vendored) — a
-      fraction of the full Wan VAE's cost, which removes it from both the latency and the memory peak. Peak memory is the largest single stage, not the sum — which is why a
-      5B fits in 16 GB and a 14B in 24.</li>
+    <li><b>Memory choreography.</b> The umT5 text encoder loads in bf16, encodes once, and frees before
+      the DiT loads. Decode defaults to TAEHV (Ollin's tiny Wan autoencoder, MIT-licensed and vendored),
+      a fraction of the full Wan VAE's cost. Peak memory is the largest single stage, not the sum, which
+      is why a 5B fits in 16 GB and a 14B in 24.</li>
     <li><b>Pre-quantized checkpoints + prompt cache.</b> Packed INT8 weights, scales, and biases stored
       directly; reloads skip requantization, and a content-addressed prompt cache makes repeat generations
       start in seconds.</li>
   </ul>
 
-  <h2>QAD, retargeted to MLX</h2>
-  <p>Post-training quantization visibly damages a 3-step model — with only three denoising steps there's
-  no room to recover from weights knocked off their trained values. So we make the model live in its
-  deployment precision during training: the training-time fake quantizer transcribes MLX's affine
-  quantization arithmetic (the fp32 group min/max, the negative-scale anchoring, the integer zero-point
-  re-fit), pinned against <code>mx.quantize</code>/<code>mx.dequantize</code> by tests in the suite. The
-  recipe is quantization-aware DMD: a frozen teacher, a critic, and a student initialized from the
-  already-distilled FastWan checkpoint whose every forward computes on the INT8 deploy grid, gradients
-  passing straight through to the real weights.</p>
-
   <h2>How we chose INT8</h2>
-  <p>Two other formats were serious candidates. We evaluated both the way we evaluate everything — by
-  training on them and measuring — and both fell short. The data is below, because the community runs
-  these same experiments and should not have to repeat our spend.</p>
-
-  <h3>MXFP4: ruled out on quality</h3>
-  <p>Our first QAD runs used the MXFP4 grid, at both 1.3B and 14B. Neither met the bar. The 14B run
-  consumed 26 GPU-days over 4000 steps and produced washed-out, undertrained video. The reconstruction
-  numbers explain why: MXFP4 is the least accurate format we measured.</p>
+  <p>We evaluated the candidate low-bit formats the way we evaluate everything: by training on them and
+  measuring. <b>For now, we believe INT8 is the best option for Apple silicon</b>: it is the most accurate
+  format we measured at its memory cost, and it is the reliability sweet spot across Apple generations.
+  The alternatives (MXFP4, NVFP4) reconstruct weights less accurately at comparable memory, and we think
+  there is more work to be done on those paths, from our side and from the frameworks underneath them,
+  before they're the right answer here. We'll keep evaluating.</p>
 
   <div class="chart">
     <svg viewBox="0 0 760 240" width="100%" role="img" aria-label="Reconstruction error by format">
@@ -152,7 +138,6 @@
         .ax{stroke:#263042;stroke-width:1}
       </style>
       <line x1="150" y1="20" x2="150" y2="210" class="ax"/>
-      <!-- log-ish scale: value -> width via w = v*5.2 (capped) -->
       <g>
         <rect x="150" y="30"  width="28"  height="26" class="bar best"/><text x="10" y="47" class="lbl">INT8 (8.5b)</text><text x="186" y="47" class="val">0.0055</text>
         <rect x="150" y="66"  width="350" height="26" class="bar"/><text x="10" y="83" class="lbl">MXFP8 (8.25b)</text><text x="508" y="83" class="val">0.068 · 12.4×</text>
@@ -162,80 +147,38 @@
       </g>
       <text x="150" y="230" class="lbl">weight reconstruction relative L2 (lower is better) — measured on Apple M5</text>
     </svg>
-    <div class="cap">Affine INT8 is 12.4× more accurate than MXFP8 and 22× more accurate than MXFP4 at
-    comparable memory. Integer formats beat float formats at equal bit width: E4M3 spends its bits on
-    dynamic range that per-group scaling has already made useless; affine int8 spends all 8 bits on 256
-    uniform levels across each group's actual range.</div>
+    <div class="cap">Affine INT8 is the most accurate format we measured at its memory cost. Integer
+    formats beat float formats at equal bit width: E4M3 spends its bits on dynamic range that per-group
+    scaling has already made unnecessary; affine int8 spends all 8 bits on 256 uniform levels across each
+    group's actual range.</div>
   </div>
 
-  <div class="video">[ VIDEO GRID — 1.3B: MXFP4 vs INT8, same prompt/seed ]</div>
-  <div class="video">[ VIDEO GRID — 14B: MXFP4 vs INT8, same prompt/seed ]</div>
-
-  <h3>W8A8: ruled out on speed</h3>
-  <p>The obvious follow-up is to quantize activations as well as weights, keeping the matmul in the
-  integer domain so the Neural Accelerators actually engage. Ideogram shipped that pattern on consumer
-  GPUs. We built it and measured it for Wan on Apple silicon.</p>
-  <p>Activation calibration on GB200 (every Linear in the 5B and 14B, across the three DMD timesteps,
-  with random and real umT5 context) told us the scheme was viable: the bulk of every layer fits int8
-  with per-token scales, and only ~7% of layers — almost all cross-attention <code>to_q</code> — are
-  outlier spikes we would hold in fp16. Real text embeddings make those outliers worse, not better, so
-  the keep-list is not a randn artifact. We then wrote a fused int8×int8 Metal kernel
-  (<code>mx.fast.metal_kernel</code>: per-token activation scales, per-out-channel weight scales, int32
-  accumulate). It is bit-close to the dequantized reference (max abs error 3×10⁻⁶), and we set the ship
-  bar in advance: <b>≥1.2× faster than fp16 at DiT shapes, or we don't ship it.</b></p>
-  <p>It did not come close:</p>
-  <table>
-    <thead><tr><th>Shape (tokens × out × in)</th><th class="num">fp16</th><th class="num">Fused W8A8 (best)</th><th class="num">Speedup</th></tr></thead>
-    <tbody>
-      <tr><td>128³ (toy)</td><td class="num">0.92 ms</td><td class="num">1.09 ms</td><td class="num warn">0.85×</td></tr>
-      <tr><td>512³</td><td class="num">0.39 ms</td><td class="num">4.85 ms</td><td class="num bad">0.08×</td></tr>
-      <tr><td>1024×5120×5120 (DiT-class)</td><td class="num">8.7 ms</td><td class="num">448 ms</td><td class="num bad">0.02×</td></tr>
-      <tr><td>4096×5120×5120</td><td class="num">53 ms</td><td class="num">1341 ms</td><td class="num bad">0.04×</td></tr>
-      <tr><td>8192×5120×5120</td><td class="num">53 ms</td><td class="num">1755 ms</td><td class="num bad">0.03×</td></tr>
-    </tbody>
-  </table>
-  <div class="callout neg">
-    <span class="tag bad">Correctness: PASS · Speed: NO-GO</span>
-    <p class="small" style="margin:6px 0 0">M5's fp16 GEMM is excellent — the bottleneck is the kernel
-    surface, not the silicon. Today's MLX custom-kernel API gives you a <b>scalar</b> int8 multiply in
-    shader code; it does not bind the Neural Accelerator integer tensor path. Until that path is public
-    and stable (or a lower-level kernel clears the 1.2× bar), <b>quantization on Mac is a memory lever,
-    not a speed lever.</b> Weight-only <code>mx.quantized_matmul</code> stayed near fp16 throughout —
-    the dequant-then-fp16 behavior the survey predicted, not a hidden fast path.</p>
-  </div>
-  <p class="small muted">Full receipt: <code>docs/design/w8a8_int8_gemm_metal.md</code> (M5, 24 GB,
-  macOS 26.5.2, MLX 0.32.0).</p>
-
-  <div class="callout pos">
-    <span class="tag good">The decision: INT8</span>
-    <p class="small" style="margin:6px 0 0">Quantization on Apple silicon is a memory decision, and INT8
-    is the most accurate way to spend 8 bits. 5.3 GB for the 5B, 14.9 GB for the 14B — model classes that
-    frontier-class models, in laptop memory. Speed comes from step count, fused kernels, and the
-    fast modes below.</p>
-  </div>
+  <p>We also took the natural next hypothesis seriously: quantizing activations as well as weights
+  (W8A8) so the integer matrix units engage directly. We built a fused int8×int8 Metal kernel and
+  calibrated it against real DiT workloads; it is correct to within 3×10⁻⁶ of the reference, but on
+  today's MLX/Metal kernel surface it does not yet beat fp16 at DiT shapes. We think there is more work
+  to be done there from both ends, the kernel and the framework API, and we'll keep at it. For this
+  release, INT8 for memory and dense fp16 attention is the right call.</p>
 
   <h2>Generation modes</h2>
-  <p>Temporal and spatial shortcuts compose, and every one ships behind a quality gate.</p>
+  <p>The runtime ships several generation modes that compose, each behind a quality gate:</p>
   <ul>
-    <li><b>Fast mode (RIFE)</b> — generate every Nth frame, interpolate the rest with Apple-silicon-native
-      rife-mlx. <code>--fast --fast-factor 2</code> roughly halves diffusion work; <code>--fast-sharpen</code>
-      restores edge crispness.</li>
-    <li><b>Spatial fast mode</b> — RIFE's spatial twin: denoise at a fraction of the target resolution,
-      then bilinear-upsample the clean latents back before decode. No second denoise, ≈ scale² fewer
-      tokens. Composes with <code>--fast</code> for fewer frames <i>and</i> fewer pixels. (MetalFX is
-      deliberately not used — it wants game-engine motion vectors and depth that diffusion output doesn't
-      have.)</li>
-    <li><b>Refine mode (two-pass)</b> — the H3 / LTX-2 pattern, ported into the runtime: generate at base
-      resolution, re-noise, and run a second denoising pass with the <i>same</i> DiT at higher resolution.
-      No LoRA, no SR weights, no training — the biggest quality lever that doesn't need a new model.</li>
-    <li><b>Quality mode</b> — full Wan VAE decode (bf16) instead of the default TAEHV, one flag away
+    <li><b>Fast mode (RIFE)</b>: generate every Nth frame and interpolate the rest with
+      Apple-silicon-native rife-mlx. <code>--fast --fast-factor 2</code> roughly halves diffusion work;
+      <code>--fast-sharpen</code> restores edge crispness.</li>
+    <li><b>Spatial fast mode</b>: denoise at a fraction of the target resolution, then bilinear-upsample
+      the clean latents back before decode. No second denoise, roughly scale² fewer tokens, and it
+      composes with fast mode for fewer frames <i>and</i> fewer pixels.</li>
+    <li><b>Refine mode (two-pass)</b> — generate at base resolution, then a second denoising pass with
+      the same DiT at higher resolution. No LoRA, no super-resolution weights, no training; a meaningful
+      quality lever that needs no new model.</li>
+    <li><b>Quality mode</b>: full Wan VAE decode (bf16) instead of the default TAEHV, one flag away
       (<code>--decode-backend wan-vae</code>).</li>
-    <li><b>Prompt enhancement (Context-IR-style)</b> — an on-device pre-pass that expands a short prompt
-      into Wan-style cinematic shot language, via a local mlx-lm model or a deterministic template, with an
-      on-disk cache. Wan's training captions are long and cinematic; short prompts leave quality on the
-      table.</li>
-    <li><b>Draft attention (experimental)</b> — windowed attention with sinks for interactive prompt
-      exploration, gated behind an SSIM check; dense attention stays the default for final renders.</li>
+    <li><b>Prompt enhancement</b>: an on-device pre-pass that expands a short prompt into Wan-style
+      cinematic shot language, via a local mlx-lm model or a deterministic template, with an on-disk
+      cache.</li>
+    <li><b>Draft attention (experimental)</b>: windowed attention with sinks for interactive prompt
+      exploration, gated behind an SSIM check. Dense attention stays the default for final renders.</li>
   </ul>
 
   <h2>Results</h2>
@@ -246,9 +189,9 @@
     <thead><tr><th>Model</th><th class="num">Mean MS-SSIM</th></tr></thead>
     <tbody>
       <tr><td>FastWan 1.3B, post-training quantization</td><td class="num">0.907</td></tr>
-      <tr><td>FastWan-QAD-INT8-1.3B (EMA release)</td><td class="num good">0.933</td></tr>
-      <tr><td>FastWan-QAD-INT8-5B</td><td class="num">TODO(measure)</td></tr>
-      <tr><td>FastWan-QAD-INT8-14B</td><td class="num">TODO(measure)</td></tr>
+      <tr><td>FastWan-MLX-1.3B (EMA release)</td><td class="num good">0.933</td></tr>
+      <tr><td>FastWan-MLX-5B</td><td class="num">TODO(measure)</td></tr>
+      <tr><td>FastWan-MLX-14B</td><td class="num">TODO(measure)</td></tr>
     </tbody>
   </table>
   <p>Speed and memory (Apple M5, 3-step DMD, INT8 DiT, TAEHV decode):</p>
@@ -264,40 +207,47 @@
   <div class="video">[ VIDEO — 1.3B fast-mode RIFE ×2 side-by-side ]</div>
   <p class="small muted">Those memory figures are why this release matters beyond any one machine: the
   pipeline peaks far below the headline capacity of even base Macs. We are validating lower-memory
-  configurations and will state exact supported tiers as they pass — this post claims only what we have
+  configurations and will state exact supported tiers as they pass. This post claims only what we have
   measured.</p>
 
   <h2>How to run</h2>
   <pre>uv pip install -e '.[mlx]'
-huggingface-cli download [TODO: final HF id] --local-dir ~/models/fastwan-qad
+huggingface-cli download [TODO: final HF id] --local-dir ~/models/fastwan-mlx
 
-python examples/inference/basic/mlx_wan_prompt_to_video.py \
-  --model-root ~/models/fastwan-qad \
-  --mlx-checkpoint ~/models/fastwan-qad/mlx_dit \
-  --prompt "A fox runs through a misty pine forest, leaves kicking up behind it."</pre>
+python examples/inference/basic/mlx_wan_prompt_to_video.py   --model-root ~/models/fastwan-mlx   --mlx-checkpoint ~/models/fastwan-mlx/mlx_dit   --prompt "A fox runs through a misty pine forest, leaves kicking up behind it."</pre>
   <p class="small">The defaults are the release configuration. Fast mode is <code>--fast --fast-factor 2</code>,
   spatial fast mode is <code>--fast-spatial</code>, refine is <code>--refine</code>, quality mode is
   <code>--decode-backend wan-vae</code>, prompt enhancement is <code>--enhance-prompt</code>. The Apple
   Silicon guide covers fast-reload, memory tiers, and troubleshooting.</p>
 
   <h2>What's next</h2>
-  <ul>
-    <li><b>Image-to-video and longer clips.</b> The 5B is natively image-conditioned; I2V and
-      streaming/causal generation are on the runtime roadmap.</li>
-    <li><b>MiniMax-H3.</b> The same INT8 QAD machinery now points at H3's 33B omni-modal (video + native
-      audio) teacher. Local audio-video generation is the thing nobody else ships.</li>
-  </ul>
-  <p>We tried to make INT8 fast and closed that door with data. The door we didn't close is the one that
-  matters: bigger, better models, running locally, on the machine already on your desk. That's the
-  direction, and we're just getting started.</p>
+  <p>FastWan-MLX is the start of the Mac track, not the end of it. We're continuing to experiment and to
+  improve: more model families coming to the MLX runtime, larger models at the quality end, and
+  even faster generation at the speed end. Image-to-video and longer clips are on the roadmap, and we
+  keep pushing the quantization and kernel work forward so each release is better than the last.</p>
+  <p>We also welcome contributions. The runtime, the recipe, and the benchmarks are all open, and there
+  is real room to move them. And we're glad to work with the platform teams whose silicon makes all of
+  this possible; if that's you, we'd love to talk.</p>
 
   <h2>Acknowledgements</h2>
-  <p class="small muted">Training for every model in this post ran on NVIDIA GB200 GPUs — thank you to
-  NVIDIA for the compute and for the Blackwell-era tooling the QAD recipe builds on. [TODO: contributor
-  list, advisor list, community links]</p>
+  <p class="small">Training for every model in this post ran on NVIDIA GB200 GPUs. Thank you to NVIDIA
+  for the compute and for the Blackwell-era tooling the QAD recipe builds on.</p>
 
-  <div class="foot">FastVideo Team · Apache-2.0 (code) · MIT (TAEHV) ·
-  <a href="https://github.com/hao-ai-lab/FastVideo">github.com/hao-ai-lab/FastVideo</a></div>
+  <div class="card" style="margin-top:26px">
+    <h3 style="margin-top:0">FastVideo Team</h3>
+    <table>
+      <tbody>
+        <tr><td><a href="https://github.com/aryan5v">Aryan Kumar</a></td><td class="muted">Built this: MLX runtime, INT8 QAD, and this post</td></tr>
+        <tr><td><a href="https://github.com/hao-ai-lab">Will Lin</a></td><td class="muted">Tech lead</td></tr>
+        <tr><td><a href="https://github.com/hao-ai-lab">Hao Zhang</a></td><td class="muted">Advisor</td></tr>
+      </tbody>
+    </table>
+    <p class="small" style="margin-bottom:0">
+      <a href="https://github.com/hao-ai-lab/FastVideo">FastVideo on GitHub</a> ·
+      <a href="https://huggingface.co/FastVideo">FastVideo on Hugging Face</a> ·
+      <a href="https://haoailab.com">Hao AI Lab</a>
+    </p>
+  </div>
 
 </div>
 </body>
