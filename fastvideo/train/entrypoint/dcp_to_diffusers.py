@@ -273,21 +273,46 @@ def convert(
     # -- Load DCP weights into the model --
     ema_cb = None
     if weights_only:
-        # Export only the role transformer weights. DCP load with the full
-        # training state (optimizers for student+critic) OOMs on a single
-        # GB200 at 14B (~114 GiB of AdamW state on top of base+roles).
-        # Skip optimizer/scheduler/dataloader/callback state entirely.
+        # Export the role transformer (+ EMA callback state when requested).
+        # DCP load with the full training state (optimizers for student+critic)
+        # OOMs on a single GB200 at 14B (~114 GiB of AdamW state on top of
+        # base+roles). Skip optimizer/scheduler/dataloader state entirely.
         states: dict[str, Any] = {}
         model = method._role_models.get(role)
         if model is None or model.transformer is None:
             raise ValueError(f"Role {role!r} has no transformer to export.")
         states[f"roles.{role}.transformer"] = ModelWrapper(model.transformer)
-        logger.info(
-            "weights_only: loading only roles.%s.transformer from %s",
-            role,
-            resolved,
-        )
+        if use_ema:
+            from fastvideo.train.callbacks.callback import CallbackDict
+            from fastvideo.train.callbacks.ema import EMACallback
+            from fastvideo.train.utils.checkpoint import _CallbackStateWrapper
+
+            callbacks = CallbackDict(cfg.callbacks or {}, tc)
+            ema_cb = next(
+                (cb for cb in callbacks._callbacks.values() if isinstance(cb, EMACallback)),
+                None,
+            )
+            if ema_cb is None:
+                raise ValueError("--ema requested but the run config declares no EMA callback.")
+            ema_cb.on_train_start(method)
+            states["callbacks"] = _CallbackStateWrapper(callbacks)
+            logger.info(
+                "weights_only+ema: loading roles.%s.transformer and EMA callback "
+                "state from %s",
+                role,
+                resolved,
+            )
+        else:
+            logger.info(
+                "weights_only: loading only roles.%s.transformer from %s",
+                role,
+                resolved,
+            )
         dcp.load(states, checkpoint_id=str(dcp_dir))
+        if ema_cb is not None and not ema_cb._ema_started:
+            raise ValueError(
+                "--ema requested but the checkpoint contains no started EMA state "
+                "(ema_started is false). Export without --ema instead.")
     else:
         states = method.checkpoint_state()
         if use_ema:
