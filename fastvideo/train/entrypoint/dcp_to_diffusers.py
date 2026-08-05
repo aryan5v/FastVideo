@@ -281,6 +281,7 @@ def convert(
         model = method._role_models.get(role)
         if model is None or model.transformer is None:
             raise ValueError(f"Role {role!r} has no transformer to export.")
+        from fastvideo.train.methods.base import ModelWrapper
         states[f"roles.{role}.transformer"] = ModelWrapper(model.transformer)
         if use_ema:
             from fastvideo.train.callbacks.callback import CallbackDict
