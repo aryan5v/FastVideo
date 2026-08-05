@@ -203,6 +203,7 @@ def convert(
     role: str = "student",
     overwrite: bool = False,
     use_ema: bool = False,
+    weights_only: bool = False,
 ) -> str:
     """Load a DCP checkpoint and export as a diffusers model.
 
@@ -270,34 +271,51 @@ def convert(
     _, method, _, _ = build_from_config(cfg)
 
     # -- Load DCP weights into the model --
-    states = method.checkpoint_state()
     ema_cb = None
-    if use_ema:
-        from fastvideo.train.callbacks.callback import CallbackDict
-        from fastvideo.train.callbacks.ema import EMACallback
-        from fastvideo.train.utils.checkpoint import _CallbackStateWrapper
-
-        # Rebuild the callbacks so their state namespace matches what the
-        # CheckpointManager saved, then let the EMA callback allocate its
-        # shadow container before dcp.load fills it.
-        callbacks = CallbackDict(cfg.callbacks or {}, tc)
-        ema_cb = next(
-            (cb for cb in callbacks._callbacks.values() if isinstance(cb, EMACallback)),
-            None,
+    if weights_only:
+        # Export only the role transformer weights. DCP load with the full
+        # training state (optimizers for student+critic) OOMs on a single
+        # GB200 at 14B (~114 GiB of AdamW state on top of base+roles).
+        # Skip optimizer/scheduler/dataloader/callback state entirely.
+        states: dict[str, Any] = {}
+        model = method._role_models.get(role)
+        if model is None or model.transformer is None:
+            raise ValueError(f"Role {role!r} has no transformer to export.")
+        states[f"roles.{role}.transformer"] = ModelWrapper(model.transformer)
+        logger.info(
+            "weights_only: loading only roles.%s.transformer from %s",
+            role,
+            resolved,
         )
-        if ema_cb is None:
-            raise ValueError("--ema requested but the run config declares no EMA callback.")
-        ema_cb.on_train_start(method)
-        states["callbacks"] = _CallbackStateWrapper(callbacks)
-    logger.info(
-        "Loading DCP checkpoint from %s",
-        resolved,
-    )
-    dcp.load(states, checkpoint_id=str(dcp_dir))
-    if ema_cb is not None and not ema_cb._ema_started:
-        raise ValueError(
-            "--ema requested but the checkpoint contains no started EMA state "
-            "(ema_started is false). Export without --ema instead.")
+        dcp.load(states, checkpoint_id=str(dcp_dir))
+    else:
+        states = method.checkpoint_state()
+        if use_ema:
+            from fastvideo.train.callbacks.callback import CallbackDict
+            from fastvideo.train.callbacks.ema import EMACallback
+            from fastvideo.train.utils.checkpoint import _CallbackStateWrapper
+
+            # Rebuild the callbacks so their state namespace matches what the
+            # CheckpointManager saved, then let the EMA callback allocate its
+            # shadow container before dcp.load fills it.
+            callbacks = CallbackDict(cfg.callbacks or {}, tc)
+            ema_cb = next(
+                (cb for cb in callbacks._callbacks.values() if isinstance(cb, EMACallback)),
+                None,
+            )
+            if ema_cb is None:
+                raise ValueError("--ema requested but the run config declares no EMA callback.")
+            ema_cb.on_train_start(method)
+            states["callbacks"] = _CallbackStateWrapper(callbacks)
+        logger.info(
+            "Loading DCP checkpoint from %s",
+            resolved,
+        )
+        dcp.load(states, checkpoint_id=str(dcp_dir))
+        if ema_cb is not None and not ema_cb._ema_started:
+            raise ValueError(
+                "--ema requested but the checkpoint contains no started EMA state "
+                "(ema_started is false). Export without --ema instead.")
 
     # -- Export to diffusers format --
     model = method._role_models[role]
@@ -439,6 +457,13 @@ def main() -> None:
         action="store_true",
         help="Export the EMA shadow weights instead of the raw role weights.",
     )
+    parser.add_argument(
+        "--weights-only",
+        action="store_true",
+        help="Load only roles.<role>.transformer from DCP (skip optimizer/"
+        "scheduler/callback state). Needed to export 14B on a single GPU "
+        "without OOM.",
+    )
     args = parser.parse_args(sys.argv[1:])
 
     convert(
@@ -448,6 +473,7 @@ def main() -> None:
         role=args.role,
         use_ema=args.ema,
         overwrite=args.overwrite,
+        weights_only=args.weights_only,
     )
 
 
