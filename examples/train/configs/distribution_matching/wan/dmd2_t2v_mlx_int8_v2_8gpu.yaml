@@ -74,7 +74,7 @@ training:
     # 100 (not 20): step-20 first-save OOM'd on 4 GPUs (job 1281). 100 keeps
     # resume points dense enough for the 1.3B scale while matching the proven
     # 5B/14B cadence (empty_cache-before-save is in checkpoint.py on this HEAD).
-    training_state_checkpointing_steps: 100
+    training_state_checkpointing_steps: 250
     checkpoints_total_limit: 3
 
   tracker:
