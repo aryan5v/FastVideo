@@ -156,6 +156,7 @@ def run_h3_t2va_smoke(
     seed: int = 2026,
 ) -> str:
     """End-to-end T2VA smoke: real weights, video + native stereo audio out."""
+    import shlex
     import subprocess
 
     repo_root = _prepare_workspace(commit)
@@ -164,7 +165,7 @@ def run_h3_t2va_smoke(
         f"set -euo pipefail && source $HOME/.local/bin/env && source /opt/venv/bin/activate && "
         f"cd {repo_root} && export HF_HOME='/root/data/.cache' && "
         f"python examples/inference/basic/basic_minimax_h3_t2v.py "
-        f"--model-path {MODEL_REPO} --prompt {prompt@Q} --output {output_dir} "
+        f"--model-path {MODEL_REPO} --prompt {shlex.quote(prompt)} --output {output_dir} "
         f"--steps {steps} --num-frames {num_frames} --height {height} --width {width} "
         f"--seed {seed} --num-gpus 4"
     )
