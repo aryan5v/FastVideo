@@ -177,7 +177,7 @@ def run_h3_t2va_smoke(
     return f"T2VA smoke: PASS -> {output_dir}/minimax_h3_t2v.mp4"
 
 
-@app.function(gpu="GB200:4", **COMMON_KWARGS)
+@app.function(gpu=os.getenv("FAS3_SSIM_GPU", "H100:4"), **COMMON_KWARGS)
 def run_h3_ssim(commit: str = DEFAULT_COMMIT) -> str:
     """Full H3 SSIM gate (4 GPUs, GB200-keyed references; ~13-min generation)."""
     import subprocess
