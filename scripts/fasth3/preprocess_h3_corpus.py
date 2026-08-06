@@ -235,10 +235,13 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
             captions[row["text_sha1"]] = row["caption"]
     if args.smoke:
         captions = dict(list(captions.items())[:1])
+    # Each rank encodes its own prompt shard; FSDP wraps the 64 GB encoder
+    # across the node, so every rank runs its own forward concurrently.
+    caption_items = list(captions.items())[rank::world_size]
 
     hidden_state_index = 50
     with torch.no_grad():
-        for index, (sha1, caption) in enumerate(captions.items()):
+        for index, (sha1, caption) in enumerate(caption_items):
             token_ids = _token_ids(tokenizer(caption, add_special_tokens=False))
             input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
             mm_token_type_ids = _mm_token_type_ids(processor, token_ids, device)
@@ -255,7 +258,7 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
             safetensors.torch.save_file({"embed": embed.to(torch.float16)}, str(text_dir / f"{sha1}.safetensors"))
             if index % 100 == 0:
                 print(f"[rank {rank}] text {index}/{len(captions)}", flush=True)
-    print(f"[rank {rank}] phase B done: {len(captions)} prompts", flush=True)
+    print(f"[rank {rank}] phase B done: {len(caption_items)} prompts", flush=True)
 
 
 def _token_ids(tokenized) -> list[int]:
