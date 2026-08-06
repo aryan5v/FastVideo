@@ -97,6 +97,7 @@ def _prepare_workspace(commit: str) -> str:
     export HF_HOME='/root/data/.cache'
     if [ -d {repo_root}/.git ]; then
       cd {repo_root}
+      git remote set-url origin {FORK_REPO}
       git fetch --prune origin
     else
       git clone {FORK_REPO} {repo_root}
