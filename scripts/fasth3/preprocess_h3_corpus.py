@@ -62,10 +62,12 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def read_clip(video_path: str, num_frames: int, short_edge: int, max_long_edge: int) -> torch.Tensor:
+def read_clip(video_path: str, num_frames: int, short_edge: int, max_long_edge: int, sample_rate: int = 32000,
+              seconds: float = 5.0):
+    """Decode video+audio. Returns (frames (T,C,H,W) fp32 [0,1], waveform (2,S) fp32 [-1,1])."""
     from torchvision.io import read_video
 
-    video, _, _ = read_video(video_path, pts_unit="sec")
+    video, audio, _ = read_video(video_path, pts_unit="sec")
     video = video[:num_frames]
     if video.shape[0] < num_frames:
         raise ValueError(f"clip too short: {video.shape[0]} < {num_frames}")
@@ -77,10 +79,29 @@ def read_clip(video_path: str, num_frames: int, short_edge: int, max_long_edge: 
         new_h -= 32
         new_w -= 32
     frames = video.permute(0, 3, 1, 2).float().div_(255.0)
-    return torch.nn.functional.interpolate(frames, size=(new_h, new_w), mode="bilinear", align_corners=False)
+    frames = torch.nn.functional.interpolate(frames, size=(new_h, new_w), mode="bilinear", align_corners=False)
+
+    # audio: (C, S) fp32 in [-1, 1], native rate; resample + pad to target
+    n = int(seconds * sample_rate)
+    if audio is None or audio.numel() == 0:
+        waveform = torch.zeros(2, n, dtype=torch.float32)
+    else:
+        rate = int(audio[0])
+        data = audio[1]  # (C, S) fp32 [-1,1]
+        if rate != sample_rate:
+            data = torch.nn.functional.interpolate(data[None], size=n, mode="linear", align_corners=False)[0]
+        waveform = data[:2]
+        if waveform.shape[0] < 2:
+            waveform = torch.cat([waveform, waveform[:1]], dim=0)
+        if waveform.shape[1] < n:
+            waveform = torch.nn.functional.pad(waveform, (0, n - waveform.shape[1]))
+        else:
+            waveform = waveform[:, :n]
+    return frames, waveform
 
 
 def read_audio(audio_path: str, sample_rate: int = 32000, seconds: float = 5.0) -> torch.Tensor:
+    """Fallback: decode a standalone wav to (2, S) float in [-1, 1]."""
     import wave
 
     with wave.open(audio_path, "rb") as wf:
@@ -152,8 +173,7 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
     with torch.no_grad():
         for index, row in enumerate(rows):
             try:
-                frames = read_clip(row["video"], args.num_frames, args.short_edge, args.max_long_edge)
-                waveform = read_audio(row["audio"], seconds=args.audio_seconds)
+                frames, waveform = read_clip(row["video"], args.num_frames, args.short_edge, args.max_long_edge)
 
                 pixels = frames.permute(1, 0, 2, 3)[None].to(device)  # (1, C, T, H, W)
                 posterior = vae.encode(vae.normalize_pixels(pixels)).latent_dist
