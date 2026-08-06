@@ -112,6 +112,19 @@ def _prepare_workspace(commit: str) -> str:
     fi
     uv pip install -e ".[test]"
     hf auth login --token "$HF_API_KEY"
+    SNAP=$(python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+path = snapshot_download(
+    "MiniMaxAI/MiniMax-H3",
+    ignore_patterns=["FL2VA/*", "Ref2VA/*", "assets/*"],
+)
+print(path)
+PY
+    )
+    rm -rf {repo_root}/official_weights/MiniMax-H3
+    mkdir -p {repo_root}/official_weights
+    ln -sfn "$SNAP" {repo_root}/official_weights/MiniMax-H3
     """
     result = subprocess.run(
         ["/bin/bash", "-lc", command],
