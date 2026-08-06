@@ -204,6 +204,7 @@ def convert(
     overwrite: bool = False,
     use_ema: bool = False,
     weights_only: bool = False,
+    keep_training_mesh: bool = False,
 ) -> str:
     """Load a DCP checkpoint and export as a diffusers model.
 
@@ -254,18 +255,30 @@ def convert(
 
     tc = cfg.training
 
-    # -- Init distributed (1 GPU is enough; DCP reshards) --
-    maybe_init_distributed_environment_and_model_parallel(
-        tp_size=1,
-        sp_size=1,
-    )
-
-    # Override distributed config so model loading uses 1 GPU.
-    tc.distributed.tp_size = 1
-    tc.distributed.sp_size = 1
-    tc.distributed.num_gpus = 1
-    tc.distributed.hsdp_replicate_dim = 1
-    tc.distributed.hsdp_shard_dim = 1
+    # -- Init distributed. Default: 1 GPU (DCP reshards). With
+    # --keep-training-mesh we use the config's training mesh (e.g. 8 GPUs,
+    # HSDP 2x4) so DCP maps the checkpoint's per-rank shards 1:1. This is
+    # required for EMA: tiny root params like scale_shift_table can be saved
+    # as empty local shards on some ranks at world_size=8, and DCP's planner
+    # rejects them when resharing onto world_size=1 (size mismatch). Loading
+    # at the same mesh the checkpoint was written at avoids that entirely.
+    if keep_training_mesh:
+        td = tc.distributed
+        maybe_init_distributed_environment_and_model_parallel(
+            tp_size=td.tp_size or 1,
+            sp_size=td.sp_size or 1,
+        )
+    else:
+        maybe_init_distributed_environment_and_model_parallel(
+            tp_size=1,
+            sp_size=1,
+        )
+        # Override distributed config so model loading uses 1 GPU.
+        tc.distributed.tp_size = 1
+        tc.distributed.sp_size = 1
+        tc.distributed.num_gpus = 1
+        tc.distributed.hsdp_replicate_dim = 1
+        tc.distributed.hsdp_shard_dim = 1
 
     # -- Build model (loads pretrained weights + FSDP) --
     _, method, _, _ = build_from_config(cfg)
@@ -490,6 +503,15 @@ def main() -> None:
         "scheduler/callback state). Needed to export 14B on a single GPU "
         "without OOM.",
     )
+    parser.add_argument(
+        "--keep-training-mesh",
+        action="store_true",
+        help="Use the config's training mesh (e.g. 8 GPUs HSDP 2x4) instead of "
+        "forcing 1 GPU. Required to export EMA state: tiny root-param shards "
+        "(scale_shift_table) can be empty on some ranks at the training world "
+        "size, and DCP rejects them when resharing onto world_size=1. Run with "
+        "torchrun --nproc_per_node <training gpus>.",
+    )
     args = parser.parse_args(sys.argv[1:])
 
     convert(
@@ -500,6 +522,7 @@ def main() -> None:
         use_ema=args.ema,
         overwrite=args.overwrite,
         weights_only=args.weights_only,
+        keep_training_mesh=args.keep_training_mesh,
     )
 
 
