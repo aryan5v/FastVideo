@@ -164,7 +164,7 @@ def _loader_args(model_root: str) -> object:
 def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: torch.device) -> None:
     import safetensors.torch
 
-    from fastvideo.models.loader.component_loader import VAELoader
+    from fastvideo.models.loader.component_loader import AudioDecoderLoader, VAELoader
 
     out_dir = Path(args.out)
     latents_dir = out_dir / "latents"
@@ -176,7 +176,7 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
     rows = rows[rank::world_size]
 
     vae = VAELoader().load(f"{args.model_root}/vae", _loader_args(args.model_root))
-    audio_vae = VAELoader().load(f"{args.model_root}/audio_vae", _loader_args(args.model_root))
+    audio_vae = AudioDecoderLoader().load(f"{args.model_root}/audio_vae", _loader_args(args.model_root))
     vae.to(device).eval()
     audio_vae.to(device).eval()
 
