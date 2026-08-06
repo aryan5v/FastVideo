@@ -195,7 +195,9 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
                 pixels = frames.permute(1, 0, 2, 3)[None].to(device)  # (1, C, T, H, W)
                 posterior = vae.encode(vae.normalize_pixels(pixels)).latent_dist
                 latents = posterior.sample(generator=generator).to(torch.float16).float().cpu()
-                latents = (latents - video_mean[None, :, None, None, None]) / video_std[None, :, None, None, None]
+                # Plain broadcasting, exactly like the upstream latent-prep stage
+                # (latents_mean is (1, 24, 1, 1); do NOT index it manually).
+                latents = (latents - video_mean) / video_std
 
                 posterior = audio_vae.encode(waveform.to(device)[:, None]).latent_dist
                 audio = posterior.mode().float().cpu().transpose(1, 2)
