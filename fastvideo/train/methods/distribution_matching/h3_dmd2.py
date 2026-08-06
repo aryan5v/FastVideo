@@ -57,6 +57,10 @@ class H3DMD2Method(DMD2Method):
         """Continuous uniform timestep in [0, 1] (H3 clean-time convention)."""
         return torch.rand((1, ), device=device, dtype=torch.float32, generator=self.cuda_generator)
 
+    def _sample_audio_score_timestep(self, device: torch.device) -> torch.Tensor:
+        """Independent continuous audio timestep (critic sees all noise levels)."""
+        return torch.rand((1, ), device=device, dtype=torch.float32, generator=self.cuda_generator)
+
     # ------------------------------------------------------------------
     # rollout
     # ------------------------------------------------------------------
@@ -82,7 +86,7 @@ class H3DMD2Method(DMD2Method):
             generator=self.cuda_generator,
         )
         target_timestep_idx_int = int(target_timestep_idx.item())
-        target_timestep = step_list[target_timestep_idx]
+        target_timestep = step_list[target_timestep_idx_int]
 
         current_noise = torch.randn(latents.shape, device=device, dtype=dtype, generator=self.cuda_generator)
         current_audio_noise = torch.randn(
@@ -90,7 +94,7 @@ class H3DMD2Method(DMD2Method):
         current_noise_copy = current_noise.clone()
         current_audio_noise_copy = current_audio_noise.clone()
 
-        max_target_idx = len(step_list) - 1
+        max_target_idx = target_timestep_idx_int  # only the target step is consumed
         video_noise_latents: list[torch.Tensor] = []
         audio_noise_latents: list[torch.Tensor] = []
         noise_latent_index = target_timestep_idx_int - 1
@@ -142,7 +146,8 @@ class H3DMD2Method(DMD2Method):
                     noisy_input, noisy_audio_input, target_timestep_tensor, batch,
                     conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="vsa")
 
-        batch.dmd_latent_vis_dict["generator_timestep"] = target_timestep.float().detach()
+        batch.dmd_latent_vis_dict["generator_timestep"] = torch.tensor(
+            target_timestep, device=device, dtype=torch.float32)
         return pred_x0
 
     # ------------------------------------------------------------------
@@ -159,17 +164,20 @@ class H3DMD2Method(DMD2Method):
 
         device = generator_video_x0.device
         fake_score_timestep = self._sample_score_timestep(device)
+        fake_score_audio_timestep = self._sample_audio_score_timestep(device)
 
         noise = torch.randn(generator_video_x0.shape, device=device, dtype=generator_video_x0.dtype,
                             generator=self.cuda_generator)
         audio_noise = torch.randn(generator_audio_x0.shape, device=device, dtype=generator_audio_x0.dtype,
                                   generator=self.cuda_generator)
         noisy_x0 = self.student.add_noise(generator_video_x0, noise, fake_score_timestep)
-        noisy_audio_x0 = self.student.add_noise_audio(generator_audio_x0, audio_noise, fake_score_timestep)
+        noisy_audio_x0 = self.student.add_noise_audio_continuous(generator_audio_x0, audio_noise,
+                                                                 fake_score_audio_timestep)
 
         pred_video_vel, pred_audio_vel = self.critic.predict_velocity_h3(
             noisy_x0, noisy_audio_x0, fake_score_timestep, batch,
-            conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense")
+            conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense",
+            audio_timestep=fake_score_audio_timestep)
 
         # velocity target: x0 - noise  (H3 predicts v = x0 - eps)
         target_video = generator_video_x0 - noise
@@ -194,31 +202,31 @@ class H3DMD2Method(DMD2Method):
         generator_pred_x0: tuple[torch.Tensor, torch.Tensor],
         batch: Any,
     ) -> torch.Tensor:
-        guidance_scale = 1.0  # H3 is guidance-distilled; cfg_uncond.text=keep
+        # H3 is guidance-distilled (cfg_uncond.text=keep); teacher cond == uncond.
         generator_video_x0, generator_audio_x0 = generator_pred_x0
         device = generator_video_x0.device
 
         with torch.no_grad():
             timestep = self._sample_score_timestep(device)
+            audio_timestep = self._sample_audio_score_timestep(device)
 
             noise = torch.randn(generator_video_x0.shape, device=device, dtype=generator_video_x0.dtype,
                                 generator=self.cuda_generator)
             audio_noise = torch.randn(generator_audio_x0.shape, device=device, dtype=generator_audio_x0.dtype,
                                       generator=self.cuda_generator)
             noisy_latents = self.student.add_noise(generator_video_x0, noise, timestep)
-            noisy_audio = self.student.add_noise_audio(generator_audio_x0, audio_noise, timestep)
+            noisy_audio = self.student.add_noise_audio_continuous(generator_audio_x0, audio_noise, audio_timestep)
 
             faker_video, faker_audio = self.critic.predict_x0_h3(
                 noisy_latents, noisy_audio, timestep, batch,
-                conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense")
-            real_cond_video, real_cond_audio = self.teacher.predict_x0_h3(
+                conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense",
+                audio_timestep=audio_timestep)
+            # Guidance-distilled: conditional == unconditional, so a single
+            # teacher pass suffices (real_cfg = real_cond, scale 1.0).
+            real_cfg_video, real_cfg_audio = self.teacher.predict_x0_h3(
                 noisy_latents, noisy_audio, timestep, batch,
-                conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense")
-            real_uncond_video, real_uncond_audio = self.teacher.predict_x0_h3(
-                noisy_latents, noisy_audio, timestep, batch,
-                conditional=False, cfg_uncond=self._cfg_uncond, attn_kind="dense")
-            real_cfg_video = real_uncond_video + (real_cond_video - real_uncond_video) * guidance_scale
-            real_cfg_audio = real_uncond_audio + (real_cond_audio - real_uncond_audio) * guidance_scale
+                conditional=True, cfg_uncond=self._cfg_uncond, attn_kind="dense",
+                audio_timestep=audio_timestep)
 
             denom_video = torch.abs(generator_video_x0 - real_cfg_video).mean()
             grad_video = torch.nan_to_num((faker_video - real_cfg_video) / denom_video)

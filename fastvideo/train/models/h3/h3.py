@@ -277,8 +277,8 @@ class H3Model(ModelBase):
         )
         unique, inverse = build_row_timesteps(layout, float(video_t.item()), float(audio_t.item()))
 
-        noise = torch.randn_like(latents, generator=generator)
-        audio_noise = torch.randn_like(audio_latents, generator=generator)
+        noise = torch.randn(latents.shape, device=device, dtype=dtype, generator=generator)
+        audio_noise = torch.randn(audio_latents.shape, device=device, dtype=dtype, generator=generator)
 
         from fastvideo.train.utils.training_config import TrainingBatch  # noqa: PLC0415
 
@@ -317,6 +317,7 @@ class H3Model(ModelBase):
         return t * latents + (1.0 - t) * noise
 
     def add_noise_audio(self, latents: torch.Tensor, noise: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        """Audio noise at the DMD-grid timestep for this (video) step (rollout path)."""
         t = torch.tensor(
             self._audio_timestep_for(float(timestep.item())),
             device=latents.device,
@@ -324,10 +325,17 @@ class H3Model(ModelBase):
         )
         return t * latents + (1.0 - t) * noise
 
+    def add_noise_audio_continuous(self, latents: torch.Tensor, noise: torch.Tensor, audio_t: torch.Tensor
+                                  ) -> torch.Tensor:
+        """Audio noise at an arbitrary continuous t (score-loss paths)."""
+        t = audio_t.to(latents.dtype)
+        return t * latents + (1.0 - t) * noise
+
     def _packed_forward(self, noisy_video: torch.Tensor, noisy_audio: torch.Tensor, video_t: float, audio_t: float,
                         batch: Any):
         """Run the H3 transformer on packed rows; return (video_rows, audio_rows) velocities."""
         from fastvideo.pipelines.basic.minimax_h3.packing import (  # noqa: PLC0415
+            build_row_timesteps,
             patchify_video_latents,
         )
 
@@ -336,6 +344,7 @@ class H3Model(ModelBase):
         audio_rows = noisy_audio.reshape(1, -1, self.audio_in_channels)
         unique, inverse = build_row_timesteps(layout, video_t, audio_t)
 
+        text_embeds = batch.h3.text_embeds
         video_out, audio_out = self.transformer(
             hidden_states=video_rows,
             audio_hidden_states=audio_rows,
@@ -360,11 +369,16 @@ class H3Model(ModelBase):
         conditional: bool,
         cfg_uncond: dict[str, Any] | None = None,
         attn_kind: Literal["dense", "vsa"] = "dense",
+        audio_timestep: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Model velocities for both modalities at a (video) timestep."""
+        """Model velocities for both modalities at a (video) timestep.
+
+        ``audio_timestep``: continuous audio t for the score-loss paths; when
+        None, the audio t is derived from the DMD grid (rollout path).
+        """
         del conditional, cfg_uncond, attn_kind  # guidance-distilled: single pass
         video_t = float(timestep.item())
-        audio_t = self._audio_timestep_for(video_t)
+        audio_t = float(audio_timestep.item()) if audio_timestep is not None else self._audio_timestep_for(video_t)
         video_rows_out, audio_rows_out = self._packed_forward(noisy_video, noisy_audio, video_t, audio_t, batch)
 
         # rows -> latents (channel-major patch contract)
@@ -394,13 +408,14 @@ class H3Model(ModelBase):
         conditional: bool,
         cfg_uncond: dict[str, Any] | None = None,
         attn_kind: Literal["dense", "vsa"] = "dense",
+        audio_timestep: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Data-ward x0 = x_t + (1 - t) * v per modality."""
         video_vel, audio_vel = self.predict_velocity_h3(
             noisy_video, noisy_audio, timestep, batch, conditional=conditional, cfg_uncond=cfg_uncond,
-            attn_kind=attn_kind)
+            attn_kind=attn_kind, audio_timestep=audio_timestep)
         video_t = float(timestep.item())
-        audio_t = self._audio_timestep_for(video_t)
+        audio_t = float(audio_timestep.item()) if audio_timestep is not None else self._audio_timestep_for(video_t)
         video_x0 = noisy_video + (1.0 - video_t) * video_vel
         audio_x0 = noisy_audio + (1.0 - audio_t) * audio_vel
         return video_x0, audio_x0

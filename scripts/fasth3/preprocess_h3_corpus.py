@@ -63,11 +63,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_clip(video_path: str, num_frames: int, short_edge: int, max_long_edge: int, sample_rate: int = 32000,
-              seconds: float = 5.0):
-    """Decode video+audio. Returns (frames (T,C,H,W) fp32 [0,1], waveform (2,S) fp32 [-1,1])."""
+              seconds: float = 5.0, video_fps: float = 24.0):
+    """Decode video+audio. Returns (frames (T,C,H,W) fp32 [0,1], waveform (2,S) fp32 [-1,1]).
+
+    Audio is cropped to the same time window as the retained video frames
+    (``num_frames / video_fps`` seconds) and resampled to ``sample_rate``.
+    """
     from torchvision.io import read_video
 
-    video, audio, _ = read_video(video_path, pts_unit="sec")
+    video, audio, info = read_video(video_path, pts_unit="sec")
     video = video[:num_frames]
     if video.shape[0] < num_frames:
         raise ValueError(f"clip too short: {video.shape[0]} < {num_frames}")
@@ -81,22 +85,33 @@ def read_clip(video_path: str, num_frames: int, short_edge: int, max_long_edge: 
     frames = video.permute(0, 3, 1, 2).float().div_(255.0)
     frames = torch.nn.functional.interpolate(frames, size=(new_h, new_w), mode="bilinear", align_corners=False)
 
-    # audio: (C, S) fp32 in [-1, 1], native rate; resample + pad to target
-    n = int(seconds * sample_rate)
+    # audio: (C, S) fp32 [-1, 1]; crop to the video window, resample to 32 kHz
+    window_seconds = num_frames / video_fps
+    n_target = int(seconds * sample_rate)
     if audio is None or audio.numel() == 0:
-        waveform = torch.zeros(2, n, dtype=torch.float32)
+        waveform = torch.zeros(2, n_target, dtype=torch.float32)
     else:
-        rate = int(audio[0])
-        data = audio[1]  # (C, S) fp32 [-1,1]
-        if rate != sample_rate:
-            data = torch.nn.functional.interpolate(data[None], size=n, mode="linear", align_corners=False)[0]
+        rate = float(info.get("audio_fps", 0) or 0)
+        data = audio  # (C, S) fp32 [-1,1]
+        if rate > 0:
+            n_window = int(round(window_seconds * rate))
+            data = data[:, :n_window]
+            try:
+                import torchaudio.functional as taf  # noqa: PLC0415
+
+                data = taf.resample(data, int(rate), sample_rate)
+            except Exception:  # noqa: BLE001 - fall back to linear interpolation
+                data = torch.nn.functional.interpolate(data[None], size=n_target, mode="linear",
+                                                       align_corners=False)[0]
+        else:
+            data = torch.nn.functional.interpolate(data[None], size=n_target, mode="linear", align_corners=False)[0]
         waveform = data[:2]
         if waveform.shape[0] < 2:
             waveform = torch.cat([waveform, waveform[:1]], dim=0)
-        if waveform.shape[1] < n:
-            waveform = torch.nn.functional.pad(waveform, (0, n - waveform.shape[1]))
+        if waveform.shape[1] < n_target:
+            waveform = torch.nn.functional.pad(waveform, (0, n_target - waveform.shape[1]))
         else:
-            waveform = waveform[:, :n]
+            waveform = waveform[:, :n_target]
     return frames, waveform
 
 
@@ -114,7 +129,8 @@ def read_audio(audio_path: str, sample_rate: int = 32000, seconds: float = 5.0) 
     if data.shape[1] < n:
         data = torch.nn.functional.pad(data, (0, n - data.shape[1]))
     if rate != sample_rate:
-        data = torch.nn.functional.interpolate(data[None], size=n, mode="linear", align_corners=False)[0]
+        target = int(seconds * sample_rate)
+        data = torch.nn.functional.interpolate(data[None], size=target, mode="linear", align_corners=False)[0]
     return data
 
 
@@ -167,7 +183,7 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
     video_std = vae.latents_std.detach().float().cpu()
     audio_mean = audio_vae.latents_mean.detach().float().cpu().transpose(1, 2)
     audio_std = audio_vae.latents_std.detach().float().cpu().transpose(1, 2)
-    generator = torch.Generator("cpu").manual_seed(args.seed)
+    generator = torch.Generator(device=device).manual_seed(args.seed)
 
     done: list[dict] = []
     with torch.no_grad():
@@ -285,11 +301,17 @@ def main() -> None:
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     random.seed(args.seed)
+    if world_size > 1:
+        torch.distributed.init_process_group(backend="nccl")
 
     if args.mode in ("latents", "both"):
         phase_latents(args, rank, world_size, device)
+    if world_size > 1:
+        torch.distributed.barrier()
     if args.mode in ("text", "both"):
         phase_text(args, rank, world_size, device)
+    if world_size > 1:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
