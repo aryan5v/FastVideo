@@ -135,15 +135,26 @@ def read_audio(audio_path: str, sample_rate: int = 32000, seconds: float = 5.0) 
 
 
 def _loader_args() -> object:
+    """Minimal FastVideoArgs-shaped namespace for the component loaders.
+
+    Every ``fastvideo_args.<attr>`` the loaders touch is provided with a safe
+    default (mirrors the training/inference production args).
+    """
     from types import SimpleNamespace
 
     return SimpleNamespace(
         model_paths={},
+        pipeline_config=None,
         override_transformer_cls_name=None,
+        override_text_encoder_quant=None,
+        override_text_encoder_safetensors=None,
         init_weights_from_safetensors=None,
         hsdp_replicate_dim=1,
         hsdp_shard_dim=1,
         dit_cpu_offload=False,
+        vae_cpu_offload=False,
+        text_encoder_cpu_offload=False,
+        image_encoder_cpu_offload=False,
         pin_cpu_memory=False,
         use_fsdp_inference=True,
         training_mode=False,
@@ -153,6 +164,7 @@ def _loader_args() -> object:
         dit_layerwise_offload=False,
         trust_remote_code=False,
         revision="main",
+        attention_backend=None,
     )
 
 
