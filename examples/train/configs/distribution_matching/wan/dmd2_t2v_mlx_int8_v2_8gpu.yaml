@@ -44,8 +44,8 @@ training:
     num_gpus: 8
     sp_size: 1
     tp_size: 1
-    hsdp_replicate_dim: 1
-    hsdp_shard_dim: 8
+    hsdp_replicate_dim: 2
+    hsdp_shard_dim: 4
 
   data:
     data_path: data/Wan-Syn_77x448x832_600k
