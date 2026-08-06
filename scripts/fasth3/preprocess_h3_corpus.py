@@ -138,6 +138,7 @@ def _loader_args() -> object:
     from types import SimpleNamespace
 
     return SimpleNamespace(
+        model_paths={},
         override_transformer_cls_name=None,
         init_weights_from_safetensors=None,
         hsdp_replicate_dim=1,
