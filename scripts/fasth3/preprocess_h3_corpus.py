@@ -320,8 +320,8 @@ def main() -> None:
         if args.mode in ("text", "both"):
             phase_text(args, rank, world_size, device)
     finally:
-        if world_size > 1:
-            torch.distributed.destroy_process_group()
+        # Single teardown: fastvideo's cleanup destroys the torch process
+        # group too; a manual destroy_process_group here double-destroys.
         cleanup_dist_env_and_memory()
 
 
