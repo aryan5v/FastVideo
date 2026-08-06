@@ -142,9 +142,21 @@ def _loader_args() -> object:
     """
     from types import SimpleNamespace
 
+    pipeline_config = SimpleNamespace(
+        vae_precision=None,
+        vae_config=None,
+        dit_precision=None,
+        dit_config=None,
+        text_encoder_precisions=None,
+        text_encoder_configs=None,
+        image_encoder_precision=None,
+        image_encoder_config=None,
+        upsampler_config=None,
+        flow_shift=8.0,
+    )
     return SimpleNamespace(
         model_paths={},
-        pipeline_config=None,
+        pipeline_config=pipeline_config,
         override_transformer_cls_name=None,
         override_text_encoder_quant=None,
         override_text_encoder_safetensors=None,
