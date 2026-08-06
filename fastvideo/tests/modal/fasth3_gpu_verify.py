@@ -70,6 +70,12 @@ image = (
 model_vol = modal.Volume.from_name("hf-model-weights")
 SECRET = modal.Secret.from_name("fasth3-hf-token")
 
+# The golden gate is device-keyed; the B200 training cluster reports
+# ``NVIDIA GB200`` and matches the minted golden. This workspace has no GB200,
+# so default to H100 (the test then seeds a local golden and fails with mint
+# instructions — the documented path for a new device).
+GOLDEN_GATE_GPU = os.getenv("FAS3_GOLDEN_GPU", "H100")
+
 COMMON_KWARGS = dict(
     image=image,
     volumes={"/root/data": model_vol},
@@ -115,7 +121,7 @@ def _prepare_workspace(commit: str) -> str:
     return repo_root
 
 
-@app.function(gpu="GB200", **COMMON_KWARGS)
+@app.function(gpu=GOLDEN_GATE_GPU, **COMMON_KWARGS)
 def run_h3_golden_gate(commit: str = DEFAULT_COMMIT) -> str:
     """Single-block bitwise fingerprint vs the GB200 golden (fast, ~1.2 GB)."""
     import subprocess
