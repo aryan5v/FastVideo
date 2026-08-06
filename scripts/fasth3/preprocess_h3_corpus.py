@@ -134,49 +134,25 @@ def read_audio(audio_path: str, sample_rate: int = 32000, seconds: float = 5.0) 
     return data
 
 
-def _loader_args() -> object:
-    """Minimal FastVideoArgs-shaped namespace for the component loaders.
+def _loader_args(model_root: str) -> object:
+    """Real FastVideoArgs for the component loaders (resolves the H3 pipeline
+    config via the registry, which the loaders require for config wiring)."""
+    from fastvideo.fastvideo_args import FastVideoArgs
 
-    Every ``fastvideo_args.<attr>`` the loaders touch is provided with a safe
-    default (mirrors the training/inference production args).
-    """
-    from types import SimpleNamespace
-
-    pipeline_config = SimpleNamespace(
-        vae_precision=None,
-        vae_config=None,
-        dit_precision=None,
-        dit_config=None,
-        text_encoder_precisions=None,
-        text_encoder_configs=None,
-        image_encoder_precision=None,
-        image_encoder_config=None,
-        upsampler_config=None,
-        flow_shift=8.0,
-    )
-    return SimpleNamespace(
-        model_paths={},
-        pipeline_config=pipeline_config,
-        override_transformer_cls_name=None,
-        override_text_encoder_quant=None,
-        override_text_encoder_safetensors=None,
-        init_weights_from_safetensors=None,
-        hsdp_replicate_dim=1,
-        hsdp_shard_dim=1,
+    return FastVideoArgs.from_kwargs(
+        model_path=model_root,
+        num_gpus=1,
+        use_fsdp_inference=True,
         dit_cpu_offload=False,
         vae_cpu_offload=False,
         text_encoder_cpu_offload=False,
-        image_encoder_cpu_offload=False,
         pin_cpu_memory=False,
-        use_fsdp_inference=True,
         training_mode=False,
-        enable_torch_compile=False,
-        torch_compile_kwargs={},
         inference_mode=True,
-        dit_layerwise_offload=False,
         trust_remote_code=False,
         revision="main",
-        attention_backend=None,
+        hsdp_replicate_dim=1,
+        hsdp_shard_dim=1,
     )
 
 
@@ -199,8 +175,8 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
         rows = rows[:1]
     rows = rows[rank::world_size]
 
-    vae = VAELoader().load(f"{args.model_root}/vae", _loader_args())
-    audio_vae = VAELoader().load(f"{args.model_root}/audio_vae", _loader_args())
+    vae = VAELoader().load(f"{args.model_root}/vae", _loader_args(args.model_root))
+    audio_vae = VAELoader().load(f"{args.model_root}/audio_vae", _loader_args(args.model_root))
     vae.to(device).eval()
     audio_vae.to(device).eval()
 
@@ -264,8 +240,8 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
     text_dir = out_dir / "text"
     text_dir.mkdir(parents=True, exist_ok=True)
 
-    conditioner = TextEncoderLoader().load(f"{args.model_root}/text_encoder", _loader_args())
-    processor = ProcessorLoader().load(f"{args.model_root}/processor", _loader_args())
+    conditioner = TextEncoderLoader().load(f"{args.model_root}/text_encoder", _loader_args(args.model_root))
+    processor = ProcessorLoader().load(f"{args.model_root}/processor", _loader_args(args.model_root))
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     conditioner.eval()
 
