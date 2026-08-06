@@ -304,15 +304,25 @@ def main() -> None:
     random.seed(args.seed)
     if world_size > 1:
         torch.distributed.init_process_group(backend="nccl")
+    # FastVideo loaders (TextEncoderLoader with FSDP) require the model-parallel
+    # groups; torch.distributed alone is not enough.
+    from fastvideo.distributed import (  # noqa: PLC0415
+        cleanup_dist_env_and_memory,
+        maybe_init_distributed_environment_and_model_parallel,
+    )
+    maybe_init_distributed_environment_and_model_parallel(1, 1)
 
-    if args.mode in ("latents", "both"):
-        phase_latents(args, rank, world_size, device)
-    if world_size > 1:
-        torch.distributed.barrier()
-    if args.mode in ("text", "both"):
-        phase_text(args, rank, world_size, device)
-    if world_size > 1:
-        torch.distributed.destroy_process_group()
+    try:
+        if args.mode in ("latents", "both"):
+            phase_latents(args, rank, world_size, device)
+        if world_size > 1:
+            torch.distributed.barrier()
+        if args.mode in ("text", "both"):
+            phase_text(args, rank, world_size, device)
+    finally:
+        if world_size > 1:
+            torch.distributed.destroy_process_group()
+        cleanup_dist_env_and_memory()
 
 
 if __name__ == "__main__":
