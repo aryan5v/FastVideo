@@ -112,7 +112,9 @@ def _prepare_workspace(commit: str) -> str:
     fi
     uv pip install -e ".[test]"
     hf auth login --token "$HF_API_KEY"
-    SNAP=$(python - <<'PY'
+    SNAP=""
+    for attempt in 1 2 3; do
+      SNAP=$(python - <<'PY' 2>/dev/null
 import os
 from huggingface_hub import snapshot_download
 path = snapshot_download(
@@ -121,7 +123,15 @@ path = snapshot_download(
 )
 print(path)
 PY
-    )
+      )
+      if [ -n "$SNAP" ] && [ -d "$SNAP/transformer" ]; then break; fi
+      echo "snapshot resolve attempt $attempt failed; retrying in 10s"
+      sleep 10
+    done
+    if [ -z "$SNAP" ] || [ ! -d "$SNAP/transformer" ]; then
+      echo "could not resolve MiniMaxAI/MiniMax-H3 snapshot"
+      exit 1
+    fi
     rm -rf {repo_root}/official_weights/MiniMax-H3
     mkdir -p {repo_root}/official_weights
     ln -sfn "$SNAP" {repo_root}/official_weights/MiniMax-H3
