@@ -104,6 +104,9 @@ def _prepare_workspace(commit: str) -> str:
       cd {repo_root}
     fi
     git checkout {commit}
+    if [ ! -d {repo_root}/DiffusersMiniMaxH3/.git ]; then
+      git clone --depth 1 --branch minimax-h3 https://github.com/huggingface/diffusers.git {repo_root}/DiffusersMiniMaxH3
+    fi
     uv pip install -e ".[test]"
     hf auth login --token "$HF_API_KEY"
     """
