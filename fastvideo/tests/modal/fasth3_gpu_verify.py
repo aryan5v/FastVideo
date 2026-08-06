@@ -209,7 +209,8 @@ def run_h3_parity_suite(commit: str = DEFAULT_COMMIT) -> str:
     command = (
         f"set -euo pipefail && source $HOME/.local/bin/env && source /opt/venv/bin/activate && "
         f"cd {repo_root} && export HF_HOME='/root/data/.cache' && "
-        f"export MINIMAX_H3_RUN_DIT_PARITY=1 MINIMAX_H3_RUN_VAE_PARITY=1 && "
+        f"export MINIMAX_H3_RUN_DIT_PARITY=1 MINIMAX_H3_RUN_VAE_PARITY=1 "
+        f"MINIMAX_H3_RUN_VIDEO_VAE_PARITY=1 MINIMAX_H3_RUN_AUDIO_VAE_PARITY=1 && "
         f"python -m pytest "
         f"tests/local_tests/transformers/test_minimax_h3_transformer_parity.py "
         f"tests/local_tests/vaes/test_minimax_h3_video_vae_parity.py "
