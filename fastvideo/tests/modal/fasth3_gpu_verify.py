@@ -24,8 +24,10 @@ Requirements: Modal profile `hao-ai-lab`; secret `fasth3-hf-token`
 runs, so the ~145 GB H3 weight download happens once).
 
 Device keying: the H3 golden gate and SSIM references are minted on
-`NVIDIA_GB200` (fastvideo/tests/golden_gate/test_minimax_h3_t2v.py), so
-verification runs use GB200 GPUs to match.
+`NVIDIA_GB200`; this Modal workspace has no GB200, so verification here runs
+on **4xH100** (the 146 GB of weights do not fit one 80 GB H100). The
+GB200-keyed golden gate runs as-is on the training cluster (B200 reports
+``NVIDIA GB200`` and the existing golden matches).
 """
 
 from __future__ import annotations
@@ -133,7 +135,7 @@ def run_h3_golden_gate(commit: str = DEFAULT_COMMIT) -> str:
     return "golden-gate: PASS"
 
 
-@app.function(gpu="GB200", **COMMON_KWARGS)
+@app.function(gpu="H100:4", **COMMON_KWARGS)
 def run_h3_t2va_smoke(
     commit: str = DEFAULT_COMMIT,
     prompt: str = (
@@ -157,7 +159,7 @@ def run_h3_t2va_smoke(
         f"python examples/inference/basic/basic_minimax_h3_t2v.py "
         f"--model-path {MODEL_REPO} --prompt {prompt@Q} --output {output_dir} "
         f"--steps {steps} --num-frames {num_frames} --height {height} --width {width} "
-        f"--seed {seed} --num-gpus 1"
+        f"--seed {seed} --num-gpus 4"
     )
     result = subprocess.run(["/bin/bash", "-lc", command], capture_output=True, text=True)
     print(result.stdout)
@@ -187,6 +189,33 @@ def run_h3_ssim(commit: str = DEFAULT_COMMIT) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"H3 SSIM failed with exit code {result.returncode}")
     return "H3 SSIM: PASS"
+
+
+@app.function(gpu="H100:1", **COMMON_KWARGS)
+def run_h3_parity_suite(commit: str = DEFAULT_COMMIT) -> str:
+    """Device-agnostic upstream parity suites (transformer, VAEs, scheduler,
+    packing, pipeline smoke) — the correctness gates for the torch side."""
+    import subprocess
+
+    repo_root = _prepare_workspace(commit)
+    command = (
+        f"set -euo pipefail && source $HOME/.local/bin/env && source /opt/venv/bin/activate && "
+        f"cd {repo_root} && export HF_HOME='/root/data/.cache' && "
+        f"python -m pytest "
+        f"tests/local_tests/minimax_h3/test_minimax_h3_transformer_parity.py "
+        f"tests/local_tests/minimax_h3/test_minimax_h3_video_vae_parity.py "
+        f"tests/local_tests/minimax_h3/test_minimax_h3_audio_vae_parity.py "
+        f"tests/local_tests/minimax_h3/test_minimax_h3_scheduler_parity.py "
+        f"tests/local_tests/minimax_h3/test_minimax_h3_packing.py "
+        f"-v -x"
+    )
+    result = subprocess.run(["/bin/bash", "-lc", command], capture_output=True, text=True)
+    print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"H3 parity suite failed with exit code {result.returncode}")
+    return "H3 parity suite: PASS"
 
 
 @app.local_entrypoint()
