@@ -34,6 +34,72 @@ from fastvideo.logger import init_logger
 logger = init_logger(__name__)
 
 
+class SkipMismatchedEMAPlanner:
+    """DCP load planner that drops degenerate EMA shards before the shape check.
+
+    Root EMA params like ``scale_shift_table`` can be saved as an empty local
+    shard (``[0, 2, 3072]``) when a tiny dim is sharded across ranks at save
+    time. DCP's default planner raises on the saved-vs-live shape mismatch
+    *before* any ``load_state_dict`` runs, so the whole EMA state becomes
+    un-exportable (observed at world_size=1 and at the training mesh).
+
+    We subclass :class:`DefaultLoadPlanner` and, in ``create_local_plan``,
+    drop any ``callbacks.ema.student_ema_sharded.*`` key whose stored shape
+    is empty (numel == 0) from both the load metadata and the live state dict
+    before delegating to the default planner. The export then falls back to
+    the live student value for just those degenerate params.
+    """
+
+    def __new__(cls):
+        from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+        from torch.distributed.checkpoint.planner import LoadPlan
+        from torch.distributed.checkpoint.utils import _element_wise_copy
+        from torch.distributed.checkpoint.default_planner import create_default_local_load_plan
+
+        class _Planner(DefaultLoadPlanner):
+            def create_local_plan(self) -> LoadPlan:
+                assert self.metadata is not None
+                # Identify degenerate (empty) EMA shards in the checkpoint.
+                bad_keys = set()
+                for key, meta in self.metadata.state_dict_metadata.items():
+                    if "callbacks.ema.student_ema_sharded" in key:
+                        size = 1
+                        for d in meta.size:
+                            size *= int(d)
+                        if size == 0:
+                            bad_keys.add(key)
+                if bad_keys:
+                    from fastvideo.logger import init_logger as _log
+                    _log(__name__).warning(
+                        "EMA export: dropping %d degenerate empty shard(s) "
+                        "from the load plan (falls back to live student): %s",
+                        len(bad_keys),
+                        sorted(bad_keys)[:3],
+                    )
+                # Prune the metadata and the live state dict in sync.
+                pruned_metadata = {
+                    k: v for k, v in self.metadata.state_dict_metadata.items()
+                    if k not in bad_keys
+                }
+                pruned_state = {
+                    k: v for k, v in self.state_dict.items()
+                    if not any(k.startswith(b) for b in bad_keys)
+                }
+                # Rebuild a minimal metadata object with the pruned map.
+                from torch.distributed.checkpoint.metadata import Metadata
+                import dataclasses
+                meta = dataclasses.replace(self.metadata, state_dict_metadata=pruned_metadata)
+                return create_default_local_load_plan(
+                    pruned_state, meta, not self.allow_partial_load
+                )
+
+        return _Planner()
+
+
+def _ema_planner():
+    return SkipMismatchedEMAPlanner()
+
+
 def _ensure_distributed() -> None:
     """Set up a single-process distributed env if needed.
 
@@ -322,7 +388,7 @@ def convert(
                 role,
                 resolved,
             )
-        dcp.load(states, checkpoint_id=str(dcp_dir))
+        dcp.load(states, checkpoint_id=str(dcp_dir), planner=_ema_planner() if use_ema else None)
         if ema_cb is not None and not ema_cb._ema_started:
             raise ValueError(
                 "--ema requested but the checkpoint contains no started EMA state "
@@ -350,7 +416,7 @@ def convert(
             "Loading DCP checkpoint from %s",
             resolved,
         )
-        dcp.load(states, checkpoint_id=str(dcp_dir))
+        dcp.load(states, checkpoint_id=str(dcp_dir), planner=_ema_planner() if use_ema else None)
         if ema_cb is not None and not ema_cb._ema_started:
             raise ValueError(
                 "--ema requested but the checkpoint contains no started EMA state "
