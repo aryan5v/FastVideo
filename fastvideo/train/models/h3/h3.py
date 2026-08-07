@@ -354,7 +354,9 @@ class H3Model(ModelBase):
         )
 
         layout = batch.h3.layout
-        video_rows = patchify_video_latents(noisy_video.float(), self.patch_size)
+        # (Nv, patch_dim) -> (1, Nv, patch_dim): the torch forward indexes
+        # hidden_states.shape[1] against video_indices and expects a batch dim.
+        video_rows = patchify_video_latents(noisy_video.float(), self.patch_size)[None]
         audio_rows = noisy_audio.reshape(1, -1, self.audio_in_channels)
         unique, inverse = build_row_timesteps(layout, video_t, audio_t, 1.0, 1.0)
 
