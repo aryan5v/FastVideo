@@ -53,7 +53,6 @@ class SkipMismatchedEMAPlanner:
     def __new__(cls):
         from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
         from torch.distributed.checkpoint.planner import LoadPlan
-        from torch.distributed.checkpoint.utils import _element_wise_copy
         from torch.distributed.checkpoint.default_planner import create_default_local_load_plan
 
         class _Planner(DefaultLoadPlanner):
