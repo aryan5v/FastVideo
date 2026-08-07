@@ -206,6 +206,9 @@ class MiniMaxH3Attention(nn.Module):
 
         # H3 rotates only 96/128 channels, which the generic `freqs_cis`
         # branch cannot express. Apply it above, then pass no RoPE here.
+        import os as _os
+        if _os.environ.get('FAS3_DEBUG_ATTN', '0') == '1':
+            print(f'[dbg] x={tuple(hidden_states.shape)} q={tuple(query.shape)} k={tuple(key.shape)} v={tuple(value.shape)}', flush=True)
         hidden_states, _ = self.distributed_attention(
             query,
             key,
