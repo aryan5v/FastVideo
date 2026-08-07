@@ -77,13 +77,15 @@ class H3CorpusDataset(torch.utils.data.Dataset):
         entry = self.entries[index]
         latents = self._st.load_file(str(pathlib.Path(self.latents_dir) / f"{entry['id']}.safetensors"))
         text = self._st.load_file(str(pathlib.Path(self.text_dir) / f"{entry['text_sha1']}.safetensors"))
-        video = latents["video"].unsqueeze(0)  # (1, 24, T', H', W')
+        # Saved artifacts carry the batch dim (encode output); return unbatched
+        # tensors and let the DataLoader collate add the training batch dim.
+        video = latents["video"][0]  # (24, T', H', W')
         audio_rows = latents["audio"]  # (2n, 32)
-        audio = audio_rows.reshape(2, -1, audio_rows.shape[-1]).transpose(1, 2).unsqueeze(0)  # (1, 2, 32, n)
+        audio = audio_rows.reshape(2, -1, audio_rows.shape[-1]).transpose(1, 2)  # (2, 32, n)
         return {
             "vae_latent": video,
             "audio_latent": audio,
-            "text_embedding": text["embed"].unsqueeze(0),  # (1, L, 5120)
+            "text_embedding": text["embed"],  # (L, 5120)
         }
 
 
