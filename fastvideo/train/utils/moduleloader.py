@@ -112,7 +112,13 @@ def load_module_from_path(
         raise ValueError(f"Module {module_type!r} has null value in "
                          f"config at {local_model_path}")
 
-    transformers_or_diffusers, _architecture = module_info
+    # Newer model indexes (e.g. MiniMax H3) carry a trailing kwargs dict:
+    # ['diffusers', 'ClassName', {pretrained kwargs}]. The training path
+    # builds its own config, so only the first two elements matter.
+    if isinstance(module_info, (list, tuple)) and len(module_info) >= 2:
+        transformers_or_diffusers, _architecture = module_info[0], module_info[1]
+    else:
+        raise ValueError(f"Malformed module info for {module_type!r}: {module_info!r}")
     component_path = os.path.join(local_model_path, module_type)
 
     old_override: str | None = None
