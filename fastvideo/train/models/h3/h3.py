@@ -194,11 +194,22 @@ class H3Model(ModelBase):
         transformer_override_safetensor: str | None = None,
         attention_backend: Any = None,
     ) -> torch.nn.Module:
+        from fastvideo.configs.pipelines.minimax_h3 import (  # noqa: PLC0415
+            MiniMaxH3PipelineConfig,
+        )
         from fastvideo.training.activation_checkpoint import (  # noqa: PLC0415
             apply_activation_checkpointing,
         )
         from fastvideo.train.utils.module_state import apply_trainable  # noqa: PLC0415
         from fastvideo.train.utils.moduleloader import load_module_from_path  # noqa: PLC0415
+
+        # The training flow builds a base PipelineConfig (base DiTArchConfig)
+        # unless the TrainingConfig carries a family config; update_model_arch
+        # then silently drops H3 fields (patch_size, audio_in_channels, ...).
+        # Resolve the H3 family config here so the loader sees real arch fields.
+        current = getattr(training_config, "pipeline_config", None)
+        if not isinstance(current, MiniMaxH3PipelineConfig):
+            training_config.pipeline_config = MiniMaxH3PipelineConfig()
 
         transformer = load_module_from_path(
             model_path=init_from,
