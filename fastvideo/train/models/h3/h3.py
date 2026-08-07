@@ -294,7 +294,7 @@ class H3Model(ModelBase):
         noise = torch.randn(latents.shape, device=device, dtype=dtype, generator=generator)
         audio_noise = torch.randn(audio_latents.shape, device=device, dtype=dtype, generator=generator)
 
-        from fastvideo.train.utils.training_config import TrainingBatch  # noqa: PLC0415
+        from fastvideo.pipelines import TrainingBatch  # noqa: PLC0415
 
         batch = TrainingBatch()
         batch.latents = latents
