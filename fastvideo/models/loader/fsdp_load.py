@@ -158,7 +158,9 @@ def maybe_load_fsdp_model(
     dtype_selector = getattr(model, "_get_parameter_dtype", None)
     has_mixed_parameter_dtypes = callable(dtype_selector) and any(
         dtype_selector(name, param_dtype) != param_dtype for name, _ in model.named_parameters())
-    if training_mode and has_mixed_parameter_dtypes:
+    # Mixed param dtypes are safe without replicated parameters: the missing
+    # piece is only the separate gradient sync for *replicated* params.
+    if training_mode and has_mixed_parameter_dtypes and hsdp_replicate_dim > 1:
         raise NotImplementedError("FSDP training with model-selected mixed parameter dtypes requires "
                                   "separate gradient synchronization for replicated parameters.")
 
