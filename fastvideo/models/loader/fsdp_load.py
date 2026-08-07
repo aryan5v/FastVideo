@@ -156,6 +156,12 @@ def maybe_load_fsdp_model(
         model = model_cls(**init_params)
 
     dtype_selector = getattr(model, "_get_parameter_dtype", None)
+    # Training-mode escape hatch: force uniform bf16 so FSDP2 never enters the
+    # mixed-dtype allgather path. The fp32 keep-set (e.g. MiniMax H3 input/
+    # output projections) is a checkpoint/inference property; training keeps
+    # precision in the optimizer state instead.
+    if os.environ.get("FASTVIDEO_FORCE_UNIFORM_BF16", "0") == "1" and training_mode:
+        dtype_selector = lambda name, default: torch.bfloat16  # noqa: E731
     has_mixed_parameter_dtypes = callable(dtype_selector) and any(
         dtype_selector(name, param_dtype) != param_dtype for name, _ in model.named_parameters())
     # Mixed param dtypes are safe without replicated parameters: the missing
