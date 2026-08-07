@@ -72,5 +72,3 @@ callbacks:
   grad_clip:
     max_grad_norm: 1.0
 
-pipeline:
-  flow_shift: 8

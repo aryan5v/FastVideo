@@ -89,5 +89,3 @@ callbacks:
     decay: 0.98
     start_iter: 0
 
-pipeline:
-  flow_shift: 8
