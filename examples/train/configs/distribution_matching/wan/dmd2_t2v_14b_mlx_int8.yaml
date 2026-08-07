@@ -91,7 +91,7 @@ training:
 
   loop:
     max_train_steps: 4000
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 2
 
   checkpoint:
     output_dir: outputs/wan2.1_14b_dmd2_3steps_mlx_int8
