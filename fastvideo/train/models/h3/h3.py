@@ -363,7 +363,9 @@ class H3Model(ModelBase):
         unique, inverse = build_row_timesteps(layout, video_t, audio_t, 1.0, 1.0)
 
         text_embeds = batch.h3.text_embeds
-        video_out, audio_out = self.transformer(
+        from fastvideo.forward_context import set_forward_context  # noqa: PLC0415
+        with set_forward_context(current_timestep=0, attn_metadata=None):
+            video_out, audio_out = self.transformer(
             hidden_states=video_rows,
             audio_hidden_states=audio_rows,
             encoder_hidden_states=text_embeds,
