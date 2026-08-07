@@ -150,8 +150,11 @@ class H3Model(ModelBase):
         self.sp_group: Any = None
         self._requires_negative_conditioning = False  # guidance-distilled
 
-        self.patch_size = tuple(int(value) for value in self.transformer.patch_size)
-        self.audio_in_channels = int(self.transformer.audio_in_channels)
+        # FSDP2 wrappers do not forward plain model attributes; read the arch
+        # from the resolved pipeline config instead (same values by contract).
+        arch = training_config.pipeline_config.dit_config.arch_config
+        self.patch_size = tuple(int(value) for value in arch.patch_size)
+        self.audio_in_channels = int(arch.audio_in_channels)
 
     # ------------------------------------------------------------------
     # timestep mechanics (continuous t in [0, 1])
