@@ -189,6 +189,9 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
     done: list[dict] = []
     with torch.no_grad():
         for index, row in enumerate(rows):
+            out_path = latents_dir / f"{row['clip_id']}.safetensors"
+            if out_path.exists():  # resume: already processed
+                continue
             try:
                 frames, waveform = read_clip(row["video"], args.num_frames, args.short_edge, args.max_long_edge)
 
@@ -205,7 +208,7 @@ def phase_latents(args: argparse.Namespace, rank: int, world_size: int, device: 
 
                 safetensors.torch.save_file(
                     {"video": latents.to(torch.float16), "audio": audio.to(torch.float16)},
-                    str(latents_dir / f"{row['clip_id']}.safetensors"),
+                    str(out_path),
                 )
                 done.append({
                     "id": row["clip_id"],
@@ -261,6 +264,9 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
     hidden_state_index = 50
     with torch.no_grad():
         for index, (sha1, caption) in enumerate(caption_items):
+            out_path = text_dir / f"{sha1}.safetensors"
+            if out_path.exists():  # resume: already encoded
+                continue
             token_ids = _token_ids(tokenizer(caption, add_special_tokens=False))
             input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
             mm_token_type_ids = _mm_token_type_ids(processor, token_ids, device)
@@ -274,7 +280,7 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
             if outputs.hidden_states is None or len(outputs.hidden_states) <= hidden_state_index:
                 raise RuntimeError(f"hidden_states[{hidden_state_index}] unavailable")
             embed = outputs.hidden_states[hidden_state_index][0].float().cpu()
-            safetensors.torch.save_file({"embed": embed.to(torch.float16)}, str(text_dir / f"{sha1}.safetensors"))
+            safetensors.torch.save_file({"embed": embed.to(torch.float16)}, str(out_path))
             if index % 100 == 0:
                 print(f"[rank {rank}] text {index}/{len(captions)}", flush=True)
     print(f"[rank {rank}] phase B done: {len(caption_items)} prompts", flush=True)

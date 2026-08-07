@@ -194,11 +194,11 @@ class H3Model(ModelBase):
         transformer_override_safetensor: str | None = None,
         attention_backend: Any = None,
     ) -> torch.nn.Module:
-        from fastvideo.train.utils.module_utils import (  # noqa: PLC0415
+        from fastvideo.training.activation_checkpoint import (  # noqa: PLC0415
             apply_activation_checkpointing,
-            apply_trainable,
-            load_module_from_path,
         )
+        from fastvideo.train.utils.module_state import apply_trainable  # noqa: PLC0415
+        from fastvideo.train.utils.moduleloader import load_module_from_path  # noqa: PLC0415
 
         transformer = load_module_from_path(
             model_path=init_from,
