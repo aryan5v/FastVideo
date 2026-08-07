@@ -96,7 +96,10 @@ training:
   checkpoint:
     output_dir: outputs/wan2.1_14b_dmd2_3steps_mlx_int8
     training_state_checkpointing_steps: 100
-    checkpoints_total_limit: 3
+    # Keep ALL checkpoints from 2000->4000 (20 saves at every-100). The old
+    # limit-3 silently pruned the quality peaks (5B-1700/2600, 1.3B-2300);
+    # 373GB x ~23 = ~8.6TB is fine on the 8EB NFS. Rank & export after.
+    checkpoints_total_limit: 25
 
   tracker:
     project_name: distillation_wan
