@@ -289,7 +289,7 @@ class H3Model(ModelBase):
             num_audio_latents,
             self.patch_size,
         )
-        unique, inverse = build_row_timesteps(layout, float(video_t.item()), float(audio_t.item()))
+        unique, inverse = build_row_timesteps(layout, float(video_t.item()), float(audio_t.item()), 1.0, 1.0)
 
         noise = torch.randn(latents.shape, device=device, dtype=dtype, generator=generator)
         audio_noise = torch.randn(audio_latents.shape, device=device, dtype=dtype, generator=generator)
@@ -356,7 +356,7 @@ class H3Model(ModelBase):
         layout = batch.h3.layout
         video_rows = patchify_video_latents(noisy_video.float(), self.patch_size)
         audio_rows = noisy_audio.reshape(1, -1, self.audio_in_channels)
-        unique, inverse = build_row_timesteps(layout, video_t, audio_t)
+        unique, inverse = build_row_timesteps(layout, video_t, audio_t, 1.0, 1.0)
 
         text_embeds = batch.h3.text_embeds
         video_out, audio_out = self.transformer(
