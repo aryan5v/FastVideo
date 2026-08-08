@@ -67,7 +67,7 @@ training:
 
   loop:
     max_train_steps: 4000
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 2
 
   checkpoint:
     output_dir: outputs/wan2.1_dmd2_3steps_mlx_int8_v2_8gpu_peaks
@@ -75,7 +75,7 @@ training:
     # resume points dense enough for the 1.3B scale while matching the proven
     # 5B/14B cadence (empty_cache-before-save is in checkpoint.py on this HEAD).
     training_state_checkpointing_steps: 50
-    checkpoints_total_limit: 12
+    checkpoints_total_limit: 40
 
   tracker:
     project_name: distillation_wan
