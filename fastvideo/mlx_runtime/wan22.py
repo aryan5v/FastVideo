@@ -42,6 +42,16 @@ class MLXWan22TransformerBlock:
     """Dense Wan block with per-token (``[B, L, dim]``) timestep modulation."""
 
     def __init__(self, weights: dict[str, mx.array], *, dim: int, ffn_dim: int, num_heads: int, eps: float = 1e-6):
+        """
+        Initialize a Wan transformer block with its attention configuration and weights.
+        
+        Parameters:
+            weights (dict[str, mx.array]): Model weights used by the block.
+            dim (int): Hidden dimension of the block.
+            ffn_dim (int): Feed-forward network dimension.
+            num_heads (int): Number of attention heads.
+            eps (float): Epsilon used for normalization.
+        """
         self.weights = weights
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -51,6 +61,19 @@ class MLXWan22TransformerBlock:
         self.attn2 = MLXWanT2VCrossAttention(weights, dim=dim, num_heads=num_heads, eps=eps)
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep_proj, cos, sin) -> mx.array:
+        """
+        Apply modulated self-attention, cross-attention, and feed-forward transformations.
+        
+        Parameters:
+            hidden_states: Input token representations.
+            encoder_hidden_states: Encoder representations used for cross-attention.
+            timestep_proj: Per-token timestep conditioning and modulation values.
+            cos: Cosine rotary-embedding values.
+            sin: Sine rotary-embedding values.
+        
+        Returns:
+            Token representations after the transformer block.
+        """
         import mlx.core as mx
 
         orig_dtype = hidden_states.dtype
@@ -113,6 +136,14 @@ class MLXWan22DiT:
     """Wan2.2-TI2V-5B dense DiT with per-token timestep conditioning."""
 
     def __init__(self, weights: dict[str, mx.array], blocks: list[MLXWan22TransformerBlock], config: dict) -> None:
+        """
+        Initialize the Wan2.2 diffusion transformer with model weights, transformer blocks, and configuration.
+        
+        Parameters:
+        	weights (dict[str, mx.array]): Model weight tensors.
+        	blocks (list[MLXWan22TransformerBlock]): Transformer blocks used by the model.
+        	config (dict): Model configuration containing attention, patching, channel, frequency, and normalization settings.
+        """
         self.weights = weights
         self.blocks = blocks
         self.config = config
@@ -125,6 +156,15 @@ class MLXWan22DiT:
         self.eps = float(config.get("eps", 1e-6))
 
     def _patch_embed(self, hidden_states) -> mx.array:
+        """
+        Convert latent video data into a sequence of projected spatiotemporal patches.
+        
+        Parameters:
+        	hidden_states: Latent video tensor with shape `[batch, channels, frames, height, width]`.
+        
+        Returns:
+        	Projected patch representations with shape `[batch, num_patches, hidden_size]`.
+        """
         batch, channels, frames, height, width = hidden_states.shape
         pt, ph, pw = self.patch_size
         patch_dim = channels * pt * ph * pw
@@ -133,7 +173,16 @@ class MLXWan22DiT:
         return linear(x, self.weights["patch_embedding.weight"], self.weights.get("patch_embedding.bias"))
 
     def _condition(self, timestep, encoder_hidden_states) -> tuple:
-        """Per-token conditioning. ``timestep`` is ``[B, L]`` (one level per token)."""
+        """
+        Generate per-token timestep and text conditioning representations.
+        
+        Parameters:
+            timestep: A tensor of per-token timestep values with shape ``[batch, sequence]``.
+            encoder_hidden_states: Encoder text representations to transform.
+        
+        Returns:
+            A tuple containing the timestep embeddings, six timestep modulation values per token, and transformed encoder hidden states.
+        """
         batch, seq = timestep.shape
         t_freq = timestep_embedding(timestep.reshape(-1), self.freq_dim).astype(
             weight_dtype(self.weights["condition_embedder.time_embedder.linear_1.weight"]))
@@ -155,6 +204,21 @@ class MLXWan22DiT:
         return temb_out, timestep_proj, ehs
 
     def _output(self, hidden_states, temb_out, *, batch, frames, height, width) -> mx.array:
+        """
+        Apply output modulation and reconstruct the patch sequence into a video tensor.
+        
+        Parameters:
+            hidden_states: Patch-level hidden representations.
+            temb_out: Per-token timestep conditioning used for output modulation.
+            batch: Batch size.
+            frames: Number of output frames.
+            height: Output height.
+            width: Output width.
+        
+        Returns:
+            The reconstructed video tensor with shape
+            ``[batch, out_channels, frames, height, width]``.
+        """
         import mlx.core as mx
 
         pt, ph, pw = self.patch_size
@@ -170,6 +234,18 @@ class MLXWan22DiT:
         return out.reshape(batch, self.out_channels, frames, height, width)
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep, freqs_cis) -> mx.array:
+        """
+        Generate the reconstructed video representation from latent inputs and conditioning data.
+        
+        Parameters:
+        	hidden_states: Latent video tensor with shape `[batch, channels, frames, height, width]`.
+        	encoder_hidden_states: Encoded text conditioning states.
+        	timestep: Per-token diffusion timestep values.
+        	freqs_cis: Cosine and sine rotary positional embeddings.
+        
+        Returns:
+        	mx.array: Processed video tensor with shape `[batch, channels, frames, height, width]`.
+        """
         cos, sin = freqs_cis
         batch, _, frames, height, width = hidden_states.shape
         hidden = self._patch_embed(hidden_states)
@@ -187,7 +263,19 @@ def mlx_wan22_dit_from_diffusers_safetensors(
     num_blocks: int | None = None,
     quantization=None,
 ) -> MLXWan22DiT:
-    """Load Wan2.2-TI2V-5B (FullAttn) into ``MLXWan22DiT`` via the dense loader."""
+    """
+    Load a Wan2.2-TI2V-5B model from Diffusers safetensors files.
+    
+    Parameters:
+    	checkpoint_path (str | Path): Path to the model checkpoint.
+    	config_path (str | Path): Path to the model configuration.
+    	dtype (str): Data type used for loaded weights.
+    	num_blocks (int | None): Number of transformer blocks to load.
+    	quantization: Optional quantization configuration.
+    
+    Returns:
+    	MLXWan22DiT: The loaded Wan2.2 diffusion transformer.
+    """
     dense = mlx_dit_from_diffusers_safetensors(checkpoint_path,
                                                config_path,
                                                dtype=dtype,

@@ -64,6 +64,14 @@ class BenchResult:
 
 
 def _sysctl(name: str) -> str:
+    """Read a macOS system value by name.
+    
+    Parameters:
+        name (str): The system value to query.
+    
+    Returns:
+        str: The queried value, or ``"unknown"`` if the query fails.
+    """
     try:
         out = subprocess.run(
             ["sysctl", "-n", name], capture_output=True, text=True, timeout=5, check=True
@@ -74,7 +82,12 @@ def _sysctl(name: str) -> str:
 
 
 def detect_platform() -> PlatformInfo:
-    """Read chip / macOS / MLX identity and guess whether M5-class accel exists."""
+    """
+    Collect system and MLX runtime information and assess whether M5/A19-class acceleration is expected.
+    
+    Returns:
+    	PlatformInfo: Platform and MLX details, including the expected neural accelerator availability.
+    """
     chip = _sysctl("machdep.cpu.brand_string")
     macos = platform.mac_ver()[0] or "unknown"
     mlx_version = str(getattr(mx, "__version__", "unknown"))
@@ -103,10 +116,19 @@ def _time_call(fn, warmup: int, iters: int) -> float:
 def bench_gemm(
     backend: str, m: int, k: int, n: int, *, warmup: int, iters: int
 ) -> BenchResult:
-    """Benchmark ``(m,k) @ (k,n)`` in fp16 or a quantized backend.
-
-    FLOPs for a dense matmul are ``2*m*k*n``; we report that against wall time
-    regardless of backend so fp16 and quantized paths are directly comparable.
+    """
+    Benchmark a matrix multiplication using fp16 or a quantized backend.
+    
+    Parameters:
+        backend (str): Matrix multiplication backend to benchmark.
+        m (int): Number of rows in the left-hand matrix.
+        k (int): Shared matrix dimension.
+        n (int): Number of columns in the right-hand matrix.
+        warmup (int): Number of warmup executions.
+        iters (int): Number of timed executions.
+    
+    Returns:
+        BenchResult: Timing and throughput metrics for the benchmark.
     """
     x = mx.random.normal((m, k)).astype(mx.float16)
     flops = 2.0 * m * k * n
@@ -114,12 +136,24 @@ def bench_gemm(
         w = mx.random.normal((n, k)).astype(mx.float16)
 
         def run() -> mx.array:
+            """
+            Compute the matrix product of `x` and the transpose of `w`.
+            
+            Returns:
+                mx.array: The resulting matrix product.
+            """
             return x @ w.T
     else:
         w = mx.random.normal((n, k)).astype(mx.float16)
         qw = quantize_weight(w, backend)
 
         def run() -> mx.array:
+            """
+            Perform quantized matrix multiplication on the prepared inputs.
+            
+            Returns:
+                mx.array: The quantized matrix multiplication result.
+            """
             return quantized_matmul(x, qw)
 
     spi = _time_call(run, warmup, iters)
@@ -137,13 +171,32 @@ def bench_gemm(
 def bench_attention(
     b: int, h: int, s: int, d: int, *, warmup: int, iters: int
 ) -> BenchResult:
-    """Benchmark the fused ``mx.fast.scaled_dot_product_attention`` at our shape."""
+    """
+    Benchmark fused scaled dot-product attention for the specified batch, head, sequence, and head dimensions.
+    
+    Parameters:
+    	b (int): Batch size.
+    	h (int): Number of attention heads.
+    	s (int): Sequence length.
+    	d (int): Dimension of each attention head.
+    	warmup (int): Number of warmup executions.
+    	iters (int): Number of timed executions.
+    
+    Returns:
+    	BenchResult: Timing and estimated throughput for the fp16 attention benchmark.
+    """
     scale = 1.0 / (d ** 0.5)
     q = mx.random.normal((b, h, s, d)).astype(mx.float16)
     k = mx.random.normal((b, h, s, d)).astype(mx.float16)
     v = mx.random.normal((b, h, s, d)).astype(mx.float16)
 
     def run() -> mx.array:
+        """
+        Compute scaled dot-product attention for the configured query, key, and value tensors.
+        
+        Returns:
+            mx.array: The scaled dot-product attention output.
+        """
         return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
 
     # QK^T and AV are each ~2*b*h*s*s*d FLOPs.
@@ -161,7 +214,15 @@ def bench_attention(
 
 
 def _with_speedups(results: list[BenchResult]) -> list[BenchResult]:
-    """Fill ``speedup_vs_fp16`` for GEMM rows relative to the fp16 GEMM baseline."""
+    """
+    Add fp16-relative speedups to quantized GEMM benchmark results.
+    
+    Parameters:
+    	results (list[BenchResult]): Benchmark results containing an fp16 GEMM baseline.
+    
+    Returns:
+    	list[BenchResult]: Results with quantized GEMM speedups populated when an fp16 baseline is available.
+    """
     fp16_gemm = next(
         (r for r in results if r.kind == "gemm" and r.backend == "fp16"), None
     )
@@ -181,7 +242,19 @@ def _with_speedups(results: list[BenchResult]) -> list[BenchResult]:
 def run_probe(
     *, gemm: tuple[int, int, int], attn: tuple[int, int, int, int], warmup: int, iters: int
 ) -> dict:
-    """Run all microbenchmarks and return a JSON-serializable report."""
+    """
+    Run all configured microbenchmarks and assess likely accelerator engagement.
+    
+    Parameters:
+        gemm (tuple[int, int, int]): Matrix dimensions for the GEMM benchmark.
+        attn (tuple[int, int, int, int]): Batch, head, sequence, and feature dimensions for the attention benchmark.
+        warmup (int): Number of warmup executions for each benchmark.
+        iters (int): Number of timed executions for each benchmark.
+    
+    Returns:
+        dict: JSON-serializable report containing platform information, benchmark results,
+            the best quantized GEMM speedup over fp16, and the accelerator engagement assessment.
+    """
     info = detect_platform()
     results: list[BenchResult] = [bench_gemm("fp16", *gemm, warmup=warmup, iters=iters)]
     for backend in BACKENDS:
@@ -216,6 +289,7 @@ def run_probe(
 
 
 def _print_report(report: dict) -> None:
+    """Print platform information, benchmark results, speedups, and the accelerator assessment."""
     p = report["platform"]
     print(f"chip={p['chip']}  macOS={p['macos']}  mlx={p['mlx_version']}  device={p['device']}")
     print(f"neural_accel_expected={p['neural_accel_expected']}")
@@ -234,6 +308,7 @@ def _print_report(report: dict) -> None:
 
 
 def main() -> None:
+    """Parse command-line options, run the accelerator probe, and display the benchmark report."""
     parser = argparse.ArgumentParser(description="MLX Apple-Silicon accelerator probe.")
     parser.add_argument("--gemm", default=",".join(str(v) for v in _DEFAULT_GEMM),
                         help="M,K,N for the linear GEMM benchmark.")

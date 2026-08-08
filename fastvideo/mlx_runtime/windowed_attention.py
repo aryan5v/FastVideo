@@ -34,6 +34,19 @@ import mlx.core as mx
 
 
 def _default_scale(head_dim: int, scale: Optional[float]) -> float:
+    """
+    Determine the attention scaling factor from an explicit value or head dimension.
+    
+    Parameters:
+    	head_dim (int): The attention head dimension used to derive the default scale.
+    	scale (Optional[float]): An explicit scaling factor.
+    
+    Returns:
+    	float: The explicit scale converted to a float, or the reciprocal square root of `head_dim`.
+    
+    Raises:
+    	ValueError: If `scale` is not provided and `head_dim` is not positive.
+    """
     if scale is not None:
         return float(scale)
     if head_dim <= 0:
@@ -42,6 +55,20 @@ def _default_scale(head_dim: int, scale: Optional[float]) -> float:
 
 
 def _validate_qkv(q: mx.array, k: mx.array, v: mx.array) -> tuple[int, int, int, int]:
+    """
+    Validate compatible rank-4 query, key, and value tensors.
+    
+    Parameters:
+        q (mx.array): Query tensor shaped `(B, H, S, D)`.
+        k (mx.array): Key tensor with the same shape as `q`.
+        v (mx.array): Value tensor with the same shape as `q`.
+    
+    Returns:
+        tuple[int, int, int, int]: Batch size, head count, sequence length, and head dimension.
+    
+    Raises:
+        ValueError: If the tensors are not rank 4, do not have identical shapes, or have an empty sequence or head dimension.
+    """
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         raise ValueError(
             f"q/k/v must be rank-4 (B, H, S, D); got shapes "
@@ -65,7 +92,16 @@ def full_attention(
     v: mx.array,
     scale: Optional[float] = None,
 ) -> mx.array:
-    """Full (dense) self-attention via fused SDPA.  Shapes ``(B, H, S, D)``."""
+    """
+    Compute dense scaled dot-product attention over the full sequence.
+    
+    Parameters:
+        scale (float, optional): Attention scaling factor. If omitted, uses the
+            inverse square root of the head dimension.
+    
+    Returns:
+        mx.array: Attention output with shape ``(B, H, S, D)``.
+    """
     _, _, _, d = _validate_qkv(q, k, v)
     sc = _default_scale(d, scale)
     return mx.fast.scaled_dot_product_attention(q, k, v, scale=sc)
@@ -130,21 +166,26 @@ def windowed_attention(
     *,
     chunk_size: Optional[int] = None,
 ) -> mx.array:
-    """Block-local symmetric sliding-window attention (chunked SDPA).
-
-    Args:
-        q, k, v: ``(B, H, S, D)`` query/key/value tensors.
-        window: Symmetric window width in tokens (see module docstring).
-            Must be ``>= 1``.  When ``window >= S`` the result matches full
-            attention up to floating-point noise (sinks are redundant).
-        sink: Number of leading key positions that every query may attend to
-            globally.  Must be ``>= 0``.
-        scale: Softmax scale; defaults to ``1 / sqrt(D)``.
-        chunk_size: Query-block length for the FLOP-reducing tile loop.
-            Defaults to ``min(window, 512)`` (clamped to at least 1).
-
+    """
+    Apply symmetric sliding-window self-attention with optional global sink positions.
+    
+    Parameters:
+        q (mx.array): Query tensor shaped `(B, H, S, D)`.
+        k (mx.array): Key tensor shaped `(B, H, S, D)`.
+        v (mx.array): Value tensor shaped `(B, H, S, D)`.
+        window (int): Symmetric attention window width in tokens; must be at least 1.
+        sink (int): Number of leading key positions available to every query; must
+            be between 0 and the sequence length.
+        scale (Optional[float]): Softmax scale. Defaults to `1 / sqrt(D)`.
+        chunk_size (Optional[int]): Query block length used for chunked processing.
+            Defaults to the smaller of `window` and 512.
+    
     Returns:
-        Attention output with the same shape as ``q``.
+        mx.array: Attention output with the same shape as `q`.
+    
+    Raises:
+        ValueError: If the inputs or attention parameters are invalid.
+        RuntimeError: If a query block has no available keys.
     """
     _, _, seq_len, d = _validate_qkv(q, k, v)
 

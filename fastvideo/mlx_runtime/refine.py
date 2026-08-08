@@ -67,22 +67,35 @@ class RefinePlan:
 
     @property
     def stage1_latent_height(self) -> int:
+        """Return the stage-1 latent height after VAE spatial compression."""
         return self.stage1_height // self.vae_spatial_compression
 
     @property
     def stage1_latent_width(self) -> int:
+        """Return the stage-one latent width after VAE spatial compression."""
         return self.stage1_width // self.vae_spatial_compression
 
     @property
     def stage2_latent_height(self) -> int:
+        """Calculate the target-resolution latent height.
+        
+        Returns:
+            int: The target height divided by the VAE spatial compression factor.
+        """
         return self.target_height // self.vae_spatial_compression
 
     @property
     def stage2_latent_width(self) -> int:
+        """Return the target image width in latent-space units."""
         return self.target_width // self.vae_spatial_compression
 
     @property
     def latent_frames(self) -> int:
+        """Calculate the number of latent frames after VAE temporal compression.
+        
+        Returns:
+            int: The compressed latent frame count.
+        """
         return (self.num_frames - 1) // self.vae_temporal_compression + 1
 
 
@@ -97,12 +110,21 @@ def plan_refine_resolutions(
     patch_size: tuple[int, int, int] = (1, 2, 2),
     enabled: bool = True,
 ) -> RefinePlan:
-    """Validate and split ``(height, width)`` into stage-1 / stage-2 sizes.
-
-    Mirrors :class:`LTX2RefineInitStage`: stage 1 runs at
-    ``target // spatial_scale``, stage 2 restores the original target.
-    When ``enabled`` is false the plan collapses to a single pass at the
-    target resolution (stage1 == stage2).
+    """
+    Validate the requested dimensions and create the stage-1 and target-resolution refinement plan.
+    
+    Parameters:
+    	height (int): Target image height in pixels.
+    	width (int): Target image width in pixels.
+    	num_frames (int): Number of frames in the input sequence.
+    	spatial_scale (int): Factor used to reduce spatial dimensions for stage 1.
+    	vae_spatial_compression (int): Spatial compression factor of the VAE.
+    	vae_temporal_compression (int): Temporal compression factor of the VAE.
+    	patch_size (tuple[int, int, int]): Temporal and spatial patch dimensions used to validate latent-grid alignment.
+    	enabled (bool): Whether to use two-pass refinement.
+    
+    Returns:
+    	RefinePlan: The validated stage-1 and target-resolution plan.
     """
     if height <= 0 or width <= 0:
         raise ValueError(f"height/width must be positive, got {height}x{width}")
@@ -166,7 +188,16 @@ def plan_refine_resolutions(
 
 
 def _validate_plan(plan: RefinePlan, *, patch_size: tuple[int, int, int]) -> None:
-    """Ensure both stages produce integer patch-grid tokens."""
+    """
+    Validate that both refinement stages have latent dimensions aligned to the patch grid.
+    
+    Parameters:
+        patch_size (tuple[int, int, int]): Temporal, height, and width patch dimensions.
+    
+    Raises:
+        ValueError: If a stage's spatial latent dimensions or the temporal latent
+            dimension is not divisible by the corresponding patch dimension.
+    """
     pt, ph, pw = patch_size
     for label, lh, lw in (
         ("stage1", plan.stage1_latent_height, plan.stage1_latent_width),
@@ -190,17 +221,16 @@ def upsample_latents_spatial(
     scale: int = 2,
     mode: str = "bilinear",
 ) -> Any:
-    """Spatially upsample 5-D latents ``(B, C, T, H, W)`` by ``scale``.
-
-    Temporal axis is left untouched. Prefer this over decode→resize→encode:
-    staying in latent space is the whole point of the LTX-2 / H3 hand-off and
-    avoids a second VAE round-trip on memory-tight Macs.
-
-    ``mode``:
-      * ``"nearest"`` — repeat each spatial sample ``scale`` times (exact,
-        cheap, blocky; useful for bit-exact tests).
-      * ``"bilinear"`` (default) — linear interpolation over H×W, matching
-        the spirit of a learned residual upsampler without the weights.
+    """
+    Upsample the spatial dimensions of 5-D latent arrays while preserving the batch, channel, and temporal dimensions.
+    
+    Parameters:
+        latents (Any): Latents with shape ``(B, C, T, H, W)``.
+        scale (int): Integer factor for enlarging the spatial dimensions.
+        mode (str): Interpolation mode, either ``"nearest"`` or ``"bilinear"``.
+    
+    Returns:
+        Any: Latents with shape ``(B, C, T, H * scale, W * scale)``.
     """
     if scale < 1:
         raise ValueError(f"scale must be >= 1, got {scale}")
@@ -220,6 +250,19 @@ def _upsample_latents_numpy(
     scale: int,
     mode: str,
 ) -> np.ndarray:
+    """Upsample 5-D latent arrays spatially using nearest-neighbor or bilinear interpolation.
+    
+    Parameters:
+        latents (np.ndarray): Latents with shape ``(B, C, T, H, W)``.
+        scale (int): Spatial upsampling factor.
+        mode (str): Interpolation mode, either ``"nearest"`` or ``"bilinear"``.
+    
+    Returns:
+        np.ndarray: Spatially upsampled latents with preserved batch, channel, and temporal dimensions.
+    
+    Raises:
+        ValueError: If the latents are not five-dimensional or the interpolation mode is unsupported.
+    """
     if latents.ndim != 5:
         raise ValueError(f"Expected 5-D latents (B,C,T,H,W), got shape {latents.shape}")
     b, c, t, h, w = latents.shape
@@ -260,6 +303,17 @@ def _upsample_latents_numpy(
 
 
 def _upsample_latents_mlx(latents: mx.array, *, scale: int, mode: str) -> mx.array:
+    """
+    Upsample MLX latent tensors along their spatial dimensions.
+    
+    Parameters:
+    	latents (mx.array): A latent tensor with shape `(B, C, T, H, W)`.
+    	scale (int): The integer spatial upsampling factor.
+    	mode (str): The interpolation mode, such as `"nearest"` or `"bilinear"`.
+    
+    Returns:
+    	mx.array: The spatially upsampled latent tensor with its original data type.
+    """
     import mlx.core as mx
 
     # Route through NumPy for the interpolation math. Latent tensors at Mac
@@ -281,16 +335,22 @@ def prepare_refine_latents(
     upsample_mode: str = "bilinear",
     seed: int | None = None,
 ) -> Any:
-    """Upsample clean stage-1 latents and re-noise for the stage-2 denoise.
-
-    Mirrors :class:`LTX2UpsampleStage` for the text-to-video path:
-
-    * upsample clean latents spatially by ``scale``
-    * mix with Gaussian noise at ``sigma``:
-      ``latents = (1 - sigma) * clean_up + sigma * noise``
-
-    When ``add_noise_flag`` is false the upsampled clean latents are returned
-    directly (useful for ablation / decode-only checks).
+    """
+    Upsample clean latents spatially and optionally mix them with Gaussian noise.
+    
+    Parameters:
+        clean_latents: The stage-1 latent tensor.
+        sigma: Noise mixing factor between 0 and 1.
+        noise: Optional noise tensor to mix with the upsampled latents.
+        add_noise_flag: Whether to apply noise mixing.
+        upsample_mode: Spatial interpolation mode.
+        seed: Optional seed for generated noise.
+    
+    Returns:
+        The upsampled latents, optionally mixed with noise.
+    
+    Raises:
+        ValueError: If sigma is outside the range from 0 to 1.
     """
     if sigma < 0.0 or sigma > 1.0:
         raise ValueError(f"sigma must be in [0, 1], got {sigma}")
@@ -309,7 +369,18 @@ def refine_sigma_from_schedule(
     schedule: MLXDMDSchedule,
     timesteps: Sequence[float | int],
 ) -> float:
-    """Stage-2 start sigma = schedule sigma of the first refine timestep."""
+    """Derive the refinement noise level from the first refinement timestep.
+    
+    Parameters:
+    	schedule (MLXDMDSchedule): Schedule used to map timesteps to noise levels.
+    	timesteps (Sequence[float | int]): Refinement timesteps, whose first value determines the sigma.
+    
+    Returns:
+    	float: Sigma corresponding to the first refinement timestep.
+    
+    Raises:
+    	ValueError: If `timesteps` is empty.
+    """
     if not timesteps:
         raise ValueError("timesteps must be non-empty to derive a refine sigma")
     return float(schedule.sigma_for(float(timesteps[0])))
@@ -328,12 +399,18 @@ def run_dmd_loop(
     step_callback: Callable[[int, int], None] | None = None,
     label: str = "denoise",
 ) -> Any:
-    """Run an on-device DMD loop over ``timesteps`` with a fixed DiT.
-
-    Shared by stage-1 and stage-2 so both passes stay bit-symmetric aside
-    from resolution / RoPE. Re-noise is drawn from a NumPy Generator when
-    ``seed`` is set (reproducible across MLX / CPU A/B dumps); otherwise
-    MLX's device RNG is used.
+    """
+    Denoise latents over the supplied timesteps using the DMD schedule.
+    
+    Parameters:
+        timesteps (Sequence[float | int]): Denoising timesteps in execution order.
+        seed (int | None): Seed for reproducible intermediate noise generation.
+        step_callback (Callable[[int, int], None] | None): Callback receiving the
+            completed step number and total step count.
+        label (str): Label used for progress output when no callback is provided.
+    
+    Returns:
+        Any: The denoised latents.
     """
     import mlx.core as mx
 
@@ -407,26 +484,31 @@ def run_two_pass_dmd(
     refine_sigma: float | None = None,
     step_callback: Callable[[str, int, int], None] | None = None,
 ) -> TwoPassResult:
-    """Full H3 / LTX-2 two-pass: base denoise → upsample+noise → refine denoise.
-
-    Args:
-        dit: MLX DiT callable ``(latents, enc, timestep, freqs_cis) -> pred``.
-        encoder_hidden_states: prompt embeds (shared across both passes).
-        noise_latents_stage1: initial Gaussian noise at stage-1 latent shape.
-        freqs_cis_stage1 / freqs_cis_stage2: RoPE tables for each resolution.
-            When refine is disabled (``plan.spatial_scale == 1``) stage-2
-            tables may be ``None`` and only stage-1 runs.
-        plan: from :func:`plan_refine_resolutions`.
-        schedule: host-side flow-match schedule.
-        timesteps: stage-1 DMD timesteps (e.g. ``[1000, 757, 522]``).
-        refine_timesteps: stage-2 timesteps; defaults to ``timesteps``.
-        mx_dtype: runtime MLX dtype for DiT I/O.
-        seed: base seed; stage-2 re-noise uses ``seed + 1``.
-        add_noise_flag: when false, stage-2 starts from clean upsampled latents.
-        upsample_mode: ``"bilinear"`` (default) or ``"nearest"``.
-        refine_sigma: override for the stage-2 start sigma; default is the
-            schedule sigma of the first refine timestep.
-        step_callback: optional ``(phase, step_idx, n_steps)`` hook.
+    """
+    Run base denoising and, when enabled, spatial refinement denoising.
+    
+    Parameters:
+        dit: DiT callable used for both denoising passes.
+        encoder_hidden_states: Prompt embeddings shared across both passes.
+        noise_latents_stage1: Initial stage-1 noise latents.
+        freqs_cis_stage1: RoPE tables for the stage-1 resolution.
+        freqs_cis_stage2: RoPE tables for the stage-2 resolution, required when refinement is enabled.
+        plan: Refinement geometry and configuration.
+        schedule: Flow-matching schedule used by both passes.
+        timesteps: Stage-1 denoising timesteps.
+        refine_timesteps: Stage-2 denoising timesteps. Uses `timesteps` when omitted.
+        mx_dtype: MLX dtype used for DiT inputs and outputs.
+        seed: Base seed for reproducible noise generation.
+        add_noise_flag: Whether to add noise to the upsampled stage-1 latents.
+        upsample_mode: Spatial upsampling mode, either `"bilinear"` or `"nearest"`.
+        refine_sigma: Stage-2 starting noise level. Derived from the first refinement timestep when omitted.
+        step_callback: Optional callback receiving the phase name, step index, and total step count.
+    
+    Returns:
+        TwoPassResult containing the final latents, stage-1 latents, refinement plan, and applied refinement sigma.
+    
+    Raises:
+        ValueError: If refinement is enabled without stage-2 RoPE tables, without refinement timesteps, or if upsampled latents do not match the planned stage-2 dimensions.
     """
     stage1_cb = None
     stage2_cb = None
@@ -528,6 +610,7 @@ __all__ = [
 
 
 def _draw_noise_like(like: Any, *, seed: int | None, is_mlx: bool) -> Any:
+    """Generate Gaussian noise with the shape and array type of the input."""
     shape = tuple(int(s) for s in like.shape)
     if seed is not None:
         rng = np.random.default_rng(seed)

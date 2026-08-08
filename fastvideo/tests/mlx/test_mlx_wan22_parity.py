@@ -36,6 +36,16 @@ from fastvideo.tests.mlx.tiny_wan import (  # noqa: E402
 
 
 def _mlx_wan22_from_torch(model, hf_config) -> MLXWan22DiT:
+    """
+    Convert a PyTorch Wan2.2 model to an MLX Wan2.2 DiT model.
+    
+    Parameters:
+    	model: PyTorch Wan2.2 model whose state is converted.
+    	hf_config: Model configuration containing attention, feed-forward, and normalization settings.
+    
+    Returns:
+    	MLXWan22DiT: The model initialized with weights converted from the PyTorch model.
+    """
     state = {name: value.detach().float() for name, value in model.state_dict().items()}
     inner_dim = int(hf_config["num_attention_heads"]) * int(hf_config["attention_head_dim"])
     weights = {}
@@ -54,6 +64,9 @@ def _mlx_wan22_from_torch(model, hf_config) -> MLXWan22DiT:
 
 @pytest.mark.usefixtures("distributed_setup")
 def test_wan22_per_token_timestep_matches_torch() -> None:
+    """
+    Verify that the MLX Wan2.2 implementation matches the PyTorch reference for per-token timestep conditioning.
+    """
     torch_model = build_torch_model()
     hf_config = build_hf_config(build_tiny_wan_config())
     mlx_model = _mlx_wan22_from_torch(torch_model, hf_config)

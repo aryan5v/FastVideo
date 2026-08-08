@@ -20,6 +20,19 @@ class RIFEBackendError(RuntimeError):
 
 
 def _require_hwc_rgb(frame: np.ndarray, index: int) -> np.ndarray:
+    """
+    Validate and normalize a frame as a contiguous HWC RGB NumPy array.
+    
+    Parameters:
+        frame (np.ndarray): Frame data to validate and normalize.
+        index (int): Frame index used in validation error messages.
+    
+    Returns:
+        np.ndarray: A contiguous 8-bit RGB frame.
+    
+    Raises:
+        ValueError: If the frame does not have shape HxWx3.
+    """
     array = np.asarray(frame)
     if array.ndim != 3 or array.shape[2] != 3:
         raise ValueError(f"frame {index} must have shape HxWx3, got {array.shape}")
@@ -30,11 +43,18 @@ def _require_hwc_rgb(frame: np.ndarray, index: int) -> np.ndarray:
 
 @lru_cache(maxsize=2)
 def load_model(version: str = "4.25", weights_dir: str | None = None):
-    """Load the MLX-native RIFE model.
-
-    ``weights_dir`` is passed through to ``rife_mlx.utils.weights.build_model``.
-    When it is ``None``, the package downloads/uses the Hugging Face
-    ``mlx-community/RIFE-4.25`` snapshot.
+    """
+    Load an MLX-native RIFE model for the specified version.
+    
+    Parameters:
+        version (str): RIFE model version to load.
+        weights_dir (str | None): Optional directory containing model weights. If omitted, the default model weights are used.
+    
+    Returns:
+        The loaded RIFE model.
+    
+    Raises:
+        RIFEBackendError: If the backend is unavailable or model loading fails.
     """
     try:
         from rife_mlx.utils.weights import build_model
@@ -57,7 +77,24 @@ def interpolate_pair(
     model=None,
     scale: float = 1.0,
 ) -> np.ndarray:
-    """Interpolate one RGB frame between two input RGB frames."""
+    """
+    Interpolate a frame at a specified position between two RGB frames.
+    
+    Parameters:
+        frame_a (np.ndarray): The first HWC RGB frame.
+        frame_b (np.ndarray): The second HWC RGB frame.
+        timestep (float): The interpolation position between the frames, from 0 to 1.
+        model: Optional RIFE model to use for interpolation.
+        scale (float): Spatial scaling factor used by the model.
+    
+    Returns:
+        np.ndarray: The interpolated HWC RGB frame.
+    
+    Raises:
+        ValueError: If the timestep is outside the open interval from 0 to 1 or the
+            frame shapes do not match.
+        RIFEBackendError: If model loading or interpolation fails.
+    """
     if not 0.0 < timestep < 1.0:
         raise ValueError(f"timestep must be inside (0, 1), got {timestep}")
     img0 = _require_hwc_rgb(frame_a, 0)
@@ -82,11 +119,16 @@ def interpolate(
     model=None,
     scale: float = 1.0,
 ) -> list[np.ndarray]:
-    """Return an Nx interpolated frame list.
-
-    For ``len(frames)=41`` and ``factor=2``, the output length is 81:
-    ``(41 - 1) * 2 + 1``. Original keyframes are preserved in order and RIFE
-    fills ``factor - 1`` intermediate timesteps between each adjacent pair.
+    """
+    Generate an interpolated frame sequence while preserving the original frames.
+    
+    Parameters:
+        frames (list[np.ndarray] | Iterable[np.ndarray]): HWC RGB frames in sequence.
+        factor (int): Number of output intervals per input interval.
+    
+    Returns:
+        list[np.ndarray]: Original frames with ``factor - 1`` interpolated frames
+        inserted between each adjacent pair.
     """
     frame_list = [_require_hwc_rgb(frame, idx) for idx, frame in enumerate(frames)]
     if factor < 1:
@@ -128,6 +170,7 @@ def _self_test() -> None:
 
 
 def main() -> None:
+    """Run the command-line self-test when requested."""
     parser = argparse.ArgumentParser(description="MLX RIFE 4.25 frame interpolation smoke test.")
     parser.add_argument("--self-test", action="store_true", help="Run a tiny two-frame interpolation test.")
     args = parser.parse_args()
