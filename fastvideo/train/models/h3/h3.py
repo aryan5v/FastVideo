@@ -471,7 +471,12 @@ class H3Model(ModelBase):
         *,
         grad_accum_rounds: int,
     ) -> None:
-        (loss / max(1, int(grad_accum_rounds))).backward()
+        # Grad-checkpoint recomputation re-runs the attention layers, which
+        # require the forward context (Wan wraps backward the same way).
+        from fastvideo.forward_context import set_forward_context  # noqa: PLC0415
+
+        with set_forward_context(current_timestep=0, attn_metadata=None):
+            (loss / max(1, int(grad_accum_rounds))).backward()
 
     @property
     def device(self) -> torch.device:
