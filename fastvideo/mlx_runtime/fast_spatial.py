@@ -36,26 +36,59 @@ class FastSpatialPlan:
 
     @property
     def enabled(self) -> bool:
+        """
+        Determine whether spatial scaling is enabled.
+        
+        Returns:
+            `true` if the spatial scale is greater than one, `false` otherwise.
+        """
         return self.plan.spatial_scale > 1
 
     @property
     def scale(self) -> int:
+        """Provides the configured spatial scaling factor.
+        
+        Returns:
+            int: The spatial scaling factor.
+        """
         return self.plan.spatial_scale
 
     @property
     def target_height(self) -> int:
+        """
+        Return the target output height for the spatial plan.
+        
+        Returns:
+            int: Target output height in pixels.
+        """
         return self.plan.target_height
 
     @property
     def target_width(self) -> int:
+        """Return the target image width in pixels.
+        
+        Returns:
+            int: The target image width.
+        """
         return self.plan.target_width
 
     @property
     def stage1_height(self) -> int:
+        """
+        Provide the stage-one latent height used for reduced-resolution processing.
+        
+        Returns:
+        	int: The stage-one latent height.
+        """
         return self.plan.stage1_height
 
     @property
     def stage1_width(self) -> int:
+        """Get the stage-one latent width.
+        
+        Returns:
+            int: The stage-one latent width.
+        """
         return self.plan.stage1_width
 
 
@@ -71,7 +104,15 @@ def plan_fast_spatial(
     upsample_mode: str = "bilinear",
     enabled: bool = True,
 ) -> FastSpatialPlan:
-    """Build a spatial-fast plan (shared validation with refine)."""
+    """
+    Build a plan for reduced-resolution denoising followed by spatial upsampling.
+    
+    Parameters:
+    	upsample_mode (str): Latent upsampling mode, either ``"bilinear"`` or ``"nearest"``.
+    
+    Returns:
+    	FastSpatialPlan: The validated spatial-fast processing plan.
+    """
     if upsample_mode not in {"bilinear", "nearest"}:
         raise ValueError(f"Unsupported upsample mode: {upsample_mode}")
     plan = plan_refine_resolutions(
@@ -101,7 +142,18 @@ def apply_fast_spatial_upsample(
     clean_latents: Any,
     spatial: FastSpatialPlan,
 ) -> Any:
-    """Upsample stage-1 clean latents to the target grid (no re-noise)."""
+    """Upsample clean latents to the target spatial resolution without re-noising.
+    
+    Parameters:
+    	clean_latents (Any): Clean latents produced at the stage-one resolution.
+    	spatial (FastSpatialPlan): Spatial processing plan defining the target grid and upsampling settings.
+    
+    Returns:
+    	Any: The original latents when spatial scaling is disabled; otherwise, the upsampled latents.
+    
+    Raises:
+    	ValueError: If the upsampled latent dimensions do not match the target latent grid.
+    """
     if not spatial.enabled:
         return clean_latents
     up = upsample_latents_spatial(
@@ -126,11 +178,11 @@ def resolve_spatial_mode(
     refine: bool,
     fast_spatial: bool,
 ) -> str:
-    """Return the active spatial mode: ``off`` | ``fast_spatial`` | ``refine``.
-
-    Refine is the quality path and wins when both flags are set — fast-spatial
-    is a pure speed upsample with no second denoise, so stacking it under
-    refine would be a no-op (refine already densifies at full res).
+    """Select the active spatial processing mode, with refinement taking precedence.
+    
+    Returns:
+        str: ``"refine"`` when refinement is enabled, ``"fast_spatial"`` when
+            spatial-fast processing is enabled, or ``"off"`` otherwise.
     """
     if refine:
         return "refine"

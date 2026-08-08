@@ -25,6 +25,11 @@ import numpy as np
 
 
 def _default_paths() -> tuple[Path, Path, Path]:
+    """Locate the default paths for the shared text encoder, Wan2.2 model, and DiT checkpoint.
+    
+    Returns:
+    	tuple[Path, Path, Path]: Paths to the shared text encoder snapshot, Wan2.2 snapshot, and local DiT directory.
+    """
     fw21 = Path(
         glob.glob(str(Path.home() / ".cache/huggingface/hub/models--FastVideo--FastWan2.1-T2V-1.3B-Diffusers/snapshots/*"))
         [0])
@@ -37,6 +42,12 @@ def _default_paths() -> tuple[Path, Path, Path]:
 
 
 def main() -> None:
+    """Generate a Wan2.2 text-to-video sample from a prompt.
+    
+    Parses generation options, encodes the prompt, performs DiT denoising, and
+    decodes the resulting latents to an MP4 file. Optionally saves the generated
+    latents and reports timing and memory metrics.
+    """
     fw21_default, wan22_default, dit_default = _default_paths()
     parser = argparse.ArgumentParser(description="MLX Wan2.2-5B T2V (encode → DiT DMD → TAEHV/VAE decode)")
     parser.add_argument("--prompt", default="A red fox trotting through a snowy pine forest at golden hour, cinematic")

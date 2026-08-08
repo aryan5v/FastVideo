@@ -55,7 +55,15 @@ class MLXDMDSchedule:
         return cls(sigmas=np.asarray(sigmas), timesteps=np.asarray(timesteps))
 
     def sigma_for(self, timestep: float) -> float:
-        """Nearest-timestep ``sigma`` lookup, computed on the host."""
+        """
+        Find the sigma associated with the scheduled timestep nearest to the given timestep.
+        
+        Parameters:
+            timestep (float): Timestep for which to find the nearest scheduled sigma.
+        
+        Returns:
+            float: Sigma associated with the nearest scheduled timestep.
+        """
         idx = int(np.argmin(np.abs(self.timesteps - float(timestep))))
         return float(self.sigmas[idx])
 
@@ -65,10 +73,16 @@ def pred_noise_to_pred_video(
     noise_input_latent: "mx.array",
     sigma: float,
 ) -> "mx.array":
-    """``x0`` prediction from a flow-match noise prediction (scalar ``sigma``).
-
-    Equivalent to ``fastvideo/models/utils.py::pred_noise_to_pred_video`` for a
-    single scalar timestep: ``pred_video = noise_input - sigma * pred_noise``.
+    """
+    Compute the clean latent prediction from a flow-matching noise prediction.
+    
+    Parameters:
+    	pred_noise (mx.array): Predicted noise.
+    	noise_input_latent (mx.array): Noised latent input.
+    	sigma (float): Noise level used for the prediction.
+    
+    Returns:
+    	mx.array: Predicted clean latent.
     """
     return noise_input_latent - sigma * pred_noise
 
@@ -95,28 +109,24 @@ def dmd_step(
     next_timestep: float | None,
     noise: "mx.array | None" = None,
 ) -> "mx.array":
-    """One on-device DMD update.
-
-    Predicts the clean video from ``pred_noise`` at ``timestep`` and, when a
-    ``next_timestep`` is given, re-noises it to that level (the intermediate
-    DMD steps). The final step (``next_timestep is None``) returns the clean
-    prediction directly.
-
+    """
+    Compute one DMD sampling update, optionally re-noising the clean latent prediction.
+    
     Args:
-        latents: unused placeholder kept for call-site symmetry with the torch
-            loop; the update depends only on ``noise_input_latent`` and
-            ``pred_noise``.
-        noise_input_latent: the noisy latent fed to the DiT this step.
-        pred_noise: the DiT's velocity/noise prediction this step.
-        schedule: host-side flow-match schedule.
-        timestep: current DMD timestep.
-        next_timestep: the DMD timestep to re-noise toward, or ``None`` on the
-            last step.
-        noise: fresh Gaussian noise (same shape as ``pred_noise``) for the
-            re-noise; required when ``next_timestep`` is not ``None``.
-
+        latents: Retained for call-site compatibility and not used in the update.
+        noise_input_latent: Noisy latent used to compute the clean prediction.
+        pred_noise: Predicted noise or velocity.
+        schedule: Flow-matching schedule used to map timesteps to sigmas.
+        timestep: Current sampling timestep.
+        next_timestep: Timestep for the next update, or `None` for the final step.
+        noise: Fresh noise used for re-noising intermediate steps.
+    
     Returns:
-        The latents to carry into the next step (or the final clean latents).
+        The re-noised latent for the next step or the clean latent prediction on
+        the final step.
+    
+    Raises:
+        ValueError: If `next_timestep` is provided without `noise`.
     """
     del latents  # symmetry with the torch loop; not needed for the math.
     sigma = schedule.sigma_for(timestep)

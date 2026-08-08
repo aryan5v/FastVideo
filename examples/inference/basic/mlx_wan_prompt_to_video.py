@@ -71,6 +71,14 @@ def resolve_model_root(model_root: Path | None, *, model_id: str = DEFAULT_MODEL
 
 
 def _torch_device(device_arg: str):
+    """Resolve the PyTorch device used for computation.
+    
+    Parameters:
+    	device_arg (str): Device name, or ``"auto"`` to select MPS when available and CPU otherwise.
+    
+    Returns:
+    	torch.device: The resolved PyTorch device.
+    """
     import torch
 
     if device_arg == "auto":
@@ -79,12 +87,14 @@ def _torch_device(device_arg: str):
 
 
 def _torch_dtype(dtype_arg: str):
+    """Map a dtype name to its corresponding PyTorch data type."""
     import torch
 
     return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[dtype_arg]
 
 
 def _cleanup_torch() -> None:
+    """Release unused Python and MPS memory held by PyTorch."""
     import torch
 
     gc.collect()
@@ -100,6 +110,19 @@ def encode_prompt(
     device_arg: str,
     dtype_arg: str,
 ):
+    """
+    Encode a prompt into padded text embeddings for video generation.
+    
+    Parameters:
+    	model_root (Path): Local model directory containing the tokenizer and text encoder.
+    	prompt (str): Text prompt to encode.
+    	max_sequence_length (int): Maximum number of tokens in the encoded prompt.
+    	device_arg (str): Device selection for text encoding.
+    	dtype_arg (str): Data type used by the text encoder.
+    
+    Returns:
+    	prompt_embeds (torch.Tensor): CPU-contiguous prompt embeddings padded to the configured sequence length.
+    """
     import torch
     from transformers import AutoTokenizer, UMT5EncoderModel
 
@@ -155,6 +178,19 @@ def encode_prompt_subprocess(
     device_arg: str,
     dtype_arg: str,
 ):
+    """
+    Encode a prompt in a temporary subprocess and return its embeddings.
+    
+    Parameters:
+    	model_root (Path): Root directory containing the model files.
+    	prompt (str): Text prompt to encode.
+    	max_sequence_length (int): Maximum number of tokens in the encoded prompt.
+    	device_arg (str): PyTorch device used by the encoder subprocess.
+    	dtype_arg (str): Text encoder data type used by the subprocess.
+    
+    Returns:
+    	torch.Tensor: Contiguous prompt embeddings.
+    """
     import torch
 
     with tempfile.TemporaryDirectory(prefix="fastvideo_prompt_embeds_") as tmpdir:
@@ -189,13 +225,17 @@ def _default_prompt_cache_path(
     max_sequence_length: int,
     dtype_arg: str,
 ) -> Path:
-    """Content-addressed prompt-embedding cache location.
-
-    The key covers everything that changes the embedding: the prompt text, the
-    truncation length, the encoder dtype, and the model directory (which pins
-    the tokenizer/encoder weights for a resolved snapshot). A collision would
-    require identical encoders and prompts, so a plain SHA-256 of the tuple is
-    a safe filename.
+    """
+    Build a deterministic cache path for prompt embeddings.
+    
+    Parameters:
+        model_root (Path): Model directory used to identify the encoder.
+        prompt (str): Text whose embeddings are cached.
+        max_sequence_length (int): Maximum token sequence length used for encoding.
+        dtype_arg (str): Encoder data type used to generate the embeddings.
+    
+    Returns:
+        Path: Path to the corresponding NumPy cache file.
     """
     key = "\0".join([str(model_root), prompt, str(max_sequence_length), dtype_arg])
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
@@ -212,6 +252,21 @@ def get_prompt_embeds(
     encode_mode: str,
     cache_path: Path | None,
 ):
+    """
+    Encode a prompt into model embeddings, optionally loading from or saving to a cache.
+    
+    Parameters:
+    	model_root (Path): Root directory containing the model and tokenizer.
+    	prompt (str): Text prompt to encode.
+    	max_sequence_length (int): Maximum token sequence length.
+    	device_arg (str): Device used for prompt encoding.
+    	dtype_arg (str): Data type used for prompt encoding.
+    	encode_mode (str): Encoding mode, either ``"inline"`` or ``"subprocess"``.
+    	cache_path (Path | None): Optional path for cached embeddings.
+    
+    Returns:
+    	torch.Tensor: Prompt embeddings.
+    """
     import torch
 
     if cache_path is not None and cache_path.exists():
@@ -243,6 +298,18 @@ def get_prompt_embeds(
 
 
 def make_rotary_embeddings(config: dict, *, latent_frames: int, latent_height: int, latent_width: int):
+    """
+    Create rotary positional embeddings for the specified latent dimensions.
+    
+    Parameters:
+    	config (dict): DiT configuration containing attention and patch geometry settings.
+    	latent_frames (int): Number of latent video frames.
+    	latent_height (int): Latent video height.
+    	latent_width (int): Latent video width.
+    
+    Returns:
+    	tuple: MLX float32 cosine and sine rotary embeddings.
+    """
     import mlx.core as mx
     import torch
 
@@ -285,6 +352,19 @@ def decode_latents_to_video(
     taehv_checkpoint_path: Path | None,
     taehv_parallel: bool,
 ) -> None:
+    """
+    Decode latent video representations and export the resulting video.
+    
+    Parameters:
+        model_root (Path): Local model directory containing the Wan VAE.
+        latents_np (np.ndarray): Latent video representation to decode.
+        output_path (Path): Destination path for the exported video.
+        fps (int): Frames per second for the output video.
+        backend (str): Decoder backend, either ``"taehv"`` or ``"wan-vae"``.
+    
+    Raises:
+        ValueError: If ``backend`` is unsupported.
+    """
     import torch
     from diffusers import AutoencoderKLWan
     from diffusers.video_processor import VideoProcessor
@@ -342,8 +422,16 @@ def _unsharp(frame: np.ndarray, amount: float) -> np.ndarray:
 
 def _rife_interpolate_video(*, video_path: Path, target_frames: int, factor: int,
                             sharpen: float, fps: int) -> None:
-    """Read the reduced-frame mp4, RIFE-interpolate up to ``target_frames`` on
-    Apple Silicon, optionally light-sharpen, and rewrite the file in place."""
+    """
+                            Interpolate a reduced-frame video and rewrite it with the requested frame count.
+                            
+                            Parameters:
+                            	video_path (Path): Path to the video to update.
+                            	target_frames (int): Maximum number of frames to write.
+                            	factor (int): Temporal interpolation factor.
+                            	sharpen (float): Unsharp-mask strength applied to interpolated frames.
+                            	fps (int): Output video frame rate.
+                            """
     import imageio.v3 as iio
 
     from fastvideo.mlx_runtime.rife_interp import interpolate as rife_interpolate, load_model
@@ -360,6 +448,7 @@ def _rife_interpolate_video(*, video_path: Path, target_frames: int, factor: int
 
 
 def main() -> None:
+    """Run the command-line FastWan text-to-video generation pipeline."""
     parser = argparse.ArgumentParser(description="Prompt-to-video FastWan generation using MLX for the DiT")
     parser.add_argument("--model-root", type=Path, default=None,
                         help=f"Model directory. Defaults to the local HF cache for {DEFAULT_MODEL_ID} "

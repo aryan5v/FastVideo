@@ -27,6 +27,12 @@ _HAS_METAL = bool(getattr(mx, "metal", None) and mx.metal.is_available())
 
 @pytest.mark.parametrize("z_dim", [16, 48])
 def test_taehv_mlx_matches_torch(z_dim: int) -> None:
+    """
+    Verify that MLX and PyTorch TAEHV decoding produce matching video frames.
+    
+    Parameters:
+    	z_dim (int): Number of latent channels used by the TAEHV checkpoint.
+    """
     import torch
     from fastvideo.third_party.taehv import TAEHV
 

@@ -53,6 +53,21 @@ class MLXQuantizationSpec:
 
     @classmethod
     def from_name(cls, name: str | None) -> "MLXQuantizationSpec | None":
+        """
+        Create a quantization specification from a supported mode name.
+        
+        Parameters:
+            name (str | None): Quantization mode name, such as ``int8``, ``int4``,
+                ``mxfp8``, ``mxfp4``, or ``nvfp4``. Empty and unquantized dtype names
+                produce no specification.
+        
+        Returns:
+            MLXQuantizationSpec | None: The parsed quantization specification, or
+            ``None`` for unquantized modes.
+        
+        Raises:
+            ValueError: If the mode name is unsupported.
+        """
         if name is None or name in {"", "none", "fp16", "fp32"}:
             return None
         if name == "int8":
@@ -69,6 +84,12 @@ class MLXQuantizationSpec:
 
     @property
     def label(self) -> str:
+        """
+        Return the display label for the quantization specification.
+        
+        Returns:
+        	str: The quantization mode label, including the bit width for affine quantization.
+        """
         if self.mode == "affine":
             return f"int{self.bits}"
         return self.mode
@@ -94,7 +115,22 @@ def fastwan_shape(
     num_heads: int = 12,
     head_dim: int = 128,
 ) -> FastWanShape:
-    """Return the approximate DiT token shape for Wan/FastWan T2V inference."""
+    """
+    Compute latent, patch, token, and hidden dimensions for Wan/FastWan inference.
+    
+    Parameters:
+    	height (int): Video height in pixels.
+    	width (int): Video width in pixels.
+    	num_frames (int): Number of video frames.
+    	vae_temporal_compression (int): Temporal compression factor of the VAE.
+    	vae_spatial_compression (int): Spatial compression factor of the VAE.
+    	patch_size (tuple[int, int, int]): Temporal, height, and width patch sizes.
+    	num_heads (int): Number of attention heads.
+    	head_dim (int): Dimension of each attention head.
+    
+    Returns:
+    	FastWanShape: The calculated latent dimensions, patch dimensions, token count, and hidden size.
+    """
     latent_frames = (num_frames - 1) // vae_temporal_compression + 1
     latent_height = height // vae_spatial_compression
     latent_width = width // vae_spatial_compression
@@ -126,6 +162,18 @@ def fastwan_shape_from_config(
     width: int,
     num_frames: int,
 ) -> FastWanShape:
+    """
+    Calculate FastWan tensor dimensions using model settings from a JSON configuration file.
+    
+    Parameters:
+    	config_path (str | Path): Path to the JSON configuration file.
+    	height (int): Video height in pixels.
+    	width (int): Video width in pixels.
+    	num_frames (int): Number of video frames.
+    
+    Returns:
+    	FastWanShape: Shape dimensions derived from the video dimensions and configuration.
+    """
     config = json.loads(Path(config_path).read_text())
     return fastwan_shape(
         height=height,
@@ -138,14 +186,44 @@ def fastwan_shape_from_config(
 
 
 def replace_tokens(shape: FastWanShape, tokens: int) -> FastWanShape:
+    """
+    Return a shape with the token count replaced.
+    
+    Parameters:
+        shape (FastWanShape): The source shape.
+        tokens (int): The new token count.
+    
+    Returns:
+        FastWanShape: A shape retaining all original values except `tokens`.
+    """
     return FastWanShape(**{**shape.__dict__, "tokens": tokens})
 
 
 def median_ms(samples: list[float]) -> float:
+    """
+    Convert the median of duration samples from seconds to milliseconds.
+    
+    Parameters:
+    	samples (list[float]): Duration samples measured in seconds.
+    
+    Returns:
+    	float: The median duration in milliseconds.
+    """
     return statistics.median(samples) * 1000.0
 
 
 def benchmark_mlx_attention(shape: FastWanShape, warmup: int, iters: int) -> float:
+    """
+    Benchmark MLX scaled dot-product attention for the specified FastWan shape.
+    
+    Parameters:
+        shape (FastWanShape): Attention dimensions used to create the query, key, and value tensors.
+        warmup (int): Number of warmup evaluations before timing.
+        iters (int): Number of timed attention evaluations.
+    
+    Returns:
+        float: Median attention latency in milliseconds.
+    """
     import mlx.core as mx
 
     q = mx.random.normal((1, shape.num_heads, shape.tokens, shape.head_dim), dtype=mx.float16)
@@ -167,6 +245,17 @@ def benchmark_mlx_attention(shape: FastWanShape, warmup: int, iters: int) -> flo
 
 
 def benchmark_mlx_linear(shape: FastWanShape, warmup: int, iters: int) -> float:
+    """
+    Measure the median MLX linear-layer execution time for the specified shape.
+    
+    Parameters:
+    	shape (FastWanShape): Shape parameters defining the input token count and hidden size.
+    	warmup (int): Number of untimed executions used to warm up the operation.
+    	iters (int): Number of timed executions to measure.
+    
+    Returns:
+    	float: Median execution time in milliseconds.
+    """
     import mlx.core as mx
 
     x = mx.random.normal((shape.tokens, shape.hidden_size), dtype=mx.float16)
@@ -187,6 +276,17 @@ def benchmark_mlx_linear(shape: FastWanShape, warmup: int, iters: int) -> float:
 
 
 def benchmark_torch_mps_attention(shape: FastWanShape, warmup: int, iters: int) -> float | None:
+    """
+    Benchmark scaled dot-product attention on an available Torch MPS device.
+    
+    Parameters:
+        shape (FastWanShape): Shape parameters defining the attention tensor dimensions.
+        warmup (int): Number of warm-up iterations before timing.
+        iters (int): Number of timed iterations.
+    
+    Returns:
+        float | None: Median attention latency in milliseconds, or `None` if Torch or MPS is unavailable.
+    """
     try:
         import torch
         import torch.nn.functional as F
@@ -217,12 +317,29 @@ def benchmark_torch_mps_attention(shape: FastWanShape, warmup: int, iters: int) 
 
 
 def torch_to_mx(tensor) -> "mx.array":
+    """
+    Convert a Torch tensor to an MLX array through a detached CPU float32 copy.
+    
+    Parameters:
+        tensor: The Torch tensor to convert.
+    
+    Returns:
+        An MLX array containing the tensor values as float32.
+    """
     import mlx.core as mx
 
     return mx.array(tensor.detach().cpu().float().numpy())
 
 
 def weight_dtype(weight):
+    """Return the effective computation dtype for a weight.
+    
+    Parameters:
+    	weight: A regular weight array or quantized matrix.
+    
+    Returns:
+    	The dequantized dtype for quantized weights, or the weight's dtype otherwise.
+    """
     if isinstance(weight, QuantizedMatrix):
         return weight.dequantized_dtype
     return weight.dtype
@@ -258,7 +375,14 @@ def quantization_support_error(spec: MLXQuantizationSpec) -> str | None:
 
 
 def ensure_quantization_supported(spec: MLXQuantizationSpec | None) -> None:
-    """Raise :class:`UnsupportedMLXQuantizationError` if ``spec`` cannot run here."""
+    """Ensure that the requested MLX quantization mode is supported by the installed MLX runtime.
+    
+    Parameters:
+        spec: Quantization specification to validate. If ``None``, no validation is performed.
+    
+    Raises:
+        UnsupportedMLXQuantizationError: If the quantization mode is unsupported.
+    """
     if spec is None:
         return
     error = quantization_support_error(spec)
@@ -274,6 +398,16 @@ def ensure_quantization_supported(spec: MLXQuantizationSpec | None) -> None:
 
 
 def quantize_matrix(weight, spec: MLXQuantizationSpec | None):
+    """
+    Quantize a matrix using the specified MLX quantization configuration.
+    
+    Parameters:
+        weight: The weight array to quantize.
+        spec (MLXQuantizationSpec | None): Quantization configuration, or `None` to leave the weight unchanged.
+    
+    Returns:
+        The original weight for one-dimensional inputs or when `spec` is `None`; otherwise, a `QuantizedMatrix` containing the quantized weight and its quantization parameters.
+    """
     if spec is None:
         return weight
     import mlx.core as mx
@@ -296,6 +430,17 @@ def quantize_matrix(weight, spec: MLXQuantizationSpec | None):
 
 
 def linear(x, weight, bias=None):
+    """
+    Apply a matrix weight and optional bias to an input array.
+    
+    Parameters:
+        x: Input array.
+        weight: Dense or quantized matrix used for the linear transformation.
+        bias: Optional bias added to the result.
+    
+    Returns:
+        The transformed array, with the same dtype as `x`.
+    """
     import mlx.core as mx
 
     if isinstance(weight, QuantizedMatrix):
@@ -330,6 +475,18 @@ def _use_fast_norm() -> bool:
 
 
 def layer_norm(x, weight=None, bias=None, eps: float = 1e-6):
+    """
+    Apply layer normalization along the last dimension of an array.
+    
+    Parameters:
+    	x: Input array to normalize.
+    	weight: Optional scale applied after normalization.
+    	bias: Optional offset applied after scaling.
+    	eps: Small value added to the variance for numerical stability.
+    
+    Returns:
+    	The normalized array, optionally scaled and shifted.
+    """
     import mlx.core as mx
 
     if _use_fast_norm():
@@ -351,6 +508,16 @@ def layer_norm(x, weight=None, bias=None, eps: float = 1e-6):
 
 
 def rms_norm(x, weight, eps: float = 1e-6):
+    """Normalize the final dimension of an array using root mean square normalization.
+    
+    Parameters:
+    	x: The array to normalize.
+    	weight: The element-wise scale applied to the normalized values.
+    	eps (float): Small value added for numerical stability.
+    
+    Returns:
+    	The normalized array scaled by `weight`.
+    """
     import mlx.core as mx
 
     if _use_fast_norm():
@@ -364,12 +531,18 @@ def rms_norm(x, weight, eps: float = 1e-6):
 
 
 def apply_rotary_emb(x, cos, sin, *, is_neox_style: bool = False):
-    """Apply FastVideo's rotary convention to MLX tensors.
-
-    Args:
-        x: [batch, seq, heads, head_dim]
-        cos/sin: [seq, head_dim] for Wan's full-dimension rotate-pair style,
-          or [seq, head_dim // 2] for traditional RoPE.
+    """Apply rotary positional embeddings using the specified layout convention.
+    
+    Parameters:
+    	x: Array with shape ``[batch, seq, heads, head_dim]``.
+    	cos: Cosine embeddings with shape ``[seq, head_dim]`` for full-dimension
+    		pair rotation, or ``[seq, head_dim // 2]`` for traditional rotation.
+    	sin: Sine embeddings with the same shape as ``cos``.
+    	is_neox_style: Whether to split the head dimension into two halves for
+    		NeoX-style rotation.
+    
+    Returns:
+    	An array with the same shape and dtype as ``x`` after rotary embedding.
     """
     import mlx.core as mx
 
@@ -407,18 +580,37 @@ _GELU_TANH_COEF = math.sqrt(2.0 / math.pi)
 
 
 def gelu_tanh(x):
+    """Apply the tanh approximation of the Gaussian error linear unit activation."""
     import mlx.core as mx
 
     return 0.5 * x * (1.0 + mx.tanh(_GELU_TANH_COEF * (x + 0.044715 * mx.power(x, 3.0))))
 
 
 def silu(x):
+    """Apply the sigmoid-weighted linear unit activation to an array.
+    
+    Parameters:
+    	x: Input array.
+    
+    Returns:
+    	The activated array.
+    """
     import mlx.core as mx
 
     return x * mx.sigmoid(x)
 
 
 def timestep_embedding(t, dim: int, max_period: int = 10000):
+    """Generate sinusoidal embeddings for timestep values.
+    
+    Parameters:
+    	t: Timestep values to encode.
+    	dim (int): Size of the output embedding.
+    	max_period (int): Maximum period used to construct the frequencies.
+    
+    Returns:
+    	An array of sinusoidal timestep embeddings with the requested dimension.
+    """
     import mlx.core as mx
 
     half = dim // 2
@@ -431,10 +623,25 @@ def timestep_embedding(t, dim: int, max_period: int = 10000):
 
 
 def scale_residual(residual, x, gate):
+    """Add a gated tensor contribution to a residual tensor."""
     return residual + x * gate
 
 
 def scale_residual_layer_norm_scale_shift(residual, x, gate, shift, scale, weight=None, bias=None, eps: float = 1e-6):
+    """
+    Apply a gated residual update, normalize the result, and modulate it with scale and shift values.
+    
+    Parameters:
+        gate: Residual multiplier, or the integer `1` for an ungated update.
+        shift: Additive modulation applied after normalization.
+        scale: Multiplicative modulation applied after normalization.
+        weight: Optional layer normalization weights.
+        bias: Optional layer normalization bias.
+        eps (float): Epsilon used by layer normalization.
+    
+    Returns:
+        tuple: The modulated output and the updated residual.
+    """
     if isinstance(gate, int):
         assert gate == 1
         residual_output = residual + x
@@ -447,6 +654,13 @@ def scale_residual_layer_norm_scale_shift(residual, x, gate, shift, scale, weigh
 
 class MLXWanT2VCrossAttention:
     def __init__(self, weights: dict[str, "mx.array"], *, dim: int, num_heads: int, eps: float = 1e-6) -> None:
+        """Initialize a cross-attention module with projection weights and attention dimensions.
+        
+        Parameters:
+        	weights (dict[str, mx.array]): Projection weights used by the attention module.
+        	dim (int): Hidden dimension of the attention inputs and outputs.
+        	num_heads (int): Number of attention heads.
+        	eps (float): Epsilon used for normalization."""
         self.weights = weights
         self.dim = dim
         self.num_heads = num_heads
@@ -454,6 +668,16 @@ class MLXWanT2VCrossAttention:
         self.eps = eps
 
     def __call__(self, x, context):
+        """
+        Apply cross-attention between the input sequence and conditioning context.
+        
+        Parameters:
+        	x: Query sequence.
+        	context: Key and value conditioning sequence. An empty sequence produces zero attention output.
+        
+        Returns:
+        	Array containing the projected attention output for each input position.
+        """
         import mlx.core as mx
 
         batch = x.shape[0]
@@ -489,6 +713,14 @@ class MLXWanTransformerBlock:
     """
 
     def __init__(self, weights: dict[str, "mx.array"], *, dim: int, ffn_dim: int, num_heads: int, eps: float = 1e-6):
+        """Initialize a Wan transformer block with its weights and attention configuration.
+        
+        Parameters:
+        	weights (dict[str, mx.array]): Block weight tensors.
+        	dim (int): Hidden dimension.
+        	ffn_dim (int): Feed-forward network dimension.
+        	num_heads (int): Number of attention heads.
+        	eps (float): Epsilon used for normalization."""
         self.weights = weights
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -498,6 +730,18 @@ class MLXWanTransformerBlock:
         self.attn2 = MLXWanT2VCrossAttention(weights, dim=dim, num_heads=num_heads, eps=eps)
 
     def __call__(self, hidden_states, encoder_hidden_states, temb, freqs_cis=None):
+        """
+        Apply conditioned self-attention, cross-attention, and feed-forward processing to hidden states.
+        
+        Parameters:
+            hidden_states: Input token representations.
+            encoder_hidden_states: Representations used for cross-attention.
+            temb: Timestep conditioning used to modulate the transformer block.
+            freqs_cis: Optional cosine and sine tensors for rotary position embeddings.
+        
+        Returns:
+            Updated hidden states with the original input dtype.
+        """
         import mlx.core as mx
 
         orig_dtype = hidden_states.dtype
@@ -575,6 +819,15 @@ class MLXWanTransformerBlock:
 
 
 def mlx_block_weights_from_torch(torch_block) -> dict[str, "mx.array"]:
+    """
+    Convert a Torch transformer block's state dictionary to MLX arrays.
+    
+    Parameters:
+    	torch_block: The Torch block whose state dictionary provides the weights.
+    
+    Returns:
+    	dict[str, mx.array]: A mapping from parameter names to MLX arrays.
+    """
     return {name: torch_to_mx(value) for name, value in torch_block.state_dict().items()}
 
 
@@ -589,6 +842,16 @@ class MLXWanDiT:
         *,
         compile: bool = False,
     ) -> None:
+        """
+        Initialize the Wan DiT model with its weights, transformer blocks, and configuration.
+        
+        Parameters:
+            weights (dict[str, mx.array]): Model weights.
+            blocks (list[MLXWanTransformerBlock]): Transformer blocks used during inference.
+            config (dict): Model configuration containing architecture dimensions and patch settings.
+            compile (bool): Whether to enable compiled forward execution; the
+                FASTVIDEO_MLX_COMPILE environment variable can also enable it.
+        """
         import os
 
         self.weights = weights
@@ -611,6 +874,7 @@ class MLXWanDiT:
         self._compiled_forward = None
 
     def patch_embed(self, hidden_states):
+        """Convert video hidden states into patch-token embeddings."""
         batch, channels, frames, height, width = hidden_states.shape
         pt, ph, pw = self.patch_size
         patch_dim = channels * pt * ph * pw
@@ -619,6 +883,16 @@ class MLXWanDiT:
         return linear(x, self.weights["patch_embedding.weight"], self.weights.get("patch_embedding.bias"))
 
     def condition(self, timestep, encoder_hidden_states):
+        """
+        Generate timestep and text conditioning representations for the DiT model.
+        
+        Parameters:
+        	timestep: Timestep values used to compute temporal conditioning.
+        	encoder_hidden_states: Text encoder hidden states to project into the model's hidden dimension.
+        
+        Returns:
+        	tuple: The timestep embedding, timestep projection reshaped into six modulation vectors per sample, and projected text conditioning states.
+        """
         t_freq = timestep_embedding(timestep, self.freq_dim).astype(
             weight_dtype(self.weights["condition_embedder.time_embedder.linear_1.weight"]))
         temb = linear(
@@ -653,6 +927,7 @@ class MLXWanDiT:
         return temb, timestep_proj, encoder_hidden_states
 
     def output(self, hidden_states, temb, *, batch: int, frames: int, height: int, width: int):
+        """Project transformer features back into the output video tensor."""
         pt, ph, pw = self.patch_size
         post_patch_frames = frames // pt
         post_patch_height = height // ph
@@ -675,10 +950,18 @@ class MLXWanDiT:
         return hidden_states.reshape(batch, self.out_channels, frames, height, width)
 
     def _forward(self, hidden_states, encoder_hidden_states, timestep, cos, sin):
-        """Pure forward used both eagerly and as the mx.compile target.
-
-        ``cos``/``sin`` are passed as separate array args (rather than a tuple)
-        so the function traces cleanly under mx.compile.
+        """
+        Run the DiT denoising forward pass for the supplied inputs.
+        
+        Parameters:
+            hidden_states: Input latent video tensor.
+            encoder_hidden_states: Text-conditioning states.
+            timestep: Diffusion timestep values.
+            cos: Cosine rotary-embedding values, or None.
+            sin: Sine rotary-embedding values, or None.
+        
+        Returns:
+            The denoised output tensor.
         """
         batch, _, frames, height, width = hidden_states.shape
         freqs_cis = (cos, sin) if cos is not None else None
@@ -689,6 +972,15 @@ class MLXWanDiT:
         return self.output(hidden_states, temb, batch=batch, frames=frames, height=height, width=width)
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep, freqs_cis):
+        """
+        Run the Wan DiT forward pass with optional compiled execution.
+        
+        Parameters:
+            freqs_cis: Optional rotary embedding cosine and sine tensors.
+        
+        Returns:
+            The denoised output produced by the forward pass.
+        """
         cos, sin = freqs_cis if freqs_cis is not None else (None, None)
         if self._enable_compile and cos is not None:
             import mlx.core as mx
@@ -705,6 +997,16 @@ class MLXWanDiT:
 
 
 def mx_split_two(x, *, axis: int):
+    """
+    Split an MLX array into two equal parts along the specified axis.
+    
+    Parameters:
+    	x: The array to split.
+    	axis (int): The axis along which to split the array.
+    
+    Returns:
+    	tuple: The two resulting array parts.
+    """
     import mlx.core as mx
 
     left, right = mx.split(x, 2, axis=axis)
@@ -712,16 +1014,28 @@ def mx_split_two(x, *, axis: int):
 
 
 def _load_safetensor_value(handle, name: str):
+    """Load a tensor value from a safetensors handle by name.
+    
+    Parameters:
+    	name (str): Name of the tensor to load.
+    
+    Returns:
+    	object: The tensor associated with the specified name.
+    """
     return handle.get_tensor(name)
 
 
 def _load_mx_array_from_safetensor(handle, name: str, dtype):
-    """Load a safetensors value and cast before creating the MLX array.
-
-    The FastWan Diffusers checkpoint is fp32. Creating an MLX array first and
-    then casting it to fp16 briefly materializes a large fp32 MLX allocation.
-    Casting the CPU tensor before crossing into MLX keeps the transient GPU-side
-    footprint lower.
+    """
+    Load a named safetensors value into an MLX array with the requested dtype.
+    
+    Parameters:
+        handle: Safetensors handle containing the value.
+        name (str): Name of the value to load.
+        dtype: Target MLX dtype. Values are cast before transfer when supported.
+    
+    Returns:
+        MLX array containing the loaded value in the requested dtype.
     """
     import mlx.core as mx
     import torch
@@ -743,6 +1057,7 @@ def _load_mx_array_from_safetensor(handle, name: str, dtype):
 
 
 def _eval_loaded_weight(value) -> None:
+    """Evaluate a loaded weight and its associated quantization arrays."""
     import mlx.core as mx
 
     if isinstance(value, QuantizedMatrix):
@@ -794,7 +1109,20 @@ def mlx_block_weights_from_diffusers_safetensors(
     quantization: str | MLXQuantizationSpec | None = None,
     dtype=None,
 ) -> dict[str, "mx.array"]:
-    """Load one Diffusers-format Wan block into the MLX dense-block key layout."""
+    """Load a Diffusers-format Wan transformer block into the MLX dense-block key layout.
+    
+    Parameters:
+    	checkpoint_path (str | Path): Path to the Diffusers safetensors checkpoint.
+    	block_index (int): Index of the transformer block to load.
+    	quantization (str | MLXQuantizationSpec | None): Quantization specification for matrix weights.
+    	dtype: Optional dtype used when loading tensor values.
+    
+    Returns:
+    	dict[str, mx.array]: Mapping of dense-block parameter names to MLX arrays.
+    
+    Raises:
+    	KeyError: If a required block weight is missing.
+    """
     import mlx.core as mx
     from safetensors import safe_open
 
@@ -831,6 +1159,19 @@ def mlx_dit_from_diffusers_safetensors(
     num_blocks: int | None = None,
     quantization: str | MLXQuantizationSpec | None = None,
 ) -> MLXWanDiT:
+    """
+    Load a Wan DiT model from Diffusers safetensors weights and configuration.
+    
+    Parameters:
+    	checkpoint_path (str | Path): Path to the Diffusers safetensors checkpoint.
+    	config_path (str | Path): Path to the model configuration file.
+    	dtype (str): Floating-point dtype for loaded weights.
+    	num_blocks (int | None): Number of transformer blocks to load; loads all configured blocks when omitted.
+    	quantization (str | MLXQuantizationSpec | None): Quantization specification for supported weight matrices.
+    
+    Returns:
+    	MLXWanDiT: The initialized MLX Wan DiT model.
+    """
     import mlx.core as mx
     from safetensors import safe_open
 
@@ -909,7 +1250,19 @@ def torch_block_state_from_diffusers_safetensors(
     *,
     block_index: int = 0,
 ) -> dict[str, "torch.Tensor"]:
-    """Load one Diffusers-format Wan block into FastVideo's dense block keys."""
+    """
+    Load one Diffusers-format Wan transformer block into FastVideo dense-block keys.
+    
+    Parameters:
+        checkpoint_path (str | Path): Path to the Diffusers safetensors checkpoint.
+        block_index (int): Index of the block to load.
+    
+    Returns:
+        dict[str, torch.Tensor]: Block weights converted to CPU float tensors.
+    
+    Raises:
+        KeyError: If a required block weight is missing.
+    """
     from safetensors import safe_open
 
     prefix = f"blocks.{block_index}."
