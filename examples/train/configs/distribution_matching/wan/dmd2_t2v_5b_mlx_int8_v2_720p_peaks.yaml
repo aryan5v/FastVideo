@@ -1,33 +1,30 @@
-# Mac-targeted QAD distillation at 14B, 720p: Wan 2.1 T2V 14B -> 3-step INT8
-# student at 768x1280. PREPARED, NOT SUBMITTED — the 480p run (job chain
-# 1090/1091/1092) lands first; this is the Quality-tier follow-up.
+# Mac-targeted QAD distillation at 5B, 720p — RUN 2 with peak capture.
 #
-# Differences from the 480p config, and the risks to review before submitting:
+# The first 5B run (wan2.2_5b_dmd2_3steps_mlx_int8) pruned its quality peaks
+# (user-rated 1700/1800/2600 >> 3500) via checkpoints_total_limit: 3.
+# This run:
+#   - saves every 100 steps, keeps 25 (nothing pruned)
+#   - gradient_accumulation_steps 4 -> 2 (2x faster; effective batch 8 -> 4)
+#   - validation every 200 steps (720p validation is expensive)
+#   - fresh start (no resume), new output dir
+# The peak watcher scores every validation set live and auto-exports the
+# peak checkpoint (raw + EMA) to FastMetal-5B-QAD once decline is confirmed.
 #
-# - Corpus: FastVideo/Wan-Syn_77x768x1280_250k (768x1280). NOT downloaded yet.
-# - Resolution adaptation, not just grid adaptation: the FastWan 14B student
-#   init is a 480p 3-step model. The base Wan2.1-14B teacher does 720p
-#   natively, so DMD can pull the student up, but this is a harder adaptation
-#   than 480p — watch the early validation videos closely.
-# - Token count quadruples (latent 20x96x160 vs 20x56x104): training memory
-#   per shard rises; the 2x8 mesh should still hold but watch the first
-#   checkpoint's step time before assuming the 480p wall-clock scaling.
-# - flow_shift stays 8 (Wan2.1); the 720p Wan-Syn corpus was generated with
-#   the same scheduler family.
-#
+# Mesh: 8 GPUs (2 replicate x 4 shard), same as run 1.
+
 models:
   student:
     _target_: fastvideo.train.models.wan.WanModel
-    init_from: FastVideo/FastWan2.1-T2V-14B-Diffusers
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
     trainable: true
   teacher:
     _target_: fastvideo.train.models.wan.WanModel
-    init_from: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    init_from: Wan-AI/Wan2.2-TI2V-5B-Diffusers
     trainable: false
     disable_custom_init_weights: true
   critic:
     _target_: fastvideo.train.models.wan.WanModel
-    init_from: FastVideo/FastWan2.1-T2V-14B-Diffusers
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
     trainable: true
     disable_custom_init_weights: true
 
@@ -38,29 +35,28 @@ method:
   real_score_guidance_scale: 4.5
   dmd_denoising_steps: [1000, 757, 522]
 
-  # Critic optimizer (required — no fallback to training.optimizer)
   fake_score_learning_rate: 8.0e-6
   fake_score_betas: [0.0, 0.999]
   fake_score_lr_scheduler: constant
 
 training:
   distributed:
-    num_gpus: 16
+    num_gpus: 8
     sp_size: 1
     tp_size: 1
     hsdp_replicate_dim: 2
-    hsdp_shard_dim: 8
+    hsdp_shard_dim: 4
 
   data:
-    data_path: data/Wan-Syn_77x768x1280_250k
+    data_path: data/Wan2.2-Syn-121x704x1280_32k
     dataloader_num_workers: 4
     train_batch_size: 1
     training_cfg_rate: 0.0
     seed: 1000
-    num_latent_t: 20
-    num_height: 768
+    num_latent_t: 31
+    num_height: 704
     num_width: 1280
-    num_frames: 77
+    num_frames: 121
 
   optimizer:
     learning_rate: 2.0e-6
@@ -74,14 +70,15 @@ training:
     gradient_accumulation_steps: 2
 
   checkpoint:
-    output_dir: outputs/wan2.1_14b_dmd2_3steps_mlx_int8_720p
-    # every-100 saves + keep-25: never prune a peak (5B/1.3B lesson).
+    output_dir: outputs/wan2.2_5b_dmd2_3steps_mlx_int8_720p_r2
+    # every-100 saves + keep-25: never prune a peak. Val every 200 so save+val
+    # co-occur only every 200 steps (OOM-safe with the empty-cache-before-save).
     training_state_checkpointing_steps: 100
     checkpoints_total_limit: 25
 
   tracker:
     project_name: distillation_wan
-    run_name: wan2.1_14b_dmd2_3steps_mlx_int8_720p
+    run_name: wan2.2_5b_dmd2_3steps_mlx_int8_720p_r2
 
   model:
     enable_gradient_checkpointing_type: full
@@ -96,7 +93,7 @@ callbacks:
     max_grad_norm: 1.0
   validation:
     pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
-    dataset_file: examples/training/finetune/Wan2.1-VSA/Wan-Syn-Data/validation_4.json
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_4.json
     every_steps: 200
     validate_at_step_zero: false
     sampling_steps: [3]
@@ -108,4 +105,4 @@ callbacks:
     start_iter: 0
 
 pipeline:
-  flow_shift: 8
+  flow_shift: 5.0
