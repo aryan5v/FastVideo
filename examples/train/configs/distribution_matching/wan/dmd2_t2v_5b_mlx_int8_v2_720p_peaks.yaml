@@ -73,7 +73,7 @@ training:
     output_dir: outputs/wan2.2_5b_dmd2_3steps_mlx_int8_720p_r2
     # every-100 saves + keep-25: never prune a peak. Val every 200 so save+val
     # co-occur only every 200 steps (OOM-safe with the empty-cache-before-save).
-    training_state_checkpointing_steps: 100
+    training_state_checkpointing_steps: 250
     checkpoints_total_limit: 25
 
   tracker:
@@ -94,7 +94,7 @@ callbacks:
   validation:
     pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
     dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_4.json
-    every_steps: 200
+    every_steps: 100
     validate_at_step_zero: false
     sampling_steps: [3]
     sampling_timesteps: [1000, 757, 522]
