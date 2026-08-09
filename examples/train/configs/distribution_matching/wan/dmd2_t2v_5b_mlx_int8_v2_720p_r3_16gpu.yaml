@@ -1,0 +1,111 @@
+# 5B 720p RUN 3: 16 GPUs (HSDP 2x8). Runs 1/2 OOM'd at 8 GPUs (2x4) —
+# 720p 3-role init sits at the 184GB edge. Shard-8 halves per-GPU memory
+# and roughly doubles throughput. Same peak-capture policy (ckpt 250, keep 25).
+# Mac-targeted QAD distillation at 5B, 720p — RUN 2 with peak capture.
+#
+# The first 5B run (wan2.2_5b_dmd2_3steps_mlx_int8) pruned its quality peaks
+# (user-rated 1700/1800/2600 >> 3500) via checkpoints_total_limit: 3.
+# This run:
+#   - saves every 100 steps, keeps 25 (nothing pruned)
+#   - gradient_accumulation_steps 4 -> 2 (2x faster; effective batch 8 -> 4)
+#   - validation every 200 steps (720p validation is expensive)
+#   - fresh start (no resume), new output dir
+# The peak watcher scores every validation set live and auto-exports the
+# peak checkpoint (raw + EMA) to FastMetal-5B-QAD once decline is confirmed.
+#
+# Mesh: 8 GPUs (2 replicate x 4 shard), same as run 1.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    trainable: true
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  real_score_guidance_scale: 4.5
+  dmd_denoising_steps: [1000, 757, 522]
+
+  fake_score_learning_rate: 8.0e-6
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 2
+    hsdp_shard_dim: 8
+
+  data:
+    data_path: data/Wan2.2-Syn-121x704x1280_32k
+    dataloader_num_workers: 4
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 1000
+    num_latent_t: 31
+    num_height: 704
+    num_width: 1280
+    num_frames: 121
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 2
+
+  checkpoint:
+    output_dir: outputs/wan2.2_5b_dmd2_3steps_mlx_int8_720p_r3
+    # every-100 saves + keep-25: never prune a peak. Val every 200 so save+val
+    # co-occur only every 200 steps (OOM-safe with the empty-cache-before-save).
+    training_state_checkpointing_steps: 250
+    checkpoints_total_limit: 25
+
+  tracker:
+    project_name: distillation_wan
+    run_name: wan2.2_5b_dmd2_3steps_mlx_int8_720p_r3
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+callbacks:
+  mlx_qat:
+    mode: affine
+    group_size: 64
+    bits: 8
+    simulate_dtype: fp16
+  grad_clip:
+    max_grad_norm: 1.0
+  validation:
+    pipeline_target: fastvideo.pipelines.basic.wan.wan_dmd_pipeline.WanDMDPipeline
+    dataset_file: examples/distill/Wan2.2-TI2V-5B-Diffusers/Data-free/validation_4.json
+    every_steps: 100
+    validate_at_step_zero: false
+    sampling_steps: [3]
+    sampling_timesteps: [1000, 757, 522]
+    guidance_scale: 6.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.98
+    start_iter: 0
+
+pipeline:
+  flow_shift: 5.0
