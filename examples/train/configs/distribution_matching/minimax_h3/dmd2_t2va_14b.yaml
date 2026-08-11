@@ -84,8 +84,4 @@ training:
 callbacks:
   grad_clip:
     max_grad_norm: 1.0
-  ema:
-    _target_: fastvideo.train.callbacks.ema.EMACallback
-    decay: 0.98
-    start_iter: 0
 
