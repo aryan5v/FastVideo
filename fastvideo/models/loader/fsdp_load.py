@@ -161,7 +161,8 @@ def maybe_load_fsdp_model(
     # output projections) is a checkpoint/inference property; training keeps
     # precision in the optimizer state instead.
     if os.environ.get("FASTVIDEO_FORCE_UNIFORM_BF16", "0") == "1" and training_mode:
-        dtype_selector = lambda name, default: torch.bfloat16  # noqa: E731
+        model._get_parameter_dtype = lambda name, default: torch.bfloat16  # type: ignore[method-assign]
+        dtype_selector = model._get_parameter_dtype
     has_mixed_parameter_dtypes = callable(dtype_selector) and any(
         dtype_selector(name, param_dtype) != param_dtype for name, _ in model.named_parameters())
     # Mixed param dtypes are safe without replicated parameters: the missing
