@@ -1,0 +1,91 @@
+# FastH3 33B DMD Quality distillation (dual-scheduler, joint AV).
+#
+# Teacher: MiniMax H3 33B (FL2VA partition), frozen, guidance-distilled.
+# Student + critic: same 33B init, trainable. 6-step Quality schedule.
+#
+# Dual-scheduler DMD (fastvideo.train.methods.distribution_matching.h3_dmd2):
+# - dmd_denoising_steps are the VIDEO timesteps (shift-12 grid, ascending
+#   t in [0,1], ending at 1.0 = clean); the audio grid (shift-3) is derived
+#   per step index inside the model wrapper.
+# - data-ward velocity (x0 = x_t + (1-t)*v); flow targets are (x0 - noise).
+# - cfg_uncond.text: keep -> no negative prompt (H3 has none); guidance 1.0.
+#
+# Data: preprocessed H3 corpus (scripts/fasth3/preprocess_h3_corpus.py):
+# latents/ (video+audio safetensors) + text/ (Qwen3-VL-32B hidden_states[50]).
+# Batch size 1 per GPU (packed sequence length varies per clip).
+
+models:
+  student:
+    _target_: fastvideo.train.models.h3.h3.H3Model
+    init_from: /mnt/nfs/vlm-aryan/fasth3-33b-20260806/outputs/pruned_14b
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.h3.h3.H3Model
+    init_from: MiniMaxAI/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.h3.h3.H3Model
+    init_from: MiniMaxAI/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.h3_dmd2.H3DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  real_score_guidance_scale: 1.0
+  # Video shift-12 grid, 6 denoise steps (t = 1 - sigma, ascending to clean).
+  dmd_denoising_steps: [0.016, 0.040, 0.077, 0.143, 0.294, 1.0]
+  cfg_uncond:
+    text: keep
+  fake_score_learning_rate: 8.0e-6
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 2
+    hsdp_shard_dim: 8
+
+  data:
+    data_path: /mnt/nfs/vlm-aryan/fasth3-33b-20260806/data/h3_corpus
+    preprocessed_data_type: t2v
+    train_batch_size: 1
+    dataloader_num_workers: 4
+    seed: 1000
+
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 4
+
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-33b-20260806/outputs/h3_14b_dmd_6step
+    training_state_checkpointing_steps: 100
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: fasth3
+    run_name: h3_14b_dmd_6step
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+callbacks:
+  grad_clip:
+    max_grad_norm: 1.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.98
+    start_iter: 0
+
