@@ -94,7 +94,12 @@ class H3DMD2Method(DMD2Method):
         current_noise_copy = current_noise.clone()
         current_audio_noise_copy = current_audio_noise.clone()
 
-        max_target_idx = target_timestep_idx_int  # only the target step is consumed
+        # IMPORTANT: run the FULL loop on every rank. The method's cuda_generator
+        # is seeded per-rank, so target_timestep_idx_int DIFFERS across ranks;
+        # the loop length must therefore be rank-invariant or the collective
+        # counts diverge and FSDP allgathers deadlock. (The base DMD2 does the
+        # same for this reason — the "extra" steps are not waste.)
+        max_target_idx = len(step_list) - 1
         video_noise_latents: list[torch.Tensor] = []
         audio_noise_latents: list[torch.Tensor] = []
         noise_latent_index = target_timestep_idx_int - 1
