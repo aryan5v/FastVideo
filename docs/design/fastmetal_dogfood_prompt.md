@@ -24,8 +24,9 @@ You do not need to know anything about the codebase. The agent sizes the run to
 your machine's memory and will tell you straight if your Mac cannot run a given
 model.
 
-**Everything is local.** No prompt, video, or telemetry leaves your machine
-except what you choose to paste into the issue yourself.
+**Generation runs entirely on your machine.** Nothing is uploaded except the
+report the agent posts to the issue, which you approve up front and which
+contains your machine profile and timings — no prompts, no video.
 
 ---
 
@@ -38,7 +39,7 @@ HUGGING_FACE_TOKEN: <PASTE YOUR TOKEN HERE>
 
 ## Rules
 
-- **Ask before you run anything.** The three questions in step 3 are mandatory.
+- **Ask before you run anything.** The four questions in step 3 are mandatory.
   Do not download a model or start a generation before the user has answered.
 - Never exceed what the user approves, even if the machine looks capable.
 - If a run fails, record the failure and carry on. A crash on a small machine
@@ -140,9 +141,9 @@ Download only the approved models:
 
 ```bash
 export HF_TOKEN="<the token above>"
-huggingface-cli download aryan5v/FastMetal-1.3B-QAD --local-dir models/fastmetal-1.3b
-huggingface-cli download aryan5v/FastMetal-5B-QAD  --local-dir models/fastmetal-5b
-huggingface-cli download aryan5v/FastMetal-14B-QAD --local-dir models/fastmetal-14b
+huggingface-cli download FastVideo/FastMetal-1.3B-QAD --local-dir models/fastmetal-1.3b
+huggingface-cli download FastVideo/FastMetal-5B-QAD  --local-dir models/fastmetal-5b
+huggingface-cli download FastVideo/FastMetal-14B-QAD --local-dir models/fastmetal-14b
 ```
 
 If a download command is supplied alongside this prompt, prefer it over the
