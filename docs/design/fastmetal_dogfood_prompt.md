@@ -1,11 +1,28 @@
 # FastMetal dogfooding — agent prompt
 
-Paste everything in the fenced block below into a coding agent (Claude Code,
-Codex, Cursor) running on the Mac you want to benchmark. It will size the run to
-the machine, ask you what you are willing to run, then collect timing and memory
-data for us.
+**We are collecting performance data for the FastMetal Apple Silicon video
+models across as many different Macs as possible.** This takes about 20 minutes
+of your time, most of it waiting.
 
-Fill in your Hugging Face token first. Everything else the agent works out.
+## How to use it
+
+1. Open a coding agent (Claude Code, Codex, Cursor) on the Mac you want to
+   benchmark, in an empty directory.
+2. Copy **everything inside the fenced block below** and paste it in.
+3. Replace `<PASTE YOUR TOKEN HERE>` with your Hugging Face token first.
+   If a ready-made download command was sent with this doc, paste that in too —
+   the agent is told to prefer it.
+4. Answer the three questions the agent asks. It will not download or run
+   anything before you do.
+5. Post the report it produces to
+   **https://github.com/aryan5v/FastVideo/issues/31**
+
+You do not need to know anything about the codebase. The agent sizes the run to
+your machine's memory and will tell you straight if your Mac cannot run a given
+model.
+
+**Everything is local.** No prompt, video, or telemetry leaves your machine
+except what you choose to paste into the issue yourself.
 
 ---
 
@@ -78,10 +95,31 @@ Wait for answers. Then confirm the plan back to them before starting.
 
 ## 4. Set up
 
+**Check out the exact head of PR #1638.** Not `main` — the code being measured
+only exists on that PR, and it moves. `pull/1638/head` always resolves to its
+current tip:
+
 ```bash
 brew install ffmpeg
 git clone https://github.com/hao-ai-lab/FastVideo && cd FastVideo
-git fetch origin pull/1638/head:pr1638 && git checkout pr1638
+git fetch origin pull/1638/head:pr1638
+git checkout pr1638
+git rev-parse HEAD          # RECORD THIS — it goes in the report
+```
+
+The head must be at or after `8be306e07`, which is the commit that fixed spatial
+fast mode. Anything earlier produces a blurred veil in `--fast-spatial` output
+and the numbers will not be comparable. Verify:
+
+```bash
+git merge-base --is-ancestor 8be306e07ddac456918d6cf55dfa1ed06143f6ba HEAD \
+  && echo "OK: includes the fast-spatial fix" \
+  || echo "TOO OLD: re-fetch the PR head"
+```
+
+Then:
+
+```bash
 uv venv --python 3.12 --seed && source .venv/bin/activate
 uv pip install -e '.[mlx]'
 ```
@@ -94,6 +132,10 @@ huggingface-cli download aryan5v/FastMetal-1.3B-QAD --local-dir models/fastmetal
 huggingface-cli download aryan5v/FastMetal-5B-QAD  --local-dir models/fastmetal-5b
 huggingface-cli download aryan5v/FastMetal-14B-QAD --local-dir models/fastmetal-14b
 ```
+
+If a download command is supplied alongside this prompt, prefer it over the
+above — the repo names may have moved. If a download 401s or 404s, stop and tell
+the user rather than guessing at an alternative name.
 
 ## 5. Pick prompts at random
 
@@ -162,6 +204,7 @@ Note that the first run for a given prompt pays a cold UMT5 encode (18s at
 Write `runs/REPORT.md` containing:
 
 - the machine profile from step 1
+- **the commit SHA from step 4** — without it the numbers cannot be compared
 - one row per run: model, mode, prompt index, denoise seconds, total seconds,
   peak GiB, cold or warm prompt, pass or fail
 - for each model, the speedup of each mode over its own baseline
@@ -170,6 +213,20 @@ Write `runs/REPORT.md` containing:
 
 Then, in two or three sentences, say what this machine is comfortably good for.
 
-Finally, tell the user where the videos and `REPORT.md` are, and ask them to
-send the report and the machine profile back to the team.
+## 9. Post the results
+
+Results go here:
+
+**https://github.com/aryan5v/FastVideo/issues/31**
+
+Tell the user to paste `REPORT.md` as a comment on that issue. Every machine is
+worth posting, including ones where a model refused to run or swapped — a
+declined 8 GB machine is a real data point.
+
+Videos are welcome too: `.mp4` files can be dragged straight into a GitHub
+comment. Anything that looks *wrong* is especially useful — blur, noise, colour
+artefacts, motion breaking down. Note which model and mode produced it.
+
+Finally, print the paths to the videos and `REPORT.md` so the user can find
+them, and the issue URL again.
 ````
