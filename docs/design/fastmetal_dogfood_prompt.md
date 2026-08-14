@@ -12,10 +12,13 @@ of your time, most of it waiting.
 3. Replace `<PASTE YOUR TOKEN HERE>` with your Hugging Face token first.
    If a ready-made download command was sent with this doc, paste that in too —
    the agent is told to prefer it.
-4. Answer the three questions the agent asks. It will not download or run
+4. Answer the four questions the agent asks. It will not download or run
    anything before you do.
-5. Post the report it produces to
-   **https://github.com/aryan5v/FastVideo/issues/31**
+5. Leave it alone. It runs the benchmark and posts the results to
+   **https://github.com/aryan5v/FastVideo/issues/31** itself.
+
+The only thing that may interrupt you is a one-time `gh auth login` browser
+prompt, if the GitHub CLI is not already signed in on this machine.
 
 You do not need to know anything about the codebase. The agent sizes the run to
 your machine's memory and will tell you straight if your Mac cannot run a given
@@ -90,8 +93,17 @@ Present your recommendation from step 2, then ask:
    mode; at 14B, 5-10 minutes. Suggest 6-10 runs as a useful sample.
 3. **Anything to avoid?** Time limits, thermal concerns, disk space (the three
    checkpoints together are large), or modes they do not care about.
+4. **May I post the results to the public issue when I am done?** Say that you
+   will post the machine profile and the timing table to
+   `https://github.com/aryan5v/FastVideo/issues/31`, that it is public, and that
+   it contains no prompts or video unless they ask for those to be included.
+   Default to yes. If they decline, run the benchmark anyway and leave the
+   report on disk.
 
 Wait for answers. Then confirm the plan back to them before starting.
+
+After this point, run to completion without further questions. The user should
+not need to do anything else.
 
 ## 4. Set up
 
@@ -213,20 +225,39 @@ Write `runs/REPORT.md` containing:
 
 Then, in two or three sentences, say what this machine is comfortably good for.
 
-## 9. Post the results
+## 9. Post the results yourself
 
-Results go here:
+If the user approved posting in step 3, **you post it.** Do not ask them to do
+it by hand.
 
-**https://github.com/aryan5v/FastVideo/issues/31**
+Check authentication first:
 
-Tell the user to paste `REPORT.md` as a comment on that issue. Every machine is
-worth posting, including ones where a model refused to run or swapped — a
-declined 8 GB machine is a real data point.
+```bash
+gh auth status
+```
 
-Videos are welcome too: `.mp4` files can be dragged straight into a GitHub
-comment. Anything that looks *wrong* is especially useful — blur, noise, colour
-artefacts, motion breaking down. Note which model and mode produced it.
+If `gh` is not installed, install it (`brew install gh`). If it is not
+authenticated, run `gh auth login` and walk the user through the browser prompt
+— that is the one point where they must touch the keyboard.
 
-Finally, print the paths to the videos and `REPORT.md` so the user can find
-them, and the issue URL again.
+Then post:
+
+```bash
+gh issue comment 31 --repo aryan5v/FastVideo --body-file runs/REPORT.md
+```
+
+Print the URL of the comment you created so the user can see it landed.
+
+Post even when the results are bad. A machine that swapped, throttled, or
+refused to run a model is a real data point, and an 8 GB Mac that ran nothing at
+all should still post its profile.
+
+If posting fails, say so plainly, print the path to `runs/REPORT.md`, and give
+the user the issue URL so they can paste it themselves.
+
+**Videos.** The GitHub API cannot attach video to a comment, so you cannot
+upload them. If any output looks wrong — blur, noise, colour artefacts, motion
+breaking down — say so in the comment, name the model and mode, and print the
+file path. Tell the user they can drag that `.mp4` into the issue in a browser
+if they want to share it. Treat this as optional.
 ````
