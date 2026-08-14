@@ -126,3 +126,59 @@ sigmas `1.000, 0.940, 0.845`, so the best available stage-1 weight is **0.060**
 0.522` and a weight of 0.243 — but warping is what matches the FastVideo
 sampling schedule, so turning it off changes the timesteps the distilled student
 sees. Which is better at 5B is unresolved and needs a run on real 5B weights.
+
+## Where denoise time actually goes
+
+Measured on M4 Max (32 GPU cores), 1.3B INT8, 480×832×81 — 32,760 tokens after
+patching, 30 layers, 12 heads, head_dim 128:
+
+| | per step | share |
+|---|---:|---:|
+| self-attention (SDPA) | 19.05s | **70%** |
+| all linears (q/k/v/out + FFN) | 8.01s | 30% |
+| everything else | ~1.6s | — |
+
+The important part is what that leaves room for:
+
+**There is no kernel headroom.** Sustained fp16 GEMM on this machine tops out at
+**12.1 TFLOP/s** (measured, saturates by 4096³). Dense SDPA runs at 10.6
+TFLOP/s — **88% of the machine's own ceiling** — and int8 `quantized_matmul`
+hits 10.9. Nothing here is leaving meaningful performance on the table, so a
+better attention kernel is not the lever. Ring Attention and friends do not
+apply either: they distribute exact attention across devices to escape memory
+limits, and this is one device that is compute-bound, not memory-bound.
+
+**Attention is exactly O(tokens²), so token count is the lever.** Measured:
+4× fewer tokens → **16× cheaper** attention. That is precisely what
+`--fast-spatial` buys, and it is why that mode — not a kernel rewrite — is the
+denoise story: 86.1s → 10.3s, and 4.5s stacked with `--fast`.
+
+**Sparse attention does not work for free.** The `FASTVIDEO_MLX_WINDOW`
+sliding-window path is fast (6.6× at a ±3-frame window) but destroys the output
+on a checkpoint trained with dense attention — heavy colour-block noise, subject
+barely recognisable. Structural agreement with the dense baseline is 0.25 at
+±3 frames and 0.03 at ±5. Sparsity of this kind is a *training-time* method
+(this is what VSA is); it cannot be switched on at inference. Treat that env var
+as a research knob only.
+
+**INT8 is a memory optimisation, not a speed one.** On the same shape, int8
+`quantized_matmul` is ~10% *slower* than fp16 (83.1ms vs 75.2ms). End to end at
+1.3B: `--mlx-quantization none` denoises in 83.3s vs 86.1s for int8, at 5.11 GiB
+peak vs 3.87. INT8 remains the right default — it is what makes 14B fit at all —
+but on a small model with headroom, fp16 is marginally faster. It is not a
+quality problem either: int8 and unquantized fp16 agree at 0.964 on the same
+seed.
+
+**Precision settings are not hurting quality.** `--mlx-dtype bf16` is 6% slower
+than the fp16 default (90.2s vs 84.9s) and no better looking; fp16 and bf16
+differ at 0.769 agreement purely because rounding perturbs a chaotic 3-step
+trajectory, not because either degrades. Keep fp16.
+
+**Model load is now a visible share of fast-spatial.** With denoise at 10.3s,
+the 4.2s DiT load matters. Use `--mlx-checkpoint` (a pre-quantized MLX
+checkpoint from `--save-mlx-checkpoint`) so the run skips casting and quantizing
+the Diffusers weights every time.
+
+**Decoder choice.** `--decode-backend wan-vae` under `--fast-spatial` costs
+1.27s → 29.6s of decode for a marginal edge-quality gain. TAEHV is the right
+default here.

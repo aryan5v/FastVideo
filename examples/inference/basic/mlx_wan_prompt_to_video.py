@@ -683,8 +683,8 @@ def main() -> None:
         enhance_result_as_metrics,
         load_or_enhance_prompt,
     )
-    from fastvideo.mlx_runtime.refine import plan_refine_resolutions, run_two_pass_dmd
-    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule, dmd_step
+    from fastvideo.mlx_runtime.refine import plan_refine_resolutions, run_dmd_loop, run_two_pass_dmd
+    from fastvideo.mlx_runtime.sampling import MLXDMDSchedule
 
     mx.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -908,40 +908,34 @@ def main() -> None:
         refine_sigma = two_pass.refine_sigma
         print(f"[refine] stage-2 hand-off sigma={refine_sigma:.4f} "
               f"(stage-1 weight {1.0 - refine_sigma:.4f})")
+    elif args.denoising_mode == "dmd":
+        # Single shared DMD loop with the refine path. This used to be a second,
+        # inline copy of the same arithmetic that drew its re-noise from
+        # mx.random instead of run_dmd_loop's seeded NumPy generator, so the
+        # same --seed gave different videos depending on whether --refine was
+        # set, and the two copies were free to drift apart.
+        latents = run_dmd_loop(
+            dit=dit,
+            latents=latents,
+            encoder_hidden_states=encoder_hidden_states,
+            freqs_cis=freqs_cis,
+            timesteps=[float(t.item()) for t in timesteps],
+            schedule=dmd_schedule,
+            mx_dtype=mx_dtype,
+            seed=args.seed,
+            label="denoise",
+        )
     else:
+        # Non-distilled scheduler path: the diffusers scheduler is torch-side, so
+        # this one still round-trips MLX -> torch -> MLX once per step.
         for step_index, timestep in enumerate(timesteps):
-            noise_input_latent = latents
             timestep_mx = mx.array([float(timestep.item())]).astype(mx.float32)
             noise_pred = dit(latents.astype(mx_dtype), encoder_hidden_states, timestep_mx, freqs_cis)
-
-            if args.denoising_mode == "dmd":
-                # On-device DMD update: no per-step MLX->torch->MLX round-trip. The
-                # affine math runs in fp32 to match the torch reference precision,
-                # then casts back to the runtime dtype. Re-noise is drawn with MLX's
-                # RNG (seeded above) instead of the torch CPU generator.
-                ts_val = float(timestep.item())
-                noise_input_f32 = noise_input_latent.astype(mx.float32)
-                pred_noise_f32 = noise_pred.astype(mx.float32)
-                if step_index < len(timesteps) - 1:
-                    next_ts: float | None = float(timesteps[step_index + 1].item())
-                    renoise = mx.random.normal(noise_input_f32.shape).astype(mx.float32)
-                else:
-                    next_ts, renoise = None, None
-                latents = dmd_step(
-                    latents=noise_input_f32,
-                    noise_input_latent=noise_input_f32,
-                    pred_noise=pred_noise_f32,
-                    schedule=dmd_schedule,
-                    timestep=ts_val,
-                    next_timestep=next_ts,
-                    noise=renoise,
-                ).astype(mx_dtype)
-            else:
-                mx.eval(noise_pred)
-                noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
-                latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
-                latents_torch = scheduler.step(noise_pred_torch, timestep, latents_torch, return_dict=False)[0]
-                latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
+            mx.eval(noise_pred)
+            noise_pred_torch = torch.from_numpy(np.array(noise_pred.astype(mx.float32)))
+            latents_torch = torch.from_numpy(np.array(latents.astype(mx.float32)))
+            latents_torch = scheduler.step(noise_pred_torch, timestep, latents_torch, return_dict=False)[0]
+            latents = mx.array(latents_torch.numpy()).astype(mx_dtype)
 
             mx.eval(latents)
             print(f"denoise step {step_index + 1}/{len(timesteps)} complete")
