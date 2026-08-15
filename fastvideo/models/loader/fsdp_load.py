@@ -31,6 +31,38 @@ from fastvideo.utils import set_mixed_precision_policy, is_pin_memory_available
 logger = init_logger(__name__)
 
 
+def _mixed_precision_module_groups(
+    model: nn.Module,
+    default_param_dtype: torch.dtype | None,
+) -> tuple[list[tuple[str, nn.Module]], set[nn.Parameter]]:
+    """Resolve declared FP32 FSDP groups and uncovered mixed parameters."""
+    dtype_selector = getattr(model, "_get_parameter_dtype", None)
+    if not callable(dtype_selector) or default_param_dtype is None:
+        return [], set()
+
+    mixed_params = {
+        parameter
+        for name, parameter in model.named_parameters()
+        if dtype_selector(name, default_param_dtype) != default_param_dtype
+    }
+    declared = set(getattr(model, "_keep_in_fp32_modules", ()))
+    groups: list[tuple[str, nn.Module]] = []
+    covered: set[nn.Parameter] = set()
+    for name, module in model.named_modules():
+        if name not in declared or any(name.startswith(f"{parent}.") for parent, _ in groups):
+            continue
+        parameters = list(module.named_parameters())
+        if not parameters:
+            continue
+        if not all(
+                dtype_selector(f"{name}.{child_name}", default_param_dtype) == torch.float32
+                for child_name, _ in parameters):
+            continue
+        groups.append((name, module))
+        covered.update(parameter for _, parameter in parameters)
+    return groups, mixed_params - covered
+
+
 def _maybe_quantize_model(model: nn.Module) -> None:
     """Quantize NVFP4- or FP8-tagged linear layers in-place after weights are loaded.
 
@@ -161,11 +193,18 @@ def maybe_load_fsdp_model(
         model = model_cls(**init_params)
 
     dtype_selector = getattr(model, "_get_parameter_dtype", None)
-    has_mixed_parameter_dtypes = callable(dtype_selector) and any(
-        dtype_selector(name, param_dtype) != param_dtype for name, _ in model.named_parameters())
-    if training_mode and has_mixed_parameter_dtypes:
+    parameter_dtype_overrides = []
+    if callable(dtype_selector):
+        parameter_dtype_overrides = [
+            (name, str(selected_dtype))
+            for name, _ in model.named_parameters()
+            if (selected_dtype := dtype_selector(name, default_dtype)) != default_dtype
+        ]
+    _, ungrouped_mixed_params = _mixed_precision_module_groups(model, param_dtype)
+    if training_mode and ungrouped_mixed_params:
         raise NotImplementedError("FSDP training with model-selected mixed parameter dtypes requires "
-                                  "separate gradient synchronization for replicated parameters.")
+                                  "separate gradient synchronization for replicated parameters or "
+                                  "declared FP32 module groups.")
 
     # Check if we should use FSDP
     use_fsdp = training_mode or fsdp_inference
@@ -220,6 +259,7 @@ def maybe_load_fsdp_model(
             default_dtype=default_dtype,
             param_dtype=param_dtype,
             param_names_mapping=model.param_names_mapping,
+            parameter_dtype_overrides=parameter_dtype_overrides,
         )
     cache_hit = (shard_cache_ctx is not None
                  and try_load_from_shard_cache(model, shard_cache_ctx, device, strict=strict))
@@ -307,15 +347,12 @@ def shard_model(
         return
 
     default_param_dtype = getattr(mp_policy, "param_dtype", None)
-    dtype_selector = getattr(model, "_get_parameter_dtype", None)
-    ignored_params: set[nn.Parameter] = set()
-    if callable(dtype_selector) and default_param_dtype is not None:
-        ignored_params = {
-            parameter
-            for name, parameter in model.named_parameters()
-            if dtype_selector(name, default_param_dtype) != default_param_dtype
-        }
+    fp32_groups, ignored_params = _mixed_precision_module_groups(model, default_param_dtype)
     named_modules = list(model.named_modules())
+    fp32_group_ids = {id(module) for _, module in fp32_groups}
+    fp32_group_params = {
+        parameter for _, module in fp32_groups for parameter in module.parameters()
+    }
     ignored_params_by_module = {
         id(module): ignored_params.intersection(set(module.parameters()))
         for _, module in named_modules
@@ -340,6 +377,10 @@ def shard_model(
 
         for n, m in reversed(named_modules):
             if any([shard_condition(n, m) for shard_condition in fsdp_shard_conditions]):
+                if id(m) in fp32_group_ids:
+                    continue
+                if fp32_group_params.intersection(set(m.parameters())):
+                    raise ValueError(f"FSDP shard condition for {n!r} contains a declared FP32 compute group")
                 # Count all parameters
                 param_count = sum(p.numel() for p in m.parameters(recurse=True))
 
@@ -361,6 +402,10 @@ def shard_model(
         # Shard all modules matching conditions
         for n, m in reversed(named_modules):
             if any([shard_condition(n, m) for shard_condition in fsdp_shard_conditions]):
+                if id(m) in fp32_group_ids:
+                    continue
+                if fp32_group_params.intersection(set(m.parameters())):
+                    raise ValueError(f"FSDP shard condition for {n!r} contains a declared FP32 compute group")
                 module_kwargs = fsdp_kwargs
                 local_ignored_params = ignored_params_by_module[id(m)]
                 if local_ignored_params:
@@ -370,6 +415,20 @@ def shard_model(
 
         if num_layers_sharded == 0:
             raise ValueError("No layer modules were sharded. Please check if shard conditions are working as expected.")
+
+    if fp32_groups:
+        fp32_kwargs = {
+            **fsdp_kwargs,
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=torch.float32,
+                reduce_dtype=mp_policy.reduce_dtype,
+                output_dtype=mp_policy.output_dtype,
+                cast_forward_inputs=mp_policy.cast_forward_inputs,
+            ),
+        }
+        for _, module in fp32_groups:
+            fully_shard(module, **fp32_kwargs)
+        logger.info("Sharded FP32 compute modules: %s", [name for name, _ in fp32_groups])
 
     # Finally shard the entire model to account for any stragglers
     root_kwargs = fsdp_kwargs

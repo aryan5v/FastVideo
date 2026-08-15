@@ -94,7 +94,7 @@ bash examples/train/run.sh \
 - ``t_list_override``: ``[999, 937, 833, 624, 0]``
 - ``use_mean_velocity``: ``true`` (i.e. ``r = t_next`` during rollout)
 - ``real_score_guidance_scale``: 3.0
-- ``generator_update_interval``: 5 (DMD2 alternation)
+- ``generator_update_interval``: 5 (four critic-only steps, then one student-only step)
 - Training steps: 4000
 
 ## 🔌 Loading published AnyFlow checkpoints

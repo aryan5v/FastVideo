@@ -4,7 +4,7 @@
 The base latent prep stage (`MagiHumanLatentPreparationStage`) precomputes
 ``batch.magi_static_packed_layout`` for the BASE-resolution latent and stashes
 it on the batch so the base denoising loop can reuse it across all denoising
-steps (C4 perf optimization, commit 4190c720).
+steps.
 
 The SR latent prep stage (`MagiHumanSRLatentPreparationStage`) upsamples
 ``batch.latents`` to a much larger spatial grid (e.g. 256x480 -> 512x896 for

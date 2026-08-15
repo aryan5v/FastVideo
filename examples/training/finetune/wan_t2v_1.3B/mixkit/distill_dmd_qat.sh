@@ -11,10 +11,8 @@
 # Init the generator from the stage-1 finetune checkpoint (finetune_qat.sh).
 # Data: run examples/datasets/mixkit/download_dataset.sh first.
 #
-# Verified end-to-end on Blackwell (GB200/sm_100): generator loads with
-# ATTN_QAT_TRAIN while teacher/critic load full-precision; the DMD double loop
-# runs (generator updates every generator_update_interval steps, critic every
-# step), 3-step validation generates videos, checkpoint saved.
+# This legacy pipeline keeps its own double loop: the critic runs every step
+# and the generator runs every generator_update_interval steps.
 set -euo pipefail
 
 export FASTVIDEO_ATTENTION_BACKEND=ATTN_QAT_TRAIN   # generator-only (loader-gated)

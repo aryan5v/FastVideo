@@ -6,9 +6,7 @@ Loads ``nvidia/AnyFlow-Wan2.1-T2V-14B-Diffusers`` into FastVideo's
 ``WanTransformer3DModel`` (with the ``param_names_mapping`` regex
 handling the ``delta_embedder`` rename), runs the
 ``FlowMapEulerDiscreteScheduler`` for the requested NFE schedule, and
-saves the decoded video as MP4. Matches the prompt / shift / guidance
-recipe used by the parallel FastGen demo so the videos are directly
-comparable.
+saves the decoded video as MP4.
 
 Memory tactics (single H200, 141 GB HBM):
 - Encode prompts with UMT5, free the encoder.

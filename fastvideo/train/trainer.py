@@ -30,8 +30,9 @@ def _verify_master_weight_precision(method: TrainingMethod, tc: TrainingConfig) 
     updates below ~half an ulp of each weight's magnitude; O(1)-magnitude
     parameters (norm gains) freeze entirely at typical distillation learning
     rates, and ``zeros_like``-allocated optimizer state inherits the same
-    starved dtype. fp32 sharded masters (``training.dit_precision: fp32``)
-    keep compute in bf16 via FSDP's param_dtype while fixing both.
+    starved dtype. FP32 sharded masters (``training.dit_precision: fp32``)
+    fix both; ordinary FSDP groups still compute in BF16, while models may
+    declare narrower FP32 compute boundaries.
     """
     if bool(getattr(tc.model, "allow_low_precision_master_weights", False)):
         return
@@ -51,7 +52,7 @@ def _verify_master_weight_precision(method: TrainingMethod, tc: TrainingConfig) 
                            f"{offenders}. bf16/fp16 parameter storage silently rounds away "
                            "optimizer updates below ~half an ulp per weight (norm-scale "
                            "parameters freeze completely). Set training.dit_precision: fp32 "
-                           "(fp32 sharded masters; compute stays bf16 via FSDP param_dtype), "
+                           "(FP32 sharded masters; ordinary groups compute in BF16), "
                            "or acknowledge the effect explicitly with "
                            "training.model.allow_low_precision_master_weights: true.")
 

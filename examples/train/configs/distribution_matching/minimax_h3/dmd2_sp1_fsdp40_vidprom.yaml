@@ -1,33 +1,7 @@
-# Production data-free DMD2 on VidProM prompts — sp=1 / full-FSDP topology.
-#
-# v5 (2026-08-14): fresh run folding in the precision + schedule fixes:
-#   * fp32 master weights (bf16 masters bit-froze norm gains for 1000 steps)
-#   * dmd_denoising_steps re-spaced for H3's shift-12 video axis:
-#     [1000, 667, 333] -> sigma_video {1.0, 0.960, 0.857}, audio {1.0, 0.857,
-#     0.60} (the old Wan-derived [1000, 757, 522] gave video {1.0, 0.974,
-#     0.929} — a near-no-op middle step). Same uniform-base-t design rule as
-#     the proven Wan recipe ([1000,750,500,250] + warp at shift 5). Keep
-#     warp_denoising_step OFF: the H3 adapter shifts per modality internally.
-#   * score supervision sampled uniform in sigma_video (score_timestep_shift
-#     12.0) instead of uniform base-t, which put 57% of draws at
-#     sigma_v > 0.9; min_timestep_ratio 0.005 drops the video supervision
-#     floor 0.197 -> 0.057 (audio parity).
-#   * LRs back to 1x — the fp32 fix changes what earlier LR curves meant.
-#
-# Topology: sp_size=1 (one packed document per GPU), mesh (replicate=1,
-# shard=world). num_gpus/hsdp_shard_dim below are defaults; the sbatch
-# overrides them to the allocated world size at launch. 40 GPUs bf16
-# measured ~89 GiB/GPU (job 1770); fp32 masters add ~8-13 GiB/rank
-# depending on shard width — fits with wide margin.
-#
-# Validation: all 64 held-out Wan-derived H3 prompts every 100 steps (+ at
-# start). Checkpoints: every 100 steps starting at step 500, keep last 4
-# (~528 GiB each at fp32 masters — lustre is tight).
-#
-# Launch (after warmup ladder or onto trays held by a previous job):
-#   SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=<4*nodes> \
-#   CONFIG=<this file> sbatch --nodes=<N> -p hpc-rack-2 \
-#     examples/train/slurm/dmd2_32xgb200.sbatch
+# Alternative data-free DMD2 hyperparameters.
+# Reference topology: SP=1, replicate=1, shard=world; the Slurm launcher
+# overrides the 40-GPU defaults from the allocation.
+# See h3_dmd.md for the current recipe and comparison notes.
 
 models:
   student:
@@ -54,14 +28,11 @@ method:
   _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
   rollout_mode: simulate
   generator_update_interval: 5
-  # 1.0: H3's released checkpoint is guidance-distilled (its inference stack
-  # rejects CFG), so the conditional teacher prediction already carries
-  # guidance — and DMD2 skips the unconditional forward entirely at 1.0.
+  # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
   real_score_guidance_scale: 1.0
-  # Base-t ladder; the H3 adapter maps each entry through the per-modality
-  # shifts (video 12 / audio 3). Do NOT enable warp_denoising_step here.
+  # Base-t ladder; the H3 adapter applies the video/audio shifts 12/3.
   dmd_denoising_steps: [1000, 667, 333]
-  # Score-supervision window and density, tuned for shift 12 (see header).
+  # Uniform score supervision on the shifted video-noise axis.
   min_timestep_ratio: 0.005
   max_timestep_ratio: 0.98
   score_timestep_shift: 12.0
@@ -104,9 +75,8 @@ training:
     gradient_accumulation_steps: 1
 
   checkpoint:
-    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v5_fp32_sched
-    # Requeue-safe: fresh output_dir -> first boot starts from scratch; after
-    # a pod flap the requeued job resumes from the newest checkpoint here.
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v5_current_cadence
+    # Requeues resume the newest complete checkpoint in this directory.
     resume_from_checkpoint: latest
     training_state_checkpointing_steps: 100
     checkpointing_start_step: 500
@@ -114,16 +84,13 @@ training:
 
   tracker:
     project_name: h3-dmd2-vsa
-    run_name: dmd2_sp1_vidprom_v5_fp32_sched
+    run_name: dmd2_sp1_vidprom_v5_current_cadence
 
   model:
     precondition_outputs: false
     enable_gradient_checkpointing_type: full
 
-  # fp32 sharded master weights (compute stays bf16 via FSDP param_dtype).
-  # bf16 masters silently round away updates below ~half an ulp — norm-scale
-  # params were bit-frozen for 1000 steps (verified against checkpoint-1000).
-  # The trainer hard-checks this at startup.
+  # FP32 sharded master weights; the trainer verifies them at startup.
   dit_precision: fp32
 
 callbacks:
@@ -132,16 +99,13 @@ callbacks:
     max_grad_norm: 1.0
   latent_vis:
     _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
-    # Decodes rank 0's generator/real-score/fake-score x0 estimates at their
-    # training timesteps — the DMD dynamics view, complementing validation's
-    # full 3-step samples at the same cadence.
+    # Decode rank 0's generator, teacher, and critic x0 estimates.
     every_steps: 100
     fps: 24
   validation:
     _target_: fastvideo.train.callbacks.validation.ValidationCallback
     pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
-    # 64 held-out prompts (Wan2.1 DMD2 validation_64 rewritten into H3's
-    # three-field format; disjoint from the VidProM training captions).
+    # Held-out prompts disjoint from the VidProM training captions.
     dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_wan64.json
     every_steps: 100
     run_at_start: true
@@ -154,4 +118,6 @@ callbacks:
     text_encoder_cpu_offload: true
     vae_cpu_offload: true
 
-pipeline: {}
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: true

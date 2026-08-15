@@ -193,7 +193,7 @@ class TrainingMethod(torch.nn.Module, ABC):
         DCP needs matching entries to load into; without them
         the saved optimizer state is silently dropped.
         """
-        for opt in self.get_optimizers(0):
+        for opt in self._optimizer_dict.values():
             for group in opt.param_groups:
                 for p in group["params"]:
                     if not p.requires_grad:

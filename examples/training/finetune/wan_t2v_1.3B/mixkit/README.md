@@ -90,9 +90,9 @@ bash examples/training/finetune/wan_t2v_1.3B/mixkit/distill_dmd_qat.sh \
     checkpoints/wan_t2v_qat_finetune/checkpoint-2000/transformer/diffusion_pytorch_model.safetensors
 ```
 
-DMD runs a double loop (critic every step, generator every
-`generator_update_interval`), and validation samples the distilled student at
-3 steps — the final 4-bit-attention model.
+This launcher uses the legacy DMD pipeline, whose critic runs every step and
+whose generator runs every `generator_update_interval`. Validation samples the
+distilled student at 3 steps — the final 4-bit-attention model.
 
 ## Inference (NVFP4 4-bit linear)
 

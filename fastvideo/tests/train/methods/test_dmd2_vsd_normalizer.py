@@ -40,8 +40,6 @@ def test_degenerate_denominator_yields_finite_loss_and_grad() -> None:
     batch = SimpleNamespace(dmd_latent_vis_dict={})
     loss, metrics = method._dmd_loss(gen, batch)
 
-    # Without the fp32 + 1e-6 floor, (critic - teacher) / 0 -> inf -> the
-    # nan_to_num dtype-max stand-in squares to an infinite loss.
     assert torch.isfinite(loss)
     assert metrics == {}
     loss.backward()

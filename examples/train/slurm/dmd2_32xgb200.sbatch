@@ -1,14 +1,12 @@
 #!/bin/bash
-# 8-tray (8 x 4x GB200 = 32 GPU) MiniMax-H3 DMD2 launch from a Slurm login node.
+# Multi-node MiniMax-H3 DMD2 launch; defaults to 8 x 4-GPU trays.
 #
 #   sbatch examples/train/slurm/dmd2_32xgb200.sbatch
 #   sbatch --nodes=2 examples/train/slurm/dmd2_32xgb200.sbatch          # smaller sweep
 #   CONFIG=path/to/other.yaml sbatch examples/train/slurm/dmd2_32xgb200.sbatch
 #
-# The paired config (dmd2_sp1_fsdp40_vidprom_v6.yaml) runs the production
-# sp=1 / pure full-shard FSDP topology; this script forwards overrides
-# derived from the actual allocation, so any --nodes count "just works"
-# (global batch shrinks/grows with it).
+# The launcher derives the SP=1/full-shard mesh from the allocation. Smaller
+# allocations still require an independent memory-capacity check.
 #
 # Cluster-specific knobs (partition/account/container) are marked CLUSTER.
 
@@ -34,8 +32,8 @@ NNODES="${SLURM_JOB_NUM_NODES}"
 GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-4}"
 GPUS_PER_NODE="${GPUS_PER_NODE##*:}"   # "4" or "gb200:4" -> 4
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
-# Topology overrides (default: sp=1, pure full-shard FSDP across the world —
-# the v5/v6 production topology). For sp-across-a-tray HSDP instead:
+# Topology overrides default to SP=1 and full-shard FSDP across the world.
+# For SP across each tray with HSDP instead:
 # SP_SIZE=4 HSDP_REPLICATE=$NNODES HSDP_SHARD=4.
 SP_SIZE="${SP_SIZE:-1}"
 HSDP_REPLICATE="${HSDP_REPLICATE:-1}"

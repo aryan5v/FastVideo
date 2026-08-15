@@ -1,49 +1,7 @@
-# Production data-free DMD2 on VidProM prompts — sp=1 / full-FSDP topology.
-#
-# v6 (2026-08-14): recipe aligned with fastgen's DMD2 choices (deep-compare
-# vs fastgen/methods/distribution_matching/dmd2.py + its Wan/LTX-2.3-A/V/H3
-# configs). Deltas vs v5, each matching a fastgen choice:
-#   * score-timestep density back to uniform base-t (score_timestep_shift
-#     1.0). fastgen's own H3 config samples "shifted" at the clock's 12 —
-#     identical to uniform base-t in our parametrization — and explicitly
-#     warns that uniform-in-sigma (v5's score_timestep_shift 12.0) "is not
-#     the curve the sampler walks". Median sigma_video 0.92 / sigma_audio
-#     0.74 vs v5's 0.53 / 0.22 — supervision returns to the high-noise
-#     region where the 3-step ladder actually operates.
-#   * score window 0.001..0.999 (fastgen min_t/max_t) instead of 0.005..0.98.
-#   * Adam betas (0.9, 0.999) for student AND critic (fastgen default; v5's
-#     beta1=0 was CausVid/Self-Forcing lineage). Memory note: beta1>0 brings
-#     back exp_avg — fp32 sharded over 40 ranks adds ~3.3 GiB/rank per
-#     trainable role (~6.6 GiB/rank total); fits the v5 profile with margin.
-#   * equal LRs 2e-6 for student and critic (fastgen uses one LR for all
-#     roles; TTUR comes from update frequency, not LR asymmetry).
-#   * grad clip 10.0 (fastgen clips the student at 10 — effectively a safety
-#     net, not a per-step LR modulator; v5's 1.0 was silently rescaling
-#     updates whenever norms sat above 1, which they measurably did). Residual
-#     difference: our callback also clips the critic at 10; fastgen leaves the
-#     critic unclipped. Inert unless the critic blows past norm 10.
-#   * fake_score_loss_space x0: critic trained in x0 space (fastgen's
-#     fake_score_pred_type="x0") = sigma_m(t)^2-weighted velocity MSE per
-#     modality, downweighting low-noise critic fitting.
-# Kept from v5 (already fastgen-aligned or deliberate):
-#   * dmd_denoising_steps [1000, 667, 333] — uniform base-t ladder, the same
-#     design rule as fastgen's Wan/LTX t_lists (shift-warped uniform grid);
-#     the H3 adapter shifts per modality internally, warp stays OFF.
-#   * real_score_guidance_scale 1.0 (guidance-distilled teacher, no CFG).
-#   * fp32 master weights, weight decay 0.01, generator_update_interval 5.
-#   * rollout_mode simulate — fastgen has no simulate mode (its multi-step
-#     student sees forward-noised REAL data); kept because this run is
-#     data-free (text_only rows). Known remaining confound vs fastgen, along
-#     with the GAN branch (fastgen gan_loss_weight_gen 0.03), deferred.
-#
-# Topology: sp_size=1 (one packed document per GPU), mesh (replicate=1,
-# shard=world). num_gpus/hsdp_shard_dim below are defaults; the sbatch
-# overrides them to the allocated world size at launch.
-#
-# Launch (after warmup ladder or onto trays held by a previous job):
-#   SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=<4*nodes> \
-#   CONFIG=<this file> sbatch --nodes=<N> -p hpc-rack-2 \
-#     examples/train/slurm/dmd2_32xgb200.sbatch
+# Current data-free DMD2 recipe for VidProM prompts.
+# Reference topology: SP=1, replicate=1, shard=world; the Slurm launcher
+# overrides the 40-GPU defaults from the allocation.
+# See h3_dmd.md for rationale, comparison notes, and open issues.
 
 models:
   student:
@@ -70,20 +28,15 @@ method:
   _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
   rollout_mode: simulate
   generator_update_interval: 5
-  # 1.0: H3's released checkpoint is guidance-distilled (its inference stack
-  # rejects CFG), so the conditional teacher prediction already carries
-  # guidance — and DMD2 skips the unconditional forward entirely at 1.0.
+  # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
   real_score_guidance_scale: 1.0
-  # Base-t ladder; the H3 adapter maps each entry through the per-modality
-  # shifts (video 12 / audio 3). Do NOT enable warp_denoising_step here.
+  # Base-t ladder; the H3 adapter applies the video/audio shifts 12/3.
   dmd_denoising_steps: [1000, 667, 333]
-  # Score supervision: uniform in base-t over [0.001, 0.999] — fastgen's H3
-  # density ("shifted" draw at the model's own shift = uniform base-t here).
+  # Uniform base-t score supervision.
   min_timestep_ratio: 0.001
   max_timestep_ratio: 0.999
   score_timestep_shift: 1.0
-  # Critic regression in x0 space (fastgen fake_score_pred_type="x0"):
-  # per-modality velocity MSE weighted by sigma_m(t)^2.
+  # Per-modality x0-space critic objective.
   fake_score_loss_space: x0
   cfg_uncond:
     text: zero
@@ -124,9 +77,8 @@ training:
     gradient_accumulation_steps: 1
 
   checkpoint:
-    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v6_fastgen_align
-    # Requeue-safe: fresh output_dir -> first boot starts from scratch; after
-    # a pod flap the requeued job resumes from the newest checkpoint here.
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v6_fp32_compute
+    # Requeues resume the newest complete checkpoint in this directory.
     resume_from_checkpoint: latest
     training_state_checkpointing_steps: 100
     checkpointing_start_step: 500
@@ -134,16 +86,13 @@ training:
 
   tracker:
     project_name: h3-dmd2-vsa
-    run_name: dmd2_sp1_vidprom_v6_fastgen_align
+    run_name: dmd2_sp1_vidprom_v6_fp32_compute
 
   model:
     precondition_outputs: false
     enable_gradient_checkpointing_type: full
 
-  # fp32 sharded master weights (compute stays bf16 via FSDP param_dtype).
-  # bf16 masters silently round away updates below ~half an ulp — norm-scale
-  # params were bit-frozen for 1000 steps (verified against checkpoint-1000).
-  # The trainer hard-checks this at startup.
+  # FP32 sharded master weights; the trainer verifies them at startup.
   dit_precision: fp32
 
 callbacks:
@@ -152,16 +101,13 @@ callbacks:
     max_grad_norm: 10.0
   latent_vis:
     _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
-    # Decodes rank 0's generator/real-score/fake-score x0 estimates at their
-    # training timesteps — the DMD dynamics view, complementing validation's
-    # full 3-step samples at the same cadence.
+    # Decode rank 0's generator, teacher, and critic x0 estimates.
     every_steps: 100
     fps: 24
   validation:
     _target_: fastvideo.train.callbacks.validation.ValidationCallback
     pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
-    # 64 held-out prompts (Wan2.1 DMD2 validation_64 rewritten into H3's
-    # three-field format; disjoint from the VidProM training captions).
+    # Held-out prompts disjoint from the VidProM training captions.
     dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_wan64.json
     every_steps: 100
     run_at_start: true
@@ -174,4 +120,6 @@ callbacks:
     text_encoder_cpu_offload: true
     vae_cpu_offload: true
 
-pipeline: {}
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false

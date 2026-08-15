@@ -483,11 +483,8 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
 
         Factorized AdaLN uses FP16; BF16 is ~1.7x worse there.
         """
-        # Precedence: the factorized-AdaLN FP16 pin wins over
-        # uniform_parameter_dtype on purpose. Under FSDP's one-dtype rule the
-        # resulting mix hard-fails at load time, which beats silently training
-        # AdaLN in BF16. Rank-reduced checkpoints are inference artifacts --
-        # train from the full-rank release.
+        # Rank-reduced AdaLN stays FP16 even in uniform mode. The FSDP loader
+        # rejects those ungrouped mixed parameters for training.
         if getattr(self, "adaln_rank", None) is not None and (
                 ".adaln_proj." in name or name.startswith(("norm_out.linear.", "adaln_basis."))):
             return torch.float16

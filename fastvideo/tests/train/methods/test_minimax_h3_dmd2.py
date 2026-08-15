@@ -125,11 +125,11 @@ def _build_method(
 
 
 @pytest.mark.parametrize("rollout_mode", ["data_latent", "simulate"])
-def test_dmd2_single_train_step_updates_student_and_critic(
+def test_dmd2_student_iteration_updates_only_student(
     monkeypatch: pytest.MonkeyPatch,
     rollout_mode: str,
 ) -> None:
-    """Run rollout, critic loss, generator loss, both backwards and steps."""
+    """Student iterations do not train or step the critic."""
     method = _build_method(monkeypatch, rollout_mode=rollout_mode)
     student = method.student
     teacher = method.teacher
@@ -141,36 +141,90 @@ def test_dmd2_single_train_step_updates_student_and_critic(
     for key in ("total_loss", "generator_loss", "fake_score_loss"):
         assert torch.isfinite(loss_map[key]), key
     assert loss_map["generator_loss"].item() > 0.0
-    assert loss_map["fake_score_loss"].item() > 0.0
+    assert loss_map["fake_score_loss"].item() == 0.0
+    torch.testing.assert_close(loss_map["total_loss"], loss_map["generator_loss"])
+    assert "generator_pred_video" in method.latent_vis
+    assert "real_score_pred_video" in method.latent_vis
+    assert "faker_score_pred_video" in method.latent_vis
 
     method.backward(loss_map, outputs)
     assert student.transformer.scale.grad is not None
     assert torch.isfinite(student.transformer.scale.grad)
-    assert critic.transformer.scale.grad is not None
-    assert torch.isfinite(critic.transformer.scale.grad)
+    assert critic.transformer.scale.grad is None
     assert teacher.transformer.scale.grad is None
+    assert method.get_optimizers(0) == [method._student_optimizer]
+    assert method.get_lr_schedulers(0) == [method._student_lr_scheduler]
+    assert method.get_grad_clip_targets(0) == {"student": student.transformer}
 
     student_before = student.transformer.scale.detach().clone()
     critic_before = critic.transformer.scale.detach().clone()
     method.optimizers_schedulers_step(0)
     assert student.transformer.scale.detach() != student_before
-    assert critic.transformer.scale.detach() != critic_before
+    torch.testing.assert_close(critic.transformer.scale.detach(), critic_before)
 
 
-def test_dmd2_generator_update_interval_gates_student(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Off-interval iterations train the critic only."""
+def test_dmd2_critic_iteration_updates_only_critic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off-interval iterations do not train or step the student."""
     method = _build_method(
         monkeypatch,
         rollout_mode="data_latent",
         generator_update_interval=5,
     )
 
-    loss_map, _outputs, metrics = method.single_train_step(_raw_batch(), iteration=1)
+    student = method.student
+    critic = method.critic
+    loss_map, outputs, metrics = method.single_train_step(_raw_batch(), iteration=1)
 
     assert metrics["update_student"] == 0.0
     assert loss_map["generator_loss"].item() == 0.0
     assert loss_map["fake_score_loss"].item() > 0.0
+    torch.testing.assert_close(loss_map["total_loss"], loss_map["fake_score_loss"])
+    method.backward(loss_map, outputs)
+    assert student.transformer.scale.grad is None
+    assert critic.transformer.scale.grad is not None
+    assert torch.isfinite(critic.transformer.scale.grad)
     assert method.get_optimizers(1) == [method._critic_optimizer]
+    assert method.get_lr_schedulers(1) == [method._critic_lr_scheduler]
+    assert method.get_grad_clip_targets(1) == {"critic": critic.transformer}
+
+    student_before = student.transformer.scale.detach().clone()
+    critic_before = critic.transformer.scale.detach().clone()
+    method.optimizers_schedulers_step(1)
+    torch.testing.assert_close(student.transformer.scale.detach(), student_before)
+    assert critic.transformer.scale.detach() != critic_before
+
+
+def test_dmd2_five_step_cadence_and_resume_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    method = _build_method(
+        monkeypatch,
+        rollout_mode="simulate",
+        generator_update_interval=5,
+    )
+
+    assert [method._should_update_student(i) for i in range(1, 6)] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    method.method_config["generator_update_interval"] = 0
+    with pytest.raises(ValueError, match="must be positive"):
+        method._should_update_student(0)
+
+    method.seed_optimizer_state_for_resume()
+    for optimizer in (method._student_optimizer, method._critic_optimizer):
+        assert optimizer.state
+        assert all("exp_avg" in state for state in optimizer.state.values())
+
+    method.method_config.pop("generator_update_interval")
+    assert [method._should_update_student(i) for i in range(1, 6)] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -373,9 +427,10 @@ def test_per_role_attention_backend_override_resolves(monkeypatch: pytest.Monkey
         _fake_load,
     )
 
+    student_config = _ctor_training_config()
     student = MiniMaxH3DMDModel(
         init_from="role/student",
-        training_config=_ctor_training_config(),
+        training_config=student_config,
         trainable=True,
         attention_backend="VIDEO_SPARSE_ATTN_H3",
     )
@@ -387,6 +442,7 @@ def test_per_role_attention_backend_override_resolves(monkeypatch: pytest.Monkey
     )
 
     assert student.attention_backend is AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
+    assert student_config.pipeline_config.dit_config.uniform_parameter_dtype is False
     assert teacher.attention_backend is AttentionBackendEnum.FLASH_ATTN
     # load_module_from_path turns this request into the construction scope
     # that binds the backend to the transformer's attention layers.
@@ -418,15 +474,8 @@ def test_h3_dmd2_fixture_resolves_trio_contract() -> None:
     assert config.training.data.preprocessed_data_type == "t2va"
 
 
-def test_h3_dmd2_v6_config_mirrors_fastgen_recipe() -> None:
-    """The v6 production config pins the fastgen-aligned DMD2 recipe.
-
-    Each value below matches a fastgen choice (see the config header):
-    uniform base-t score sampling over [0.001, 0.999], Adam betas
-    (0.9, 0.999) with one LR for both trainable roles, x0-space critic
-    loss, grad clip 10, and the H3 contract (guidance-distilled teacher,
-    base-t ladder with warp off).
-    """
+def test_h3_dmd2_current_config_pins_recipe() -> None:
+    """The production config pins the intended H3 DMD2 knobs."""
     config = yaml.safe_load(_EXPERIMENT_CONFIG.read_text())
     method = config["method"]
     training = config["training"]
@@ -451,6 +500,8 @@ def test_h3_dmd2_v6_config_mirrors_fastgen_recipe() -> None:
     assert method["fake_score_lr_scheduler"] == "constant"
     assert training["optimizer"]["betas"] == [0.9, 0.999]
     assert training["dit_precision"] == "fp32"
+    assert training["checkpoint"]["output_dir"].endswith("v6_fp32_compute")
+    assert config["pipeline"]["dit_config"]["uniform_parameter_dtype"] is False
     assert training["data"]["preprocessed_data_type"] == "text_only"
     assert training["data"]["train_batch_size"] == 1
     assert training["data"]["training_cfg_rate"] == 0.0
@@ -467,7 +518,7 @@ def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
     """
     from fastvideo.models.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 
-    steps = [1000, 757, 522]
+    steps = [1000, 667, 333]
     base = torch.tensor([step / 1000.0 for step in steps] + [0.0], dtype=torch.float32)
     video = MiniMaxH3Scheduler(shift=12.0)
     audio = MiniMaxH3Scheduler(shift=3.0)
@@ -487,11 +538,11 @@ def test_validation_callback_injects_method_denoising_steps() -> None:
     from fastvideo.train.callbacks.validation import ValidationCallback
 
     callback = ValidationCallback.__new__(ValidationCallback)
-    callback.method = SimpleNamespace(method_config={"dmd_denoising_steps": [1000, 757, 522]})
+    callback.method = SimpleNamespace(method_config={"dmd_denoising_steps": [1000, 667, 333]})
 
     config = SimpleNamespace(dmd_denoising_steps=None)
     callback._inject_method_denoising_steps(config)
-    assert config.dmd_denoising_steps == [1000, 757, 522]
+    assert config.dmd_denoising_steps == [1000, 667, 333]
 
     explicit = SimpleNamespace(dmd_denoising_steps=[1000, 500])
     callback._inject_method_denoising_steps(explicit)

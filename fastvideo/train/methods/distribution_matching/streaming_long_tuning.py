@@ -368,6 +368,24 @@ class StreamingLongTuningMethod(SelfForcingMethod):
             return self._single_train_step_short(batch, iteration, stage)
         return self._single_train_step_streaming(batch, iteration, stage)
 
+    def get_optimizers(self, iteration: int) -> list[torch.optim.Optimizer]:
+        optimizers = [self._critic_optimizer]
+        if self._should_update_student(iteration):
+            optimizers.append(self._student_optimizer)
+        return optimizers
+
+    def get_lr_schedulers(self, iteration: int) -> list[Any]:
+        schedulers = [self._critic_lr_scheduler]
+        if self._should_update_student(iteration):
+            schedulers.append(self._student_lr_scheduler)
+        return schedulers
+
+    def get_grad_clip_targets(self, iteration: int) -> dict[str, torch.nn.Module]:
+        targets = {"critic": self.critic.transformer}
+        if self._should_update_student(iteration):
+            targets["student"] = self.student.transformer
+        return targets
+
     def _single_train_step_short(
         self,
         batch: dict[str, Any],

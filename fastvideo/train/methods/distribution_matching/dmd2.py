@@ -109,11 +109,14 @@ class DMD2Method(TrainingMethod):
         generator_loss = torch.zeros(
             (),
             device=training_batch.latents.device,
-            dtype=training_batch.latents.dtype,
+            dtype=torch.float32,
         )
         student_ctx = None
         generator_metrics: dict[str, LogScalar] = {}
-        rollout_for_critic: torch.Tensor | None = None
+        fake_score_loss = torch.zeros_like(generator_loss)
+        critic_ctx = None
+        critic_outputs: dict[str, Any] = {}
+        critic_metrics: dict[str, LogScalar] = {}
         if update_student:
             generator_pred_x0 = self._student_rollout(training_batch, with_grad=True)
             student_ctx = (
@@ -121,20 +124,14 @@ class DMD2Method(TrainingMethod):
                 training_batch.attn_metadata_vsa,
             )
             generator_loss, generator_metrics = self._dmd_loss(generator_pred_x0, training_batch)
-            # Reference DMD2 trains the critic on the same generated sample
-            # the generator step used; a second independent rollout here
-            # would only add ~len(dmd_denoising_steps) no-grad forwards.
-            rollout_for_critic = generator_pred_x0.detach()
-
-        (
-            fake_score_loss,
-            critic_ctx,
-            critic_outputs,
-            critic_metrics,
-        ) = self._critic_flow_matching_loss(
-            training_batch,
-            generator_pred_x0=rollout_for_critic,
-        )
+            training_batch.dmd_latent_vis_dict["generator_pred_video"] = generator_pred_x0.detach()
+        else:
+            (
+                fake_score_loss,
+                critic_ctx,
+                critic_outputs,
+                critic_metrics,
+            ) = self._critic_flow_matching_loss(training_batch)
 
         total_loss = generator_loss + fake_score_loss
         loss_map = {
@@ -154,9 +151,7 @@ class DMD2Method(TrainingMethod):
             **generator_metrics,
             **critic_metrics,
         }
-        # Rank-local latent snapshots for LatentVisCallback. The critic dict
-        # always carries generator_pred_video; the DMD dict adds the real- and
-        # fake-score predictions on generator-update iterations.
+        # Rank-local latent snapshots for LatentVisCallback.
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
@@ -191,6 +186,7 @@ class DMD2Method(TrainingMethod):
                 student_ctx,
                 grad_accum_rounds=grad_accum_rounds,
             )
+            return
 
         critic_ctx = backward_ctx.get("critic_ctx")
         if critic_ctx is None:
@@ -206,33 +202,27 @@ class DMD2Method(TrainingMethod):
         self,
         iteration: int,
     ) -> list[torch.optim.Optimizer]:
-        optimizers: list[torch.optim.Optimizer] = []
-        optimizers.append(self._critic_optimizer)
         if self._should_update_student(iteration):
-            optimizers.append(self._student_optimizer)
-        return optimizers
+            return [self._student_optimizer]
+        return [self._critic_optimizer]
 
     # TrainingMethod override: get_lr_schedulers
     def get_lr_schedulers(
         self,
         iteration: int,
     ) -> list[Any]:
-        schedulers: list[Any] = []
-        schedulers.append(self._critic_lr_scheduler)
         if self._should_update_student(iteration):
-            schedulers.append(self._student_lr_scheduler)
-        return schedulers
+            return [self._student_lr_scheduler]
+        return [self._critic_lr_scheduler]
 
     # TrainingMethod override: get_grad_clip_targets
     def get_grad_clip_targets(
         self,
         iteration: int,
     ) -> dict[str, torch.nn.Module]:
-        targets: dict[str, torch.nn.Module] = {}
         if self._should_update_student(iteration):
-            targets["student"] = (self.student.transformer)
-        targets["critic"] = self.critic.transformer
-        return targets
+            return {"student": self.student.transformer}
+        return {"critic": self.critic.transformer}
 
     def _parse_rollout_mode(self, ) -> Literal["simulate", "data_latent"]:
         """Parse how DMD2 obtains the latent point used for rollout.
@@ -394,14 +384,7 @@ class DMD2Method(TrainingMethod):
         )
 
     def _modality_slices(self) -> tuple[tuple[str, slice], ...] | None:
-        """Named packed-latent slices exposed by multi-modality models.
-
-        Packed adapters (e.g. MiniMax-H3's video+audio flattening) weight
-        modalities by element count under a single global mean, which mutes
-        the smaller stream — H3 audio is <1% of packed elements. When the
-        student exposes ``modality_slices()``, every DMD2 loss and normalizer
-        is computed per modality and combined via ``_modality_weight``.
-        """
+        """Return slices used to normalize packed modalities independently."""
         getter = getattr(self.student, "modality_slices", None)
         if getter is None:
             return None
@@ -440,9 +423,9 @@ class DMD2Method(TrainingMethod):
             where="method.generator_update_interval",
         )
         if interval is None:
-            interval = 1
+            interval = 5
         if interval <= 0:
-            return True
+            raise ValueError("method.generator_update_interval must be positive")
         return iteration % interval == 0
 
     def _get_denoising_step_list(
@@ -492,7 +475,7 @@ class DMD2Method(TrainingMethod):
         return step_list[index]
 
     def _parse_score_timestep_bounds(self) -> tuple[int, int]:
-        """Resolve the score-model timestep window used by legacy DMD.
+        """Resolve the score-model timestep window.
 
         The student rollout schedule is controlled separately by
         ``dmd_denoising_steps``. These bounds apply only to the randomly
@@ -522,16 +505,10 @@ class DMD2Method(TrainingMethod):
         )
 
     def _parse_score_timestep_shift(self) -> float:
-        """Resolve the sampling-density shift for the score timestep.
+        """Resolve score-sampling density on the rectified-flow time axis.
 
-        ``1.0`` (default) keeps the legacy uniform draw over base timesteps.
-        For rectified-flow models with a large timestep shift ``s``, uniform
-        base-t concentrates ~s× more supervision near sigma=1 than near the
-        floor; setting this to ``s`` samples uniformly in that modality's
-        *shifted sigma* instead (draw u ~ U over sigma-space bounds, invert
-        t = u / (s - (s-1)u)), equalizing score supervision across its noise
-        axis. Only the sampling density changes — every timestep still maps
-        to per-modality sigmas exactly as before.
+        ``1`` samples base timesteps uniformly. A value ``s`` samples uniformly
+        after the rational shift by drawing shifted sigma and inverting it.
         """
         shift = get_optional_float(
             self.method_config,
@@ -545,14 +522,7 @@ class DMD2Method(TrainingMethod):
         return shift
 
     def _parse_fake_score_loss_space(self) -> Literal["velocity", "x0"]:
-        """Resolve the space the critic's flow-matching loss is computed in.
-
-        ``velocity`` (default) regresses the raw velocity target with uniform
-        weight across noise levels. ``x0`` reproduces fastgen's
-        ``fake_score_pred_type="x0"``: for rectified flow, the x0-space MSE
-        equals the velocity MSE weighted by ``sigma_m(t)^2`` per modality,
-        which downweights critic fitting at low noise.
-        """
+        """Resolve velocity MSE or its per-modality sigma-squared x0 form."""
         raw = self.method_config.get("fake_score_loss_space", None)
         if raw is None:
             return "velocity"
@@ -759,10 +729,8 @@ class DMD2Method(TrainingMethod):
         for name, modality in slices:
             loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
             if self._fake_score_loss_space == "x0":
-                # x0-space MSE = sigma_m(t)^2 * velocity MSE. The forward
-                # process is affine (noisy - clean = sigma_m * target
-                # elementwise for every RF-style model here), so the ratio
-                # below recovers sigma_m^2 exactly without a model hook.
+                # For affine rectified flow, x0 MSE is sigma_m(t)^2 times
+                # velocity MSE. Estimate sigma_m^2 from the realized tensors.
                 with torch.no_grad():
                     num = torch.mean((noisy_x0[:, modality].float() - generator_pred_x0[:, modality].float())**2)
                     den = torch.mean(target[:, modality].float()**2)
@@ -826,12 +794,8 @@ class DMD2Method(TrainingMethod):
                 attn_kind="dense",
             )
             if float(guidance_scale) == 1.0:
-                # At scale 1.0 the CFG combination is the identity, so the
-                # unconditional forward is pure waste. This is also the
-                # correct setting for guidance-distilled teachers (e.g.
-                # MiniMax-H3, whose own inference stack rejects CFG): their
-                # conditional prediction already bakes in guidance, and they
-                # define no trained unconditional branch to extrapolate from.
+                # Scale 1 is the conditional prediction and needs no
+                # unconditional forward.
                 real_cfg_x0 = real_cond_x0
             else:
                 real_uncond_x0 = self.teacher.predict_x0(
@@ -844,9 +808,7 @@ class DMD2Method(TrainingMethod):
                 )
                 real_cfg_x0 = real_uncond_x0 + (real_cond_x0 - real_uncond_x0) * guidance_scale
 
-            # Intermediate-latent visualization state (legacy training/
-            # distillation_pipeline.py key names); LatentVisCallback decodes
-            # these on rank 0 every N steps.
+            # LatentVisCallback decodes these estimates on rank 0.
             batch.dmd_latent_vis_dict.update({
                 "real_score_pred_video": real_cfg_x0.detach(),
                 "faker_score_pred_video": faker_x0.detach(),
@@ -862,9 +824,8 @@ class DMD2Method(TrainingMethod):
         for name, modality in slices:
             gen_m = generator_pred_x0[:, modality].float()
             with torch.no_grad():
-                # fp32 + epsilon like fastgen's VSD weight: a bf16 division
-                # with no floor turns a degenerate denominator into bf16-max
-                # garbage after nan_to_num instead of a bounded gradient.
+                # Keep the VSD weight stable for low-precision or degenerate
+                # teacher residuals.
                 real_m = real_cfg_x0[:, modality].float()
                 denom = (gen_m - real_m).abs().mean() + 1e-6
                 grad = torch.nan_to_num((faker_x0[:, modality].float() - real_m) / denom)

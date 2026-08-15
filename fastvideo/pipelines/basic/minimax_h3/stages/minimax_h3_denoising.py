@@ -113,10 +113,7 @@ class MiniMaxH3DenoisingStage(PipelineStage):
             env_steps = os.environ.get("FASTVIDEO_DMD_DENOISING_STEPS", "").strip()
             if env_steps:
                 dmd_steps = [int(s) for s in env_steps.split(",") if s.strip()]
-        # Stochastic backward simulation (reference-DMD2 sampling): re-noise
-        # each hop's x0 estimate with FRESH noise instead of the deterministic
-        # Euler carry — matching the training rollout's input manifold. Only
-        # meaningful with explicit DMD steps.
+        # Optionally re-noise x0 between explicit DMD steps.
         stochastic_renoise = bool(dmd_steps) and (
             bool(getattr(fastvideo_args.pipeline_config, "dmd_stochastic_renoise", False))
             or os.environ.get("FASTVIDEO_DMD_STOCHASTIC_RENOISE", "0").strip().lower() in ("1", "true", "yes"))
@@ -248,9 +245,8 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                                     "x0(std=%.4f,mean=%.4f) v(std=%.4f)", index, tag, s, xin.std(), xin.mean(),
                                     x0dbg.std(), x0dbg.mean(), vel[0, st:].float().std())
                     if stochastic_renoise:
-                        # x0 = sample + sigma * v (velocity = noise - clean),
-                        # then fresh-noise re-mix at the next sigma — the same
-                        # hop rule as the DMD2 training rollout.
+                        # Raw H3 output is clean - noise, so
+                        # x0 = sample + sigma * output.
                         assert self.scheduler.sigmas is not None and self.audio_scheduler.sigmas is not None
                         for latents, velocity, start, sigmas in (
                             (batch.latents, video_velocity, video_start, self.scheduler.sigmas),

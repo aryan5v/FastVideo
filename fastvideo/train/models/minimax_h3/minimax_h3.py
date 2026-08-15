@@ -106,10 +106,6 @@ class MiniMaxH3Model(ModelBase):
             raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type "
                              "'t2va' or 'text_only'")
 
-        # FastVideo's Fully Sharded Data Parallel loading path requires one BF16
-        # parameter dtype, including modules that H3 inference keeps in FP32.
-        training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
-
         self._init_from = str(init_from)
         self.training_config = training_config
         self.transformer = self._load_transformer(
@@ -399,6 +395,8 @@ class MiniMaxH3Model(ModelBase):
 
         dtype = torch.bfloat16
         device = self.device
+        video_input_dtype = noisy_latents.dtype
+        audio_input_dtype = batch.audio_noisy_model_input.dtype
         video_bcthw = noisy_latents.permute(0, 2, 1, 3, 4).to(dtype)
         # Match H3 checkpoint token order: video rows flatten
         # (C, patch_t, patch_h, patch_w), while audio rows flatten stereo
@@ -417,7 +415,7 @@ class MiniMaxH3Model(ModelBase):
         unique_timesteps = unique_timesteps.to(device)
         timestep_indices = timestep_indices.to(device)
 
-        with torch.autocast(device.type, dtype=dtype), set_forward_context(
+        with set_forward_context(
                 current_timestep=unique_timesteps,
                 attn_metadata=attn_metadata,
         ):
@@ -444,7 +442,10 @@ class MiniMaxH3Model(ModelBase):
             self.transformer.patch_size,
         ).permute(0, 2, 1, 3, 4)
         audio_prediction = unpack_audio_tokens(audio_velocity[0], num_audio_latents)[None]
-        return -video_prediction, -audio_prediction
+        return (
+            (-video_prediction).to(video_input_dtype),
+            (-audio_prediction).to(audio_input_dtype),
+        )
 
     def backward(
         self,

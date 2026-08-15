@@ -32,11 +32,17 @@ def cpu_mesh():
     return init_device_mesh("cpu", (1, 1), mesh_dim_names=("replicate", "shard"))
 
 
-def _make_model(cpu_mesh, *, extra_param: str | None = None, weight_rows: int = 8) -> nn.Module:
+def _make_model(
+    cpu_mesh,
+    *,
+    extra_param: str | None = None,
+    weight_rows: int = 8,
+    dtype: torch.dtype = torch.float32,
+) -> nn.Module:
     model = nn.Module()
     placements = (Replicate(), Shard(0))
-    weight = distribute_tensor(torch.randn(weight_rows, 4), cpu_mesh, placements)
-    bias = distribute_tensor(torch.randn(weight_rows), cpu_mesh, placements)
+    weight = distribute_tensor(torch.randn(weight_rows, 4, dtype=dtype), cpu_mesh, placements)
+    bias = distribute_tensor(torch.randn(weight_rows, dtype=dtype), cpu_mesh, placements)
     model.register_parameter("weight", nn.Parameter(weight))
     model.register_parameter("bias", nn.Parameter(bias))
     model.register_buffer("scale", torch.full((1, ), 2.0))
@@ -107,3 +113,31 @@ def test_missing_entry_misses_cleanly(cpu_mesh, tmp_path):
     dst = _make_model(cpu_mesh)
     ctx = ShardCacheContext(entry_dir=tmp_path / "absent", key="k2", shard_index=0, num_shards=1, is_writer=True)
     assert not try_load_from_shard_cache(dst, ctx, torch.device("cpu"))
+
+
+def test_model_selected_dtype_rejects_stale_cache_and_hits_fresh_cache(cpu_mesh, tmp_path):
+    stale = _make_model(cpu_mesh, dtype=torch.bfloat16)
+    stale_ctx = _ctx(tmp_path / "stale")
+    write_shard_cache(stale, stale_ctx)
+
+    def select_dtype(name: str, default: torch.dtype) -> torch.dtype:
+        return torch.float32 if name == "weight" else default
+
+    destination = _make_model(cpu_mesh, dtype=torch.bfloat16)
+    destination._get_parameter_dtype = select_dtype
+    assert not try_load_from_shard_cache(destination, stale_ctx, torch.device("cpu"))
+
+    fresh = _make_model(cpu_mesh, dtype=torch.bfloat16)
+    fresh_weight = distribute_tensor(
+        torch.randn(8, 4, dtype=torch.float32),
+        cpu_mesh,
+        (Replicate(), Shard(0)),
+    )
+    fresh.weight = nn.Parameter(fresh_weight)
+    fresh_ctx = _ctx(tmp_path / "fresh")
+    write_shard_cache(fresh, fresh_ctx)
+
+    destination = _make_model(cpu_mesh, dtype=torch.bfloat16)
+    destination._get_parameter_dtype = select_dtype
+    assert try_load_from_shard_cache(destination, fresh_ctx, torch.device("cpu"))
+    assert destination.weight.dtype == torch.float32

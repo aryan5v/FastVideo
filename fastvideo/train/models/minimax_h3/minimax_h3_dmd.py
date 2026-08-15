@@ -22,8 +22,8 @@ from fastvideo.train.models.minimax_h3.minimax_h3 import (
     shift_noise_amount,
 )
 
-# DMD2 samples integer score timesteps on the legacy [0, 1000] scale. H3 maps
-# them to its shared base noise amount before applying the modality shifts.
+# DMD2 uses integer score timesteps on [0, 1000]. H3 maps them to its shared
+# base noise amount before applying the modality shifts.
 _DMD_TIMESTEP_SCALE = 1000
 
 

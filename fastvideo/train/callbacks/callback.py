@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Callback base class and CallbackDict manager.
-
-Adapted from FastGen's callback pattern to FastVideo's types.
-"""
+"""Callback base class and CallbackDict manager."""
 
 from __future__ import annotations
 

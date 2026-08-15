@@ -83,4 +83,6 @@ callbacks:
     text_encoder_cpu_offload: true
     vae_cpu_offload: true
 
-pipeline: {}
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: true

@@ -51,7 +51,7 @@ method:
 
   # --- DMD2-specific keys (read from self.method_config) ---
   rollout_mode: simulate              # required: "simulate" or "data_latent"
-  generator_update_interval: 5        # default: 1
+  generator_update_interval: 5        # 4 critic-only steps, then 1 student-only step
   dmd_denoising_steps: [1000, 750, 500, 250]  # SDE timestep schedule
   min_timestep_ratio: 0.0            # score-model timestep lower bound
   max_timestep_ratio: 1.0            # score-model timestep upper bound

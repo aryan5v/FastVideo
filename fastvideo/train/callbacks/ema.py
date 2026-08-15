@@ -92,6 +92,9 @@ class EMACallback(Callback):
         if self.student_ema is None:
             return
 
+        student_optimizer = getattr(method, "_student_optimizer", None)
+        if student_optimizer is not None and student_optimizer not in method.get_optimizers(iteration):
+            return
         if iteration < self._start_iter:
             return
         if not self._ema_started:

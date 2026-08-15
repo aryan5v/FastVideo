@@ -320,7 +320,7 @@ method:
 |-----------|---------|-------------|
 | `rollout_mode` | *(required)* | `"simulate"` (pure noise) or `"data_latent"` (from data) |
 | `dmd_denoising_steps` | *(required)* | Timestep schedule for student rollout |
-| `generator_update_interval` | `1` | Update student every N critic steps |
+| `generator_update_interval` | `5` | One student step after N - 1 critic steps; 1 is student-only |
 | `real_score_guidance_scale` | `1.0` | CFG scale for teacher predictions |
 | `min_timestep_ratio` | `0.0` | Lower bound for randomly sampled teacher/critic score timesteps |
 | `max_timestep_ratio` | `1.0` | Upper bound for randomly sampled teacher/critic score timesteps |

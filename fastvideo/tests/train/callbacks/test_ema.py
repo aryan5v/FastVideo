@@ -47,6 +47,18 @@ class _Method:
         self.tracker = tracker
 
 
+class _CriticOnlyMethod(_Method):
+
+    def __init__(self, transformer: torch.nn.Module) -> None:
+        super().__init__(transformer)
+        self._student_optimizer = object()
+        self._critic_optimizer = object()
+
+    def get_optimizers(self, iteration: int) -> list[object]:
+        del iteration
+        return [self._critic_optimizer]
+
+
 def _tiny_transformer(*, fill: float = 0.0) -> torch.nn.Module:
     m = torch.nn.Linear(4, 2, bias=False)
     with torch.no_grad():
@@ -107,6 +119,19 @@ class TestOnTrainingStepEnd:
             cb.student_ema.shadow["weight"],
             torch.full((2, 4), 1.0),
         )
+
+    def test_skips_iterations_without_student_optimizer(self) -> None:
+        transformer = _tiny_transformer(fill=1.0)
+        cb = EMACallback(decay=0.5, start_iter=0)
+        method = _CriticOnlyMethod(transformer)
+        cb.on_train_start(method, iteration=0)
+
+        with torch.no_grad():
+            transformer.weight.fill_(7.0)
+        cb.on_training_step_end(method, loss_dict={}, iteration=1)
+
+        assert not cb._ema_started
+        assert torch.allclose(cb.student_ema.shadow["weight"], torch.full((2, 4), 1.0))
 
     def test_first_active_step_reinits_then_updates(self) -> None:
         transformer = _tiny_transformer(fill=1.0)

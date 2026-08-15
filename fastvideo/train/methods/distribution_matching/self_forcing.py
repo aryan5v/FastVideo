@@ -12,6 +12,7 @@ from fastvideo.train.models.base import (
     CausalModelBase,
     ModelBase,
 )
+from fastvideo.train.methods.base import LogScalar
 from fastvideo.train.methods.distribution_matching.dmd2 import (
     DMD2Method, )
 from fastvideo.train.utils.config import (
@@ -464,7 +465,10 @@ class SelfForcingMethod(DMD2Method):
         self.student.clear_caches(cache_tag=cache_tag)
         return torch.cat(denoised_blocks, dim=1)
 
-    def _critic_flow_matching_loss(self, batch: Any) -> tuple[torch.Tensor, Any, dict[str, Any]]:
+    def _critic_flow_matching_loss(
+        self,
+        batch: Any,
+    ) -> tuple[torch.Tensor, Any, dict[str, Any], dict[str, LogScalar]]:
         with torch.no_grad():
             generator_pred_x0 = self._student_rollout(batch, with_grad=False)
 
@@ -507,13 +511,14 @@ class SelfForcingMethod(DMD2Method):
             flow_matching_loss,
             (batch.timesteps, batch.attn_metadata),
             outputs,
+            {},
         )
 
     def _dmd_loss(
         self,
         generator_pred_x0: torch.Tensor,
         batch: Any,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, LogScalar]]:
         guidance_scale = get_optional_float(
             self.method_config,
             "real_score_guidance_scale",
@@ -573,4 +578,4 @@ class SelfForcingMethod(DMD2Method):
             grad = torch.nan_to_num(grad)
 
         loss = 0.5 * torch.mean((generator_pred_x0.float() - (generator_pred_x0.float() - grad.float()).detach())**2)
-        return loss
+        return loss, {}

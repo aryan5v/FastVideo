@@ -1,31 +1,28 @@
-#!/bin/bash
-# DMD2 distillation for MiniMax H3 (joint video + audio) on the modular
-# trainer (fastvideo/train). Unlike the legacy SFWan scripts, the modern
-# stack is YAML-driven: the {student, teacher, critic} trio, DMD2 method
-# knobs, and callbacks all live in the run config.
+#!/usr/bin/env bash
+# Direct torchrun wrapper for the current MiniMax-H3 DMD2 config.
+# Use examples/train/slurm/dmd2_32xgb200.sbatch for production allocation.
 
 set -euo pipefail
 
-export TOKENIZERS_PARALLELISM=false
-export MASTER_PORT=${MASTER_PORT:-29513}
-# Per-role backends come from the YAML (models.<role>.attention_backend);
-# do not export FASTVIDEO_ATTENTION_BACKEND globally. FA4 selects the fast
-# path inside the FLASH_ATTN roles.
-export FASTVIDEO_FA4=${FASTVIDEO_FA4:-1}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${REPO_ROOT}"
 
-NUM_GPUS=${NUM_GPUS:-4}
-CONFIG=${CONFIG:-examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml}
-DATA_DIR=${DATA_DIR:-data/crush-smol_h3_t2va_single_sample_preprocessed}
-OUTPUT_DIR=${OUTPUT_DIR:-outputs/minimax_h3_dmd2_3steps}
+export MASTER_PORT="${MASTER_PORT:-29513}"
+export FASTVIDEO_FA4="${FASTVIDEO_FA4:-1}"
 
-torchrun \
-  --nnodes 1 \
-  --master_port "$MASTER_PORT" \
-  --nproc_per_node "$NUM_GPUS" \
-  -m fastvideo.train.entrypoint.train \
-  --config "$CONFIG" \
-  --training.distributed.num_gpus "$NUM_GPUS" \
-  --training.distributed.sp_size "$NUM_GPUS" \
-  --training.distributed.hsdp_shard_dim "$NUM_GPUS" \
-  --training.data.data_path "$DATA_DIR" \
-  --training.checkpoint.output_dir "$OUTPUT_DIR"
+export NUM_GPUS="${NUM_GPUS:-4}"
+WORLD_SIZE="${NUM_GPUS}"
+SP_SIZE="${SP_SIZE:-1}"
+HSDP_REPLICATE="${HSDP_REPLICATE:-1}"
+HSDP_SHARD="${HSDP_SHARD:-${WORLD_SIZE}}"
+CONFIG="${CONFIG:-examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/minimax_h3_dmd2_local}"
+
+exec bash examples/train/run.sh "${CONFIG}" \
+  --training.distributed.num_gpus "${WORLD_SIZE}" \
+  --training.distributed.sp_size "${SP_SIZE}" \
+  --training.distributed.hsdp_replicate_dim "${HSDP_REPLICATE}" \
+  --training.distributed.hsdp_shard_dim "${HSDP_SHARD}" \
+  --training.checkpoint.output_dir "${OUTPUT_DIR}" \
+  "$@"

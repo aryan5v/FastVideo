@@ -82,6 +82,5 @@ class MiniMaxH3Config(DiTConfig):
 
     arch_config: MiniMaxH3ArchConfig = field(default_factory=MiniMaxH3ArchConfig)
     prefix: str = "minimax_h3"
-    # FastVideo's Fully Sharded Data Parallel (FSDP) loading path requires one
-    # parameter dtype, while H3 inference keeps boundary projections in FP32.
+    # Disable model-selected FP32 compute groups when uniform precision is required.
     uniform_parameter_dtype: bool = False

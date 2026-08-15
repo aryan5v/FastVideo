@@ -64,7 +64,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Old PyTorch baselines (extracted from ops.py before commit d9cd0b9)
+# PyTorch baselines
 # ---------------------------------------------------------------------------
 
 

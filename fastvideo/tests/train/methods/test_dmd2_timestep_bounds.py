@@ -19,7 +19,7 @@ def _method_with_ratios(min_ratio, max_ratio) -> DMD2Method:
     return method
 
 
-def test_dmd2_score_timestep_bounds_match_legacy_recipe() -> None:
+def test_dmd2_score_timestep_bounds_apply_ratios() -> None:
     method = _method_with_ratios(0.02, 0.98)
     assert method._parse_score_timestep_bounds() == (20, 980)
 
@@ -54,20 +54,14 @@ def _sampler(min_ratio: float, max_ratio: float, shift: float) -> DMD2Method:
 
 
 def test_uniform_sampler_draws_in_bounds_without_boundary_atoms() -> None:
-    """shift=1.0 must sample inside [min, max] directly, not clamp into it.
-
-    Drawing over the full [0, 1000) range and clamping piles the out-of-range
-    mass onto the endpoints: with bounds [20, 980] that is ~21x the uniform
-    endpoint probability at t=20. Seeded draw counts are deterministic.
-    """
+    """shift=1 samples uniformly inside the configured integer bounds."""
     method = _sampler(0.02, 0.98, shift=1.0)
     device = torch.device("cpu")
     draws = torch.cat([method._sample_score_timestep(device) for _ in range(4000)])
 
     assert int(draws.min()) >= 20
     assert int(draws.max()) <= 980
-    # Uniform over 961 values -> ~4.2 expected per endpoint; the clamp bug
-    # would put ~84 at t=20 and ~80 at t=980.
+    # Uniform over 961 values yields about four samples per endpoint.
     assert int((draws == 20).sum()) < 20
     assert int((draws == 980).sum()) < 20
 

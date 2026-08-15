@@ -14,7 +14,7 @@
 #       --config examples/train/scenario/ode_init_self_forcing_wan_causal/step3_self_forcing.yaml
 #
 # Success criteria:
-#   - generator_loss and critic_loss both finite at step 0
+#   - fake_score_loss is finite at step 1; generator_loss is finite at step 5
 #   - Validation videos logged to tracker every 20 steps
 #   - No crash through max_train_steps=100
 

@@ -76,6 +76,7 @@ def shard_cache_context(
     default_dtype: torch.dtype,
     param_dtype: torch.dtype,
     param_names_mapping: dict[str, str] | None,
+    parameter_dtype_overrides: list[tuple[str, str]] | None = None,
 ) -> ShardCacheContext | None:
     root = os.environ.get(_ENV_DIR)
     if not root:
@@ -86,18 +87,18 @@ def shard_cache_context(
             return None
         stats = sorted((os.path.basename(p), os.stat(p).st_size, os.stat(p).st_mtime_ns) for p in files)
         mapping_items = sorted((param_names_mapping or {}).items())
-        key_material = json.dumps(
-            [
-                _FORMAT_VERSION,
-                stats,
-                int(hsdp_replicate_dim),
-                int(hsdp_shard_dim),
-                str(default_dtype),
-                str(param_dtype),
-                mapping_items,
-            ],
-            sort_keys=True,
-        )
+        key_fields = [
+            _FORMAT_VERSION,
+            stats,
+            int(hsdp_replicate_dim),
+            int(hsdp_shard_dim),
+            str(default_dtype),
+            str(param_dtype),
+            mapping_items,
+        ]
+        if parameter_dtype_overrides:
+            key_fields.append(sorted(parameter_dtype_overrides))
+        key_material = json.dumps(key_fields, sort_keys=True)
         key = hashlib.sha256(key_material.encode()).hexdigest()[:16]
         coordinate = device_mesh.get_coordinate()
         if coordinate is None:
@@ -132,8 +133,12 @@ def _all_ranks_agree(local_ok: bool, device: torch.device) -> bool:
     return bool(flag.item())
 
 
-def _validate_entry(name: str, entry: dict[str, Any], meta_param: torch.Tensor) -> bool:
-    if entry["dtype"] != str(meta_param.dtype):
+def _validate_entry(
+    entry: dict[str, Any],
+    meta_param: torch.Tensor,
+    expected_dtype: torch.dtype,
+) -> bool:
+    if entry["dtype"] != str(expected_dtype):
         return False
     if list(entry["global_shape"]) != list(meta_param.shape):
         return False
@@ -166,6 +171,7 @@ def try_load_from_shard_cache(
             manifest = json.loads(manifest_path.read_text())
             local_ok = (manifest.get("format_version") == _FORMAT_VERSION and manifest.get("key") == ctx.key)
         meta_sd = model.state_dict()
+        dtype_selector = getattr(model, "_get_parameter_dtype", None)
         if local_ok:
             params_table = manifest["params"]
             for name, meta_param in meta_sd.items():
@@ -175,7 +181,10 @@ def try_load_from_shard_cache(
                         local_ok = False
                         break
                     continue
-                if not _validate_entry(name, entry, meta_param):
+                expected_dtype = meta_param.dtype
+                if callable(dtype_selector):
+                    expected_dtype = dtype_selector(name, expected_dtype)
+                if not _validate_entry(entry, meta_param, expected_dtype):
                     local_ok = False
                     break
         if not _all_ranks_agree(local_ok, device):
@@ -186,7 +195,6 @@ def try_load_from_shard_cache(
         from safetensors import safe_open
 
         named_buffers = dict(model.named_buffers())
-        dtype_selector = getattr(model, "_get_parameter_dtype", None)
         sharded_sd: dict[str, Any] = {}
         with safe_open(str(shard_path), framework="pt", device=str(device)) as f:
             cached_keys = set(f.keys())
