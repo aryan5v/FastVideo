@@ -568,9 +568,11 @@ class DMD2Method(TrainingMethod):
     def _sample_score_timestep(self, device: torch.device) -> torch.Tensor:
         shift = self._score_timestep_shift
         if shift == 1.0:
+            # Draw inside the bounds directly; drawing over the full range
+            # and clamping piles probability atoms onto both endpoints.
             timestep = torch.randint(
-                0,
-                int(self.student.num_train_timesteps),
+                self._score_min_timestep,
+                self._score_max_timestep + 1,
                 [1],
                 device=device,
                 dtype=torch.long,
@@ -858,12 +860,15 @@ class DMD2Method(TrainingMethod):
         loss = torch.zeros((), device=device, dtype=torch.float32)
         metrics: dict[str, LogScalar] = {}
         for name, modality in slices:
-            with torch.no_grad():
-                real_m = real_cfg_x0[:, modality]
-                denom = torch.abs(generator_pred_x0[:, modality] - real_m).mean()
-                grad = torch.nan_to_num((faker_x0[:, modality] - real_m) / denom)
             gen_m = generator_pred_x0[:, modality].float()
-            loss_m = 0.5 * F.mse_loss(gen_m, (gen_m - grad.float()).detach())
+            with torch.no_grad():
+                # fp32 + epsilon like fastgen's VSD weight: a bf16 division
+                # with no floor turns a degenerate denominator into bf16-max
+                # garbage after nan_to_num instead of a bounded gradient.
+                real_m = real_cfg_x0[:, modality].float()
+                denom = (gen_m - real_m).abs().mean() + 1e-6
+                grad = torch.nan_to_num((faker_x0[:, modality].float() - real_m) / denom)
+            loss_m = 0.5 * F.mse_loss(gen_m, (gen_m - grad).detach())
             loss = loss + self._modality_weight(name) * loss_m
             if emit_modality_metrics:
                 metrics[f"generator_loss_{name}"] = loss_m.detach()
