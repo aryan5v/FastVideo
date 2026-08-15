@@ -63,6 +63,7 @@ class DMD2Method(TrainingMethod):
             self._score_max_timestep,
         ) = self._parse_score_timestep_bounds()
         self._score_timestep_shift = self._parse_score_timestep_shift()
+        self._fake_score_loss_space = self._parse_fake_score_loss_space()
 
         # Initialize preprocessors on student.
         self.student.init_preprocessors(self.training_config)
@@ -543,6 +544,27 @@ class DMD2Method(TrainingMethod):
                              f"got {shift}")
         return shift
 
+    def _parse_fake_score_loss_space(self) -> Literal["velocity", "x0"]:
+        """Resolve the space the critic's flow-matching loss is computed in.
+
+        ``velocity`` (default) regresses the raw velocity target with uniform
+        weight across noise levels. ``x0`` reproduces fastgen's
+        ``fake_score_pred_type="x0"``: for rectified flow, the x0-space MSE
+        equals the velocity MSE weighted by ``sigma_m(t)^2`` per modality,
+        which downweights critic fitting at low noise.
+        """
+        raw = self.method_config.get("fake_score_loss_space", None)
+        if raw is None:
+            return "velocity"
+        if not isinstance(raw, str):
+            raise ValueError("method.fake_score_loss_space must be a string, "
+                             f"got {type(raw).__name__}")
+        space = raw.strip().lower()
+        if space not in ("velocity", "x0"):
+            raise ValueError("method.fake_score_loss_space must be one of "
+                             f"{{velocity, x0}}, got {raw!r}")
+        return space  # type: ignore[return-value]
+
     def _sample_score_timestep(self, device: torch.device) -> torch.Tensor:
         shift = self._score_timestep_shift
         if shift == 1.0:
@@ -734,6 +756,16 @@ class DMD2Method(TrainingMethod):
         metrics: dict[str, LogScalar] = {}
         for name, modality in slices:
             loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
+            if self._fake_score_loss_space == "x0":
+                # x0-space MSE = sigma_m(t)^2 * velocity MSE. The forward
+                # process is affine (noisy - clean = sigma_m * target
+                # elementwise for every RF-style model here), so the ratio
+                # below recovers sigma_m^2 exactly without a model hook.
+                with torch.no_grad():
+                    num = torch.mean((noisy_x0[:, modality].float() - generator_pred_x0[:, modality].float())**2)
+                    den = torch.mean(target[:, modality].float()**2)
+                    sigma_sq = num / den
+                loss_m = sigma_sq * loss_m
             flow_matching_loss = flow_matching_loss + self._modality_weight(name) * loss_m
             if emit_modality_metrics:
                 metrics[f"fake_score_loss_{name}"] = loss_m.detach()

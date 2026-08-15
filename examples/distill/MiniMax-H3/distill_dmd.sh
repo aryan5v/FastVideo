@@ -8,11 +8,13 @@ set -euo pipefail
 
 export TOKENIZERS_PARALLELISM=false
 export MASTER_PORT=${MASTER_PORT:-29513}
-# H3 training pins the dense TORCH_SDPA backend; do not export a sparse
-# attention backend here.
+# Per-role backends come from the YAML (models.<role>.attention_backend);
+# do not export FASTVIDEO_ATTENTION_BACKEND globally. FA4 selects the fast
+# path inside the FLASH_ATTN roles.
+export FASTVIDEO_FA4=${FASTVIDEO_FA4:-1}
 
 NUM_GPUS=${NUM_GPUS:-4}
-CONFIG=${CONFIG:-examples/train/configs/distribution_matching/minimax_h3/dmd2_t2va.yaml}
+CONFIG=${CONFIG:-examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml}
 DATA_DIR=${DATA_DIR:-data/crush-smol_h3_t2va_single_sample_preprocessed}
 OUTPUT_DIR=${OUTPUT_DIR:-outputs/minimax_h3_dmd2_3steps}
 

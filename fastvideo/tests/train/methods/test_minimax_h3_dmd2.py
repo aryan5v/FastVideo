@@ -24,8 +24,7 @@ from fastvideo.train.utils.config import load_run_config
 
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd2_min.yaml"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_EXPERIMENT_CONFIG = _REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_t2va.yaml"
-_VSA_OVERFIT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_vsa0_overfit.yaml")
+_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml")
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -408,28 +407,6 @@ def test_per_role_attention_backend_override_resolves(monkeypatch: pytest.Monkey
 # ----------------------------------------------------------------------
 
 
-def test_vsa0_overfit_config_pins_roles_and_experiment() -> None:
-    """The overfit config runs student VSA-H3 at sparsity 0, dense FA roles."""
-    config = yaml.safe_load(_VSA_OVERFIT_CONFIG.read_text())
-    models, method, training = config["models"], config["method"], config["training"]
-
-    assert models["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
-    assert models["teacher"]["attention_backend"] == "FLASH_ATTN"
-    assert models["critic"]["attention_backend"] == "FLASH_ATTN"
-    assert models["teacher"]["trainable"] is False
-    assert training["vsa"]["sparsity"] == 0.0
-    assert method["rollout_mode"] == "data_latent"
-    assert method["generator_update_interval"] == 5
-    assert method["dmd_denoising_steps"] == [1000, 757, 522]
-    assert training["data"]["train_batch_size"] == 1
-    assert training["data"]["data_path"] == "/mnt/h3-dmd2-overfit/data"
-    assert training["data"]["num_height"] == 768
-    assert training["data"]["num_width"] == 1344
-    assert training["data"]["num_frames"] == 124
-    assert training["loop"]["max_train_steps"] == 2000
-    assert training["tracker"]["project_name"] == "h3-dmd2-vsa"
-
-
 def test_h3_dmd2_fixture_resolves_trio_contract() -> None:
     """The fixture must wire the H3 DMD trio through the modular builder path."""
     config = load_run_config(str(_FIXTURE))
@@ -441,26 +418,43 @@ def test_h3_dmd2_fixture_resolves_trio_contract() -> None:
     assert config.training.data.preprocessed_data_type == "t2va"
 
 
-def test_h3_dmd2_experiment_config_mirrors_wan_recipe() -> None:
-    """The example config keeps the studio DMD2 defaults and the H3 contract."""
+def test_h3_dmd2_v6_config_mirrors_fastgen_recipe() -> None:
+    """The v6 production config pins the fastgen-aligned DMD2 recipe.
+
+    Each value below matches a fastgen choice (see the config header):
+    uniform base-t score sampling over [0.001, 0.999], Adam betas
+    (0.9, 0.999) with one LR for both trainable roles, x0-space critic
+    loss, grad clip 10, and the H3 contract (guidance-distilled teacher,
+    base-t ladder with warp off).
+    """
     config = yaml.safe_load(_EXPERIMENT_CONFIG.read_text())
     method = config["method"]
+    training = config["training"]
 
     for role in ("student", "teacher", "critic"):
         assert config["models"][role]["_target_"] == ("fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel")
     assert config["models"]["teacher"]["trainable"] is False
     assert config["models"]["critic"]["trainable"] is True
     assert method["_target_"] == ("fastvideo.train.methods.distribution_matching.dmd2.DMD2Method")
-    assert method["rollout_mode"] == "data_latent"
+    assert method["rollout_mode"] == "simulate"
     assert method["generator_update_interval"] == 5
-    assert method["dmd_denoising_steps"] == [1000, 757, 522]
+    assert method["real_score_guidance_scale"] == 1.0
+    assert method["dmd_denoising_steps"] == [1000, 667, 333]
+    assert "warp_denoising_step" not in method
+    assert method["score_timestep_shift"] == 1.0
+    assert method["min_timestep_ratio"] == 0.001
+    assert method["max_timestep_ratio"] == 0.999
+    assert method["fake_score_loss_space"] == "x0"
     assert method["cfg_uncond"] == {"text": "zero"}
-    assert method["fake_score_learning_rate"] == 8.0e-6
-    assert method["fake_score_betas"] == [0.0, 0.999]
+    assert method["fake_score_learning_rate"] == training["optimizer"]["learning_rate"]
+    assert method["fake_score_betas"] == [0.9, 0.999]
     assert method["fake_score_lr_scheduler"] == "constant"
-    assert config["training"]["data"]["preprocessed_data_type"] == "t2va"
-    assert config["training"]["data"]["train_batch_size"] == 1
-    assert config["training"]["data"]["training_cfg_rate"] == 0.0
+    assert training["optimizer"]["betas"] == [0.9, 0.999]
+    assert training["dit_precision"] == "fp32"
+    assert training["data"]["preprocessed_data_type"] == "text_only"
+    assert training["data"]["train_batch_size"] == 1
+    assert training["data"]["training_cfg_rate"] == 0.0
+    assert config["callbacks"]["grad_clip"]["max_grad_norm"] == 10.0
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:

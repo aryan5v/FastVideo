@@ -5,10 +5,10 @@
 #   sbatch --nodes=2 examples/train/slurm/dmd2_32xgb200.sbatch          # smaller sweep
 #   CONFIG=path/to/other.yaml sbatch examples/train/slurm/dmd2_32xgb200.sbatch
 #
-# The paired config (dmd2_simulate_fa4_32gpu.yaml) assumes 8 nodes:
-# hsdp_replicate_dim must equal the node count and num_gpus the world size —
-# this script forwards overrides derived from the actual allocation, so
-# shrinking --nodes "just works" (global batch shrinks with it).
+# The paired config (dmd2_sp1_fsdp40_vidprom_v6.yaml) runs the production
+# sp=1 / pure full-shard FSDP topology; this script forwards overrides
+# derived from the actual allocation, so any --nodes count "just works"
+# (global batch shrinks/grows with it).
 #
 # Cluster-specific knobs (partition/account/container) are marked CLUSTER.
 
@@ -27,18 +27,19 @@ set -euo pipefail
 # ── paths (shared FS visible on every tray) ──────────────────────────────
 REPO="${REPO:-/mnt/FastVideo}"
 VENV="${VENV:-${REPO}/.venv}"
-CONFIG="${CONFIG:-${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_simulate_fa4_32gpu.yaml}"
+CONFIG="${CONFIG:-${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml}"
 
 # ── topology derived from the allocation ─────────────────────────────────
 NNODES="${SLURM_JOB_NUM_NODES}"
 GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-4}"
 GPUS_PER_NODE="${GPUS_PER_NODE##*:}"   # "4" or "gb200:4" -> 4
 WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
-# Topology overrides (default: sp across a tray, HSDP replicate=nodes/shard=4).
-# e.g. SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=$WORLD_SIZE for pure full-shard FSDP.
-SP_SIZE="${SP_SIZE:-${GPUS_PER_NODE}}"
-HSDP_REPLICATE="${HSDP_REPLICATE:-${NNODES}}"
-HSDP_SHARD="${HSDP_SHARD:-${GPUS_PER_NODE}}"
+# Topology overrides (default: sp=1, pure full-shard FSDP across the world —
+# the v5/v6 production topology). For sp-across-a-tray HSDP instead:
+# SP_SIZE=4 HSDP_REPLICATE=$NNODES HSDP_SHARD=4.
+SP_SIZE="${SP_SIZE:-1}"
+HSDP_REPLICATE="${HSDP_REPLICATE:-1}"
+HSDP_SHARD="${HSDP_SHARD:-${WORLD_SIZE}}"
 MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
 MASTER_PORT="${MASTER_PORT:-29501}"
 

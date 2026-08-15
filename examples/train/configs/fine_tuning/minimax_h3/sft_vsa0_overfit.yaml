@@ -1,6 +1,6 @@
 # Single-sample SFT overfit: MiniMax H3 with the VSA-H3 backend at sparsity
 # 0.0 — the fine-tuning counterpart of
-# distribution_matching/minimax_h3/dmd2_vsa0_overfit.yaml (same c17_v2
+# the retired DMD2 VSA-0 overfit experiment (same c17_v2
 # preprocessed record, same validation prompt). Optimizer recipe follows the
 # crush-smol H3 T2VA overfit (overfit_minimax_h3_t2va.yaml), scaled to one
 # 4-GPU node with pure-FSDP sharding.
