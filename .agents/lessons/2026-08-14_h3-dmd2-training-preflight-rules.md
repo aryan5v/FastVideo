@@ -19,7 +19,10 @@ The durable operational checks are:
   boundaries need their own FSDP groups and an end-to-end dtype test.
 - Resume only complete DCP checkpoints containing `dcp/.metadata`; optimizer
   state must be seeded for every optimizer before loading.
-- Budget checkpoint size times retention against free space before launch.
+- Budget checkpoint size times retention against free space before launch,
+  including the transient write-then-rotate peak of one extra checkpoint
+  (H3 DMD2 fp32 saves measured 741 GiB each; an ENOSPC-class short write
+  killed a run mid-save on a 98%-full filesystem).
 - Use absolute paths from the execution clone. Compute pods may not see the
   development clone or its working directory.
 - Verify the effective GPU mesh, credentials, output directory, and execution
