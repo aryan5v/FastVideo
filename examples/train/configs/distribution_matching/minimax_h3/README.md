@@ -1,5 +1,7 @@
 # MiniMax-H3 DMD2 distillation configs
 
+Agent handoff: [`HANDOFF-h3-dmd2-vsa.md`](../../../../../HANDOFF-h3-dmd2-vsa.md).
+
 Data-free, three-step DMD2 distillation of the joint video/audio MiniMax-H3
 transformer. The current recipe, comparison scope, open issues, and launch
 preflight are tracked in [`h3_dmd.md`](h3_dmd.md).

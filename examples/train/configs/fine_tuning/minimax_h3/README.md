@@ -1,5 +1,8 @@
 # MiniMax-H3 SFT overfit configs
 
+Related H3 DMD2 handoff:
+[`HANDOFF-h3-dmd2-vsa.md`](../../../../../HANDOFF-h3-dmd2-vsa.md).
+
 Single- and two-sample SFT overfit runs used to validate the VSA-H3 backend,
 sparsity sweep (0 / 0.8 / 0.9 / 0.95 / 0.97), the FA4 dense control, and
 effective-batch-2 via gradient accumulation (`sft_fa4_bs2_overfit.yaml`).

@@ -6,6 +6,9 @@ severity: critical
 
 # Large-model training preflight
 
+Current H3 DMD2 continuation:
+[`HANDOFF-h3-dmd2-vsa.md`](../../HANDOFF-h3-dmd2-vsa.md).
+
 Keep recipe-specific settings, comparison notes, and open H3 DMD2 work in
 [`h3_dmd.md`](../../examples/train/configs/distribution_matching/minimax_h3/h3_dmd.md).
 The durable operational checks are:

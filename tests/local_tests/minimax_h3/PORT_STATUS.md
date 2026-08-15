@@ -1,5 +1,8 @@
 # MiniMax H3 port status
 
+Related training handoff:
+[`HANDOFF-h3-dmd2-vsa.md`](../../../HANDOFF-h3-dmd2-vsa.md).
+
 ## Status
 
 - workloads: T2VA, FL2VA, Ref2VA joint video/audio generation

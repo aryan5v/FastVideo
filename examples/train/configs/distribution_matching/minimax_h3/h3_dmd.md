@@ -1,5 +1,8 @@
 # MiniMax-H3 DMD2
 
+Agent continuation starts at
+[`HANDOFF-h3-dmd2-vsa.md`](../../../../../HANDOFF-h3-dmd2-vsa.md).
+
 This is the current runbook and parity tracker for the MiniMax-H3 DMD2
 experiment. Keep operational YAML and shell comments local and short; record
 cross-repository rationale and open issues here.
