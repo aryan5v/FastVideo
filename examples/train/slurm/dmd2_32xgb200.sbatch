@@ -93,6 +93,25 @@ if [ "${BOOT_TIMEOUT_MIN}" -gt 0 ]; then
   WATCHDOG_PID=$!
 fi
 
+# Launch gate (HANDOFF-h3-dmd2-vsa.md): run the two-GPU grouped-FSDP
+# mixed-dtype test on the head tray before committing the allocation to
+# training. GATE_TEST=0 skips (e.g. requeues of an already-gated lineage).
+GATE_TEST="${GATE_TEST:-1}"
+if [ "${GATE_TEST}" = "1" ]; then
+  echo "=== launch gate: grouped-FSDP mixed-dtype test (head tray) ==="
+  if ! srun --nodes=1 --ntasks=1 -w "$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)" bash -c "
+    set -euo pipefail
+    source '${VENV}/bin/activate'
+    cd '${REPO}'
+    pytest -q tests/local_tests/models/test_fsdp_load_mixed_dtype.py \
+      -k declared_fp32_group_distributed_forward_backward
+  "; then
+    echo 'LAUNCH GATE FAILED — aborting before training.'
+    exit 1
+  fi
+  echo "=== launch gate passed ==="
+fi
+
 # CLUSTER: if trays require a container, wrap the srun payload accordingly,
 # e.g. add `--container-image=... --container-mounts=/mnt:/mnt` (pyxis) so
 # /mnt (repo, models, data) and /dev/shm are available inside.

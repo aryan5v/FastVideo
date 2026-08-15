@@ -54,7 +54,8 @@ training:
     hsdp_shard_dim: 40
 
   data:
-    data_path: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/vidprom_h3_text_only
+    # Full 248,041-prompt VidProM release (verified complete + caption-aligned).
+    data_path: /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
     train_batch_size: 1
