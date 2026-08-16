@@ -75,6 +75,31 @@ Both jobs are single-`sbatch` relaunches (launchers in the task dir `scripts/`).
 
 8B (12 blocks) is structurally identical to the 14B plan — same training stack, same configs, only `--keep-blocks 12` in the pruner. It changes the reach math substantially: int8 ~8.2 GB (resident ~4.9 GB with the AdaLN cache) fits **16 GB Macs**; nvfp4 ~4.3 GB fits **16 GB VRAM** NVIDIA cards; ~1.85× faster per step than 14B. Recommendation: make **8B the co-primary launch size** (16 GB floor) alongside 14B (24 GB floor), 33B as the flagship — the pruning/DMD pipeline is size-agnostic, so this is nearly free to add.
 
+## 5c. Dataset strategy (2026-08-11 review) — captions + synthetic
+
+**Problem**: raw VGGSound labels are class names ("people marching"), not
+descriptions — a hard ceiling on prompt adherence that more clips cannot
+raise. **Captions first, then synthetic.**
+
+1. **Descriptive captions in the preprocessor** (`scripts/fasth3/preprocess_h3_corpus.py`
+   phase B): the same Qwen3-VL-32B that produces the conditioning embeddings
+   generates one detailed sentence per clip from its first/mid/last frames
+   (stock `transformers`, FSDP across ranks, keyed by clip_id, resume-safe).
+   Phase C embeds the captions; phase D finalizes manifests from latents +
+   captions. The old raw-label text embeddings are orphaned, not reused.
+2. **Synthetic corpus from the 33B teacher** (`scripts/fasth3/generate_synthetic_corpus.py`):
+   DMD2 matches a distribution — it needs teacher score over prompts
+   (FastWan/Wan-Syn precedent). The 50-step teacher runs a curated prompt
+   set at 480p/5s → mp4s with muxed stereo audio → consumed by the
+   preprocessor (latents + prompt embeddings). Exactly-matched teacher
+   distribution, controlled prompt coverage, coherent AV pairing by
+   construction, scales with GPU time. First slice 10–25k prompts
+   (~2–6 GPU-days on 4×GB200), run between jobs.
+3. **VGGSound**: the ~200k-clip source stays as filler volume, extended
+   after captions land (the extension job was restarted with the caption
+   pipeline; latents are reused via skip-if-exists — no double processing
+   of the heavy VAE work).
+
 ## 5b. The 5B option (ultra-wide tier, fast-follow experiment)
 
 5B ≈ 8 blocks (5.2B total, 3.1B resident non-AdaLN). int8 ~5.5 GB / resident ~3.3 GB; nvfp4 ~2.9 GB / resident ~1.7 GB → reaches **8–12 GB VRAM laptops** (the NVIDIA volume market) and gives 16 GB Macs big headroom. ~2.8× faster per step than 14B. The catch: 33B→5B is a **6.4× compression** — the steepest in the line — so the DMD loss floor is higher and the quality gate is genuinely at risk (mushy joint-AV output is the failure mode).
