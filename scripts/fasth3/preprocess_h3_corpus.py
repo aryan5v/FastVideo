@@ -46,7 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True, help="CSV: clip_id,video,audio,caption")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--mode", default="both", choices=("latents", "text", "both"))
+    parser.add_argument("--mode", default="all",
+                        choices=("latents", "captions", "text", "finalize", "both", "all"))
     parser.add_argument("--smoke", action="store_true", help="one clip + one prompt only")
     parser.add_argument("--num-frames", type=int, default=124)
     parser.add_argument("--short-edge", type=int, default=512)
@@ -156,6 +157,129 @@ def _loader_args(model_root: str) -> object:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Phase B: descriptive captions (Qwen3-VL generate from clip frames)
+# ---------------------------------------------------------------------------
+
+
+def phase_captions(args: argparse.Namespace, rank: int, world_size: int, device: torch.device) -> None:
+    """Generate a descriptive caption per clip with the full Qwen3-VL-32B.
+
+    Raw VGGSound labels are class names ("people marching") — a hard ceiling
+    on prompt adherence. The same 64B model that produces the conditioning
+    embeddings generates one detailed sentence per clip from its first/mid/
+    last frames. Keyed by clip_id; skip-if-exists for resume.
+    """
+    import json as _json
+
+    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
+    out_dir = Path(args.out)
+    captions_dir = out_dir / "captions"
+    captions_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = list(csv.DictReader(open(args.manifest, encoding="utf-8")))
+    if args.max_clips:
+        manifest = manifest[: args.max_clips]
+    manifest = manifest[rank::world_size]
+
+    processor = AutoProcessor.from_pretrained(f"{args.model_root}/processor")
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        f"{args.model_root}/text_encoder", torch_dtype=torch.bfloat16)
+    model = model.to(device).eval()
+    if world_size > 1:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy
+
+        model = FSDP(model, sharding_strategy=ShardingStrategy.FULL_SHARD, device_id=device)
+
+    prompt = (
+        "Describe this short video clip in one or two detailed sentences: "
+        "the subject(s), what they are doing, the scene and setting, any "
+        "objects, and any visible or implied sounds."
+    )
+    done = 0
+    with torch.no_grad():
+        for index, row in enumerate(manifest):
+            clip_id = row["clip_id"]
+            out_path = captions_dir / f"{clip_id}.txt"
+            if out_path.exists():
+                continue
+            try:
+                frames = _clip_frames(row["video"], 3)
+                inputs = processor(images=frames, text=prompt, return_tensors="pt").to(device)
+                output = model.generate(**inputs, max_new_tokens=64, do_sample=False)
+                caption = processor.batch_decode(output, skip_special_tokens=True)[0]
+                # strip the echoed prompt when the processor includes it
+                caption = caption.split(prompt)[-1].strip()
+                out_path.write_text(caption, encoding="utf-8")
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - keep the pass alive
+                print(f"[rank {rank}] caption {clip_id} failed: {exc!r}", flush=True)
+            if index % 20 == 0:
+                print(f"[rank {rank}] captions {index}/{len(manifest)}", flush=True)
+    print(f"[rank {rank}] phase B done: {done} captions", flush=True)
+
+
+def _clip_frames(video_path: str, count: int = 3, short_edge: int = 336) -> list:
+    """Decode `count` evenly spaced frames as PIL images (for the VL model)."""
+    from PIL import Image
+
+    from torchvision.io import read_video
+
+    video, _, _ = read_video(video_path, pts_unit="sec")
+    total = video.shape[0]
+    indices = [int(i * (total - 1) / max(1, count - 1)) for i in range(min(count, total))]
+    images = []
+    for idx in indices:
+        frame = video[idx].numpy()
+        scale = short_edge / min(frame.shape[0], frame.shape[1])
+        img = Image.fromarray(frame)
+        if scale < 1.0:
+            img = img.resize((max(1, int(frame.shape[1] * scale)), max(1, int(frame.shape[0] * scale))))
+        images.append(img)
+    return images
+
+
+# ---------------------------------------------------------------------------
+# Phase C: text embeddings (from the descriptive captions)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Phase D: finalize manifests (caption + geometry per processed clip)
+# ---------------------------------------------------------------------------
+
+
+def phase_finalize(args: argparse.Namespace, rank: int, world_size: int) -> None:
+    import safetensors.torch
+
+    out_dir = Path(args.out)
+    latents_dir = out_dir / "latents"
+    captions_dir = out_dir / "captions"
+    if rank != 0:
+        return
+    entries = []
+    for path in sorted(latents_dir.glob("*.safetensors")):
+        clip_id = path.stem
+        header = safetensors.torch.load_file(str(path))
+        video = header["video"]
+        audio = header["audio"]
+        caption_path = captions_dir / f"{clip_id}.txt"
+        caption = caption_path.read_text(encoding="utf-8").strip() if caption_path.exists() else ""
+        entries.append({
+            "id": clip_id,
+            "caption": caption,
+            "text_sha1": hashlib.sha1(caption.encode("utf-8")).hexdigest() if caption else "",
+            "num_latent_frames": int(video.shape[2]),
+            "latent_height": int(video.shape[3]),
+            "latent_width": int(video.shape[4]),
+            "num_audio_latents": int(audio.shape[0] // 2),
+        })
+    (out_dir / "manifest_rank0.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    print(f"[rank {rank}] phase D done: {len(entries)} manifest entries", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Phase A
 # ---------------------------------------------------------------------------
@@ -250,11 +374,19 @@ def phase_text(args: argparse.Namespace, rank: int, world_size: int, device: tor
     tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     conditioner.eval()
 
+    # Embeddings come from the descriptive captions (phase B), not the raw
+    # manifest labels. Falls back to the manifest caption for clips without one.
     captions: dict[str, str] = {}
-    for path in sorted(out_dir.glob("manifest_rank*.jsonl")):
-        for line in path.read_text().splitlines():
-            row = json.loads(line)
-            captions[row["text_sha1"]] = row["caption"]
+    caption_files = sorted((out_dir / "captions").glob("*.txt"))
+    if caption_files:
+        for path in caption_files:
+            captions[hashlib.sha1(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()] = (
+                path.read_text(encoding="utf-8"))
+    if not captions:
+        for path in sorted(out_dir.glob("manifest_rank*.jsonl")):
+            for line in path.read_text().splitlines():
+                row = json.loads(line)
+                captions[row["text_sha1"]] = row["caption"]
     if args.smoke:
         captions = dict(list(captions.items())[:1])
     # Each rank encodes its own prompt shard; FSDP wraps the 64 GB encoder
@@ -321,12 +453,20 @@ def main() -> None:
     maybe_init_distributed_environment_and_model_parallel(1, 1)
 
     try:
-        if args.mode in ("latents", "both"):
+        if args.mode in ("latents", "both", "all"):
             phase_latents(args, rank, world_size, device)
         if world_size > 1:
             torch.distributed.barrier()
-        if args.mode in ("text", "both"):
+        if args.mode in ("captions", "both", "all"):
+            phase_captions(args, rank, world_size, device)
+        if world_size > 1:
+            torch.distributed.barrier()
+        if args.mode in ("text", "both", "all"):
             phase_text(args, rank, world_size, device)
+        if world_size > 1:
+            torch.distributed.barrier()
+        if args.mode in ("finalize", "both", "all"):
+            phase_finalize(args, rank, world_size)
     finally:
         # Single teardown: fastvideo's cleanup destroys the torch process
         # group too; a manual destroy_process_group here double-destroys.
