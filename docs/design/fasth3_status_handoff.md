@@ -74,3 +74,9 @@ Both jobs are single-`sbatch` relaunches (launchers in the task dir `scripts/`).
 ## 5. The 8B question (why it's the right call — see chat companion doc)
 
 8B (12 blocks) is structurally identical to the 14B plan — same training stack, same configs, only `--keep-blocks 12` in the pruner. It changes the reach math substantially: int8 ~8.2 GB (resident ~4.9 GB with the AdaLN cache) fits **16 GB Macs**; nvfp4 ~4.3 GB fits **16 GB VRAM** NVIDIA cards; ~1.85× faster per step than 14B. Recommendation: make **8B the co-primary launch size** (16 GB floor) alongside 14B (24 GB floor), 33B as the flagship — the pruning/DMD pipeline is size-agnostic, so this is nearly free to add.
+
+## 5b. The 5B option (ultra-wide tier, fast-follow experiment)
+
+5B ≈ 8 blocks (5.2B total, 3.1B resident non-AdaLN). int8 ~5.5 GB / resident ~3.3 GB; nvfp4 ~2.9 GB / resident ~1.7 GB → reaches **8–12 GB VRAM laptops** (the NVIDIA volume market) and gives 16 GB Macs big headroom. ~2.8× faster per step than 14B. The catch: 33B→5B is a **6.4× compression** — the steepest in the line — so the DMD loss floor is higher and the quality gate is genuinely at risk (mushy joint-AV output is the failure mode).
+
+Recommendation: do **not** commit 5B at launch; run it as a cheap fast-follow (~1 week on 8–16 GPUs: `--keep-blocks 8` + one DMD run, config is a copy of the 14B one). If it clears the acceptable-quality bar for the tier → launch line becomes 5B/8B/14B/33B across the hardware spectrum. If not, the loss is a week, not months. Same reasoning as the roadmap's parked 4B probe, with the reach target moved from legacy 8 GB Macs to volume 8–12 GB VRAM.
