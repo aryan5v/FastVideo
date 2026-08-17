@@ -154,7 +154,9 @@ limits, and this is one device that is compute-bound, not memory-bound.
 denoise story: 86.1s → 10.3s, and 4.5s stacked with `--fast`.
 
 **Sparse attention does not work for free.** The `FASTVIDEO_MLX_WINDOW`
-sliding-window path is fast (6.6× at a ±3-frame window) but destroys the output
+sliding-window path is fast (5.7× at a ±3-frame window, measured after the
+per-query masking fix in 7cc411266; 6.6× before it, when the block gather
+attended outside each query's window) but destroys the output
 on a checkpoint trained with dense attention — heavy colour-block noise, subject
 barely recognisable. Structural agreement with the dense baseline is 0.25 at
 ±3 frames and 0.03 at ±5. Sparsity of this kind is a *training-time* method
