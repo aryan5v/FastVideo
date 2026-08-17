@@ -36,8 +36,14 @@ method:
   min_timestep_ratio: 0.001
   max_timestep_ratio: 0.999
   score_timestep_shift: 1.0
-  # Per-modality x0-space critic objective.
-  fake_score_loss_space: x0
+  # Critic regression space per modality. A global x0 space weights each
+  # modality's velocity MSE by sigma_m(t)^2 at the shared base-t draw; with
+  # shifts 12/3 that silences the critic across the low half of audio's
+  # noise axis (audio stopped improving by ~step 2500). Keep x0 for video,
+  # velocity (weight 1 at every t) for audio.
+  fake_score_loss_space:
+    video: x0
+    audio: velocity
   cfg_uncond:
     text: zero
 

@@ -59,7 +59,7 @@ def _run(space: str | None, critic: _Critic) -> torch.Tensor:
     return loss
 
 
-def _expected(space: str) -> float:
+def _expected(space: str | dict[str, str]) -> float:
     gen = torch.randn(1, _TOTAL, generator=torch.Generator().manual_seed(7))
     noise = torch.randn(gen.shape, generator=torch.Generator().manual_seed(0))
     target = noise - gen
@@ -67,7 +67,8 @@ def _expected(space: str) -> float:
     expected = 0.0
     for name, sl in _Student().modality_slices():
         mse = torch.mean((pred[:, sl] - target[:, sl])**2).item()
-        weight = _SIGMA[name]**2 if space == "x0" else 1.0
+        space_m = space.get(name, "velocity") if isinstance(space, dict) else space
+        weight = _SIGMA[name]**2 if space_m == "x0" else 1.0
         expected += weight * mse
     return expected
 
@@ -93,5 +94,33 @@ def test_x0_space_keeps_critic_gradient() -> None:
 def test_invalid_loss_space_rejected() -> None:
     method = object.__new__(DMD2Method)
     object.__setattr__(method, "method_config", {"fake_score_loss_space": "eps"})
+    with pytest.raises(ValueError, match="velocity, x0"):
+        method._parse_fake_score_loss_space()
+
+
+def test_per_modality_space_mapping() -> None:
+    """{video: x0, audio: velocity}: only video is sigma^2-weighted.
+
+    Under one shared base timestep with unequal shifts, a global x0 space
+    suppresses the critic's audio gradient (sigma_audio << sigma_video for
+    most draws); the mapping keeps x0 weighting for video only.
+    """
+    spec = {"video": "x0", "audio": "velocity"}
+    loss = _run(spec, _Critic())
+    assert loss.item() == pytest.approx(_expected(spec), rel=1e-4)
+
+
+def test_mapping_unknown_modality_falls_back_to_default() -> None:
+    method = object.__new__(DMD2Method)
+    object.__setattr__(method, "method_config", {"fake_score_loss_space": {"video": "x0"}})
+    mapping = method._parse_fake_score_loss_space()
+    object.__setattr__(method, "_fake_score_loss_space", mapping)
+    assert method._fake_score_space_for("video") == "x0"
+    assert method._fake_score_space_for("audio") == "velocity"
+
+
+def test_mapping_invalid_value_rejected() -> None:
+    method = object.__new__(DMD2Method)
+    object.__setattr__(method, "method_config", {"fake_score_loss_space": {"audio": "eps"}})
     with pytest.raises(ValueError, match="velocity, x0"):
         method._parse_fake_score_loss_space()

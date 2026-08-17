@@ -36,7 +36,7 @@ it at checkpoints created before the cadence and FSDP precision changes.
 | Student ladder | base timesteps `[1000, 667, 333]`, no additional warp |
 | Score draw | uniform base timestep over `[0.001, 0.999]` |
 | H3 shifts | video 12, audio 3 |
-| Critic target | x0-space objective |
+| Critic target | per-modality space: video x0, audio velocity (global x0's sigma_a^2 weight blinded the critic on audio's low-noise axis; audio stalled by step 2500 of the first v6 run) |
 | Optimizers | AdamW, LR `2e-6`, betas `(0.9, 0.999)`, weight decay `0.01` |
 | Cadence | four critic-only iterations, then one student-only iteration |
 | Gradient clip | 10 for both trainable roles |

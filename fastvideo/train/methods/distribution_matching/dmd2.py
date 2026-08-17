@@ -521,19 +521,46 @@ class DMD2Method(TrainingMethod):
                              f"got {shift}")
         return shift
 
-    def _parse_fake_score_loss_space(self) -> Literal["velocity", "x0"]:
-        """Resolve velocity MSE or its per-modality sigma-squared x0 form."""
+    def _parse_fake_score_loss_space(self) -> dict[str, str]:
+        """Resolve the critic regression space, globally or per modality.
+
+        ``velocity`` is plain velocity MSE; ``x0`` multiplies each modality's
+        velocity MSE by its realized sigma_m(t)^2 (the affine x0-space form).
+        With one shared base timestep and unequal shifts (H3: video 12,
+        audio 3), sigma_audio(t) << sigma_video(t) for most draws, so a
+        global ``x0`` space suppresses the critic's audio gradient across
+        the low half of audio's own noise axis — the critic goes blind
+        there and audio's DMD gradients degenerate. A per-modality mapping
+        such as ``{video: x0, audio: velocity}`` keeps the x0 weighting for
+        video without silencing audio.
+        """
         raw = self.method_config.get("fake_score_loss_space", None)
         if raw is None:
-            return "velocity"
-        if not isinstance(raw, str):
-            raise ValueError("method.fake_score_loss_space must be a string, "
-                             f"got {type(raw).__name__}")
-        space = raw.strip().lower()
-        if space not in ("velocity", "x0"):
-            raise ValueError("method.fake_score_loss_space must be one of "
-                             f"{{velocity, x0}}, got {raw!r}")
-        return space  # type: ignore[return-value]
+            return {"__default__": "velocity"}
+        if isinstance(raw, str):
+            mapping = {"__default__": raw}
+        elif isinstance(raw, dict):
+            mapping = {str(k).strip().lower(): str(v) for k, v in raw.items()}
+            mapping.setdefault("__default__", "velocity")
+        else:
+            raise ValueError("method.fake_score_loss_space must be a string "
+                             "or a {modality: space} mapping, got "
+                             f"{type(raw).__name__}")
+        normalized: dict[str, str] = {}
+        for key, value in mapping.items():
+            space = str(value).strip().lower()
+            if space not in ("velocity", "x0"):
+                raise ValueError("method.fake_score_loss_space values must be "
+                                 f"one of {{velocity, x0}}, got {value!r} "
+                                 f"for {key!r}")
+            normalized[key] = space
+        return normalized
+
+    def _fake_score_space_for(self, modality_name: str) -> str:
+        return self._fake_score_loss_space.get(
+            modality_name,
+            self._fake_score_loss_space["__default__"],
+        )
 
     def _sample_score_timestep(self, device: torch.device) -> torch.Tensor:
         shift = self._score_timestep_shift
@@ -728,7 +755,7 @@ class DMD2Method(TrainingMethod):
         metrics: dict[str, LogScalar] = {}
         for name, modality in slices:
             loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
-            if self._fake_score_loss_space == "x0":
+            if self._fake_score_space_for(name) == "x0":
                 # For affine rectified flow, x0 MSE is sigma_m(t)^2 times
                 # velocity MSE. Estimate sigma_m^2 from the realized tensors.
                 with torch.no_grad():
