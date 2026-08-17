@@ -184,9 +184,9 @@ def main() -> None:
     parser.add_argument("--dit-config", type=Path, default=None)
     parser.add_argument(
         "--mlx-checkpoint",
-        type=Path,
         default=None,
-        help="Pre-quantized MLX DiT checkpoint directory. Rewrapped with Wan2.2 per-token conditioning.",
+        help="Pre-quantized MLX DiT checkpoint, as a local directory or a Hugging Face "
+        "repo id (e.g. FastVideo/FastMetal-5B-QAD). Rewrapped with Wan2.2 per-token conditioning.",
     )
     parser.add_argument("--vae-root", type=Path, default=None)
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
@@ -253,6 +253,11 @@ def main() -> None:
         help="Compile the DiT forward with mx.compile; fallback to eager on failure.",
     )
     args = parser.parse_args()
+
+    if args.mlx_checkpoint is not None:
+        from fastvideo.mlx_runtime.checkpoint_source import resolve_mlx_checkpoint
+
+        args.mlx_checkpoint = resolve_mlx_checkpoint(args.mlx_checkpoint)
 
     if args.fast_factor < 2:
         parser.error("--fast-factor must be at least 2")

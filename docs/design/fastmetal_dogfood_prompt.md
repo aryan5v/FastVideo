@@ -86,16 +86,20 @@ uv venv --python 3.12 --seed && source .venv/bin/activate
 uv pip install -e '.[mlx]'
 ```
 
-Download only the approved models:
+No separate download step: `--mlx-checkpoint` takes a Hugging Face repo id and
+fetches it on first use, reusing the cache afterwards.
 
 ```bash
 export HF_TOKEN="<the token above>"
-huggingface-cli download FastVideo/FastMetal-1.3B-QAD --local-dir models/fastmetal-1.3b
-huggingface-cli download FastVideo/FastMetal-5B-QAD  --local-dir models/fastmetal-5b
-huggingface-cli download FastVideo/FastMetal-14B-QAD --local-dir models/fastmetal-14b
 ```
 
-Prefer any download command supplied alongside this prompt. If one 404s, stop
+| Model | `--mlx-checkpoint` value |
+|---|---|
+| 1.3B | `FastVideo/FastMetal-1.3B-QAD` |
+| 5B | `FastVideo/FastMetal-5B-QAD` |
+| 14B | `FastVideo/FastMetal-14B-QAD` |
+
+Prefer any repo ids supplied alongside this prompt. If one 401s or 404s, stop
 and say so rather than guessing at another name.
 
 ## 5. Pick a prompt at random
@@ -134,7 +138,7 @@ Baseline first so the rest have something to compare against.
 
 ```bash
 python examples/inference/basic/mlx_wan_prompt_to_video.py \
-  --model-root models/fastmetal-1.3b --mlx-checkpoint models/fastmetal-1.3b \
+  --mlx-checkpoint FastVideo/FastMetal-1.3B-QAD \
   --height 480 --width 832 --num-frames 81 --seed 0 \
   --prompt "<chosen prompt>" <mode flags> \
   --output-path runs/<run-id>.mp4 --metrics-json runs/<run-id>.json
@@ -145,8 +149,7 @@ python examples/inference/basic/mlx_wan_prompt_to_video.py \
 
 ```bash
 python examples/inference/basic/mlx_wan22_generate.py \
-  --mlx-checkpoint models/fastmetal-5b --text-encoder-root models/fastmetal-5b \
-  --vae-root models/fastmetal-5b/vae \
+  --mlx-checkpoint FastVideo/FastMetal-5B-QAD \
   --height 704 --width 1280 --num-frames 81 --fps 16 --seed 0 \
   --prompt "<chosen prompt>" <mode flags> \
   --output-path runs/<run-id>.mp4 --metrics-json runs/<run-id>.json

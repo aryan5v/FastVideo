@@ -26,7 +26,7 @@ uv pip install -e ".[mlx]"   # RIFE ships vendored; this only needs MLX
 
 ```bash
 python examples/inference/basic/mlx_wan_prompt_to_video.py \
-  --mlx-checkpoint <FastWan2.1-T2V-1.3B-INT8-QAD> \
+  --mlx-checkpoint FastVideo/FastMetal-1.3B-QAD \
   --prompt "A red fox trotting through a snowy pine forest at golden hour, cinematic" \
   --num-frames 81 --fast \
   --output-path video_samples/fox_fast.mp4

@@ -617,10 +617,11 @@ def main() -> None:
                         help="Cache prompt embeddings under ~/.cache/fastvideo/prompt_embeds "
                         "keyed by (model, prompt, length, dtype), so repeat runs skip "
                         "the text encoder entirely. Default: on.")
-    parser.add_argument("--mlx-checkpoint", type=Path, default=None,
-                        help="Load the DiT from a pre-quantized MLX checkpoint directory "
-                        "(created with --save-mlx-checkpoint) instead of casting/quantizing "
-                        "the Diffusers weights on every run.")
+    parser.add_argument("--mlx-checkpoint", default=None,
+                        help="Load the DiT from a pre-quantized MLX checkpoint instead of "
+                        "casting/quantizing the Diffusers weights on every run. Accepts a "
+                        "local directory (created with --save-mlx-checkpoint) or a Hugging "
+                        "Face repo id, e.g. FastVideo/FastMetal-1.3B-QAD.")
     parser.add_argument("--save-mlx-checkpoint", type=Path, default=None,
                         help="After loading the DiT, save it (cast + quantized) as an MLX "
                         "checkpoint directory for fast reloads via --mlx-checkpoint.")
@@ -651,6 +652,11 @@ def main() -> None:
         torch_mps_high_watermark_ratio=args.torch_mps_high_watermark_ratio,
         torch_mps_low_watermark_ratio=args.torch_mps_low_watermark_ratio,
     ).as_metrics()
+
+    if args.mlx_checkpoint is not None:
+        from fastvideo.mlx_runtime.checkpoint_source import resolve_mlx_checkpoint
+
+        args.mlx_checkpoint = resolve_mlx_checkpoint(args.mlx_checkpoint)
 
     model_root = resolve_model_root(
         args.model_root,
