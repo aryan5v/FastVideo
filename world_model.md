@@ -73,8 +73,8 @@ teacher trains on the interleaved layout at zero cost — full layout
 compatibility with the causal student.
 
 **Numbers (H3 real shapes)**
-- 768×1344×124f window: 37 latent frames × 1008 tokens = 37,296 video tokens
-  - ~414 audio ≈ 38k tokens (~5.2 s).
+- 768×1344×124f window: 37 latent frames × 1008 tokens = 37,296 video tokens,
+  plus ~414 audio tokens ≈ 38k total (~5.2 s).
 - Block = 3 latent frames ≈ 3.1k tokens (768p) / 1.2k (480p); ~12 blocks per
   window at 768p, **~32 blocks ≈ 16 s at 480p** — resolution is officially
   subordinated to horizon.
