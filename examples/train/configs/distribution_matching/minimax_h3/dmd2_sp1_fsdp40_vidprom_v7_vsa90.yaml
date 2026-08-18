@@ -65,8 +65,10 @@ training:
     hsdp_shard_dim: 40
 
   data:
-    # Full 248,041-prompt VidProM release (verified complete + caption-aligned).
-    data_path: /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
+    # 10k synthetic h3-t2va-condition-v1 prompts (three-section, real newlines
+    # preserved via the encoder's --jsonl-field mode). At global batch 64 this
+    # is ~156 steps/epoch -> ~26 epochs over 4000 steps.
+    data_path: /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
     train_batch_size: 1
