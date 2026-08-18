@@ -132,19 +132,11 @@ callbacks:
     # 64 prompts sampled (seed 0) from the synthetic 10k and REMOVED from the
     # training split above; disjointness verified against both training roots.
     dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
-    # DIAGNOSTIC (jobs 2307/2321), root-caused 2026-08-18: the faults were
-    # NCCL p2p transport connect failures (Cuda 400 'invalid resource
-    # handle', transport/p2p.cc:288) at the boot's FIRST FSDP all-gather,
-    # which step-0 validation reaches before training does. With
-    # shard=world and stragglers still loading their pipelines, no VSA
-    # kernel had executed when the fault fired; both failures were on
-    # rack-2 tray sets, and the VSA-H3 inference metadata path passed a
-    # full parity/in-bounds/kernel repro at these exact shapes
-    # (vsa_gate/valfix_repro.py, job 2399, incl. a rack-2 tray). Validation
-    # stays disabled for this run pending the checkpoint-500 re-check;
-    # latent_vis still provides visual monitoring every 100 steps.
-    every_steps: 4000
-    run_at_start: false
+    # Re-enabled 2026-08-18: the step-0 crashes (2307/2321) were rack-2 NCCL
+    # transport faults at the first FSDP all-gather, not a VSA bug (see
+    # h3_dmd.md); validation is safe on rack-3 tray sets.
+    every_steps: 100
+    run_at_start: true
     sampling_steps: [3]
     guidance_scale: 1.0
     num_frames: 124
