@@ -81,11 +81,14 @@ export NUM_GPUS="${GPUS_PER_NODE}"
 # in ib_uverbs_event_read/poll, no WARN output, GPUs at 0%). If no weight
 # loading has been logged within BOOT_TIMEOUT_MIN minutes, abort the job so
 # the allocation isn't squatted on. 0 disables.
-BOOT_TIMEOUT_MIN="${BOOT_TIMEOUT_MIN:-20}"
+BOOT_TIMEOUT_MIN="${BOOT_TIMEOUT_MIN:-30}"
 if [ "${BOOT_TIMEOUT_MIN}" -gt 0 ]; then
   (
     sleep $((BOOT_TIMEOUT_MIN * 60))
-    if ! grep -qs "Loading weights took" "${REPO}/examples/train/logs/${SLURM_JOB_ID}-node0"/*.log; then
+    # Either sentinel proves the boot is alive: the lustre load path logs
+    # "Loading weights took"; the warm /dev/shm cache path skips it, so also
+    # accept visible training progress (job 2373 was killed at step 2).
+    if ! grep -qsE "Loading weights took|Steps: " "${REPO}/examples/train/logs/${SLURM_JOB_ID}-node0"/*.log; then
       echo "BOOT WATCHDOG: no weight loading after ${BOOT_TIMEOUT_MIN} min — aborting job ${SLURM_JOB_ID}"
       scancel "${SLURM_JOB_ID}"
     fi
