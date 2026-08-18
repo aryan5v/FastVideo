@@ -11,12 +11,15 @@ Benchmarks 3-step (DMD-style) H3 T2VA inference under two attention
 backends and prints a latency/speedup table:
 
 - `dense` — `FASTVIDEO_ATTENTION_BACKEND=FLASH_ATTN` with FA4
-  (`FASTVIDEO_FA4=1`).
+  (`FASTVIDEO_FA4=1`). If the flash-attn package is not installed the
+  FLASH_ATTN request falls back to Torch SDPA (the worker log prints
+  "Using Torch SDPA backend"); the baseline is then SDPA, not FA4.
 - `vsa` — `FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3` at
   `--sparsity` (default 0.9), applied at generator boot through
   `FastVideoArgs.VSA_sparsity` (`pipeline.experimental`). `--vsa-kernel
-  cutedsl` (default) uses the FA4 CuTe 256-tile forward; `triton` uses the
-  256-to-64 expansion fallback.
+  triton` (default, no optional dependencies) uses the 256-to-64
+  expansion path; `cutedsl` opts into the FA4 CuTe 256-tile forward and
+  requires the optional FA4 CuTe build (`flash_attn.cute`).
 - `microbench` — model-free per-attention-layer proxy on the exact packed
   H3 sequence geometry (dense FA4/SDPA vs the full `MiniMaxH3VSAImpl`
   tile/pool/top-k/kernel/untile path). Useful standalone, and as the

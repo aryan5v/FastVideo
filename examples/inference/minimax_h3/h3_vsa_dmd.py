@@ -6,11 +6,16 @@ attention mode and reports per-request end-to-end latency plus the
 denoising-stage time (``FASTVIDEO_STAGE_LOGGING=1``):
 
 - ``dense``: FLASH_ATTN with the FA4 CuTe kernels (``FASTVIDEO_FA4=1``).
+  When the flash-attn package is not installed, the FLASH_ATTN request
+  falls back to Torch SDPA (the worker log prints "Using Torch SDPA
+  backend") — the reported baseline is then SDPA, not FA4.
 - ``vsa``: VIDEO_SPARSE_ATTN_H3 at ``--sparsity`` (default 0.9). The
   sparsity is applied at generator boot via ``FastVideoArgs.VSA_sparsity``
   (``pipeline.experimental``); the H3 denoising stage builds per-step VSA
-  metadata from it. ``--vsa-kernel cutedsl`` (default) opts into the FA4
-  CuTe 256-tile forward; ``triton`` uses the 256-to-64 expansion fallback.
+  metadata from it. ``--vsa-kernel triton`` (default, no optional deps)
+  uses the 256-to-64 expansion path; ``cutedsl`` opts into the FA4 CuTe
+  256-tile forward and requires the optional FA4 CuTe build
+  (``flash_attn.cute``).
 - ``microbench``: model-free attention-layer microbenchmark on the exact
   packed H3 sequence geometry of the requested video shape. Times
   ``block_sparse_attn_256_bshd`` (Triton and, when importable, the FA4 CuTe
@@ -99,7 +104,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1344)
     parser.add_argument("--num-frames", type=int, default=124)
     parser.add_argument("--warmup", type=int, default=1, help="Untimed warm-up requests per mode")
-    parser.add_argument("--vsa-kernel", choices=("cutedsl", "triton"), default="cutedsl")
+    parser.add_argument("--vsa-kernel",
+                        choices=("triton", "cutedsl"),
+                        default="triton",
+                        help="VSA-256 kernel path; cutedsl needs the optional FA4 CuTe build")
     parser.add_argument("--mode-timeout", type=int, default=5400, help="Hard per-mode timeout in seconds")
     parser.add_argument("--microbench-text-tokens", type=int, default=300, help="Assumed text prefix length")
     parser.add_argument("--microbench-heads", default="14,56", help="Per-GPU head counts to microbench")
