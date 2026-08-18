@@ -130,12 +130,9 @@ callbacks:
     # 64 prompts sampled (seed 0) from the synthetic 10k and REMOVED from the
     # training split above; disjointness verified against both training roots.
     dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
-    # DIAGNOSTIC (jobs 2307/2321): the validation pipeline wraps the
-    # VSA-built student and its inference-side VSA metadata path faults
-    # (async CUDA error). Validation disabled until that path is fixed;
-    # latent_vis still provides visual monitoring every 100 steps.
-    every_steps: 4000
-    run_at_start: false
+    # Dense student: the VSA-inference fault does not apply; full cadence.
+    every_steps: 100
+    run_at_start: true
     sampling_steps: [3]
     guidance_scale: 1.0
     num_frames: 124
