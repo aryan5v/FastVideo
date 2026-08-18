@@ -105,6 +105,7 @@ that recipe even after the launcher default changes.
 | P1 | Deliberate experiment difference | `simulate` builds stochastic student trajectories from noise. FastGen's multistep DMD path forward-noises real data at a sampled ladder point. A paired-latent A/B is required to isolate this difference. |
 | P1 | Open if stochastic validation is used | `dmd_stochastic_renoise` is not a typed pipeline field and its hop noise uses the global RNG rather than the request generator. Default validation remains deterministic. |
 | P2 | Open | The x0 critic objective estimates effective per-modality sigma-squared from already-rounded noised tensors. It is exact algebraically but biased at the lowest BF16 timesteps; direct `critic.predict_x0()` MSE would match FastGen more closely. |
+| P1 | Open | The VSA-H3 kernel faults in the validation/inference path (async CUDA error at the first FSDP all-gather, job 2307); v7 validates dense while training the student sparse — an eval contract mismatch until the inference-side VSA path is fixed. |
 | P2 | Deliberate omission | FastVideo has no DMD2 GAN/discriminator branch. FastGen's generic default is `0.001`; several Wan/LTX recipes use `0.03`. There is no H3 value to copy directly. |
 | P3 | Accepted | FastVideo uses the pinned official H3 scheduler endpoint while FastGen's RF schedule is capped at `0.999`. The resulting ladder differences are small and should not be changed without output evidence. |
 | P3 | Accepted | FastVideo clips both student and critic at 10; FastGen's default callback targets only the student. |
