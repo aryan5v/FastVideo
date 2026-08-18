@@ -86,7 +86,8 @@ training:
 
   loop:
     max_train_steps: 4000
-    gradient_accumulation_steps: 1
+    # Global batch 64 on 8 trays: 32 DP x batch 1 x accum 2.
+    gradient_accumulation_steps: 2
 
   checkpoint:
     output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v7_vsa90
