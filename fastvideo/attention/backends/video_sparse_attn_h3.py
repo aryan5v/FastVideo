@@ -63,6 +63,49 @@ def token_tile_and_valid(variable_block_sizes: torch.Tensor) -> tuple[torch.Tens
     return token_tile, token_valid
 
 
+def _validate_h3_tile_geometry(
+    prefix_segments: tuple[int, ...],
+    dit_seq_shape: tuple[int, int, int],
+    variable_block_sizes: torch.Tensor,
+    untile_combined_index: torch.Tensor,
+) -> None:
+    """Fail synchronously on out-of-bounds tile geometry.
+
+    Invariants the block-sparse kernel trusts without checking:
+    every tile's valid size is in (0, 256]; the sizes sum to the packed
+    sequence length; and ``untile_combined_index`` maps each packed row to
+    exactly one non-pad slot of the padded tile buffer. A violation would
+    surface only as an async device fault at some later kernel or collective
+    (e.g. an FSDP all-gather), which is unattributable — so raise here, once
+    per cached geometry, with the numbers in hand.
+    """
+    total = sum(prefix_segments) + math.prod(dit_seq_shape)
+    n_pad = variable_block_sizes.numel() * _TILE_ELEMS
+    sizes_min = int(variable_block_sizes.min())
+    sizes_max = int(variable_block_sizes.max())
+    sizes_sum = int(variable_block_sizes.sum())
+    if sizes_min < 1 or sizes_max > _TILE_ELEMS or sizes_sum != total:
+        raise ValueError(f"VSA-H3 tile sizes out of bounds for prefix={prefix_segments}, video={dit_seq_shape}: "
+                         f"min={sizes_min}, max={sizes_max}, sum={sizes_sum}, expected sum={total}.")
+    if untile_combined_index.numel() != total:
+        raise ValueError(f"VSA-H3 untile index has {untile_combined_index.numel()} entries for a packed "
+                         f"sequence of {total} rows (prefix={prefix_segments}, video={dit_seq_shape}).")
+    idx_min = int(untile_combined_index.min())
+    idx_max = int(untile_combined_index.max())
+    if idx_min < 0 or idx_max >= n_pad:
+        # Range first: the pad-slot gather below would itself index out of
+        # bounds (the very async fault this guard exists to preempt).
+        raise ValueError(f"VSA-H3 untile index is not an injective map into non-pad slots: range "
+                         f"[{idx_min}, {idx_max}] vs padded length {n_pad} "
+                         f"(prefix={prefix_segments}, video={dit_seq_shape}).")
+    in_tile_offset = untile_combined_index % _TILE_ELEMS
+    maps_into_pad = bool((in_tile_offset >= variable_block_sizes[untile_combined_index // _TILE_ELEMS]).any())
+    if maps_into_pad or int(torch.unique(untile_combined_index).numel()) != total:
+        raise ValueError(f"VSA-H3 untile index is not an injective map into non-pad slots: "
+                         f"pad-slot hit={maps_into_pad} "
+                         f"(prefix={prefix_segments}, video={dit_seq_shape}).")
+
+
 @functools.lru_cache(maxsize=10)
 def _h3_tile_geometry(
     prefix_segments: tuple[int, ...],
@@ -106,6 +149,8 @@ def _h3_tile_geometry(
     non_pad_index = get_non_pad_index(variable_block_sizes, _TILE_ELEMS)
 
     untile_combined_index = non_pad_index[torch.argsort(tile_partition_indices)]
+    # One-time (lru-cached) synchronous bounds check; see _validate_h3_tile_geometry.
+    _validate_h3_tile_geometry(prefix_segments, dit_seq_shape, variable_block_sizes, untile_combined_index)
     return (tile_partition_indices, variable_block_sizes, untile_combined_index, num_prefix_tiles, num_video_tiles)
 
 
