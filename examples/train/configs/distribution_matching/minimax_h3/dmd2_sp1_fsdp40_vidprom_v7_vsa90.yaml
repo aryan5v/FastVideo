@@ -124,8 +124,12 @@ callbacks:
     pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
     # Held-out prompts disjoint from the VidProM training captions.
     dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_wan64.json
-    every_steps: 100
-    run_at_start: true
+    # DIAGNOSTIC (jobs 2307/2321): the validation pipeline wraps the
+    # VSA-built student and its inference-side VSA metadata path faults
+    # (async CUDA error). Validation disabled until that path is fixed;
+    # latent_vis still provides visual monitoring every 100 steps.
+    every_steps: 4000
+    run_at_start: false
     sampling_steps: [3]
     guidance_scale: 1.0
     num_frames: 124
