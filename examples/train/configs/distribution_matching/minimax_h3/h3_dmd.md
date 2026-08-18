@@ -23,9 +23,12 @@ parity.
 
 ## Current recipe
 
-The recommended config is
-`dmd2_sp1_fsdp40_vidprom_v6.yaml`. The sibling config without the `_v6`
-suffix is retained as the earlier alternative recipe.
+The recommended config is `dmd2_sp1_fsdp40_vidprom_v7_vsa90.yaml` (v6 recipe
++ per-modality critic space + VSA-H3 student at 90% sparsity; teacher/critic
+stay dense). `_v6` is retained as the dense-student recipe; the config
+without a suffix is the earlier alternative. v7 is a fresh lineage: v6's
+audio did not recover post-hoc from the global-x0 critic bug, and the VSA
+student changes the attention contract — do not resume v6 checkpoints.
 The current config uses a fresh `_v6_fp32_compute` run directory; do not point
 it at checkpoints created before the cadence and FSDP precision changes.
 

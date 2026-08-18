@@ -59,9 +59,12 @@ def run_training_from_config(
     # Auto-set attention backend for model families that require a specific
     # backend at load time, unless the user already overrode it explicitly.
     if tc.vsa_sparsity > 0.0:
+        # H3 has its own packed-sequence VSA kernel; the Wan kernel would be
+        # rejected by H3's supported-backend list (e.g. at validation, which
+        # resolves the backend from this env fallback).
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
-            "VIDEO_SPARSE_ATTN",
+            ("VIDEO_SPARSE_ATTN_H3" if "minimax" in model_path_lower else "VIDEO_SPARSE_ATTN"),
         )
     elif ("turbodiffusion" in model_path_lower or "turbowan" in model_path_lower):
         os.environ.setdefault(

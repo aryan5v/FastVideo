@@ -1,0 +1,140 @@
+# v7: v6 recipe + VSA-H3 student at 90% sparsity + per-modality critic space.
+# Fresh lineage: the v6 run's audio spent 2500 steps under the global-x0
+# critic bug and did not recover post-hoc (probes at step 2800-3200), and the
+# student's attention contract changes with VSA — do not resume v6 checkpoints.
+# Student runs the packed VSA-H3 kernel (audio/text tiles exempt, video tiles
+# sparse at training.vsa_sparsity); teacher and critic stay dense FLASH_ATTN.
+# Reference topology: SP=1, replicate=1, shard=world; the Slurm launcher
+# overrides the 40-GPU defaults from the allocation.
+# See h3_dmd.md for rationale, comparison notes, and open issues.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: FLASH_ATTN
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: FLASH_ATTN
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  generator_update_interval: 5
+  # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
+  real_score_guidance_scale: 1.0
+  # Base-t ladder; the H3 adapter applies the video/audio shifts 12/3.
+  dmd_denoising_steps: [1000, 667, 333]
+  # Uniform base-t score supervision.
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 1.0
+  # Critic regression space per modality. A global x0 space weights each
+  # modality's velocity MSE by sigma_m(t)^2 at the shared base-t draw; with
+  # shifts 12/3 that silences the critic across the low half of audio's
+  # noise axis (audio stopped improving by ~step 2500). Keep x0 for video,
+  # velocity (weight 1 at every t) for audio.
+  fake_score_loss_space:
+    video: x0
+    audio: velocity
+  cfg_uncond:
+    text: zero
+
+  fake_score_learning_rate: 2.0e-6
+  fake_score_betas: [0.9, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 40
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 40
+
+  data:
+    # Full 248,041-prompt VidProM release (verified complete + caption-aligned).
+    data_path: /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 768
+    num_width: 1344
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v7_vsa90
+    # Requeues resume the newest complete checkpoint in this directory.
+    resume_from_checkpoint: latest
+    training_state_checkpointing_steps: 100
+    checkpointing_start_step: 500
+    checkpoints_total_limit: 4
+
+  tracker:
+    project_name: h3-dmd2-vsa
+    run_name: dmd2_sp1_vidprom_v7_vsa90
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+
+  # FP32 sharded master weights; the trainer verifies them at startup.
+  dit_precision: fp32
+  # Student-only sparse attention (VSA-H3): fraction of video tiles pruned.
+  vsa:
+    sparsity: 0.9
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 10.0
+  latent_vis:
+    _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
+    # Decode rank 0's generator, teacher, and critic x0 estimates.
+    every_steps: 100
+    fps: 24
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    # Held-out prompts disjoint from the VidProM training captions.
+    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_wan64.json
+    every_steps: 100
+    run_at_start: true
+    sampling_steps: [3]
+    guidance_scale: 1.0
+    num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false
