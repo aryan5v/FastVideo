@@ -65,10 +65,14 @@ training:
     hsdp_shard_dim: 40
 
   data:
-    # 10k synthetic h3-t2va-condition-v1 prompts (three-section, real newlines
-    # preserved via the encoder's --jsonl-field mode). At global batch 64 this
-    # is ~156 steps/epoch -> ~26 epochs over 4000 steps.
-    data_path: /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only
+    # Combined prompt set (~258k, globally shuffled by the seeded sampler):
+    #  - 9,936 synthetic h3-t2va-condition-v1 prompts (10k minus the 64
+    #    held out below as validation; real newlines preserved)
+    #  - 248,041 VidProM release prompts
+    # ~4030 steps/epoch at global batch 64 -> ~1 epoch over 4000 steps.
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only_train
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
     train_batch_size: 1
@@ -125,8 +129,9 @@ callbacks:
   validation:
     _target_: fastvideo.train.callbacks.validation.ValidationCallback
     pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
-    # Held-out prompts disjoint from the VidProM training captions.
-    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_wan64.json
+    # 64 prompts sampled (seed 0) from the synthetic 10k and REMOVED from the
+    # training split above; disjointness verified against both training roots.
+    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
     # DIAGNOSTIC (jobs 2307/2321): the validation pipeline wraps the
     # VSA-built student and its inference-side VSA metadata path faults
     # (async CUDA error). Validation disabled until that path is fixed;
