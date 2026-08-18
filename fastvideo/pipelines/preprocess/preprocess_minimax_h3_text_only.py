@@ -27,6 +27,7 @@ rows already on disk (delete the shard directory to re-encode from scratch).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -80,14 +81,34 @@ def _load_component(
     )
 
 
-def _load_shard_prompts(prompts_file: Path, shard_index: int, num_shards: int) -> list[tuple[int, str]]:
-    """Return this shard's ``(global_line_index, prompt)`` pairs, round-robin by line."""
-    entries: list[tuple[int, str]] = []
+def _load_shard_prompts(
+    prompts_file: Path,
+    shard_index: int,
+    num_shards: int,
+    jsonl_field: str | None = None,
+) -> list[tuple[int, str, str]]:
+    """Return this shard's ``(global_line_index, prompt, text_name)`` triples.
+
+    Default mode treats each non-empty line as one complete prompt document.
+    With ``jsonl_field`` set, each line is a JSON record; the prompt is taken
+    verbatim from that field (embedded newlines preserved — required by the
+    h3-t2va-condition-v1 contract, which forbids altering ``prompt_compiled``)
+    and the record's ``id`` becomes the parquet row id when present.
+    """
+    entries: list[tuple[int, str, str]] = []
     with prompts_file.open(encoding="utf-8") as handle:
         for index, line in enumerate(handle):
-            prompt = line.strip()
-            if prompt:
-                entries.append((index, prompt))
+            line = line.strip()
+            if not line:
+                continue
+            if jsonl_field is None:
+                entries.append((index, line, f"vidprom_{index:05d}"))
+                continue
+            record = json.loads(line)
+            prompt = record.get(jsonl_field)
+            if not isinstance(prompt, str) or not prompt:
+                raise ValueError(f"{prompts_file}:{index + 1}: empty or non-string field {jsonl_field!r}")
+            entries.append((index, prompt, str(record.get("id") or f"jsonl_{index:05d}")))
     return entries[shard_index::num_shards]
 
 
@@ -107,7 +128,7 @@ def main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"MiniMax H3 model directory is missing at {model_path}")
     model_index = verify_model_config_and_directory(str(model_path))
 
-    shard = _load_shard_prompts(args.prompts_file, args.shard_index, args.num_shards)
+    shard = _load_shard_prompts(args.prompts_file, args.shard_index, args.num_shards, args.jsonl_field)
     shard_dir = args.output_dir / f"shard_{args.shard_index:02d}"
     already_done = _count_existing_rows(shard_dir) if shard_dir.is_dir() else 0
     if already_done >= len(shard):
@@ -144,7 +165,7 @@ def main(args: argparse.Namespace) -> None:
     records: list[dict[str, Any]] = []
     started = time.monotonic()
     with torch.inference_mode():
-        for done, (global_index, prompt) in enumerate(todo, start=1):
+        for done, (global_index, prompt, text_name) in enumerate(todo, start=1):
             batch = ForwardBatch(data_type="video", prompt=prompt)
             batch.extra[MINIMAX_H3_KEYFRAMES_KEY] = []
             batch = stage.forward(batch, fastvideo_args)
@@ -154,7 +175,7 @@ def main(args: argparse.Namespace) -> None:
             text_embedding = batch.prompt_embeds[0].squeeze(0).float().cpu().contiguous().numpy()
             records.append(
                 text_only_record_creator(
-                    text_name=f"vidprom_{global_index:05d}",
+                    text_name=text_name,
                     text_embedding=text_embedding,
                     caption=prompt,
                 ))
@@ -181,6 +202,11 @@ if __name__ == "__main__":
     parser.add_argument("--samples-per-file", type=int, default=64)
     parser.add_argument("--flush-every", type=int, default=256, help="rows buffered between parquet flushes")
     parser.add_argument("--limit", type=int, default=None, help="encode at most N prompts this run (smoke tests)")
+    parser.add_argument("--jsonl-field",
+                        type=str,
+                        default=None,
+                        help="treat --prompts-file as JSONL and take the prompt verbatim from "
+                        "this field (record 'id' becomes the row id when present)")
     cli_args = parser.parse_args()
     if not 0 <= cli_args.shard_index < cli_args.num_shards:
         parser.error(f"--shard-index {cli_args.shard_index} must be in [0, {cli_args.num_shards})")

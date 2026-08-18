@@ -51,6 +51,7 @@ for k in $(seq 0 $((NUM_SHARDS - 1))); do
       --shard-index "$k" \
       --num-shards "$NUM_SHARDS" \
       ${LIMIT:+--limit "$LIMIT"} \
+      ${JSONL_FIELD:+--jsonl-field "$JSONL_FIELD"} \
       > "$OUT/shard_${k}.log" 2>&1 &
   pids+=($!)
 done
