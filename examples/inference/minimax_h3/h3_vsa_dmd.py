@@ -105,7 +105,8 @@ def parse_args() -> argparse.Namespace:
                         help="Run the dense mode on the scheduler's NATIVE n-step schedule instead of the "
                         "DMD ladder (FASTVIDEO_DMD_DENOISING_STEPS is removed for that mode). E.g. 50 turns "
                         "the dense leg into the teacher-style 50-step baseline, so the table compares "
-                        "50-step dense against the few-step DMD VSA leg")
+                        "50-step dense against the few-step DMD VSA leg. Note the H3 scheduler builds an "
+                        "n-point sigma grid ending at 0, i.e. n-1 transformer forwards")
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--height", type=int, default=768)
     parser.add_argument("--width", type=int, default=1344)
@@ -500,6 +501,11 @@ def _mode_stats(status: dict) -> dict | None:
     generation = [r["generation_seconds"] for r in requests if r.get("generation_seconds") is not None]
     denoise = [r["denoise_seconds"] for r in requests if r.get("denoise_seconds") is not None]
     steps = results.get("num_inference_steps")
+    # Native schedule (dmd_steps is None): the H3 scheduler turns n inference
+    # steps into an n-point sigma grid ending at 0 = n-1 transformer forwards.
+    # The DMD ladder runs exactly one forward per ladder entry.
+    native = steps is not None and results.get("dmd_steps") is None
+    forwards = (steps - 1) if (native and steps > 1) else steps
     mean_denoise = statistics.mean(denoise) if denoise else None
     return {
         "n": len(requests),
@@ -508,7 +514,7 @@ def _mode_stats(status: dict) -> dict | None:
         "e2e": statistics.mean(r["e2e_seconds"] for r in requests),
         "gen": statistics.mean(generation) if generation else None,
         "denoise": mean_denoise,
-        "denoise_per_step": (mean_denoise / steps) if mean_denoise is not None and steps else None,
+        "denoise_per_step": (mean_denoise / forwards) if mean_denoise is not None and forwards else None,
     }
 
 
@@ -562,6 +568,11 @@ def summarize(statuses: list[dict], args: argparse.Namespace) -> None:
         for row in results["rows"]:
             timing = f"{row['ms']:.3f} ms" if row.get("ms") is not None else f"FAILED: {row.get('error')}"
             print(f"  heads={row['heads']:>2}  {row['name']:<34} {timing}")
+    if args.dense_native_steps:
+        print(f"\nNote: the native {args.dense_native_steps}-step schedule is a "
+              f"{args.dense_native_steps}-point sigma grid = {args.dense_native_steps - 1} transformer "
+              f"forwards; denoise/step divides by forwards ({args.dense_native_steps - 1} dense, "
+              f"{len([s for s in args.dmd_steps.split(',') if s.strip()])} vsa).")
     print("\nNote: base checkpoint is dense-trained; the vsa leg measures speed, not quality parity.")
 
 
