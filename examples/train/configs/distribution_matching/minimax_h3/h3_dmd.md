@@ -163,3 +163,78 @@ Quality comparisons still require:
 - direct-x0 versus sigma-squared critic loss and gradient parity in BF16; and
 - matched-seed `simulate` versus paired-latent runs, with deterministic
   validation samples from the same checkpoint.
+
+## MFU accounting (2026-08-19)
+
+Calculator: `scripts/train/mfu_calc_minimax_h3.py` (a copy lives at
+`/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/mfu_calc.py`). Pure Python, no
+GPU or fastvideo import; formulas and the DMD2 forward/backward census are
+documented in its docstring.
+
+Key assumptions (all verified against the code, not the launch notes):
+
+- H3 DiT: 33.12 B params analytically (matches the 62 GiB bf16 transformer
+  dir and the 741 GiB student+critic fp32 DCP save at 12 bytes/param/model);
+  only the 19.27 B per-token GEMM params (50 x 385.35 M block QKV/out+SwiGLU)
+  count toward linear FLOPs — the 13 B of per-(timestep,modality) AdaLN
+  tables run on ~2 rows, not per token. Attention width is 7168 (56x128),
+  not the 5376 hidden width.
+- Packed S = 38,010 (text ~300 + audio 414 + video 37,296 at 768x1344x124).
+- Full activation checkpointing: a grad-mode pass costs fwd + recompute +
+  bwd = 4x forward FLOPs; a no-grad forward costs 1x.
+- DMD2 cadence per micro-round (x accum 2): critic step = 3 no-grad VSA
+  student fwd + dense critic grad unit = `3F_s + 4F_d`; student step =
+  `6F_s + 2F_d` (rollout 2 no-grad + 1 grad fwd, one critic + one teacher
+  no-grad dense fwd at guidance 1). Teacher/critic are always dense.
+- VSA-H3 exempt mode at 0.9: video queries keep 18/180 video tiles + the 4
+  prefix tiles; prefix queries stay dense; no `vsa_dense_layers` in training
+  (that knob is inference-only). Effective token-pair keep 13.4% (tile-level
+  0.139 incl. padding). The student's extra `to_gate_compress` GEMM (+1.93 B
+  params) is counted in "actual" only.
+- Peak: 2.25 PFLOP/s dense (non-sparse) BF16 per B200/GB200 GPU (NVIDIA
+  spec). MFU scales as 1/peak — restate it if you assume a different number.
+- Two conventions: **dense-equiv** counts the student's attention as if
+  dense (speedup bragging); **actual** counts the realized sparse FLOPs
+  (honest utilization).
+
+Measured (W&B `step_time_sec` medians, split by `update_student`; step time
+excludes validation/checkpointing but includes data loading and optimizer):
+
+| Config | Runs | s/step critic / student | MFU dense-equiv (c / s / 4:1 blend) | MFU actual |
+|---|---|---|---|---|
+| v6 dense, 32 GPU, accum 1 | byg5ajyy, 4fek9itk, 9w6pdvnt | 51.2 / 57.8 | 21.5 / 21.8 / 21.6 % | same (dense) |
+| v7 vsa90 Triton, 32 GPU, accum 2 | bmwvz3er (also 124lb3wh, 6b71zndg) | 83.7 / 71.3 | 26.3 / 35.3 / 27.9 % | 21.1 / 23.0 / 21.4 % |
+| v7 vsa90 CuTe (projected) | leg-B gauntlet + SFT A/B | ~79.1 / ~62.1 | 27.8 / 40.5 / 29.9 % | 22.3 / 26.3 / 22.9 % |
+| SFT vsa90 probe, 4 GPU SP4, Triton | gl5mrw23 | 4.59 | 34.2 % | 18.3 % |
+| SFT vsa90 probe, 4 GPU SP4, CuTe | 3470j8b6 | 3.82 | 41.1 % | 22.0 % |
+
+Reading: v6 and v7 sit at the same ~21.5% actual utilization — VSA-90
+converts the saved attention FLOPs into 1.29x more samples/s (1.641 ->
+1.268 s per sample-step on the blend) rather than higher hardware
+utilization, as expected. Critic steps are bound by the dense critic grad
+unit (4F_d of 7 units), so the CuTe flip mostly helps student steps. The
+CuTe projection uses the 2026-08-19 gauntlet (leg B full-layer fwd+bwd at
+the training shape: 45.9 ms CuTe vs 91.7 ms Triton => ~0.76 s saved per
+student forward-equivalent at SP=1, cross-checked by the SFT A/B: 4.59 ->
+3.82 s is 0.77 s saved per forward-equivalent).
+
+After the CuTe flip, the one-command "after" measurement (pull the medians,
+then compute):
+
+```bash
+HOME=/mnt/lustre/vlm-wlsaidhi \
+  /mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo/.venv/bin/python - <<'EOF'
+import statistics as st, wandb
+run = [r for r in wandb.Api().runs("h3-dmd2-vsa")
+       if r.name == "dmd2_sp1_vidprom_v7_vsa90"][-1]  # latest incarnation
+rows = list(run.history(keys=["step_time_sec", "update_student"],
+                        samples=10000, pandas=False))
+crit = st.median(r["step_time_sec"] for r in rows if r["update_student"] < 0.5)
+stud = st.median(r["step_time_sec"] for r in rows if r["update_student"] >= 0.5)
+print(f"critic {crit:.2f}s student {stud:.2f}s")
+EOF
+
+python scripts/train/mfu_calc_minimax_h3.py --step-type dmd-blend \
+  --step-time-critic <crit> --step-time-student <stud> \
+  --gpus 32 --accum 2 --student-backend vsa --sparsity 0.9
+```
