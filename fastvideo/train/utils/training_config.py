@@ -89,6 +89,8 @@ class ModelTrainingConfig:
     # are fp32 (training.dit_precision: fp32) or this explicit opt-in
     # acknowledges the effect (memory-constrained topologies).
     allow_low_precision_master_weights: bool = False
+    enable_torch_compile: bool = False
+    torch_compile_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
