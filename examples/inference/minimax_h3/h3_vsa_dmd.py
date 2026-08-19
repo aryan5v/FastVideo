@@ -99,6 +99,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/h3_vsa_dmd")
     parser.add_argument("--modes", default="dense,vsa", help=f"Comma-separated subset of {ALL_MODES}")
     parser.add_argument("--dmd-steps", default="1000,667,333", help="FASTVIDEO_DMD_DENOISING_STEPS ladder")
+    parser.add_argument("--dense-native-steps",
+                        type=int,
+                        default=None,
+                        help="Run the dense mode on the scheduler's NATIVE n-step schedule instead of the "
+                        "DMD ladder (FASTVIDEO_DMD_DENOISING_STEPS is removed for that mode). E.g. 50 turns "
+                        "the dense leg into the teacher-style 50-step baseline, so the table compares "
+                        "50-step dense against the few-step DMD VSA leg")
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--height", type=int, default=768)
     parser.add_argument("--width", type=int, default=1344)
@@ -127,10 +134,25 @@ def load_prompts(args: argparse.Namespace) -> list[str]:
     return prompts
 
 
+def dense_native_steps(mode: str, args: argparse.Namespace) -> int | None:
+    return args.dense_native_steps if (mode == "dense" and args.dense_native_steps) else None
+
+
 def apply_worker_env(mode: str, args: argparse.Namespace) -> None:
     """Set the mode's environment. Must run before any fastvideo import."""
     env = dict(MODE_ENV[mode])
-    env["FASTVIDEO_DMD_DENOISING_STEPS"] = args.dmd_steps
+    if dense_native_steps(mode, args):
+        # Teacher-style leg: the scheduler's own n-step schedule, no DMD
+        # ladder. The env var may leak in from the launch environment, so
+        # remove it explicitly (the H3 denoising stage reads it as a
+        # fallback when the pipeline config has no dmd_denoising_steps).
+        os.environ.pop("FASTVIDEO_DMD_DENOISING_STEPS", None)
+        # Per-step DMD_DEBUG stat lines double as in-log proof that all n
+        # native steps actually execute (two small latent stats per step —
+        # negligible next to a transformer forward at video resolutions).
+        env["FASTVIDEO_DMD_DEBUG_STATS"] = "1"
+    else:
+        env["FASTVIDEO_DMD_DENOISING_STEPS"] = args.dmd_steps
     env["FASTVIDEO_STAGE_LOGGING"] = "1"  # per-stage timings on the result object
     env["FASTVIDEO_VSA_CUTEDSL"] = "1" if args.vsa_kernel == "cutedsl" else "0"
     os.environ.update(env)
@@ -155,6 +177,8 @@ def run_generation_worker(args: argparse.Namespace) -> int:
     mode_dir.mkdir(parents=True, exist_ok=True)
     prompts = load_prompts(args)
     dmd_steps = [int(step) for step in args.dmd_steps.split(",") if step.strip()]
+    native_steps = dense_native_steps(mode, args)
+    num_inference_steps = native_steps or len(dmd_steps)
 
     from fastvideo import VideoGenerator
     from fastvideo.api import (
@@ -175,8 +199,9 @@ def run_generation_worker(args: argparse.Namespace) -> int:
         # per request) when building the per-step VSA metadata.
         experimental["VSA_sparsity"] = args.sparsity
 
+    schedule = (f"native {native_steps}-step schedule" if native_steps else f"dmd_steps={dmd_steps}")
     print(f"[{mode}] booting generator (backend={os.environ['FASTVIDEO_ATTENTION_BACKEND']}, "
-          f"sparsity={experimental.get('VSA_sparsity', 0.0)}, dmd_steps={dmd_steps})",
+          f"sparsity={experimental.get('VSA_sparsity', 0.0)}, {schedule})",
           flush=True)
     boot_start = time.perf_counter()
     generator = VideoGenerator.from_config(
@@ -208,7 +233,7 @@ def run_generation_worker(args: argparse.Namespace) -> int:
                 width=args.width,
                 num_frames=args.num_frames,
                 fps=24,
-                num_inference_steps=len(dmd_steps),
+                num_inference_steps=num_inference_steps,
                 guidance_scale=1.0,
                 batch_cfg=False,
                 seed=seed,
@@ -255,7 +280,8 @@ def run_generation_worker(args: argparse.Namespace) -> int:
             "mode": mode,
             "sparsity": args.sparsity if mode == "vsa" else 0.0,
             "vsa_kernel": args.vsa_kernel if mode == "vsa" else None,
-            "dmd_steps": dmd_steps,
+            "dmd_steps": None if native_steps else dmd_steps,
+            "num_inference_steps": num_inference_steps,
             "shape": [args.height, args.width, args.num_frames],
             "num_gpus": args.num_gpus,
             "load_seconds": load_time,
@@ -473,17 +499,21 @@ def _mode_stats(status: dict) -> dict | None:
     requests = results["requests"]
     generation = [r["generation_seconds"] for r in requests if r.get("generation_seconds") is not None]
     denoise = [r["denoise_seconds"] for r in requests if r.get("denoise_seconds") is not None]
+    steps = results.get("num_inference_steps")
+    mean_denoise = statistics.mean(denoise) if denoise else None
     return {
         "n": len(requests),
+        "steps": steps,
         "load": results.get("load_seconds"),
         "e2e": statistics.mean(r["e2e_seconds"] for r in requests),
         "gen": statistics.mean(generation) if generation else None,
-        "denoise": statistics.mean(denoise) if denoise else None,
+        "denoise": mean_denoise,
+        "denoise_per_step": (mean_denoise / steps) if mean_denoise is not None and steps else None,
     }
 
 
-def _fmt(value: float | None, width: int) -> str:
-    return f"{value:>{width}.1f}" if value is not None else f"{'-':>{width}}"
+def _fmt(value: float | None, width: int, decimals: int = 1) -> str:
+    return f"{value:>{width}.{decimals}f}" if value is not None else f"{'-':>{width}}"
 
 
 def _speedup(dense: dict | None, row: dict, metric: str) -> str:
@@ -496,11 +526,18 @@ def summarize(statuses: list[dict], args: argparse.Namespace) -> None:
     stats = {status["mode"]: _mode_stats(status) for status in statuses if status["mode"] in GENERATION_MODES}
     dense = stats.get("dense")
 
-    print("\n================ H3 DMD 3-step inference: attention backend benchmark ================")
+    if args.dense_native_steps:
+        title = "H3 inference: 50-step-style dense baseline vs few-step DMD VSA"
+        schedule = (f"dense: native {args.dense_native_steps}-step schedule; "
+                    f"vsa: dmd_steps={args.dmd_steps}")
+    else:
+        title = "H3 DMD 3-step inference: attention backend benchmark"
+        schedule = f"dmd_steps={args.dmd_steps}"
+    print(f"\n================ {title} ================")
     print(f"shape={args.height}x{args.width}x{args.num_frames}  gpus={args.num_gpus}  "
-          f"dmd_steps={args.dmd_steps}  vsa sparsity={args.sparsity} ({args.vsa_kernel})")
-    header = (f"{'mode':<12} {'n':>3} {'load(s)':>9} {'mean e2e(s)':>12} {'mean gen(s)':>12} "
-              f"{'mean denoise(s)':>16} {'e2e speedup':>12} {'denoise speedup':>16}")
+          f"{schedule}  vsa sparsity={args.sparsity} ({args.vsa_kernel})")
+    header = (f"{'mode':<12} {'n':>3} {'steps':>6} {'load(s)':>9} {'mean e2e(s)':>12} {'mean gen(s)':>12} "
+              f"{'mean denoise(s)':>16} {'denoise/step(s)':>16} {'e2e speedup':>12} {'denoise speedup':>16}")
     print(header)
     print("-" * len(header))
     for mode in ("dense", "vsa"):
@@ -508,11 +545,13 @@ def summarize(statuses: list[dict], args: argparse.Namespace) -> None:
         row = stats.get(mode)
         if row is None:
             if any(status["mode"] == mode for status in statuses):
-                print(f"{label:<12} {'-':>3} {'-':>9} {'CRASHED':>12} {'-':>12} {'-':>16} {'-':>12} {'-':>16}")
+                print(f"{label:<12} {'-':>3} {'-':>6} {'-':>9} {'CRASHED':>12} {'-':>12} {'-':>16} {'-':>16} "
+                      f"{'-':>12} {'-':>16}")
             continue
-        print(f"{label:<12} {row['n']:>3} {_fmt(row['load'], 9)} {_fmt(row['e2e'], 12)} {_fmt(row['gen'], 12)} "
-              f"{_fmt(row['denoise'], 16)} {_speedup(dense, row, 'e2e'):>12} "
-              f"{_speedup(dense, row, 'denoise'):>16}")
+        steps_text = str(row["steps"]) if row.get("steps") else "-"
+        print(f"{label:<12} {row['n']:>3} {steps_text:>6} {_fmt(row['load'], 9)} {_fmt(row['e2e'], 12)} "
+              f"{_fmt(row['gen'], 12)} {_fmt(row['denoise'], 16)} {_fmt(row['denoise_per_step'], 16, 2)} "
+              f"{_speedup(dense, row, 'e2e'):>12} {_speedup(dense, row, 'denoise'):>16}")
 
     micro = next((status for status in statuses if status["mode"] == "microbench"), None)
     if micro and micro.get("results"):

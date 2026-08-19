@@ -15,6 +15,7 @@ from fastvideo.api import (
     OffloadConfig,
     OutputConfig,
     ParallelismConfig,
+    PipelineSelection,
     SamplingConfig,
 )
 
@@ -36,6 +37,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-gpus", type=int, default=4)
+    parser.add_argument("--vsa-sparsity",
+                        type=float,
+                        default=0.0,
+                        help="Run-level VSA sparsity in [0, 1). Only takes effect with "
+                        "FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3 (the H3 denoising stage "
+                        "reads it when building per-step VSA metadata); set FASTVIDEO_VSA_CUTEDSL=1 "
+                        "to use the FA4 CuTe 256-tile kernels instead of Triton")
     parser.add_argument("--torch-compile", action="store_true", help="torch.compile the DiT transformer path")
     parser.add_argument("--compile-mode",
                         default=None,
@@ -53,9 +61,16 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    experimental: dict[str, float] = {}
+    if args.vsa_sparsity > 0.0:
+        # Same mechanism as examples/inference/minimax_h3/h3_vsa_dmd.py: boot-time
+        # run-level sparsity folded into FastVideoArgs.VSA_sparsity.
+        experimental["VSA_sparsity"] = args.vsa_sparsity
+
     generator = VideoGenerator.from_config(
         GeneratorConfig(
             model_path=args.model_path,
+            pipeline=PipelineSelection(experimental=experimental),
             engine=EngineConfig(
                 num_gpus=args.num_gpus,
                 use_fsdp_inference=args.num_gpus > 1,
