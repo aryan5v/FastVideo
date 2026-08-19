@@ -169,6 +169,40 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         sigma = sigma.to(device=clean.device, dtype=clean.dtype)
         return (1.0 - sigma) * clean + sigma * noise
 
+    def extract_eps(
+        self,
+        noisy_latents: torch.Tensor,
+        clean_latents: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        """Recover the noise a packed state implies, per modality.
+
+        The inverse of :meth:`add_noise` at the same shared timestep: with
+        ``x_t = (1 - sigma_m) x0 + sigma_m eps`` under each modality's
+        shifted sigma (video 12.0, audio 3.0), the implied noise is
+        ``eps_m = (x_t - (1 - sigma_m) x0) / sigma_m``. DMD2's ODE renoise
+        uses this to step a carried trajectory deterministically between
+        grid rungs.
+        """
+        sigma_video, sigma_audio = self._noise_amounts(timestep)
+        noisy_video, noisy_audio = self.unpack_latents(noisy_latents)
+        clean_video, clean_audio = self.unpack_latents(clean_latents)
+        return self.pack_latents(
+            self._unmix(noisy_video, clean_video, sigma_video),
+            self._unmix(noisy_audio, clean_audio, sigma_audio),
+        )
+
+    @staticmethod
+    def _unmix(
+        noisy: torch.Tensor,
+        clean: torch.Tensor,
+        sigma: torch.Tensor,
+    ) -> torch.Tensor:
+        sigma = sigma.to(device=noisy.device, dtype=noisy.dtype)
+        # The DMD grid never renoises from t=0, but clamp so a degenerate
+        # call cannot divide by zero.
+        return (noisy - (1.0 - sigma) * clean) / sigma.clamp_min(1e-6)
+
     def predict_noise(
         self,
         noisy_latents: torch.Tensor,

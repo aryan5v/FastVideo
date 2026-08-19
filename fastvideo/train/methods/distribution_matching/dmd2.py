@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 import torch
@@ -55,6 +56,12 @@ class DMD2Method(TrainingMethod):
             raise ValueError("DMD2Method requires critic to be trainable")
         self._cfg_uncond = self._parse_cfg_uncond()
         self._rollout_mode = self._parse_rollout_mode()
+        (
+            self._rollout_carry,
+            self._rollout_carry_slot_count,
+            self._rollout_sample_type,
+        ) = self._parse_rollout_carry()
+        self._init_rollout_carry_state()
         self._validate_preprocessed_data_type()
         self._configure_student_negative_conditioning()
         self._denoising_step_list: torch.Tensor | None = (None)
@@ -94,6 +101,9 @@ class DMD2Method(TrainingMethod):
             dict[str, Any],
             dict[str, LogScalar],
     ]:
+        if self._rollout_carry:
+            return self._carried_train_step(batch, iteration)
+
         latents_source: Literal["data", "zeros"] = "data"
         if self._rollout_mode == "simulate":
             latents_source = "zeros"
@@ -248,6 +258,163 @@ class DMD2Method(TrainingMethod):
         raise ValueError("method_config.rollout_mode must be one of "
                          "{simulate, data_latent}, got "
                          f"{raw!r}")
+
+    def _parse_rollout_carry(self) -> tuple[bool, int, Literal["ode", "sde"]]:
+        """Parse the carried backward-simulation knobs.
+
+        ``rollout_carry: true`` walks the student's own sampling grid one
+        rung per ``single_train_step`` call, carrying the trajectory in
+        memory across calls (FastGen's backward simulation): exactly one
+        generation forward per call instead of one full-grid walk. Off
+        (default) keeps the existing full-rollout behavior unchanged.
+
+        ``rollout_carry_slots`` is the number of independent trajectory
+        streams per rank; it must equal
+        ``training.loop.gradient_accumulation_steps`` because the trainer
+        calls ``single_train_step`` once per accumulation round and the
+        slots are selected round-robin over calls. Defaults to that value.
+
+        ``rollout_sample_type`` picks how the walk re-noises onto the next
+        rung: ``sde`` draws fresh noise (the existing rollout behavior),
+        ``ode`` reuses the noise the current state implies per modality —
+        the deterministic step the FastGen H3 recipe uses.
+        """
+        raw_carry = self.method_config.get("rollout_carry", None)
+        if raw_carry is None:
+            raw_carry = False
+        if not isinstance(raw_carry, bool):
+            raise ValueError("method.rollout_carry must be a bool, got "
+                             f"{type(raw_carry).__name__}")
+        carry = bool(raw_carry)
+
+        raw_sample_type = self.method_config.get("rollout_sample_type", None)
+        sample_type: Literal["ode", "sde"] = "sde"
+        if raw_sample_type is not None:
+            if not isinstance(raw_sample_type, str):
+                raise ValueError("method.rollout_sample_type must be a "
+                                 "string, got "
+                                 f"{type(raw_sample_type).__name__}")
+            normalized = raw_sample_type.strip().lower()
+            if normalized not in ("ode", "sde"):
+                raise ValueError("method.rollout_sample_type must be one of "
+                                 f"{{ode, sde}}, got {raw_sample_type!r}")
+            if not carry:
+                raise ValueError("method.rollout_sample_type requires "
+                                 "method.rollout_carry: true")
+            sample_type = normalized  # type: ignore[assignment]
+
+        slots_raw = get_optional_int(
+            self.method_config,
+            "rollout_carry_slots",
+            where="method.rollout_carry_slots",
+        )
+        if not carry:
+            if slots_raw is not None:
+                raise ValueError("method.rollout_carry_slots requires "
+                                 "method.rollout_carry: true")
+            return False, 0, sample_type
+
+        if self._rollout_mode != "simulate":
+            raise ValueError("method.rollout_carry: true requires "
+                             "method.rollout_mode: simulate")
+
+        grad_accum = max(
+            1,
+            int(self.training_config.loop.gradient_accumulation_steps or 1),
+        )
+        slots = grad_accum if slots_raw is None else int(slots_raw)
+        if slots <= 0:
+            raise ValueError("method.rollout_carry_slots must be positive, "
+                             f"got {slots}")
+        if slots != grad_accum:
+            # The trainer calls single_train_step once per accumulation round
+            # without passing the round index; the round-robin slot selection
+            # only matches the trainer's cadence when the counts agree.
+            raise ValueError("method.rollout_carry_slots must equal "
+                             "training.loop.gradient_accumulation_steps, got "
+                             f"slots={slots} vs "
+                             f"gradient_accumulation_steps={grad_accum}")
+
+        if sample_type == "ode" and not callable(getattr(self.student, "extract_eps", None)):
+            raise ValueError("method.rollout_sample_type: ode requires the "
+                             "student model to implement "
+                             "extract_eps(noisy_latents, clean_latents, "
+                             "timestep)")
+
+        _, stagger_groups = self._rollout_carry_rank_world()
+        self._validate_rollout_carry_coverage(
+            streams=stagger_groups * slots,
+            grid_len=self._rollout_grid_length(),
+            interval=self._generator_update_interval(),
+        )
+        return True, slots, sample_type
+
+    @staticmethod
+    def _validate_rollout_carry_coverage(
+        *,
+        streams: int,
+        grid_len: int,
+        interval: int,
+    ) -> None:
+        """Reject configurations that leave student rungs untrained.
+
+        Student updates revisit a stream's rung modulo
+        ``gcd(len(dmd_denoising_steps), generator_update_interval)``, so
+        every residue class must be represented by a (rank, slot) stream;
+        the consecutive stagger offsets cover all classes exactly when
+        there are at least ``gcd`` streams.
+        """
+        phase_classes = math.gcd(grid_len, interval)
+        if streams < phase_classes:
+            raise ValueError("Carried backward-simulation DMD2 cannot cover every student "
+                             f"rung with len(dmd_denoising_steps)={grid_len}, "
+                             f"generator_update_interval={interval}, and "
+                             f"{streams} trajectory stream(s) (stagger groups x slots). "
+                             "Student updates preserve the rung modulo "
+                             f"gcd(grid, interval)={phase_classes}, but only {streams} "
+                             "stream phase(s) are present. Use at least that many "
+                             "rank-slot streams or choose a coprime update interval.")
+
+    def _rollout_carry_rank_world(self) -> tuple[int, int]:
+        """Stagger rank and stream-group count for the carried rollout.
+
+        Mirrors ``TrainingMethod.on_train_start``'s RNG grouping: ranks
+        inside one sequence-parallel group shard the same document and must
+        walk one shared trajectory, so they share a stagger rank (with
+        ``sp_size=1`` this is exactly the global rank). Falls back to a
+        single group when the distributed world is not initialized (CPU
+        tests, single-process runs).
+        """
+        try:
+            from fastvideo.distributed import get_world_group
+            world_group = get_world_group()
+            global_rank = int(world_group.rank)
+            world_size = int(world_group.world_size)
+        except (AssertionError, ImportError, RuntimeError):
+            global_rank, world_size = 0, 1
+        sp_size = max(
+            1,
+            int(getattr(self.training_config.distributed, "sp_size", 1) or 1),
+        )
+        return global_rank // sp_size, max(1, world_size // sp_size)
+
+    def _rollout_grid_length(self) -> int:
+        raw = self.method_config.get("dmd_denoising_steps", None)
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("method_config.dmd_denoising_steps must "
+                             "be set for DMD2 distillation")
+        return len(raw)
+
+    def _init_rollout_carry_state(self) -> None:
+        # Transient in-memory trajectory state: one independent slot per
+        # gradient-accumulation round, selected round-robin over calls.
+        # Intentionally never checkpointed (mirrors FastGen's CarryCallback):
+        # on resume every slot restarts from fresh noise — a brief warmup
+        # until the walk is mid-trajectory again.
+        slots = max(0, int(self._rollout_carry_slot_count))
+        self._carry_call_count = 0
+        self._carry_slots: list[dict[str, Any] | None] = [None] * slots
+        self._carry_slot_seeded: list[bool] = [False] * slots
 
     def _validate_preprocessed_data_type(self) -> None:
         data_type = str(getattr(
@@ -413,10 +580,7 @@ class DMD2Method(TrainingMethod):
             if hasattr(scheduler, "base_lrs"):
                 scheduler.base_lrs = [lr] * len(scheduler.base_lrs)
 
-    def _should_update_student(
-        self,
-        iteration: int,
-    ) -> bool:
+    def _generator_update_interval(self) -> int:
         interval = get_optional_int(
             self.method_config,
             "generator_update_interval",
@@ -426,7 +590,13 @@ class DMD2Method(TrainingMethod):
             interval = 5
         if interval <= 0:
             raise ValueError("method.generator_update_interval must be positive")
-        return iteration % interval == 0
+        return interval
+
+    def _should_update_student(
+        self,
+        iteration: int,
+    ) -> bool:
+        return iteration % self._generator_update_interval() == 0
 
     def _get_denoising_step_list(
         self,
@@ -716,6 +886,304 @@ class DMD2Method(TrainingMethod):
 
         batch.dmd_latent_vis_dict["generator_timestep"] = target_timestep.float().detach()
         return pred_x0
+
+    # ------------------------------------------------------------------
+    # Carried backward simulation — the student's own trajectory, walked
+    # one rung per single_train_step call (port of FastGen's
+    # _backward_simulation / _staggered_start / _advance_carry).
+    # ------------------------------------------------------------------
+
+    def _carried_train_step(
+        self,
+        batch: dict[str, Any],
+        iteration: int,
+    ) -> tuple[
+            dict[str, torch.Tensor],
+            dict[str, Any],
+            dict[str, LogScalar],
+    ]:
+        """One backward-simulation call: one generation forward, carried state.
+
+        A multistep student is only ever correct on its own sampling
+        trajectory, and walking the full grid every call costs
+        ``len(dmd_denoising_steps)`` forwards. Instead the walk is spread
+        over consecutive calls: each call pays for exactly one student
+        forward at the carried rung, both phases (student and critic)
+        consume it — the critic is fit on the same simulated states the
+        student trains on — and both advance the trajectory. Each
+        grad-accum round owns an independent slot, selected round-robin
+        because the trainer does not pass the round index.
+
+        An empty slot (first ever use, cleared after a finished trajectory,
+        or after a resume — the carry is transient and never checkpointed)
+        starts a fresh trajectory from noise and adopts the incoming loader
+        batch's conditioning; mid-walk calls ignore the fresh loader batch
+        and rebuild the training batch from the carried raw batch, since a
+        trajectory keeps the prompt it set out with.
+        """
+        slot = self._carry_call_count % self._rollout_carry_slot_count
+        self._carry_call_count += 1
+
+        carried = self._carry_slots[slot]
+        raw_batch = (self._carry_snapshot_raw_batch(batch) if carried is None else carried["raw_batch"])
+
+        training_batch = self.student.prepare_batch(
+            raw_batch,
+            generator=self.cuda_generator,
+            latents_source="zeros",
+        )
+        latents = training_batch.latents
+        device = latents.device
+        step_list = self._get_denoising_step_list(device)
+
+        if carried is None:
+            rung = 0
+            state = torch.randn(
+                latents.shape,
+                device=device,
+                dtype=latents.dtype,
+                generator=self.cuda_generator,
+            )
+            # Stagger only the first-ever fill of each slot; later fresh
+            # starts begin at rung 0 with no pre-walk and stay out of phase
+            # naturally.
+            if not self._carry_slot_seeded[slot]:
+                self._carry_slot_seeded[slot] = True
+                state, rung = self._staggered_start(
+                    state,
+                    training_batch,
+                    step_list,
+                    slot,
+                )
+        else:
+            rung = int(carried["rung"])
+            state = carried["state"]
+
+        timestep = step_list[rung] * torch.ones(
+            1,
+            device=device,
+            dtype=torch.long,
+        )
+
+        update_student = self._should_update_student(iteration)
+
+        generator_loss = torch.zeros((), device=device, dtype=torch.float32)
+        fake_score_loss = torch.zeros_like(generator_loss)
+        student_ctx = None
+        critic_ctx = None
+        critic_outputs: dict[str, Any] = {}
+        generator_metrics: dict[str, LogScalar] = {}
+        critic_metrics: dict[str, LogScalar] = {}
+        if update_student:
+            generator_pred_x0 = self.student.predict_x0(
+                state,
+                timestep,
+                training_batch,
+                conditional=True,
+                cfg_uncond=self._cfg_uncond,
+                attn_kind="vsa",
+            )
+            student_ctx = (
+                training_batch.timesteps,
+                training_batch.attn_metadata_vsa,
+            )
+            generator_loss, generator_metrics = self._dmd_loss(generator_pred_x0, training_batch)
+            training_batch.dmd_latent_vis_dict["generator_pred_video"] = generator_pred_x0.detach()
+        else:
+            with torch.no_grad():
+                generator_pred_x0 = self.student.predict_x0(
+                    state,
+                    timestep,
+                    training_batch,
+                    conditional=True,
+                    cfg_uncond=self._cfg_uncond,
+                    attn_kind="vsa",
+                )
+            (
+                fake_score_loss,
+                critic_ctx,
+                critic_outputs,
+                critic_metrics,
+            ) = self._critic_flow_matching_loss(
+                training_batch,
+                generator_pred_x0=generator_pred_x0,
+            )
+        training_batch.dmd_latent_vis_dict["generator_timestep"] = timestep.float().detach()
+
+        # Advance after the loss path: both phases generated, so both hand
+        # the trajectory on.
+        self._advance_carry(
+            slot,
+            state,
+            generator_pred_x0,
+            timestep,
+            rung,
+            step_list,
+            raw_batch,
+        )
+
+        total_loss = generator_loss + fake_score_loss
+        loss_map = {
+            "total_loss": total_loss,
+            "generator_loss": generator_loss,
+            "fake_score_loss": fake_score_loss,
+        }
+        outputs: dict[str, Any] = dict(critic_outputs)
+        outputs["_fv_backward"] = {
+            "update_student": update_student,
+            "student_ctx": student_ctx,
+            "critic_ctx": critic_ctx,
+        }
+        metrics: dict[str, LogScalar] = {
+            "update_student": float(update_student),
+            "rollout_step": float(rung),
+            **generator_metrics,
+            **critic_metrics,
+        }
+        # Rank-local latent snapshots for LatentVisCallback.
+        self.latent_vis = {
+            **(training_batch.fake_score_latent_vis_dict or {}),
+            **(training_batch.dmd_latent_vis_dict or {}),
+        }
+        return loss_map, outputs, metrics
+
+    def _carry_snapshot_raw_batch(
+        self,
+        batch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adopt the incoming loader batch as a trajectory's conditioning.
+
+        A trajectory keeps the prompt it set out with for its whole walk,
+        so the raw dict is snapshotted (tensors detached and kept on the
+        student device) and mid-walk calls rebuild the training batch from
+        it via ``prepare_batch``; H3's ``prepare_batch`` reads the dict
+        without mutating it and rebuilds the packed layout and VSA
+        attention metadata deterministically on every call.
+        """
+        device = self.student.device
+        snapshot: dict[str, Any] = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                snapshot[key] = value.detach().to(device)
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    def _staggered_start(
+        self,
+        state: torch.Tensor,
+        training_batch: Any,
+        step_list: torch.Tensor,
+        slot: int,
+    ) -> tuple[torch.Tensor, int]:
+        """Pre-walk a fresh trajectory and snapshot it at this stream's rung.
+
+        First-ever fill of a slot only. Each (rank, slot) stream starts at
+        ``(stagger_rank * slots + slot) % len(grid)``, spreading the
+        streams evenly across the grid so student updates (which revisit
+        rungs modulo ``gcd(len(grid), generator_update_interval)``) see
+        every rung. Every rank walks the whole grid under ``no_grad``
+        regardless of its offset so the FSDP forwards issue a uniform
+        collective count — a rank-dependent count would desynchronize the
+        all-gathers and hang; only the kept snapshot differs per rank.
+        """
+        rank, _ = self._rollout_carry_rank_world()
+        grid_len = len(step_list)
+        offset = (rank * self._rollout_carry_slot_count + slot) % grid_len
+        device = state.device
+        snapshot = state
+        with torch.no_grad():
+            for rung in range(grid_len - 1):
+                timestep = step_list[rung] * torch.ones(
+                    1,
+                    device=device,
+                    dtype=torch.long,
+                )
+                pred_x0 = self.student.predict_x0(
+                    state,
+                    timestep,
+                    training_batch,
+                    conditional=True,
+                    cfg_uncond=self._cfg_uncond,
+                    attn_kind="vsa",
+                )
+                state = self._renoise(
+                    state,
+                    pred_x0.detach(),
+                    timestep,
+                    rung + 1,
+                    step_list,
+                )
+                if rung + 1 == offset:
+                    snapshot = state
+        return snapshot, offset
+
+    def _renoise(
+        self,
+        state: torch.Tensor,
+        pred_x0: torch.Tensor,
+        timestep: torch.Tensor,
+        next_rung: int,
+        step_list: torch.Tensor,
+    ) -> torch.Tensor:
+        """Re-noise an x0 prediction made at ``timestep`` onto the next rung.
+
+        ``sde`` draws fresh noise — the existing full-rollout hop.
+        ``ode`` reuses the noise the current state implies per modality
+        (``eps_m = (x_t - alpha_m(t) x0) / sigma_m(t)`` with each
+        modality's shifted sigma, via the adapter's ``extract_eps``), the
+        deterministic step the FastGen H3 recipe uses.
+        """
+        device = state.device
+        next_timestep = step_list[next_rung] * torch.ones(
+            1,
+            device=device,
+            dtype=torch.long,
+        )
+        if self._rollout_sample_type == "ode":
+            eps = self.student.extract_eps(state, pred_x0, timestep)
+        else:
+            eps = torch.randn(
+                state.shape,
+                device=device,
+                dtype=pred_x0.dtype,
+                generator=self.cuda_generator,
+            )
+        return self.student.add_noise(pred_x0, eps, next_timestep)
+
+    def _advance_carry(
+        self,
+        slot: int,
+        state: torch.Tensor,
+        generator_pred_x0: torch.Tensor,
+        timestep: torch.Tensor,
+        rung: int,
+        step_list: torch.Tensor,
+        raw_batch: dict[str, Any],
+    ) -> None:
+        """Hand the one paid-for step to the slot, or clear a finished walk.
+
+        The advanced state is detached and produced under ``no_grad``: it
+        feeds a later call, not a gradient path. Walking past the last rung
+        ends the trajectory (the terminal clean sample is never trained
+        on), so the slot empties and the next call starts fresh at rung 0.
+        """
+        if rung + 1 >= len(step_list):
+            self._carry_slots[slot] = None
+            return
+        with torch.no_grad():
+            next_state = self._renoise(
+                state,
+                generator_pred_x0.detach(),
+                timestep,
+                rung + 1,
+                step_list,
+            )
+        self._carry_slots[slot] = {
+            "state": next_state.detach(),
+            "rung": rung + 1,
+            "raw_batch": raw_batch,
+        }
 
     def _critic_flow_matching_loss(
         self,
