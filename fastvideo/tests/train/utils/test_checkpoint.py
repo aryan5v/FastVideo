@@ -34,12 +34,20 @@ def _make_checkpoint_dir(
     step: int,
     *,
     with_dcp: bool = True,
+    with_metadata: bool = True,
 ) -> Path:
-    """Create a fake ``checkpoint-<step>/dcp`` directory tree."""
+    """Create a fake ``checkpoint-<step>/dcp`` directory tree.
+
+    ``dcp/.metadata`` is dcp.save's completion marker (written last);
+    ``_find_latest_checkpoint`` requires it, so a complete fake checkpoint
+    must include it. ``with_metadata=False`` fakes a crashed mid-write save.
+    """
     ckpt_dir = output_dir / f"checkpoint-{step}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     if with_dcp:
         (ckpt_dir / "dcp").mkdir(exist_ok=True)
+        if with_metadata:
+            (ckpt_dir / "dcp" / ".metadata").touch()
     return ckpt_dir
 
 
@@ -142,6 +150,16 @@ def test_find_latest_skips_dirs_without_dcp_subdir(tmp_path: Path) -> None:
     # checkpoint-10 is "corrupted" — has no dcp/ subdir, must be skipped.
     _make_checkpoint_dir(tmp_path, 10, with_dcp=False)
     _make_checkpoint_dir(tmp_path, 5, with_dcp=True)
+    latest = _find_latest_checkpoint(tmp_path)
+    assert latest is not None
+    assert latest.name == "checkpoint-5"
+
+
+def test_find_latest_skips_incomplete_dcp_save(tmp_path: Path) -> None:
+    # checkpoint-10 crashed mid-save — dcp/ exists but .metadata (written
+    # last by dcp.save) does not; resuming from it would fail at boot.
+    _make_checkpoint_dir(tmp_path, 10, with_metadata=False)
+    _make_checkpoint_dir(tmp_path, 5)
     latest = _find_latest_checkpoint(tmp_path)
     assert latest is not None
     assert latest.name == "checkpoint-5"
