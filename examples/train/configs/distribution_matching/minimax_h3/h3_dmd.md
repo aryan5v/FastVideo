@@ -116,6 +116,37 @@ computed in FP32 with a `1e-6` floor, and the uniform integer score sampler draw
 inside its configured bounds instead of clamping out-of-range samples onto the
 endpoints.
 
+## Regional torch.compile (ported 2026-08-19, opt-in, v7 stays eager)
+
+Port of the (still-open) upstream PR hao-ai-lab/FastVideo#1718:
+`training.model.enable_torch_compile: true` regionally compiles the
+`_compile_conditions` blocks (H3: main + refiner blocks) with
+`fullgraph=True` + `emulate_precision_casts` after FSDP setup. Upstream
+measured -27% steady-state step latency on a 4x GB200 Wan DMD2 run with
+FA4. Nothing changes while the flag is off (the default); v7 production
+configs do not set it.
+
+H3-specific state and follow-ups before enabling it on a real run:
+
+- A VSA-backed role (`VIDEO_SPARSE_ATTN[_H3]`) is auto-skipped with a
+  warning (Triton kernels + SP all-to-alls + the sync metadata guard are
+  not fullgraph-traceable); dense FLASH_ATTN/FA4 roles — the DMD2
+  teacher/critic — are the compile candidates.
+- H3 keeps its post-FSDP activation-checkpoint ordering (upstream moved
+  Wan's AC pre-FSDP via `pre_fsdp_transform`). Compile then wraps the
+  FSDP block forward inside the later AC wrapper — functional, but not
+  the upstream-tested ordering. Before switching H3 to pre-FSDP AC:
+  the loader's name-keyed paths are already AC-prefix-canonicalized, but
+  the shard-cache load path and the loader's first-parameter dtype assert
+  are not verified under AC-prefixed `named_parameters()`.
+- Wan's compiled-modulation gradient corruption (fixed upstream with
+  opaque modulation ops) is a warning shot: H3's factorized AdaLN has an
+  analogous chunked-modulation pattern. Before trusting a compiled H3
+  run, A/B critic/student grad norms against eager for one step, like the
+  upstream PR did.
+- Upstream PR #1718 is unmerged (CI/review pending); re-diff against the
+  merged version when it lands.
+
 ## Verification
 
 CPU contracts cover cadence, optimizer/resume selection, FP32 group policy,
