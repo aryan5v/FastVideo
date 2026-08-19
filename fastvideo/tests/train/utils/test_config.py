@@ -89,6 +89,7 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
 
     assert t.dit_precision == "fp32"
     assert t.vsa_sparsity == 0.0
+    assert t.vsa_tile_size == 256
     assert t.pipeline_config is None
 
 
@@ -137,7 +138,8 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
             "run_name": "myrun",
         },
         "vsa": {
-            "sparsity": 0.5
+            "sparsity": 0.5,
+            "tile_size": 64,
         },
         "model": {
             "weighting_scheme": "logit_normal",
@@ -179,6 +181,7 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.tracker.project_name == "myproj"
 
     assert t.vsa_sparsity == pytest.approx(0.5)
+    assert t.vsa_tile_size == 64
     assert t.model.weighting_scheme == "logit_normal"
     assert t.model.precondition_outputs is True
     assert t.model.enable_torch_compile is True
@@ -195,6 +198,13 @@ def test_missing_models_raises(tmp_path: Path) -> None:
     data = _minimal_yaml()
     del data["models"]
     with pytest.raises(ValueError, match="models"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_invalid_vsa_tile_size_raises(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"vsa": {"tile_size": 128}}
+    with pytest.raises(ValueError, match="training.vsa.tile_size must be 64 or 256"):
         load_run_config(_write_yaml(tmp_path, data))
 
 

@@ -343,6 +343,7 @@ class MiniMaxH3Model(ModelBase):
             VSA_sparsity=float(self.training_config.vsa_sparsity),
             prefix_segments=_h3_vsa_prefix_segments(layout, patch_size),
             device=self.device,
+            tile_size=int(self.training_config.vsa_tile_size),
         )
 
     def add_noise(

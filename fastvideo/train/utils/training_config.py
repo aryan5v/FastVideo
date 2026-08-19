@@ -102,6 +102,12 @@ class TrainingConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     vsa_sparsity: float = 0.0
+    # Tokens per sparse-attention tile for the VSA student. 256 (default)
+    # keeps the (4,8,8) tiles and today's VSA-256 CuTe/Triton routing; 64
+    # selects (4,4,4) tiles on the native 64-token Triton block-sparse
+    # kernels (forward and backward). Consumed by the VSA-H3 (MiniMax H3)
+    # backend; Wan's VSA path ignores it.
+    vsa_tile_size: int = 256
     # Reuse the per-step padded VSA tile buffer across attention layers.
     # Defaults to False for training: under full activation checkpointing the
     # cached buffer survives into the backward recompute and inflates peak

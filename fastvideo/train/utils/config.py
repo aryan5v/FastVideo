@@ -382,6 +382,10 @@ def _build_training_config(
                          "{'t2v', 't2va', 'text_only'}, got "
                          f"{preprocessed_data_type!r}")
 
+    vsa_tile_size = int(vs.get("tile_size", 256) or 256)
+    if vsa_tile_size not in (64, 256):
+        raise ValueError(f"training.vsa.tile_size must be 64 or 256, got {vsa_tile_size!r}")
+
     return TrainingConfig(
         distributed=DistributedConfig(
             num_gpus=num_gpus,
@@ -432,6 +436,7 @@ def _build_training_config(
             run_name=str(tr.get("run_name", "") or ""),
         ),
         vsa_sparsity=float(vs.get("sparsity", 0.0) or 0.0),
+        vsa_tile_size=vsa_tile_size,
         vsa_cache_tile_buf=bool(vs.get("cache_tile_buf", False) or False),
         model=ModelTrainingConfig(
             weighting_scheme=str(m.get("weighting_scheme", "uniform") or "uniform"),
