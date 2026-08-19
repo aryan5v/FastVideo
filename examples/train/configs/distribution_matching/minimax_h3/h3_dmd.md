@@ -23,14 +23,27 @@ parity.
 
 ## Current recipe
 
-The recommended config is `dmd2_sp1_fsdp40_vidprom_v7_vsa90.yaml` (v6 recipe
-+ per-modality critic space + VSA-H3 student at 90% sparsity; teacher/critic
-stay dense). `_v6` is retained as the dense-student recipe; the config
-without a suffix is the earlier alternative. v7 is a fresh lineage: v6's
-audio did not recover post-hoc from the global-x0 critic bug, and the VSA
-student changes the attention contract — do not resume v6 checkpoints.
-The current config uses a fresh `_v6_fp32_compute` run directory; do not point
-it at checkpoints created before the cadence and FSDP precision changes.
+The recommended config is `dmd2_sp1_fsdp40_vidprom_v8_bwdsim_vsa64.yaml` —
+the FastGen-parity recipe (gold standard: NVIDIA-internal `fastgen` @
+`jberner/h3_new`, `configs/experiments/MiniMaxH3/config_dmd2.py`) with a
+VSA-H3 student at 64-token tiles. v8 is a fresh lineage: the carried-walk
+rollout, 4-step grid, and 64-token attention contract all differ from v7 —
+do not resume v7 checkpoints. `_v7_vsa90` is retained as the pre-parity
+256-tile recipe; `_v6` as the dense-student recipe.
+
+### v8 ↔ FastGen h3_new mapping
+
+| FastGen (gold standard) | Ours (v8) |
+|---|---|
+| `backward_simulation: true` + `CarryCallback` (per-accum-slot carry) | `method.rollout_carry: true`, `rollout_carry_slots = grad-accum steps`; carry lives on the method instance, transient across resumes |
+| One generation forward per iteration; both phases advance the walk; staggered rank starts (uniform no-grad pre-walk) | Same semantics, offset `(rank·slots + slot) % 4` |
+| `student_sample_steps: 4`, `t_list = f_12(linspace(0.999, 0, 5))`, `student_sample_type: ode` | `dmd_denoising_steps: [999, 749, 500, 250]` in base-t (identical noise levels; the adapter applies the 12/3 shifts), `rollout_sample_type: ode` |
+| Score draw `time_dist_type: shifted`, shift 5.0 on video's clock | `score_timestep_shift: 2.4` (our knob draws `tau = f_{1/s}(U)`; `f_{1/2.4} = f_{5/12}` reproduces `t = f_5(U)` on the shift-12 clock exactly) |
+| `fake_score_pred_type: x0` (both modalities; the shifted draw keeps sigma_audio in range) | `fake_score_loss_space: x0` (global — supersedes v7's `{video: x0, audio: velocity}` patch) |
+| lr `1e-6` both roles; AdamW `(0.9, 0.999)`, wd `0.01`; student clip 1, critic unclipped | Same lrs/AdamW; clip `1.0` applies to whichever role steps (critic norms ~0.1, the clip is slack — accepted deviation) |
+| `precision_fsdp: float32` | FP32 masters + FP32 module groups (already ours) |
+| Prod shape 768×1344 @ 345 frames; validation every 50 | Kept ours: 768×1344 @ 124 frames; validation every 100 on held-out synth64, 4-step sampling (accepted deviations) |
+| Dense student | VSA-H3 student, sparsity 0.9 at **64-token (4,4,4) tiles**, native Triton fwd+bwd (fixed-kernel overlay), no 256 remap; teacher/critic dense (our addition) |
 
 | Area | Current setting |
 |---|---|

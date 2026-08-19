@@ -1,0 +1,170 @@
+# v8: FastGen h3_new parity (gold standard: fastgen @ jberner/h3_new,
+# configs/experiments/MiniMaxH3/config_dmd2.py) + VSA-H3 student at 64-token
+# tiles. Fresh lineage — the carried-trajectory rollout, 4-step grid, and
+# 64-token attention contract all differ from v7; do not resume v7 checkpoints.
+#
+# Ported from the standard:
+#  - Backward simulation with cross-iteration carry: the student walks its own
+#    4-step sampling grid one rung per call (1 generation forward instead of a
+#    full rollout), per-accum-slot carry, staggered rank phases, ODE re-noising.
+#    Critic fits on the same simulated states.
+#  - 4-step student grid = the release sampler's shift-12 clock. In base-t:
+#    [999, 749, 500, 250] (FastGen: time_shift(linspace(0.999, 0, 5), 12)).
+#  - Shifted score-t draw: FastGen draws t = f_5(U) on video's clock, which in
+#    our base-t parameterization is tau = f_{5/12}(U); our knob draws
+#    tau = f_{1/s}(U), so s = 12/5 = 2.4.
+#  - Critic regression in x0 space for BOTH modalities (the shifted draw keeps
+#    audio's sigma in range; supersedes v7's per-modality {x0, velocity} patch).
+#  - lr 1e-6 (student and critic), grad clip 1.0 (FastGen clips the student at
+#    1 and leaves the critic unclipped; our callback clips the stepping model,
+#    so the critic also sees 1.0 — its grad norms run ~0.1, the clip is slack).
+# Kept ours (deliberate deviations): 768x1344 @ 124 frames (FastGen prod runs
+# 345-frame full length), validation every 100 on the held-out synth64,
+# max_train_steps 4000, VSA student (FastGen trains dense).
+# See h3_dmd.md for the full v8 rationale and the FastGen mapping table.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: FLASH_ATTN
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: FLASH_ATTN
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  # Backward simulation with cross-iteration carry (FastGen h3_new port).
+  rollout_carry: true
+  # One independent trajectory stream per grad-accum slot; must equal
+  # training.loop.gradient_accumulation_steps.
+  rollout_carry_slots: 2
+  # Deterministic re-noising along the walk (FastGen: student_sample_type ode).
+  rollout_sample_type: ode
+  generator_update_interval: 5
+  # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
+  real_score_guidance_scale: 1.0
+  # 4-step grid on the release sampler's clock (see header).
+  dmd_denoising_steps: [999, 749, 500, 250]
+  # Score supervision drawn as tau = f_{1/2.4}(U): equals FastGen's shifted
+  # draw f_5(U) on video's shift-12 clock.
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  # x0 space for both modalities (FastGen standard; see header).
+  fake_score_loss_space: x0
+  cfg_uncond:
+    text: zero
+
+  fake_score_learning_rate: 1.0e-6
+  fake_score_betas: [0.9, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 40
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 40
+
+  data:
+    # Combined prompt set (~258k, globally shuffled by the seeded sampler):
+    # 9,936 synth h3-t2va-condition-v1 (10k minus the 64 validation holdouts)
+    # + 248,041 VidProM release prompts. With the carried walk, a fresh prompt
+    # is consumed only when a trajectory starts (1 in 4 calls); the rest are
+    # skipped by design (FastGen semantics: a trajectory keeps its prompt).
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only_train
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 768
+    num_width: 1344
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    # Global batch 64 on 8 trays: 32 DP x batch 1 x accum 2.
+    gradient_accumulation_steps: 2
+
+  checkpoint:
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v8_bwdsim_vsa64
+    # Requeues resume the newest complete checkpoint in this directory.
+    # The rollout carry is transient: a resume restarts every trajectory
+    # stream from fresh noise (brief warmup, by design — FastGen parity).
+    resume_from_checkpoint: latest
+    training_state_checkpointing_steps: 100
+    checkpointing_start_step: 500
+    checkpoints_total_limit: 4
+
+  tracker:
+    project_name: h3-dmd2-vsa
+    run_name: dmd2_sp1_vidprom_v8_bwdsim_vsa64
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+
+  # FP32 sharded master weights; the trainer verifies them at startup.
+  dit_precision: fp32
+  # Student-only sparse attention (VSA-H3) at 64-token (4,4,4) tiles: native
+  # Triton forward+backward (fixed-kernel overlay), no 256-tile remap.
+  vsa:
+    sparsity: 0.9
+    tile_size: 64
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  latent_vis:
+    _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
+    # Decode rank 0's generator, teacher, and critic x0 estimates.
+    every_steps: 100
+    fps: 24
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    # 64 prompts sampled (seed 0) from the synthetic 10k and REMOVED from the
+    # training split above; disjointness verified against both training roots.
+    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
+    every_steps: 100
+    run_at_start: true
+    # Match the 4-step student grid.
+    sampling_steps: [4]
+    guidance_scale: 1.0
+    num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false
