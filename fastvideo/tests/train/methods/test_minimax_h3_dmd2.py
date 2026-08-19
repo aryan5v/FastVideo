@@ -24,7 +24,7 @@ from fastvideo.train.utils.config import load_run_config
 
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd2_min.yaml"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml")
+_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v8_bwdsim_vsa64.yaml")
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -80,6 +80,7 @@ def _tiny_training_config():
         ),
         distributed=SimpleNamespace(sp_size=1),
         vsa_sparsity=0.0,
+        vsa_tile_size=256,
     )
 
 
@@ -367,6 +368,7 @@ def test_prepare_batch_builds_vsa_h3_metadata(monkeypatch: pytest.MonkeyPatch) -
     """The VSA-H3 role gets real packed-sequence metadata; dense view stays None."""
     tc = _tiny_training_config()
     tc.vsa_sparsity = 0.35
+    tc.vsa_tile_size = 256
     model = _make_model(monkeypatch, tc)
     model.attention_backend = AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
 
@@ -486,11 +488,16 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert config["models"]["critic"]["trainable"] is True
     assert method["_target_"] == ("fastvideo.train.methods.distribution_matching.dmd2.DMD2Method")
     assert method["rollout_mode"] == "simulate"
+    assert method["rollout_carry"] is True
+    assert (method["rollout_carry_slots"] == training["loop"]["gradient_accumulation_steps"])
+    assert method["rollout_sample_type"] == "ode"
     assert method["generator_update_interval"] == 5
     assert method["real_score_guidance_scale"] == 1.0
-    assert method["dmd_denoising_steps"] == [1000, 667, 333]
+    # FastGen h3_new grid: time_shift(linspace(0.999, 0, 5), 12) in base time.
+    assert method["dmd_denoising_steps"] == [999, 749, 500, 250]
     assert "warp_denoising_step" not in method
-    assert method["score_timestep_shift"] == 1.0
+    # f_{1/2.4} == f_{5/12}: FastGen's shifted draw f_5(U) on the shift-12 clock.
+    assert method["score_timestep_shift"] == 2.4
     assert method["min_timestep_ratio"] == 0.001
     assert method["max_timestep_ratio"] == 0.999
     assert method["fake_score_loss_space"] == "x0"
@@ -500,12 +507,16 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert method["fake_score_lr_scheduler"] == "constant"
     assert training["optimizer"]["betas"] == [0.9, 0.999]
     assert training["dit_precision"] == "fp32"
-    assert training["checkpoint"]["output_dir"].endswith("v6_fp32_compute")
+    assert training["checkpoint"]["output_dir"].endswith("v8_bwdsim_vsa64")
+    assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
+    assert (config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3")
+    assert config["models"]["teacher"]["attention_backend"] == "FLASH_ATTN"
+    assert config["models"]["critic"]["attention_backend"] == "FLASH_ATTN"
     assert config["pipeline"]["dit_config"]["uniform_parameter_dtype"] is False
     assert training["data"]["preprocessed_data_type"] == "text_only"
     assert training["data"]["train_batch_size"] == 1
     assert training["data"]["training_cfg_rate"] == 0.0
-    assert config["callbacks"]["grad_clip"]["max_grad_norm"] == 10.0
+    assert config["callbacks"]["grad_clip"]["max_grad_norm"] == 1.0
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
