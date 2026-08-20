@@ -16,10 +16,13 @@ backends and prints a latency/speedup table:
   "Using Torch SDPA backend"); the baseline is then SDPA, not FA4.
 - `vsa` — `FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3` at
   `--sparsity` (default 0.9), applied at generator boot through
-  `FastVideoArgs.VSA_sparsity` (`pipeline.experimental`). `--vsa-kernel
-  triton` (default, no optional dependencies) uses the 256-to-64
-  expansion path; `cutedsl` opts into the FA4 CuTe 256-tile forward and
-  requires the optional FA4 CuTe build (`flash_attn.cute`).
+  `FastVideoArgs.VSA_sparsity` (`pipeline.experimental`).
+  `--vsa-tile-size {64,256}` (default 256) flows the same way
+  (`FastVideoArgs.VSA_tile_size`). At tile 256, `--vsa-kernel triton`
+  (default, no optional dependencies) uses the 256-to-64 expansion path
+  and `cutedsl` opts into the FA4 CuTe 256-tile forward (requires the
+  optional FA4 CuTe build, `flash_attn.cute`); at tile 64 the forward is
+  always the native 64-token Triton kernel and `--vsa-kernel` is ignored.
 - `microbench` — model-free per-attention-layer proxy on the exact packed
   H3 sequence geometry (dense FA4/SDPA vs the full `MiniMaxH3VSAImpl`
   tile/pool/top-k/kernel/untile path). Useful standalone, and as the

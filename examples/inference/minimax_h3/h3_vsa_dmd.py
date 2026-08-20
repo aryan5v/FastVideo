@@ -12,10 +12,13 @@ denoising-stage time (``FASTVIDEO_STAGE_LOGGING=1``):
 - ``vsa``: VIDEO_SPARSE_ATTN_H3 at ``--sparsity`` (default 0.9). The
   sparsity is applied at generator boot via ``FastVideoArgs.VSA_sparsity``
   (``pipeline.experimental``); the H3 denoising stage builds per-step VSA
-  metadata from it. ``--vsa-kernel triton`` (default, no optional deps)
-  uses the 256-to-64 expansion path; ``cutedsl`` opts into the FA4 CuTe
-  256-tile forward and requires the optional FA4 CuTe build
-  (``flash_attn.cute``).
+  metadata from it. ``--vsa-tile-size`` (default 256) flows the same way
+  (``FastVideoArgs.VSA_tile_size``) and selects the tile geometry: at 256,
+  ``--vsa-kernel triton`` (default, no optional deps) uses the 256-to-64
+  expansion path while ``cutedsl`` opts into the FA4 CuTe 256-tile forward
+  (requires the optional FA4 CuTe build, ``flash_attn.cute``); at 64 the
+  block map is already at kernel granularity, so the forward always runs
+  the native 64-token Triton kernel and ``--vsa-kernel`` does not apply.
 - ``microbench``: model-free attention-layer microbenchmark on the exact
   packed H3 sequence geometry of the requested video shape. Times
   ``block_sparse_attn_256_bshd`` (Triton and, when importable, the FA4 CuTe
@@ -115,7 +118,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vsa-kernel",
                         choices=("triton", "cutedsl"),
                         default="triton",
-                        help="VSA-256 kernel path; cutedsl needs the optional FA4 CuTe build")
+                        help="VSA-256 kernel path; cutedsl needs the optional FA4 CuTe build "
+                        "(ignored at --vsa-tile-size 64, which is native-Triton only)")
+    parser.add_argument("--vsa-tile-size",
+                        type=int,
+                        choices=(64, 256),
+                        default=256,
+                        help="VSA-H3 tile size in tokens, plumbed like sparsity via "
+                        "FastVideoArgs.VSA_tile_size; 64 runs the native Triton block-sparse forward")
     parser.add_argument("--mode-timeout", type=int, default=5400, help="Hard per-mode timeout in seconds")
     parser.add_argument("--microbench-text-tokens", type=int, default=300, help="Assumed text prefix length")
     parser.add_argument("--microbench-heads", default="14,56", help="Per-GPU head counts to microbench")
@@ -197,12 +207,15 @@ def run_generation_worker(args: argparse.Namespace) -> int:
     if mode == "vsa":
         # Boot-time run-level sparsity: the H3 denoising stage reads
         # fastvideo_args.VSA_sparsity (mirrored onto ForwardBatch.VSA_sparsity
-        # per request) when building the per-step VSA metadata.
+        # per request) when building the per-step VSA metadata. The tile size
+        # rides the same experimental->FastVideoArgs path.
         experimental["VSA_sparsity"] = args.sparsity
+        experimental["VSA_tile_size"] = args.vsa_tile_size
 
     schedule = (f"native {native_steps}-step schedule" if native_steps else f"dmd_steps={dmd_steps}")
     print(f"[{mode}] booting generator (backend={os.environ['FASTVIDEO_ATTENTION_BACKEND']}, "
-          f"sparsity={experimental.get('VSA_sparsity', 0.0)}, {schedule})",
+          f"sparsity={experimental.get('VSA_sparsity', 0.0)}, "
+          f"tile={experimental.get('VSA_tile_size', '-')}, {schedule})",
           flush=True)
     boot_start = time.perf_counter()
     generator = VideoGenerator.from_config(
@@ -281,6 +294,7 @@ def run_generation_worker(args: argparse.Namespace) -> int:
             "mode": mode,
             "sparsity": args.sparsity if mode == "vsa" else 0.0,
             "vsa_kernel": args.vsa_kernel if mode == "vsa" else None,
+            "vsa_tile_size": args.vsa_tile_size if mode == "vsa" else None,
             "dmd_steps": None if native_steps else dmd_steps,
             "num_inference_steps": num_inference_steps,
             "shape": [args.height, args.width, args.num_frames],
@@ -350,13 +364,14 @@ def run_microbench_worker(args: argparse.Namespace) -> int:
             prefix_segments=(n_text, n_cond, n_audio),
             device=device,
             exempt=True,
+            tile_size=args.vsa_tile_size,
         )
         for sparsity in (args.sparsity, 0.0)
     }
     reference_metadata = metadata_by_sparsity[args.sparsity]
     print(f"[microbench] tiles: prefix={reference_metadata.num_prefix_tiles} "
-          f"video={reference_metadata.num_video_tiles} "
-          f"padded_len={int(reference_metadata.variable_block_sizes.numel()) * 256}",
+          f"video={reference_metadata.num_video_tiles} tile_elems={reference_metadata.tile_elems} "
+          f"padded_len={int(reference_metadata.variable_block_sizes.numel()) * reference_metadata.tile_elems}",
           flush=True)
     impl = MiniMaxH3VSAImpl(num_heads=0, head_size=head_dim, causal=False, softmax_scale=1.0, prefix="blocks.0.attn")
 
@@ -395,7 +410,9 @@ def run_microbench_worker(args: argparse.Namespace) -> int:
         record("dense torch SDPA", _time_cuda_call(dense_sdpa) * 1e3)
 
         kernel_choices = ["triton"]
-        if args.vsa_kernel == "cutedsl":
+        if args.vsa_kernel == "cutedsl" and args.vsa_tile_size != 64:
+            # Tile 64 has no CuTe route (native Triton only) — a "cutedsl"
+            # row there would just re-measure the Triton path mislabeled.
             kernel_choices.insert(0, "cutedsl")
         for kernel in kernel_choices:
             os.environ["FASTVIDEO_VSA_CUTEDSL"] = "1" if kernel == "cutedsl" else "0"
@@ -406,7 +423,7 @@ def run_microbench_worker(args: argparse.Namespace) -> int:
                     out = impl.forward(q, k, v, None, metadata)
                     return impl.postprocess_output(out, metadata)
 
-                label = f"VSA-H3 {kernel} sparsity={sparsity:.2f}"
+                label = f"VSA-H3 {kernel} t{args.vsa_tile_size} sparsity={sparsity:.2f}"
                 try:
                     record(label, _time_cuda_call(vsa_layer) * 1e3)
                 except Exception as error:  # noqa: BLE001 - a kernel path may be uninstalled
@@ -418,6 +435,7 @@ def run_microbench_worker(args: argparse.Namespace) -> int:
     payload = {
         "mode": mode,
         "sparsity": args.sparsity,
+        "vsa_tile_size": args.vsa_tile_size,
         "geometry": {
             "seq_len": seq_len,
             "text": n_text,
@@ -540,8 +558,9 @@ def summarize(statuses: list[dict], args: argparse.Namespace) -> None:
         title = "H3 DMD 3-step inference: attention backend benchmark"
         schedule = f"dmd_steps={args.dmd_steps}"
     print(f"\n================ {title} ================")
+    vsa_kernel = "triton" if args.vsa_tile_size == 64 else args.vsa_kernel
     print(f"shape={args.height}x{args.width}x{args.num_frames}  gpus={args.num_gpus}  "
-          f"{schedule}  vsa sparsity={args.sparsity} ({args.vsa_kernel})")
+          f"{schedule}  vsa sparsity={args.sparsity} (tile {args.vsa_tile_size}, {vsa_kernel})")
     header = (f"{'mode':<12} {'n':>3} {'steps':>6} {'load(s)':>9} {'mean e2e(s)':>12} {'mean gen(s)':>12} "
               f"{'mean denoise(s)':>16} {'denoise/step(s)':>16} {'e2e speedup':>12} {'denoise speedup':>16}")
     print(header)
