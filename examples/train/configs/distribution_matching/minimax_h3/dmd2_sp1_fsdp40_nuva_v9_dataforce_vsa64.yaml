@@ -1,0 +1,193 @@
+# v9: v8 (FastGen h3_new parity, carried backward simulation, VSA-64 student)
+# + per-batch data forcing over a mixed prompt/latent dataset. Fresh lineage —
+# the accum-4 carry slots and the t2va mixed loading differ from v8; do not
+# resume v8 checkpoints into this directory.
+#
+# Data forcing (gold standard: fastgen @ jberner/h3_new, DMD2's data-driven
+# regime — configs/methods/config_dmd2.py `backward_simulation: false`):
+#  - A batch that carries real latents (a t2va parquet row) trains the student
+#    on those latents forward-noised at a uniformly drawn grid rung
+#    (FastGen `sample_from_t_list`: never t=0), per-modality shifts 12/3.
+#  - A text-only batch keeps walking the carried backward simulation (v8).
+#    FastGen picks one regime per config; the per-batch routing is our
+#    composition for mixed data_path loading. The slot's walk pauses on
+#    forced batches and resumes on the stream's next text-only batch.
+#  - The GAN/discriminator branch stays absent: FastGen's H3 config runs
+#    gan_loss_weight_gen 0.0 even in its with-data Wan recipe lineage, and
+#    FastVideo's DMD2 has no GAN branch (h3_dmd.md P2 deliberate omission).
+#  - Mixing ratio knob = dataset composition, exactly as in FastGen (no
+#    method-level ratio exists there). Adjust with per-root repeat counts:
+#    "path:N" string or {path: N} mapping duplicates that root's file list
+#    before the seeded global shuffle. Verify the realized mix from the
+#    `data_forced` W&B metric (its mean is the latent-row fraction).
+# Everything else is v8 unchanged: 4-step grid [999,749,500,250], ODE carry,
+# score draw f_{1/2.4}(U), x0 critic space, lr 1e-6 both roles, clip 1.0,
+# VSA-64 student / dense FA4 teacher+critic.
+# See h3_dmd.md for the FastGen mapping table and the v9 rationale.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: FLASH_ATTN
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: FLASH_ATTN
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  # Backward simulation with cross-iteration carry (FastGen h3_new port).
+  rollout_carry: true
+  # One independent trajectory stream per grad-accum slot; must equal
+  # training.loop.gradient_accumulation_steps.
+  rollout_carry_slots: 4
+  # Deterministic re-noising along the walk (FastGen: student_sample_type ode).
+  rollout_sample_type: ode
+  # v9: per-batch routing — latent-bearing batches train data-forced at a
+  # noised grid rung; text-only batches keep the carried walk (see header).
+  rollout_data_forcing: true
+  generator_update_interval: 5
+  # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
+  real_score_guidance_scale: 1.0
+  # 4-step grid on the release sampler's clock (see header).
+  dmd_denoising_steps: [999, 749, 500, 250]
+  # Score supervision drawn as tau = f_{1/2.4}(U): equals FastGen's shifted
+  # draw f_5(U) on video's shift-12 clock.
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  # x0 space for both modalities (FastGen standard; see v8 header).
+  fake_score_loss_space: x0
+  cfg_uncond:
+    text: zero
+
+  fake_score_learning_rate: 1.0e-6
+  fake_score_betas: [0.9, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 40
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 40
+
+  data:
+    # Mixed prompt/latent set, globally shuffled by the seeded sampler:
+    # ~258k text-only prompts (v8's two roots) + the NuVA t2va latent parquet
+    # (real video+audio latents; produced under data/nuva_t2va — verify it is
+    # complete and 768x1344 @ 124 frames / num_latent_t 37 before launch,
+    # and that the root holds ONLY production parquet: *.parquet is swept
+    # recursively, so scratch/harness files would be trained on).
+    # 't2va' declares the superset schema: text-only rows come through with
+    # empty latent columns and route to the carried walk; latent rows route
+    # to the data-forced step. Ratio = row counts; use "path:N" repeats to
+    # rebalance (see header).
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only_train
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
+      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va
+    preprocessed_data_type: t2va
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 768
+    num_width: 1344
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    # Global batch 128 on 8 trays: 32 DP x batch 1 x accum 4. Must equal
+    # method.rollout_carry_slots.
+    gradient_accumulation_steps: 4
+
+  checkpoint:
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_nuva_v9_dataforce_vsa64
+    # Requeues resume the newest complete checkpoint in this directory.
+    # The rollout carry is transient: a resume restarts every trajectory
+    # stream from fresh noise (brief warmup, by design — FastGen parity).
+    resume_from_checkpoint: latest
+    training_state_checkpointing_steps: 100
+    checkpointing_start_step: 500
+    checkpoints_total_limit: 4
+
+  tracker:
+    project_name: h3-dmd2-vsa
+    run_name: dmd2_sp1_nuva_v9_dataforce_vsa64
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+    # Regional fullgraph compile of the dense FA4 teacher/critic blocks
+    # (VSA student roles auto-degrade to eager with a warning). PENDING
+    # GATE: the compile A/B verdict at
+    # /mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/compile_ab/VERDICT.md was
+    # NOT yet present when this config was authored — read it before launch
+    # and follow its flip lines; on NO-GO set enable_torch_compile: false.
+    # Also run the runbook enable-checklist (one-step eager-vs-compiled
+    # critic/student grad-norm A/B) first.
+    enable_torch_compile: true
+    torch_compile_kwargs:
+      dynamic: false
+
+  # FP32 sharded master weights; the trainer verifies them at startup.
+  dit_precision: fp32
+  # Student-only sparse attention (VSA-H3) at 64-token (4,4,4) tiles: native
+  # Triton forward+backward (fixed-kernel overlay), no 256-tile remap.
+  vsa:
+    sparsity: 0.9
+    tile_size: 64
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  latent_vis:
+    _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
+    # Decode rank 0's generator, teacher, and critic x0 estimates.
+    every_steps: 100
+    fps: 24
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    # 64 prompts sampled (seed 0) from the synthetic 10k and REMOVED from the
+    # training split above; disjointness verified against both training roots.
+    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
+    every_steps: 100
+    run_at_start: true
+    # Match the 4-step student grid.
+    sampling_steps: [4]
+    guidance_scale: 1.0
+    num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false

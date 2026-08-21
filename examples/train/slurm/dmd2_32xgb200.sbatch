@@ -110,6 +110,7 @@ if [ "${GATE_TEST}" = "1" ]; then
       -k declared_fp32_group_distributed_forward_backward
     pytest -q fastvideo/tests/train/methods/test_dmd2_fake_score_loss_space.py \
       fastvideo/tests/train/methods/test_dmd2_rollout_carry.py \
+      fastvideo/tests/train/methods/test_dmd2_data_forcing.py \
       fastvideo/tests/train/methods/test_minimax_h3_dmd2.py \
       fastvideo/tests/attention/test_vsa_h3_metadata.py
   "; then

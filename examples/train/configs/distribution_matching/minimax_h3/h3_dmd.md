@@ -23,13 +23,71 @@ parity.
 
 ## Current recipe
 
-The recommended config is `dmd2_sp1_fsdp40_vidprom_v8_bwdsim_vsa64.yaml` —
-the FastGen-parity recipe (gold standard: NVIDIA-internal `fastgen` @
-`jberner/h3_new`, `configs/experiments/MiniMaxH3/config_dmd2.py`) with a
-VSA-H3 student at 64-token tiles. v8 is a fresh lineage: the carried-walk
-rollout, 4-step grid, and 64-token attention contract all differ from v7 —
-do not resume v7 checkpoints. `_v7_vsa90` is retained as the pre-parity
-256-tile recipe; `_v6` as the dense-student recipe.
+The recommended config is `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` —
+v8 plus per-batch data forcing over a mixed prompt/latent dataset at global
+batch 128 (32 DP x accum 4), with regional compile of the dense roles
+pending its A/B gate. v9 shares v8's checkpoint contract otherwise, but the
+accum-4 carry slots and mixed loading make it a fresh output-dir lineage —
+do not resume v8 checkpoints into it. `_v8_bwdsim_vsa64` remains the
+carry-only (data-free) recipe; `_v7_vsa90` the pre-parity 256-tile recipe;
+`_v6` the dense-student recipe.
+
+### Gold-standard refresh (2026-08-21)
+
+The reference tarball was refreshed (`fastgen.tar`, Aug 21; branch
+`jberner/h3_new` @ `2c85efc8`, four commits past the v8 reference
+`3429c171`). The H3 recipe knobs are unchanged — grid, draws, losses, lrs,
+cadence, GAN-off, data-free — so v8's mapping below still holds verbatim.
+What changed upstream, and our disposition:
+
+- **Data-driven regime (ported as v9 `rollout_data_forcing`)**: FastGen's
+  DMD2 has always had two regimes. `backward_simulation: false` (its
+  default) forces the student onto real data: `t_student` is drawn
+  uniformly over the sampling grid's rungs (`sample_from_t_list`, never
+  t=0) and the real latents are forward-noised to that rung per modality
+  shift; the critic still fits the student's generation, never real data.
+  Their H3 config stays `backward_simulation: true` + text-only loaders
+  (data-free); their Wan `config_dmd2_bwd_sim_vidprom` runs the carry
+  *with* real data, but there real data feeds only the GAN branch. There
+  is no per-batch mixing and no ratio knob upstream — the regime is
+  config-global and the "ratio" is the dataset composition. v9's per-batch
+  routing (latents present → forced, text-only → carried walk; walk pauses
+  on forced batches) is our composition of the two regimes for mixed
+  `data_path` loading.
+- **Carry refactor (not ported)**: atomic carry overlay
+  (`CARRY_OVERLAY_KEYS`), a boundary marker instead of an emptied slot,
+  fail-loud carry-state validation, and an iteration-aware stagger
+  (`(rank + completed_iterations) % steps`) so a resume recovers the phase
+  an uninterrupted rank would occupy. Our v8 carry is behaviorally
+  equivalent mid-run; the resume-phase refinement is a (small) behavior
+  change with no knob, so it was left out to keep v8 byte-identical.
+  Revisit if resume-phase clustering ever shows up in the rung histogram.
+- **New opt-in knobs (not adopted — their H3 config does not set them)**:
+  `fake_score_sample_t_cfg` (a separate critic-iteration noising-time
+  density) and the `shifted_logitnormal` time-dist type; only the Wan
+  AnyFlow on-policy recipe uses them.
+- **AnyFlow** (flow-map student, in-iteration rollout, co-trained Stage-1
+  loss on real batches): new Wan-only method, not H3, not ported.
+- **GAN**: still off in their H3 config (`gan_loss_weight_gen 0.0`); ours
+  has no GAN branch (see the deliberate omission below). v9 does NOT turn
+  it on with the new real data.
+
+### v9 data forcing
+
+`method.rollout_data_forcing: true` (requires `rollout_carry`) routes each
+batch by latent presence: a t2va parquet row trains the student at
+`add_noise(real, eps, t)` with `t` drawn uniformly from
+`dmd_denoising_steps` (exact `sample_from_t_list` semantics — the grid's
+non-zero rungs — under the 12/3 modality shifts, i.e. the uncarried
+`rollout_mode: data_latent` math); a text-only row advances the carried
+walk. The slot's walk pauses untouched on forced batches. The one-time
+stagger pre-walk still runs on each slot's first-ever call even when that
+call is data-forced, keeping the FSDP collective count uniform across
+ranks. Mixed loading is declared `preprocessed_data_type: t2va` (the
+superset schema): text-only rows surface empty latent columns and route to
+the walk; a half-present latent pair fails loudly. The realized mix is
+observable as the mean of the `data_forced` metric; rebalance with
+per-root `"path:N"` repeat counts in `data_path`.
 
 ### v8 ↔ FastGen h3_new mapping
 
@@ -115,7 +173,8 @@ that recipe even after the launcher default changes.
 
 | Priority | Status | Issue |
 |---|---|---|
-| P1 | Deliberate experiment difference | `simulate` builds stochastic student trajectories from noise. FastGen's multistep DMD path forward-noises real data at a sampled ladder point. A paired-latent A/B is required to isolate this difference. |
+| P1 | Addressed in v9 (2026-08-21) | `simulate` builds student trajectories from noise while FastGen's data-driven multistep path forward-noises real data at a sampled ladder point. v9's `rollout_data_forcing` runs both per batch over mixed data. The paired-latent A/B (forced-only vs walk-only at matched seeds) remains open for isolating the quality effect. |
+| P1 | Open until launch | v9 pre-launch gates: (1) the NuVA t2va parquet under `/mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va/` must be complete and shaped 768x1344 @ 124 frames (num_latent_t 37; wrong shapes fail loudly at prepare/unpack) — and the root must contain ONLY production parquet: the loader sweeps `*.parquet` recursively, so scratch/harness subdirectories would be swept into training (and the `map_style_cache` pickle must be regenerated after any file change); (2) the regional-compile A/B verdict (`vsa_gate/compile_ab/VERDICT.md`) was not yet written when the v9 YAML was authored — follow its flip lines, and on NO-GO set `enable_torch_compile: false`; (3) confirm the realized latent-row fraction from the `data_forced` metric matches the intended mix. |
 | P1 | Open if stochastic validation is used | `dmd_stochastic_renoise` is not a typed pipeline field and its hop noise uses the global RNG rather than the request generator. Default validation remains deterministic. |
 | P2 | Open | The x0 critic objective estimates effective per-modality sigma-squared from already-rounded noised tensors. It is exact algebraically but biased at the lowest BF16 timesteps; direct `critic.predict_x0()` MSE would match FastGen more closely. |
 | P1 | Resolved (2026-08-18, env overlay) | VSA-H3 training gradient explosion root-caused: the fastvideo_kernel 0.3.2 PyPI wheel ships the pre-95f4f547 Triton backward (bf16 K pre-scaling; error exp2-amplified by logit magnitude, so unit-scale tests pass while real activations explode — 1e7-1e9 in DMD2, ~30x in SFT). Fix: the repo's corrected block_sparse_attn_triton.py overlaid into the venv (see site-packages OVERLAY_NOTE.md); scale-sensitivity sweep on H3 packed geometry passed (grad ratios 1.000+-0.0002 across scales 1-32 at keep 0.5/0.2/0.1). Upstream 95f4f547 to public main and cut a fixed kernel release to retire the overlay. PR #1639 (FA4 CuTe backward, unmerged) is a later 3x-speed upgrade, opt-in via FASTVIDEO_VSA_CUTEDSL, and needs the out-of-place addcmul port at video_sparse_attn_h3.py:358. |

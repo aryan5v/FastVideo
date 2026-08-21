@@ -24,7 +24,7 @@ from fastvideo.train.utils.config import load_run_config
 
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd2_min.yaml"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v8_bwdsim_vsa64.yaml")
+_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml")
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -490,7 +490,12 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert method["rollout_mode"] == "simulate"
     assert method["rollout_carry"] is True
     assert (method["rollout_carry_slots"] == training["loop"]["gradient_accumulation_steps"])
+    # Global batch 128 = 32 DP x accum 4; the carry owns one stream per slot.
+    assert training["loop"]["gradient_accumulation_steps"] == 4
     assert method["rollout_sample_type"] == "ode"
+    # v9: latent-bearing batches train data-forced (FastGen's data-driven
+    # regime); text-only batches keep the carried walk.
+    assert method["rollout_data_forcing"] is True
     assert method["generator_update_interval"] == 5
     assert method["real_score_guidance_scale"] == 1.0
     # FastGen h3_new grid: time_shift(linspace(0.999, 0, 5), 12) in base time.
@@ -507,16 +512,25 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert method["fake_score_lr_scheduler"] == "constant"
     assert training["optimizer"]["betas"] == [0.9, 0.999]
     assert training["dit_precision"] == "fp32"
-    assert training["checkpoint"]["output_dir"].endswith("v8_bwdsim_vsa64")
+    assert training["checkpoint"]["output_dir"].endswith("v9_dataforce_vsa64")
     assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
     assert (config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3")
     assert config["models"]["teacher"]["attention_backend"] == "FLASH_ATTN"
     assert config["models"]["critic"]["attention_backend"] == "FLASH_ATTN"
     assert config["pipeline"]["dit_config"]["uniform_parameter_dtype"] is False
-    assert training["data"]["preprocessed_data_type"] == "text_only"
+    # Mixed loading is declared t2va (the superset schema); text-only roots
+    # yield empty latent columns and route to the carried walk.
+    assert training["data"]["preprocessed_data_type"] == "t2va"
+    data_paths = training["data"]["data_path"]
+    assert any("nuva_t2va" in str(path) for path in data_paths)
+    assert any("text_only" in str(path) for path in data_paths)
     assert training["data"]["train_batch_size"] == 1
     assert training["data"]["training_cfg_rate"] == 0.0
     assert config["callbacks"]["grad_clip"]["max_grad_norm"] == 1.0
+    # Regional compile of the dense roles; gated on the A/B verdict before
+    # launch (see the YAML's PENDING GATE note).
+    assert training["model"]["enable_torch_compile"] is True
+    assert training["model"]["torch_compile_kwargs"] == {"dynamic": False}
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
