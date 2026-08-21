@@ -308,7 +308,17 @@ def write_shard_cache(model: nn.Module, ctx: ShardCacheContext) -> None:
         _barrier_if_initialized()
 
         rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
-        if rank == 0:
+        if ctx.is_writer:
+            # Every shard writer emits the manifest, not just global rank 0:
+            # with a node-local cache root (PER_NODE=1) each node holds its own
+            # entry copy, and a manifest written only on rank 0's node leaves
+            # every other node's entry manifest-less — the all-rank agreement
+            # vote in try_load_from_shard_cache then fails on EVERY multi-node
+            # warm boot and silently degrades relaunches to full loads. The
+            # content is rank-invariant for uniformly divisible shards; the
+            # rank-suffixed tmp name keeps concurrent same-directory writers
+            # (shared root, or several local ranks per node) from clobbering
+            # each other's half-written file before the atomic replace.
             reverse_map = {
                 k: list(v)
                 for k, v in getattr(model, "reverse_param_names_mapping", {}).items()
@@ -320,9 +330,10 @@ def write_shard_cache(model: nn.Module, ctx: ShardCacheContext) -> None:
                 "params": params_table,
                 "reverse_param_names_mapping": reverse_map,
             }
-            manifest_tmp = ctx.entry_dir / "manifest.json.tmp"
+            manifest_tmp = ctx.entry_dir / f"manifest.json.tmp.{ctx.shard_index}"
             manifest_tmp.write_text(json.dumps(manifest))
             os.replace(manifest_tmp, ctx.entry_dir / "manifest.json")
+        if rank == 0:
             logger.info("shard cache WRITE %s: %d tensors -> %s", ctx.key, len(tensors), ctx.entry_dir)
             _gc_cache_root(ctx.entry_dir.parent, keep=ctx.entry_dir.name)
     except Exception as exc:  # noqa: BLE001 - cache must never fail a run

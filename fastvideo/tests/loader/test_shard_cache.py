@@ -163,6 +163,35 @@ def test_ac_wrapped_buffer_stays_buffer_on_cache_hit(cpu_mesh, tmp_path):
     assert torch.equal(dst.block.weight.to_local(), src.block.weight.to_local())
 
 
+def test_nonzero_rank_writer_emits_manifest_for_per_node_roots(cpu_mesh, tmp_path, monkeypatch):
+    """Every shard writer must write the manifest, not just global rank 0.
+
+    With FASTVIDEO_WEIGHT_SHARD_CACHE_PER_NODE=1 each node keeps its own copy
+    of the entry; ranks on non-head nodes write their shard files into their
+    node's tmpfs but (pre-fix) never a manifest, so try_load_from_shard_cache
+    failed its `manifest.json` existence check there and the all-rank vote
+    turned every multi-node warm boot into a full load (observed on the
+    h3-compile-ab job 2592 b2_on_warm leg: shard4-7 present on the second
+    tray, manifest.json absent).
+    """
+    import fastvideo.models.loader.shard_cache as sc
+
+    src = _make_model(cpu_mesh)
+    ctx = _ctx(tmp_path)
+    # Simulate a rank on a non-head node: still a writer (per-node root), but
+    # dist.get_rank() != 0.
+    monkeypatch.setattr(sc.dist, "get_rank", lambda: 4)
+    write_shard_cache(src, ctx)
+    assert (ctx.entry_dir / "manifest.json").is_file()
+
+    dst = _make_model(cpu_mesh)
+    with torch.no_grad():
+        dst.weight.mul_(0)
+    dst.reverse_param_names_mapping = {}
+    assert try_load_from_shard_cache(dst, ctx, torch.device("cpu"))
+    assert torch.equal(dst.weight.to_local(), src.weight.to_local())
+
+
 def test_model_selected_dtype_rejects_stale_cache_and_hits_fresh_cache(cpu_mesh, tmp_path):
     stale = _make_model(cpu_mesh, dtype=torch.bfloat16)
     stale_ctx = _ctx(tmp_path / "stale")
