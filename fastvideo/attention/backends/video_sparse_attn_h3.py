@@ -11,9 +11,11 @@ backend differs from the Wan-tuned ``video_sparse_attn``:
   ``(4,4,4)`` (see ``VSA_H3_TILE_SHAPES``).
 - Selection is pure Python on pooled tile scores; the block-sparse kernel
   consumes an explicit bool mask, so no kernel changes are needed.
-- The compression branch is gated by ``to_gate_compress``, which the H3
-  checkpoint does not carry: the loader zero-initializes it, so untrained
-  inference is exactly pure sparse and finetuning can learn the gate.
+- The compression branch is gated by ``to_gate_compress``, which the base
+  H3 checkpoint does not carry: the loader zero-initializes it, so
+  untrained inference is exactly pure sparse and finetuning can learn the
+  gate. VSA-distilled students (e.g. FastVideo-Minimax-H3-Preview) ship
+  trained gates, which load and activate the branch.
 - Non-video *queries* are always dense. Non-video *keys* are either
   always-selected for every query ("exempt", default) or compete in
   top-k under a FLOP-matched budget ("compete") — the ablation axis,
@@ -71,21 +73,21 @@ from fastvideo.attention.backends.video_sparse_attn import (compute_topk, constr
 from fastvideo.attention.backends.video_sparse_attn_h3_probe import probe_enabled, record_probe
 from fastvideo.logger import init_logger
 
+logger = init_logger(__name__)
+
 # Opt-in switch for the sm_100a CUDA forward on the tile-64 no-grad path.
 VSA_SM100A_ENV = "FASTVIDEO_VSA_SM100A"
 
 VSA_H3_TILE_SIZE = (4, 8, 8)  # 256 elements -> FA4 CuTe fastpath on sm10.x (default)
 _TILE_ELEMS = math.prod(VSA_H3_TILE_SIZE)
-# Selectable tile geometries, keyed by element count (= training.vsa.tile_size).
-# 64 runs the native 64-token Triton block-sparse kernels for forward AND
-# backward — the block map is already at kernel granularity, so no 256->64
-# mask expansion is involved and FASTVIDEO_VSA_CUTEDSL does not apply.
+# Selectable tile geometries, keyed by element count (= the build-time
+# ``tile_size``). 64 runs the native 64-token Triton block-sparse kernels for
+# forward AND backward — the block map is already at kernel granularity, so no
+# 256->64 mask expansion is involved and FASTVIDEO_VSA_CUTEDSL does not apply.
 VSA_H3_TILE_SHAPES: dict[int, tuple[int, int, int]] = {
     _TILE_ELEMS: VSA_H3_TILE_SIZE,
     64: (4, 4, 4),
 }
-
-logger = init_logger(__name__)
 
 
 def token_tile_and_valid(variable_block_sizes: torch.Tensor,

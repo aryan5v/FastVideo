@@ -20,7 +20,7 @@ _TINY = dict(raw_latent_shape=(8, 8, 12), patch_size=(1, 2, 2), prefix_segments=
 # (t: 4+4+1, h: 4+4+2, w: 4+4+4+1) and every prefix segment leaves a
 # partial tail tile at 64 (70 -> 64+6, 5 -> 5, 130 -> 64+64+2).
 _TINY64 = dict(raw_latent_shape=(9, 20, 26), patch_size=(1, 2, 2), prefix_segments=(70, 5, 130))
-# v7 production request: 768x1344, 124 frames -> latents (37, 48, 84),
+# production-shape request: 768x1344, 124 frames -> latents (37, 48, 84),
 # patch (1,2,2) -> token grid (37, 24, 42); text 300 + audio 414 rows.
 _PROD = dict(raw_latent_shape=(37, 48, 84), patch_size=(1, 2, 2), prefix_segments=(300, 0, 414))
 
@@ -212,7 +212,7 @@ def test_geometry_tile64_ragged_tails():
 
 
 def test_geometry_tile64_production_shape():
-    """v7 production latents (37, 48, 84): ragged t and w tails at (4,4,4)."""
+    """Production latents (37, 48, 84): ragged t and w tails at (4,4,4)."""
     meta64 = _build(_PROD, tile_size=64)
     assert meta64.num_prefix_tiles == 5 + 7  # 300 -> 4x64+44, 414 -> 6x64+30
     assert meta64.num_video_tiles == 10 * 6 * 11  # (37, 24, 42) / (4, 4, 4)
