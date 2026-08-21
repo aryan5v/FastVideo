@@ -193,6 +193,27 @@ def test_checkpoint_wrapper_prefix_normalization() -> None:
     assert not any("freq" in name for name, _ in model.named_parameters())
 
 
+def test_regional_compile_unsupported_when_attention_compile_disabled(monkeypatch) -> None:
+    """The attention-eager escape hatch must degrade the role, not crash.
+
+    FASTVIDEO_DISABLE_ATTENTION_COMPILE=1 wraps attention forwards in
+    torch.compiler.disable; under fullgraph regional compile that raises
+    `torch._dynamo.exc.Unsupported: Skip inlining torch.compiler.disable()'d
+    function` at the first training step (observed on the h3-compile-ab
+    b4_on_attneager leg, job 2610). The guard must reject regional compile
+    for the role so it falls back to eager with the standard warning.
+    """
+    from fastvideo.models.loader.fsdp_load import _regional_compile_unsupported_reason
+
+    monkeypatch.setenv("FASTVIDEO_DISABLE_ATTENTION_COMPILE", "1")
+    reason = _regional_compile_unsupported_reason({"config": None})
+    assert reason is not None
+    assert "FASTVIDEO_DISABLE_ATTENTION_COMPILE" in reason
+
+    monkeypatch.setenv("FASTVIDEO_DISABLE_ATTENTION_COMPILE", "0")
+    assert _regional_compile_unsupported_reason({"config": None}) is None
+
+
 def test_regional_compile_unsupported_for_vsa_backends() -> None:
     """A VSA-backed role must fall back to eager instead of hard-failing.
 

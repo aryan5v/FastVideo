@@ -353,6 +353,22 @@ def _regional_compile_unsupported_reason(init_params: dict[str, Any]) -> str | N
     fullgraph-traceable; a VSA-backed role (e.g. the H3 DMD2 student) falls
     back to eager while compile-safe dense roles still compile.
     """
+    try:
+        from fastvideo.attention.layer import _attention_compile_disabled
+    except Exception:  # pragma: no cover - attention stack not importable
+        pass
+    else:
+        if _attention_compile_disabled():
+            # The escape hatch wraps attention forwards in
+            # torch.compiler.disable, which is a hard dynamo error inside a
+            # fullgraph region ("Skip inlining `torch.compiler.disable()`d
+            # function" at the first training step — h3-compile-ab job 2610).
+            # Degrade the role to eager instead, matching the hatch's
+            # debugging intent.
+            return ("FASTVIDEO_DISABLE_ATTENTION_COMPILE=1 keeps attention "
+                    "forwards out of compiled graphs via torch.compiler."
+                    "disable, which fullgraph regional compile cannot trace; "
+                    "this role stays eager")
     config = init_params.get("config")
     resolved = getattr(config, "_resolved_attention_backend", None)
     resolved_name = getattr(resolved, "name", "")
