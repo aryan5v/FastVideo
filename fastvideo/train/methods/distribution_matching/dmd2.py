@@ -62,6 +62,7 @@ class DMD2Method(TrainingMethod):
             self._rollout_sample_type,
         ) = self._parse_rollout_carry()
         self._init_rollout_carry_state()
+        self._rollout_data_forcing = self._parse_rollout_data_forcing()
         self._validate_preprocessed_data_type()
         self._configure_student_negative_conditioning()
         self._denoising_step_list: torch.Tensor | None = (None)
@@ -398,6 +399,51 @@ class DMD2Method(TrainingMethod):
         )
         return global_rank // sp_size, max(1, world_size // sp_size)
 
+    def _parse_rollout_data_forcing(self) -> bool:
+        """Parse per-batch data forcing for the carried walk.
+
+        ``rollout_data_forcing: true`` routes latent-bearing batches (t2va
+        parquet rows in a mixed ``data_path``) onto FastGen's data-driven
+        student inputs — the real packed latents forward-noised at a
+        uniformly drawn grid rung (``sample_from_t_list`` semantics) —
+        while text-only batches keep walking the carried backward
+        simulation. Off (default) keeps every batch on the walk,
+        byte-identical to the carry-only behavior.
+        """
+        raw = self.method_config.get("rollout_data_forcing", None)
+        if raw is None:
+            return False
+        if not isinstance(raw, bool):
+            raise ValueError("method.rollout_data_forcing must be a bool, "
+                             f"got {type(raw).__name__}")
+        if raw and not self._rollout_carry:
+            raise ValueError("method.rollout_data_forcing: true requires "
+                             "method.rollout_carry: true; without the carry, "
+                             "always-forced inputs are "
+                             "method.rollout_mode: data_latent")
+        return raw
+
+    @staticmethod
+    def _batch_has_latents(batch: dict[str, Any]) -> bool:
+        """Classify a mixed-loading batch as latent-bearing or text-only.
+
+        Under the t2va parquet schema the collate emits empty (numel-0)
+        tensors for latent columns a text-only row does not carry, so
+        presence means "key exists and non-empty". A row carrying exactly
+        one of the pair is corrupt data, not a batch type.
+        """
+        video = batch.get("vae_latent")
+        audio = batch.get("audio_latent")
+        has_video = isinstance(video, torch.Tensor) and video.numel() > 0
+        has_audio = isinstance(audio, torch.Tensor) and audio.numel() > 0
+        if has_video != has_audio:
+            raise ValueError("Mixed-loading batch carries exactly one of "
+                             "vae_latent/audio_latent non-empty; a t2va row "
+                             "must carry both and a text_only row neither "
+                             f"(vae_latent={'present' if has_video else 'empty/missing'}, "
+                             f"audio_latent={'present' if has_audio else 'empty/missing'})")
+        return has_video
+
     def _rollout_grid_length(self) -> int:
         raw = self.method_config.get("dmd_denoising_steps", None)
         if not isinstance(raw, list) or not raw:
@@ -426,6 +472,13 @@ class DMD2Method(TrainingMethod):
             raise ValueError("training.data.preprocessed_data_type='text_only' "
                              "requires method.rollout_mode='simulate'; "
                              "data_latent rollout requires vae_latent data.")
+        if self._rollout_data_forcing and data_type != "t2va":
+            raise ValueError("method.rollout_data_forcing: true requires "
+                             "training.data.preprocessed_data_type='t2va': the "
+                             "t2va parquet schema is the superset that reads "
+                             "latent columns; text-only roots mixed into the "
+                             "same data_path yield empty latent columns and "
+                             "route to the carried walk.")
 
     def _uses_negative_prompt_conditioning(self) -> bool:
         if self._cfg_uncond is None:
@@ -924,6 +977,12 @@ class DMD2Method(TrainingMethod):
         slot = self._carry_call_count % self._rollout_carry_slot_count
         self._carry_call_count += 1
 
+        # Per-batch routing (off unless method.rollout_data_forcing): a batch
+        # that carries real latents trains on them at a noised grid rung and
+        # leaves this slot's walk untouched.
+        if self._rollout_data_forcing and self._batch_has_latents(batch):
+            return self._data_forced_train_step(batch, slot, iteration)
+
         carried = self._carry_slots[slot]
         raw_batch = (self._carry_snapshot_raw_batch(batch) if carried is None else carried["raw_batch"])
 
@@ -1037,6 +1096,149 @@ class DMD2Method(TrainingMethod):
         metrics: dict[str, LogScalar] = {
             "update_student": float(update_student),
             "rollout_step": float(rung),
+            **generator_metrics,
+            **critic_metrics,
+        }
+        if self._rollout_data_forcing:
+            # The running mean of this metric is the realized latent-row
+            # fraction of the mix; emitted only when routing is enabled so
+            # carry-only runs keep their exact metric set.
+            metrics["data_forced"] = 0.0
+        # Rank-local latent snapshots for LatentVisCallback.
+        self.latent_vis = {
+            **(training_batch.fake_score_latent_vis_dict or {}),
+            **(training_batch.dmd_latent_vis_dict or {}),
+        }
+        return loss_map, outputs, metrics
+
+    def _data_forced_train_step(
+        self,
+        batch: dict[str, Any],
+        slot: int,
+        iteration: int,
+    ) -> tuple[
+            dict[str, torch.Tensor],
+            dict[str, Any],
+            dict[str, LogScalar],
+    ]:
+        """One data-forced call: train on real latents noised at a grid rung.
+
+        FastGen's data-driven multistep student inputs (its
+        ``backward_simulation: false`` regime): ``t_student`` is drawn
+        uniformly over the student grid's rungs — ``sample_from_t_list``
+        semantics, never t=0 — and the real packed latents are
+        forward-noised to that rung under each modality's shift, exactly
+        the uncarried ``rollout_mode: data_latent`` math. The slot's
+        carried walk pauses untouched and resumes on this stream's next
+        text-only batch: FastGen picks one regime per config, so pausing
+        is the minimal per-batch composition of its two modes. Both
+        phases consume the same forced generation, mirroring the carried
+        step's critic passthrough.
+
+        The slot's one-time stagger pre-walk still runs on its first-ever
+        call even when that call is data-forced: the pre-walk's FSDP
+        collective count must stay uniform across ranks, and ranks whose
+        first batch is text-only run theirs on this same call. The seeded
+        walk adopts this batch's conditioning and waits at its stagger
+        rung.
+        """
+        training_batch = self.student.prepare_batch(
+            batch,
+            generator=self.cuda_generator,
+            latents_source="data",
+        )
+        latents = training_batch.latents
+        device = latents.device
+        if not self._carry_slot_seeded[slot]:
+            self._carry_slot_seeded[slot] = True
+            step_list = self._get_denoising_step_list(device)
+            state = torch.randn(
+                latents.shape,
+                device=device,
+                dtype=latents.dtype,
+                generator=self.cuda_generator,
+            )
+            state, rung = self._staggered_start(
+                state,
+                training_batch,
+                step_list,
+                slot,
+            )
+            self._carry_slots[slot] = {
+                "state": state.detach(),
+                "rung": rung,
+                "raw_batch": self._carry_snapshot_raw_batch(batch),
+            }
+
+        forced_timestep = self._sample_rollout_timestep(device)
+        noise = torch.randn(
+            latents.shape,
+            device=device,
+            dtype=latents.dtype,
+            generator=self.cuda_generator,
+        )
+        noisy_latents = self.student.add_noise(latents, noise, forced_timestep)
+
+        update_student = self._should_update_student(iteration)
+
+        generator_loss = torch.zeros((), device=device, dtype=torch.float32)
+        fake_score_loss = torch.zeros_like(generator_loss)
+        student_ctx = None
+        critic_ctx = None
+        critic_outputs: dict[str, Any] = {}
+        generator_metrics: dict[str, LogScalar] = {}
+        critic_metrics: dict[str, LogScalar] = {}
+        if update_student:
+            generator_pred_x0 = self.student.predict_x0(
+                noisy_latents,
+                forced_timestep,
+                training_batch,
+                conditional=True,
+                cfg_uncond=self._cfg_uncond,
+                attn_kind="vsa",
+            )
+            student_ctx = (
+                training_batch.timesteps,
+                training_batch.attn_metadata_vsa,
+            )
+            generator_loss, generator_metrics = self._dmd_loss(generator_pred_x0, training_batch)
+            training_batch.dmd_latent_vis_dict["generator_pred_video"] = generator_pred_x0.detach()
+        else:
+            with torch.no_grad():
+                generator_pred_x0 = self.student.predict_x0(
+                    noisy_latents,
+                    forced_timestep,
+                    training_batch,
+                    conditional=True,
+                    cfg_uncond=self._cfg_uncond,
+                    attn_kind="vsa",
+                )
+            (
+                fake_score_loss,
+                critic_ctx,
+                critic_outputs,
+                critic_metrics,
+            ) = self._critic_flow_matching_loss(
+                training_batch,
+                generator_pred_x0=generator_pred_x0,
+            )
+        training_batch.dmd_latent_vis_dict["generator_timestep"] = forced_timestep.float().detach()
+
+        total_loss = generator_loss + fake_score_loss
+        loss_map = {
+            "total_loss": total_loss,
+            "generator_loss": generator_loss,
+            "fake_score_loss": fake_score_loss,
+        }
+        outputs: dict[str, Any] = dict(critic_outputs)
+        outputs["_fv_backward"] = {
+            "update_student": update_student,
+            "student_ctx": student_ctx,
+            "critic_ctx": critic_ctx,
+        }
+        metrics: dict[str, LogScalar] = {
+            "update_student": float(update_student),
+            "data_forced": 1.0,
             **generator_metrics,
             **critic_metrics,
         }

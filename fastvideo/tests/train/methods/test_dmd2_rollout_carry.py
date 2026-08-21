@@ -83,6 +83,7 @@ def _make_method(
     grad_accum: int | None = None,
     rollout_mode: str = "simulate",
     student: object | None = None,
+    data_forcing: bool | None = None,
 ) -> DMD2Method:
     method = object.__new__(DMD2Method)
     config: dict = {
@@ -95,6 +96,8 @@ def _make_method(
         config["rollout_carry_slots"] = slots
         if sample_type is not None:
             config["rollout_sample_type"] = sample_type
+    if data_forcing is not None:
+        config["rollout_data_forcing"] = data_forcing
     object.__setattr__(method, "method_config", config)
     object.__setattr__(method, "student", student if student is not None else _CarryStudent())
     object.__setattr__(
@@ -115,6 +118,11 @@ def _make_method(
     object.__setattr__(method, "_rollout_carry_slot_count", knobs[1])
     object.__setattr__(method, "_rollout_sample_type", knobs[2])
     method._init_rollout_carry_state()
+    object.__setattr__(
+        method,
+        "_rollout_data_forcing",
+        method._parse_rollout_data_forcing(),
+    )
     return method
 
 
