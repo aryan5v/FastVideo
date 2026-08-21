@@ -218,6 +218,41 @@ Serving guidance meanwhile: run the stack with `enable_torch_compile_vae`
 on (parity-safe decoder compile) and, where output parity is not required,
 `FASTVIDEO_MINIMAX_H3_FUSIONS=1`.
 
+### Dense base with stack opt-ins (job 2653, node-matched)
+
+The leg-a numbers above ran the DENSE base model (50-step) at stack defaults.
+Same methodology and same node (hpc-rack-3-5) with the stack's opt-ins ON —
+#1732's slim conditioner is already default-on in every leg; a2 adds #1734's
+`enable_torch_compile_vae`; a3 adds #1735's `FASTVIDEO_MINIMAX_H3_FUSIONS=1`
+(DISCLOSED NON-PARITY numerics — speed reference only):
+
+| leg | 1x e2e | 1x denoise | SP-4 e2e | SP-4 denoise |
+|---|---:|---:|---:|---:|
+| a2. a + `enable_torch_compile_vae` (parity-safe optimum) | **181.1** (181.0-181.3) | 174.86 | **61.3** (60.6-62.3) | 52.57 |
+| a3. a2 + H3 fusions (non-parity) | **157.2** (156.4-157.8) | 151.10 | **55.6** (55.2-55.8) | 47.02 |
+
+Baselines: stack defaults (leg a) 186.6 / 66.0; pre-stack 185.2-188.2 / 62.8-63.7.
+
+- a2 beats the PRE-STACK dense baseline at both shapes (1x -2.2% vs the 185.2
+  best; SP-4 -2.3% vs 62.8) and the stack defaults by -5.5 s / -4.7 s: the
+  opt-in decoder compile recovers the defaults decode regression with room to
+  spare. Video VAE decode 4.98 s 1x (4.88-5.04) / 7.05 SP-4 (6.78-7.48) vs
+  8.3-8.9 / 10.8-12.3 at defaults and the 6.4-7.5 pre-stack band; text encode
+  0.34-0.42 s in all four legs (slim conditioner).
+- Fusions on the 49-forward dense path: denoise **-13.6% at 1x** (174.86 ->
+  151.10, 3.57 -> 3.08 s/fwd) and **-10.6% at SP-4** (52.57 -> 47.02) vs a2 —
+  the 4-forward student saw -16%/-12% (leg d). Decode/text unchanged
+  (4.90 / 6.86); engagement line present in both worker logs.
+- Determinism: every leg produced 3 byte-identical same-seed videos — a2 1x
+  ff70127e…, SP-4 9c453149… (parity-safe requirement PASS); a3 1x cf096256…,
+  SP-4 8bd6b440… (run-to-run deterministic; numerics differ from a2 by design
+  — frame-60 inspection clean and prompt-faithful, minor detail drift only).
+  Videos: `stack_bench/videos/dense50_vaec{,_fus}_{1x,sp4}/`, raw runs
+  `stack_bench/run_{1x,sp4}_denseopt/`.
+- Net: the dense/teacher serving config on the stack is a2 — the fastest
+  parity-safe dense SP-4 measured (61.3 s); where parity is not required, a3
+  reaches 157.2 / 55.6 (**-15.8% vs stack defaults at both shapes**).
+
 ## Route guidance (from the measurements)
 
 1. Student serving at 5s: SP-4, VSA-64 sm100a (`FASTVIDEO_VSA_SM100A=1`), 4 forwards
