@@ -85,7 +85,12 @@ def make_inference_args(
     # CPU tensors (no-grad forwards keep working off gathered buffers,
     # which is why it surfaces steps later).
     args.dit_cpu_offload = False
+    # Validation must sample at the training attention contract: both the
+    # sparsity AND the tile geometry. Leaving the tile size at its
+    # FastVideoArgs default silently validates a tile-64-trained student at
+    # tile 256 (v8 shipped 2400 steps of validation that way).
     args.VSA_sparsity = tc.vsa_sparsity
+    args.VSA_tile_size = tc.vsa_tile_size
     return args
 
 

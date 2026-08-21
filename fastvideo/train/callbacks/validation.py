@@ -240,6 +240,72 @@ class ValidationCallback(Callback):
     # Callback hooks
     # ----------------------------------------------------------
 
+    @staticmethod
+    def _assert_attention_contract(
+        inference_args: Any,
+        tc: Any,
+    ) -> None:
+        """Fail if validation would sample off the training attention contract.
+
+        Sparsity and tile geometry are separate knobs and both have to survive
+        the training-config to inference-args hop: v8 validated a
+        tile-64-trained student at the tile-256 default because only the
+        sparsity was propagated, and nothing downstream noticed.
+        """
+        for train_attr, args_attr in (
+            ("vsa_sparsity", "VSA_sparsity"),
+            ("vsa_tile_size", "VSA_tile_size"),
+        ):
+            trained = getattr(tc, train_attr, None)
+            sampled = getattr(inference_args, args_attr, None)
+            if trained is None or sampled is None:
+                continue
+            if sampled != trained:
+                raise ValueError(f"validation would sample at {args_attr}={sampled} while "
+                                 f"training runs {train_attr}={trained}. The attention "
+                                 "contract must match; fix the training-config to "
+                                 "inference-args propagation rather than the symptom.")
+
+    def _adopt_training_sampling_contract(
+        self,
+        method: TrainingMethod,
+    ) -> None:
+        """Keep validation sampling on the operating point training teaches.
+
+        A few-step method trains its student on an explicit timestep ladder.
+        Validation only reaches that ladder when ``sampling_timesteps`` is
+        configured: ``sampling_steps`` sets ``num_inference_steps``, and the
+        public scheduler turns N of those into an N-point sigma grid, i.e.
+        N-1 forwards on the scheduler's own spacing. Duplicating the ladder by
+        hand in the callback config is the footgun that silently validated v8
+        at three forwards on the wrong grid for its whole run, so derive it
+        from the method instead, and refuse to run when the two disagree.
+        """
+        method_config = getattr(method, "method_config", None)
+        if not isinstance(method_config, dict):
+            return
+        raw = method_config.get("dmd_denoising_steps")
+        if not isinstance(raw, list) or not raw:
+            return
+        trained = [int(s) for s in raw]
+
+        if self.sampling_timesteps is None:
+            self.sampling_timesteps = trained
+            logger.info(
+                "validation: adopting the trained denoising ladder %s "
+                "(%d forwards) from the training method",
+                trained,
+                len(trained),
+            )
+            return
+        if self.sampling_timesteps != trained:
+            raise ValueError("callbacks.validation.sampling_timesteps "
+                             f"{self.sampling_timesteps} disagrees with the trained ladder "
+                             f"{trained} (method.dmd_denoising_steps). Validation would "
+                             "sample off the operating point the student was distilled "
+                             "for. Drop the callback override to inherit the ladder, or "
+                             "align the two deliberately.")
+
     def on_train_start(
         self,
         method: TrainingMethod,
@@ -247,6 +313,7 @@ class ValidationCallback(Callback):
     ) -> None:
         self.method = method
         tc = self.training_config
+        self._adopt_training_sampling_contract(method)
 
         self.world_group = get_world_group()
         self.sp_group = get_sp_group()
@@ -1415,6 +1482,7 @@ class ValidationCallback(Callback):
             tc,
             model_path=tc.model_path,
         )
+        self._assert_attention_contract(inference_args, tc)
 
         batch = ForwardBatch(
             **shallow_asdict(sampling_param),
@@ -1512,6 +1580,7 @@ class ValidationCallback(Callback):
             tc,
             model_path=tc.model_path,
         )
+        self._assert_attention_contract(inference_args, tc)
         self._sync_runtime_dit_arch_config(
             inference_args.pipeline_config,
             transformer,
