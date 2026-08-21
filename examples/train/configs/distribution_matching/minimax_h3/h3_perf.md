@@ -9,7 +9,7 @@ prompt 0, seed 1000, warmup excluded, >=2-3 timed repeats (spreads <=1% unless n
 
 ## 1. T2VA @ 5s (768x1344, 124 frames, S=38,010)
 
-### End-to-end (seconds)
+### End-to-end (seconds) — jobs 2518 (1x), 2519/2555/2556 (SP-4), 2564 (SP-8)
 
 | config | 1x GPU | SP-4 (one tray) | SP-8 (2 trays, external launcher) |
 |---|---:|---:|---:|
@@ -25,6 +25,12 @@ prompt 0, seed 1000, warmup excluded, >=2-3 timed repeats (spreads <=1% unless n
 - Fixed (non-denoise) cost ~9.2-9.3 s (SP-invariant): text encode ~2, video VAE decode 6.4-7.5,
   audio+save ~1. FastH3 at SP-4 is ~68% fixed-cost-bound; SP-8 makes the student WORSE
   (VAE decode replicated per rank). **SP-8 is the teacher's shape; SP-4 the student's.**
+- SP-8 raw per-request (job 2564): dense e2e 42.51/42.17/44.88, denoise 28.99/29.81/32.33;
+  FastH3-triton e2e 16.63/16.10/25.76*, sm100a 16.27/17.07/30.62* (*identical output hashes —
+  stall outliers, suspected fabric/lustre interference from the co-resident 8-tray training job).
+  Known anomaly: external-launcher mode adds ~3.2 s in `video_decoding_stage` vs the stock
+  executor at equal world size (7.26→10.44 s); denoise unaffected; prime suspect torchrun's
+  `OMP_NUM_THREADS=1` default.
 - Sharding note: multi-node inference requires the external-launcher path
   (`FASTVIDEO_EXTERNAL_LAUNCHER=1`, torchrun; byte-identical gate vs stock executor; unmerged
   worktree commits `c65733463`+`ac24e7e78`).
@@ -37,8 +43,11 @@ prompt 0, seed 1000, warmup excluded, >=2-3 timed repeats (spreads <=1% unless n
 | 1 GPU + CPU offload | 140.7 s (82.6 GB peak) | — | — |
 | 4 GPU (USP-4 + text-encoder TP-4 + VAE patch-parallel + regional compile) | **40.7 s** | 62.8 s | 0.65x |
 
-Their 4-GPU margin comes from regional compile + parallel VAE decode + encoder TP — our #1718
-compile port (unenabled) and the #1703-seam parallel decode (unbuilt) are the corresponding levers.
+Per-step: ~2.69 s (1 GPU) / ~0.79 s (4 GPU). Boot→healthy 110 s (1x) / 310 s (4 GPU incl.
+regional-compile warmup 63.5 s); 1x warmup 157.5 s. Their 4-GPU margin comes from regional
+compile + parallel VAE decode + encoder TP — our #1718 compile port (unenabled) and the
+#1703-seam parallel decode (unbuilt) are the corresponding levers. (vllm 0.26.0 wheels,
+vllm-omni @73b623f2, isolated venv `vllm_omni_bench/venv`; jobs 2562/2563.)
 
 ## 2. Ref2VA @ 15s (345 frames, 768x1344 ref + target, S=220,628)
 
@@ -51,6 +60,7 @@ Base `transformer_ref` weights; full grid in `vsa_gate/ref2va_grid/ROOFLINE.md`.
 | VSA@0.9 **Triton-256, current policy — DO NOT USE at this scale** | 4 | 37.6 (1.79x SLOWER than dense) | 203 s |
 | VSA@0.9 tile-64 sm100a, current policy (P1) | 4 | 17.3 (1.22x) | 121 s |
 | **P2 ref-sparsified keep-0.10, CuTe-256 (50-step)** | 49 | **9.2 (2.34x denoise, 2.17x e2e)** | **513 s** |
+| P2b (+semantic-ref trim to ~300 text), attention-layer measured | — | 18.6 s attn-fwd @1x = **4.19x vs dense** | projected |
 
 - Component split at 221k dense: **attention 91.5% of DiT wall** (89.1% FLOPs), MLP 5.4%, QKV/O 3.1%.
   At 38k: attention 62.9%. Dense FA4 effective throughput at 221k: 0.96-0.98 PF/s.
@@ -72,7 +82,8 @@ sm_100a CUDA (merged #1719 + per-tile-count fix) vs Triton-64, blk64:
 | sm100a TFLOPS | 498 | 780 | 1026 | 1076 | 1093 | 1072 | 1020 | 993 |
 | blk128 TFLOPS | 645 | 930 | 1131 | 1293 | 1271 | 1274 | 1270 | 1268 |
 
-Triton-64 saturates ~536 TF from 65k. H3 layer path (56 heads, prod 5s shape, sparsity 0.9):
+Triton-64 saturates ~536 TF from 65k (job 2558; parity vs Triton max|diff| 0.002; sm100a
+holds ~1000+ TF to 200k with ~7% taper past 131k). H3 layer path (56 heads, prod 5s shape, sparsity 0.9):
 19.2 ms (Triton-64) → 11.4 ms (sm100a, 1.68x). Dense-50-vs-3-step legacy headline (VSA-256,
 124f): 4.66x e2e / 14.1x denoise (job 2432 era).
 
