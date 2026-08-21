@@ -530,7 +530,9 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     # Regional compile of the dense roles; gated on the A/B verdict before
     # launch (see the YAML's PENDING GATE note).
     assert training["model"]["enable_torch_compile"] is True
-    assert training["model"]["torch_compile_kwargs"] == {"dynamic": False}
+    # The compile A/B (vsa_gate/compile_ab/VERDICT.md) validated the flip
+    # with NO torch_compile_kwargs — the config must not add any.
+    assert "torch_compile_kwargs" not in training["model"]
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:

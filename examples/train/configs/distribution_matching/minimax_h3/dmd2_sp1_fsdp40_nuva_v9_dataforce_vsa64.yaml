@@ -97,10 +97,16 @@ training:
     # empty latent columns and route to the carried walk; latent rows route
     # to the data-forced step. Ratio = row counts; use "path:N" repeats to
     # rebalance (see header).
+    # NuVA roots point at the two SET directories, not data/nuva_t2va/ — the
+    # root also holds harness/ (scripts + manifests) which the recursive
+    # *.parquet sweep must not see. READY_23375: 10,000 rows (10k_720, full)
+    # + 13,375 rows (50k_720 tranche; catch-up waves append as the upstream
+    # producer generates).
     data_path:
       - /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only_train
       - /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
-      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va
+      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va/nuva_10k_720
+      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va/nuva_50k_720
     preprocessed_data_type: t2va
     dataloader_num_workers: 0
     train_batch_size: 1
@@ -141,17 +147,15 @@ training:
   model:
     precondition_outputs: false
     enable_gradient_checkpointing_type: full
-    # Regional fullgraph compile of the dense FA4 teacher/critic blocks
-    # (VSA student roles auto-degrade to eager with a warning). PENDING
-    # GATE: the compile A/B verdict at
-    # /mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/compile_ab/VERDICT.md was
-    # NOT yet present when this config was authored — read it before launch
-    # and follow its flip lines; on NO-GO set enable_torch_compile: false.
-    # Also run the runbook enable-checklist (one-step eager-vs-compiled
-    # critic/student grad-norm A/B) first.
+    # Regional fullgraph compile of the dense teacher/critic blocks (VSA
+    # student roles auto-degrade to eager with a warning). GATED GO
+    # 2026-08-21: vsa_gate/compile_ab/VERDICT.md — 21-step A/B statistically
+    # indistinguishable (within the recipe's chaotic noise floor), shard
+    # cache + fp32 asserts clean after the three loader bugfixes
+    # (983fd7495..846542f9c), steady-state -4.7% critic / -6.6% student
+    # steps. The verdict validated the flip WITHOUT torch_compile_kwargs —
+    # keep it that way.
     enable_torch_compile: true
-    torch_compile_kwargs:
-      dynamic: false
 
   # FP32 sharded master weights; the trainer verifies them at startup.
   dit_precision: fp32
