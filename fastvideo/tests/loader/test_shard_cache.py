@@ -115,6 +115,54 @@ def test_missing_entry_misses_cleanly(cpu_mesh, tmp_path):
     assert not try_load_from_shard_cache(dst, ctx, torch.device("cpu"))
 
 
+def test_ac_wrapped_buffer_stays_buffer_on_cache_hit(cpu_mesh, tmp_path):
+    """Warm-path counterpart of the cold-path AC-prefix fix in fsdp_load.
+
+    Under pre-FSDP activation checkpointing the model handed to
+    ``try_load_from_shard_cache`` is already checkpoint-wrapped:
+    ``state_dict()`` (and manifest) keys are clean, but raw
+    ``named_buffers()`` keys carry the ``_checkpoint_wrapped_module.``
+    segment. The buffer-membership test must compare canonical names, or a
+    cached persistent buffer inside a wrapped block is reassigned as an
+    ``nn.Parameter`` by ``load_state_dict(assign=True)`` — on warm boots
+    only, silently diverging from the (already fixed) cold-boot path.
+    """
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        checkpoint_wrapper, )
+
+    def _block_model() -> nn.Module:
+        model = nn.Module()
+        block = nn.Module()
+        weight = distribute_tensor(torch.randn(8, 4), cpu_mesh, (Replicate(), Shard(0)))
+        block.register_parameter("weight", nn.Parameter(weight))
+        block.register_buffer("gain", torch.full((4, ), 3.0))
+        model.block = block
+        model.reverse_param_names_mapping = {}
+        return model
+
+    # Cold boot writes the cache from the same (wrapped) model shape; keys in
+    # the manifest are clean either way because state_dict strips the prefix.
+    src = _block_model()
+    src.block = checkpoint_wrapper(src.block)
+    ctx = _ctx(tmp_path)
+    write_shard_cache(src, ctx)
+    assert "block.gain" in src.state_dict()
+
+    dst = _block_model()
+    dst.block = checkpoint_wrapper(dst.block)
+    with torch.no_grad():
+        dst.block.weight.mul_(0)
+        dst.block.gain.mul_(0)
+    assert try_load_from_shard_cache(dst, ctx, torch.device("cpu"))
+
+    buffer_names = {name for name, _ in dst.named_buffers()}
+    parameter_names = {name for name, _ in dst.named_parameters()}
+    assert "block._checkpoint_wrapped_module.gain" in buffer_names
+    assert not any(name.endswith("gain") for name in parameter_names)
+    assert torch.equal(dst.block.gain, torch.full((4, ), 3.0))
+    assert torch.equal(dst.block.weight.to_local(), src.block.weight.to_local())
+
+
 def test_model_selected_dtype_rejects_stale_cache_and_hits_fresh_cache(cpu_mesh, tmp_path):
     stale = _make_model(cpu_mesh, dtype=torch.bfloat16)
     stale_ctx = _ctx(tmp_path / "stale")

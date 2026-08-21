@@ -194,7 +194,15 @@ def try_load_from_shard_cache(
 
         from safetensors import safe_open
 
-        named_buffers = dict(model.named_buffers())
+        # meta_sd (and the manifest) use clean checkpoint keys, but a model
+        # activation-checkpoint-wrapped before load (pre-FSDP AC) yields
+        # `_checkpoint_wrapped_module.`-prefixed names from named_buffers().
+        # Canonicalize like the full-load path, or the membership test below
+        # rebuilds a cached buffer as a trainable nn.Parameter on warm boots.
+        from fastvideo.models.loader.fsdp_load import (
+            _strip_checkpoint_wrapper_prefix, )
+
+        named_buffers = {_strip_checkpoint_wrapper_prefix(k): v for k, v in model.named_buffers()}
         sharded_sd: dict[str, Any] = {}
         with safe_open(str(shard_path), framework="pt", device=str(device)) as f:
             cached_keys = set(f.keys())
