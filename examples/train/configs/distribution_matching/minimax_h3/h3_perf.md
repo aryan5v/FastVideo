@@ -197,9 +197,11 @@ and excluded-run provenance in `INVALID_RUNS.md`. Harness SHA `d85b5cc6...`; pro
 
 ## 6. Current matched serving matrix: base H3 and FastH3 (2026-08-22)
 
-This section supersedes the serving headlines in sections 1 and 5. The final timing checkout was
-the clean `integration/h3-vllm-parity-20260822` tree at exact SHA
-`99cd355a2452ce040591fe54ef340d192e26fe48`; its merged-main base is
+This section supersedes the serving headlines in sections 1 and 5. Most attribution rows below
+were measured on the clean `integration/h3-vllm-parity-20260822` tree at exact SHA
+`99cd355a2452ce040591fe54ef340d192e26fe48`; it remains the historical timing/attribution
+authority, while the exact public-head compositions in the final subsection are the current
+public-serving acceptance authority. The `99cd355a` merged-main base is
 `2f3d4074064e4d86f99dc784ebbaa296e6f5925f`, so all nine merged H3 PRs listed in section 5 are
 included. The integration tree additionally carries regional inference compile, temporal-parallel
 VAE, compile-safe fusion work, the attention compile-scope correction, and packed-varlen FA4.
@@ -378,6 +380,69 @@ speed ceiling at 6.910 s but changes model numerics and must remain report-only.
 - PR-head GPU tests: `vsa_gate/prtest_h3_fa4_varlen_2704be79/test_2755.out`.
 - Corrected current FastH3 f3/f4 pairing: current workspace
   `logs/fast_current_parity_2780.out` and per-leg `parity_current_vs_eager.json` files.
+
+### Exact public-head acceptance: current serving authority
+
+Two clean internal compositions verify the public inference-only extraction without relying on
+the older all-in-one `99cd355a` tree. Base H3 used
+`e0bb6a5374dd944907cb48f8af444fe446e4e1a9`: public main `d3cff517c` (which includes merged
+#1741) plus the reviewed contents of #1742-#1745. Its combined GB200 gate, job 2999, passed 119
+focused tests with one skip and then passed the world-4 parallel-VAE GPU test on every rank (five
+tests per rank). Preview used `bbc8d354892eca37a833a60821035b8e9c0ea26a`: the same public main
+plus #1744 (which carries #1743) and #1745. Relative to the #1742-#1745 serving extraction, Preview
+omits only #1742 because packed dense FA4 is irrelevant to its VSA attention route; it also
+deliberately excludes the independently reviewed #1739 and #1740 heads. The non-shallow ancestry
+audit is `provenance_audit.json` (SHA256 `08f29dd1651716a253dc2be15942c5ca25cf5481a40300a3b61e09dd92f767f6`).
+
+Both timing jobs used 768x1344x124, prompt 0, seed 1000, one excluded warmup, and three saved timed
+requests. Values are medians; parentheses give the timed range. The base d4 route uses packed-
+varlen FA4, regional `fullgraph=True` compile on 52 DiT blocks, compiled VAE decode, replicated
+DiT, fusions off, and temporal-parallel VAE decode at SP-4. It requested 50 scheduler points and
+the scheduler contract expects 49 forwards; jobs 3008/3009 did **not** instrument a runtime
+forward trace, so this evidence must not be relabeled as 49 observed calls.
+
+| exact composition / route | GPUs | e2e median (range), s | denoise median (range), s | video decode median (range), s | peak MiB | vllm-omni e2e / denoise delta |
+|---|---|---:|---:|---:|---:|---:|
+| `e0bb6a5`, base d4 | 1x | **134.378 (134.234-134.451)** | **126.504 (126.415-126.660)** | **6.313 (6.047-6.342)** | 74726 | -1.20% / -0.97% |
+| `e0bb6a5`, base d4 | SP-4 | **39.946 (39.930-39.960)** | **36.904 (36.855-36.910)** | **1.831 (1.812-1.850)** | 75696 | -2.10% / -0.86% |
+
+Negative deltas mean FastVideo is faster. The base acceptance therefore reproduces the vllm-omni
+match on the public extraction. Against the historical `99cd355a` rows, `e0bb6a5` is 1.44% /
+0.60% slower in 1x e2e/denoise and 1.58% /
+0.61% faster at SP-4. The first attempts, jobs 3006/3007, are excluded: their long Lustre
+`TMPDIR` exceeded the Unix-domain socket path limit when Python returned the generated tensor.
+Jobs 3008/3009 reran unchanged code and workload with a short `/tmp` directory. The combined
+receipt is `public_serving_e0bb_20260822/base_acceptance/RETRY_RECEIPTS.json` (SHA256
+`711ea11f6e1a4a62e52f2ab95bcaa7f16e3e138571c51388a4d0d1bc0e8866f5`); individual 1x/SP-4
+receipt SHA256s are `e1c79d6c3e680641b70fa14f0b92d0b493669521d149f90288c770fb35e6577f` and
+`f13224eecfcc455272d2a38f9cf7ebb304c0d216dba4e3cc65ad9eebd3f3b6d0`. The job-2999 gate log
+SHA256 is `2b9fc68491eca165f936f83a1ee1692e4c986cba840ccd67b3242cd8215efffa`.
+
+Preview f3/f4 use eager VSA@0.9 tile-64 sm100a DiT, a compiled decoder, and temporal-parallel VAE
+at SP-4; f4 additionally enables H3 fusions. All four receipts record exactly four observed DiT
+forwards per request, valid 124-frame media, and byte-identical repeats within the row. Parity is
+mean/min MS-SSIM against the same-composition f0 eager output; f3 has a 0.95 minimum floor, while
+f4 remains an ungated non-parity speed ceiling.
+
+| exact composition / leg | GPUs | e2e median (range), s | denoise median (range), s | parity mean / minimum | status | receipt SHA256 |
+|---|---|---:|---:|---:|---|---|
+| `bbc8d35`, f3 strict | 1x | **17.947 (17.887-18.407)** | **10.696 (10.696-10.715)** | 0.985266 / 0.976376 | PASS | `ad6ca5dab108...` |
+| `bbc8d35`, f4 all features | 1x | **16.228 (16.202-16.385)** | **8.683 (8.663-8.703)** | 0.518112 / 0.391864 | report-only | `0c0bf53e0aad...` |
+| `bbc8d35`, f3 strict | SP-4 | **6.562 (6.560-7.569)** | **3.493 (3.416-3.518)** | 0.985102 / 0.975800 | PASS | `d799c6aa774e...` |
+| `bbc8d35`, f4 all features | SP-4 | **6.107 (5.829-6.480)** | **2.974 (2.842-2.991)** | 0.500538 / 0.358231 | report-only | `0a02d025660a...` |
+
+The row receipts live under
+`fasth3_preview_acceptance_1744_1745_20260822/runs/fasth3/{1x,sp4}/`
+`{f3_sm100a_vaec_vaepar,f4_sm100a_vaec_vaepar_fusions}/run_receipt.json`. Their full SHA256s,
+in table order, are `ad6ca5dab1089e7ec51ad462ed0eaeb23361babc0ede9773a611939aacfd42f1`,
+`0c0bf53e0aad75c6b9fa847de8f9eba12ad4a1945b1c7c89b23208985b728100`,
+`d799c6aa774e8f3b2f4f39f3cca5d16238570a736b480d87620767b9d66add25`, and
+`0a02d025660ac5f7ffeb7f76d5f82fb6023fcf1d9f0a56e6cc122b7c793a3400`.
+The adjacent `parity_vs_eager.json` files have SHA256s, in the same order,
+`3cc8c5d15f79669cdb8390f645fe3954edc180d176631bf4e09abbb44ad4eff8`,
+`912b10ebf32c2122dff816e0665a7ae0196d5fed3b66305892488a8954575ec2`,
+`6c3040671ea61e49bbc3da4128e31c29eeb4e980d6c7e721a37ba6723b587cde`, and
+`6925bc9c82eef15959f9647bac4051dab2df73c487c64afaee53070c65e6b8b6`.
 
 ## 7. Matched duration grids: T2VA and Ref2VA (2026-08-22)
 
@@ -575,16 +640,19 @@ The public-serving extraction is intentionally split by concern. As of this refr
 (regional inference compile) is merged at public main `d3cff517c`; #1742 (packed-varlen FA4)
 is conflict-free at `9eb7b5d3a`; #1743 (schema-inventory repair) is at `d1ee99ac2`; #1744
 (parallel VAE) is at `88e241a75`; and #1745 (odd-tile sm100a) is at `286203d9e`. None of these
-public PRs contains a training path or training configuration. The original `99cd355a` rows
-remain the timing authority until the clean public-head composition acceptance run completes.
+public PRs contains a training path or training configuration. The exact `e0bb6a5`/`bbc8d35`
+acceptance above is now the current public-serving authority; `99cd355a` remains the historical
+timing and feature-attribution authority for rows that have not been rerun on those compositions.
 
-PR #1740 (`61ab307aa`, fused Ulysses NVLink all-to-all) is an explicit **excluded factor**, not
-a missing timing. Exact-head review found two distributed-correctness blockers: up to 36 CUDA
-CTAs reuse one NCCL LSA barrier index, and only the initial capability decision is voted while
-allocation, build, per-call guards, and buffer growth can diverge rank-locally. The current
-benchmark kernel prefix also lacks the new communication symbol, and the raw pybind path is not
-traceable inside base d4's `fullgraph=True` regions. Running a timing grid before those issues
-are fixed risks a mismatched collective hang and would not prove engagement.
+PR #1740 (fused Ulysses NVLink all-to-all) was re-audited after the public-head acceptance and is
+unchanged at exact head `61ab307aaf469969d2b72d36b39a4d835a19867f`; it remains an explicit
+**excluded factor**, not a missing timing. Exact-head review found two distributed-correctness
+blockers: up to 36 CUDA CTAs reuse one NCCL LSA barrier index, and only the initial capability
+decision is voted while allocation, build, per-call guards, and buffer growth can diverge
+rank-locally. The current benchmark kernel prefix also lacks the new communication symbol, and
+the raw pybind path is not traceable inside base d4's `fullgraph=True` regions. Running a timing
+grid before those issues are fixed risks a mismatched collective hang and would not prove
+engagement.
 
 | topology | #1740 grid status | reason |
 |---|---|---|
