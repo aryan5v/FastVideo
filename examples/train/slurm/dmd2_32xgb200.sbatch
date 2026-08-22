@@ -56,6 +56,11 @@ if [ -n "${EXPECTED_V10_COMMIT:-}" ]; then
     echo "V10 SOURCE GATE FAILED: execution HEAD ${observed_commit} != ${EXPECTED_V10_COMMIT}" >&2
     exit 1
   fi
+  if [ -n "$(git -C "${REPO}" status --porcelain)" ]; then
+    echo "V10 SOURCE GATE FAILED: execution checkout is dirty" >&2
+    git -C "${REPO}" status --short >&2
+    exit 1
+  fi
   echo "Execution:    ${observed_commit} (pinned)"
 fi
 
@@ -148,7 +153,11 @@ if [ "${GATE_TEST}" = "1" ]; then
       fastvideo/tests/train/methods/test_dmd2_rollout_carry.py \
       fastvideo/tests/train/methods/test_dmd2_data_forcing.py \
       fastvideo/tests/train/methods/test_minimax_h3_dmd2.py \
-      fastvideo/tests/attention/test_vsa_h3_metadata.py
+      fastvideo/tests/attention/test_vsa_h3_metadata.py \
+      fastvideo/tests/attention/test_flash_attn_h3_packed_varlen.py \
+      fastvideo/tests/dataset/test_exact_shape_bucket_sampler.py \
+      fastvideo/tests/train/callbacks/test_latent_vis_shape_context.py \
+      fastvideo/tests/train/callbacks/test_validation.py
   "; then
     echo 'LAUNCH GATE FAILED — aborting before training.'
     exit 1

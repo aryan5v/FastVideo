@@ -806,7 +806,12 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "finalize_dataset.py" in launcher
     assert "--verify-only" in launcher
     assert "H3_V10_KERNEL_GATE=1" in launcher
+    assert 'git -C "${REPO}" status --porcelain' in launcher
     assert "This helper never calls sbatch" in launcher
+
+    sbatch = _H3_SBATCH.read_text()
+    assert 'git -C "${REPO}" status --porcelain' in sbatch
+    assert "V10 SOURCE GATE FAILED: execution checkout is dirty" in sbatch
 
 
 def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None:

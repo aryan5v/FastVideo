@@ -23,14 +23,14 @@ parity.
 
 ## Current recipe
 
-The recommended config is `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` —
-v8 plus per-batch data forcing over a mixed prompt/latent dataset at global
-batch 128 (32 DP x accum 4), with regional compile of the dense roles
-pending its A/B gate. v9 shares v8's checkpoint contract otherwise, but the
-accum-4 carry slots and mixed loading make it a fresh output-dir lineage —
-do not resume v8 checkpoints into it. `_v8_bwdsim_vsa64` remains the
-carry-only (data-free) recipe; `_v7_vsa90` the pre-parity 256-tile recipe;
-`_v6` the dense-student recipe.
+The launch candidate is `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml`:
+all-real video/audio latents from the five frozen native-shape sources at
+global batch 64 (32 DP x accum 2), with no data-free carry. It starts a fresh
+base-model and optimizer lineage; never resume v8/v9 into its output. The
+full v10 contract and launch gates are below. The previous
+`dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` remains the mixed data-forcing
+plus carry recipe; `_v8_bwdsim_vsa64` is carry-only (data-free), `_v7_vsa90`
+is the pre-parity 256-tile recipe, and `_v6` is the dense-student recipe.
 
 ### Gold-standard refresh (2026-08-21)
 

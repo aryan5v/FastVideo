@@ -135,6 +135,11 @@ if ! git -C "${REPO}" merge-base --is-ancestor 56d4a6074 HEAD; then
   echo "NOT READY: execution commit does not contain corrected Triton backward PR #1730" >&2
   failures=$((failures + 1))
 fi
+if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
+  echo "NOT READY: execution checkout has uncommitted or untracked files: ${REPO}" >&2
+  git -C "${REPO}" status --short >&2
+  failures=$((failures + 1))
+fi
 
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "NOT READY: fresh v10 output directory is non-empty: ${OUTPUT_DIR}" >&2
