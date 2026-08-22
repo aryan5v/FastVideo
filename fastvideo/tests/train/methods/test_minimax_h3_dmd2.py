@@ -833,9 +833,11 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     for runtime_variable in (
             "HF_HOME",
             "XDG_CACHE_HOME",
+            "TORCH_HOME",
             "TRITON_CACHE_DIR",
             "TORCHINDUCTOR_CACHE_DIR",
             "TORCH_EXTENSIONS_DIR",
+            "FLASHINFER_WORKSPACE_BASE",
             "CUDA_CACHE_PATH",
             "NUMBA_CACHE_DIR",
             "WANDB_CONFIG_DIR",
