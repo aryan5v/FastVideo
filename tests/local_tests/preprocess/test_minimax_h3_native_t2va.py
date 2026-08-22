@@ -9,6 +9,7 @@ import pickle
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HARNESS = REPO_ROOT / "scripts" / "preprocess" / "minimax_h3_native_t2va"
@@ -123,6 +124,60 @@ def test_shape_and_bucket_contracts() -> None:
     video, audio = finalizer.expected_shapes({"width": 480, "height": 832, "num_frames": 294})
     assert video == [24, 87, 52, 30]
     assert audio == [2, 32, 490]
+
+
+def test_audio_clock_contract_covers_every_frame_count_through_supported_max() -> None:
+    worker = load_script("encode_worker")
+    finalizer = load_script("finalize_dataset")
+    for num_frames in range(1, 363):
+        target = (5 * num_frames + 1) // 3
+        raw_vae_length = (5 * num_frames + 2) // 3
+        assert worker.packed_audio_latent_num_frames(num_frames) == target
+        assert finalizer.packed_audio_latent_num_frames(num_frames) == target
+        assert raw_vae_length - target == int(num_frames % 3 == 2)
+
+
+@pytest.mark.parametrize("actual_length", [602, 603, 604])
+def test_audio_latents_are_reconciled_to_fastgen_clock(actual_length: int) -> None:
+    worker = load_script("encode_worker")
+    raw = torch.arange(2 * 3 * actual_length, dtype=torch.float32).reshape(2, 3, actual_length)
+    actual = worker.reconcile_audio_latent_length(raw, num_frames=362)
+
+    assert actual.shape == (2, 3, 603)
+    if actual_length < 603:
+        expected = torch.cat([raw, raw[..., -1:]], dim=-1)
+    else:
+        expected = raw[..., :603]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_362_frame_row_trims_raw_vae_output_before_serializing(monkeypatch) -> None:
+    worker = load_script("encode_worker")
+    finalizer = load_script("finalize_dataset")
+    input_row = row("probe-362")
+    input_row.update({"width": 16, "height": 16, "num_frames": 362, "duration_sec": 362 / 24})
+
+    expected_video, expected_audio = worker.expected_shapes(input_row)
+    assert expected_audio == (2, 32, 603)
+    assert finalizer.expected_shapes(input_row)[1] == [2, 32, 603]
+
+    class FakeEncoders:
+
+        def encode_video(self, _frames, _seed):
+            return torch.zeros(expected_video)
+
+        def encode_audio(self, _waveform):
+            return torch.arange(2 * 32 * 604, dtype=torch.float32).reshape(2, 32, 604)
+
+        def encode_text(self, _prompt):
+            return torch.zeros(1, 5120)
+
+    monkeypatch.setattr(worker, "decode_native_media", lambda _row: (object(), object(), {}))
+    record, manifest = worker.encode_row(input_row, FakeEncoders())
+
+    assert expected_video == (24, 107, 1, 1)
+    assert record["audio_latent_shape"] == [2, 32, 603]
+    assert manifest["audio_latent_shape"] == [2, 32, 603]
 
 
 def test_frozen_video_stat_is_enforced(tmp_path) -> None:

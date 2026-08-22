@@ -22,6 +22,35 @@ AUDIO_SAMPLE_RATE = 32000
 AUDIO_PAD_TOLERANCE_S = 0.25
 
 
+def packed_audio_latent_num_frames(num_frames: int) -> int:
+    """Return the H3 packed-audio length on its 40 Hz clock.
+
+    The audio VAE right-pads to its 800-sample hop and emits
+    ``ceil(5 * num_frames / 3)`` latents. H3's joint packed sequence instead
+    uses the nearest 40 Hz grid point, ``round(5 * num_frames / 3)``. Since
+    thirds cannot tie, the latter is exactly this integer expression.
+    """
+    return (5 * num_frames + 1) // 3
+
+
+def reconcile_audio_latent_length(audio_latents: Any, num_frames: int):
+    """Trim or edge-pad raw audio-VAE output to H3's packed clock."""
+    import torch
+
+    target = packed_audio_latent_num_frames(num_frames)
+    actual = int(audio_latents.shape[-1])
+    if actual > target:
+        audio_latents = audio_latents[..., :target]
+    elif actual < target:
+        if actual == 0:
+            raise ValueError("cannot edge-pad an empty audio latent sequence")
+        audio_latents = torch.cat(
+            [audio_latents, audio_latents[..., -1:].expand(*audio_latents.shape[:-1], target - actual)],
+            dim=-1,
+        )
+    return audio_latents.contiguous()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worklist", type=Path, required=True)
@@ -231,17 +260,18 @@ class Encoders:
 
 
 def expected_shapes(row: dict[str, Any]) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    from fastvideo.pipelines.basic.minimax_h3.packing import audio_latent_num_frames, video_latent_num_frames
-
     frames = int(row["num_frames"])
     height = int(row["height"])
     width = int(row["width"])
+    if frames % 17 != 5:
+        raise ValueError(f"num_frames must be 17*n+5, got {frames}")
     if height % 16 or width % 16:
         raise ValueError(f"source geometry {width}x{height} is not divisible by the H3 VAE spatial ratio 16")
-    return (24, video_latent_num_frames(frames), height // 16, width // 16), (
+    video_frames = (frames - 5) // 17 * 5 + 2
+    return (24, video_frames, height // 16, width // 16), (
         2,
         32,
-        audio_latent_num_frames(frames),
+        packed_audio_latent_num_frames(frames),
     )
 
 
@@ -278,6 +308,7 @@ def encode_row(row: dict[str, Any], encoders: Encoders) -> tuple[dict[str, Any],
     video_latents = encoders.encode_video(frames, seed)
     video_done = time.monotonic()
     audio_latents = encoders.encode_audio(waveform)
+    audio_latents = reconcile_audio_latent_length(audio_latents, int(row["num_frames"]))
     audio_done = time.monotonic()
     text_embedding = encoders.encode_text(row["prompt"])
     text_done = time.monotonic()

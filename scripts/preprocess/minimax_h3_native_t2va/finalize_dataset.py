@@ -18,6 +18,11 @@ from typing import Any
 BUCKET_RE = re.compile(r"^bucket=([1-9][0-9]*)x([1-9][0-9]*)-([1-9][0-9]*)f$")
 
 
+def packed_audio_latent_num_frames(num_frames: int) -> int:
+    """Return the H3 packed-audio length on its 40 Hz clock."""
+    return (5 * num_frames + 1) // 3
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -55,7 +60,7 @@ def expected_shapes(row: dict[str, Any]) -> tuple[list[int], list[int]]:
     if frames % 17 != 5:
         raise ValueError(f"num_frames must be 17*n+5, got {frames}")
     video_frames = (frames - 5) // 17 * 5 + 2
-    audio_frames = round(frames / 24 * 40)
+    audio_frames = packed_audio_latent_num_frames(frames)
     return [24, video_frames, height // 16, width // 16], [
         2,
         32,
