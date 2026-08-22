@@ -7,10 +7,14 @@ set -euo pipefail
 
 REPO="${REPO:-/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10}"
 VENV="${VENV:-${REPO}/.venv}"
-CONFIG="${CONFIG:-${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml}"
-DATA_ROOT="${DATA_ROOT:-/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1}"
-VALIDATION_MANIFEST="${VALIDATION_MANIFEST:-${DATA_ROOT}/validation/heldout64.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64}"
+# These four paths are one committed recipe contract. They are deliberately not
+# environment overrides: preflight must inspect exactly what the launched YAML
+# will consume and write.
+readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"
+readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"
+readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
+readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"
+readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"
 LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
 # rack-3 is deliberate: Slinky provisions pods from the submitted eight-node
 # request, and the retired v8 allocation was on this rack. Do not submit
@@ -53,6 +57,45 @@ fi
 if [[ ! -d "${FA4_CUTLASS_PACKAGES}/cutlass" ]]; then
   echo "NOT READY: missing pinned CUTLASS DSL package under ${FA4_CUTLASS_PACKAGES}" >&2
   failures=$((failures + 1))
+fi
+
+# Parse the committed YAML without importing FastVideo (which probes GPU
+# backends at package import). This guards future edits from making preflight
+# validate different data, validation, or output paths than training uses.
+if [[ -x "${VENV}/bin/python" && -f "${CONFIG}" ]]; then
+  if ! "${VENV}/bin/python" - \
+    "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" "${OUTPUT_DIR}" "${sources[@]}" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+config_path = pathlib.Path(sys.argv[1])
+data_root = pathlib.Path(sys.argv[2])
+validation_manifest = sys.argv[3]
+output_dir = sys.argv[4]
+sources = sys.argv[5:]
+document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+try:
+    training = document["training"]
+    actual_data_paths = training["data"]["data_path"]
+    actual_validation = document["callbacks"]["validation"]["dataset_file"]
+    actual_output = training["checkpoint"]["output_dir"]
+except (KeyError, TypeError) as error:
+    raise SystemExit(f"v10 YAML is missing a required launch path: {error}") from error
+
+expected_data_paths = [str(data_root / source / "data") for source in sources]
+if actual_data_paths != expected_data_paths:
+    raise SystemExit(f"v10 YAML data_path {actual_data_paths!r} != fixed preflight roots {expected_data_paths!r}")
+if actual_validation != validation_manifest:
+    raise SystemExit(f"v10 YAML validation dataset {actual_validation!r} != {validation_manifest!r}")
+if actual_output != output_dir:
+    raise SystemExit(f"v10 YAML output directory {actual_output!r} != {output_dir!r}")
+print("READY: committed v10 YAML paths match the fixed preflight contract")
+PY
+  then
+    failures=$((failures + 1))
+  fi
 fi
 
 for source in "${sources[@]}"; do
@@ -133,6 +176,10 @@ if ! git -C "${REPO}" merge-base --is-ancestor 907f2100e HEAD; then
 fi
 if ! git -C "${REPO}" merge-base --is-ancestor 56d4a6074 HEAD; then
   echo "NOT READY: execution commit does not contain corrected Triton backward PR #1730" >&2
+  failures=$((failures + 1))
+fi
+if ! git -C "${REPO}" merge-base --is-ancestor "${REVIEWED_V10_COMMIT}" HEAD; then
+  echo "NOT READY: execution commit does not contain reviewed v10 marker ${REVIEWED_V10_COMMIT}" >&2
   failures=$((failures + 1))
 fi
 if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then

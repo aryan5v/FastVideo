@@ -1,8 +1,9 @@
 #!/bin/bash
 # Compute-node launch gate for the v10 H3 sparse/dense attention environment.
-# This must run on a GB200 before training: it verifies import provenance,
-# corrected Triton-64 forward/backward gradients, sm_100a numerical parity,
-# and the real no-grad H3 route (with the Triton fallback made fatal).
+# This must run on a GB200 before training: it verifies exact source, wheel and
+# installed-prefix provenance, corrected Triton-64 forward/backward gradients,
+# sm_100a numerical parity, and the real no-grad H3 route (with the Triton
+# fallback made fatal).
 
 set -euo pipefail
 
@@ -37,6 +38,8 @@ export REPO H3_V10_KERNEL_PREFIX H3_V10_FA4_OVERLAY H3_V10_CUTLASS_PACKAGES
 
 "${VENV}/bin/python" - <<'PY'
 import importlib
+import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -69,6 +72,52 @@ def require_under(module, root, label):
     print(f"RECEIPT {label}: {locations}")
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_receipt_helper():
+    helper_path = repo / "scripts" / "train" / "h3_v10_kernel_receipt.py"
+    spec = importlib.util.spec_from_file_location("_h3_v10_kernel_receipt", helper_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"could not load prefix receipt helper from {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.installed_prefix_tree_sha256
+
+
+receipt = json.loads((prefix / "FASTVIDEO_KERNEL_V10_RECEIPT.json").read_text(encoding="utf-8"))
+if receipt.get("schema_version") != "fastvideo-h3-v10-kernel-v1":
+    raise SystemExit(f"unexpected kernel receipt: {receipt}")
+source_commit = str(receipt["source_commit"])
+execution_commit = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+if source_commit != execution_commit:
+    raise SystemExit(f"kernel receipt source {source_commit} != execution HEAD {execution_commit}")
+current_kernel_tree = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD:fastvideo-kernel"], text=True).strip()
+if current_kernel_tree != receipt["kernel_tree"]:
+    raise SystemExit(
+        f"installed kernel tree {receipt['kernel_tree']} != execution tree {current_kernel_tree}")
+
+wheel = Path(str(receipt.get("wheel", ""))).resolve()
+if not wheel.is_file():
+    raise SystemExit(f"kernel receipt wheel is not retained: {wheel}")
+observed_wheel_sha256 = sha256_file(wheel)
+if observed_wheel_sha256 != receipt.get("wheel_sha256"):
+    raise SystemExit(
+        f"kernel wheel sha256 {observed_wheel_sha256} != receipt {receipt.get('wheel_sha256')}")
+
+observed_prefix_tree_sha256 = load_receipt_helper()(prefix)
+if observed_prefix_tree_sha256 != receipt.get("installed_prefix_tree_sha256"):
+    raise SystemExit(
+        "installed kernel prefix sha256 "
+        f"{observed_prefix_tree_sha256} != receipt {receipt.get('installed_prefix_tree_sha256')}")
+
 kernel = importlib.import_module("fastvideo_kernel")
 sm100a = importlib.import_module("fastvideo_kernel.block_sparse_attn_sm100a")
 triton64 = importlib.import_module("fastvideo_kernel.triton_kernels.block_sparse_attn_triton")
@@ -79,22 +128,14 @@ require_under(sm100a, prefix, "sm100a")
 require_under(triton64, prefix, "triton64")
 require_under(fa4_cute, fa4_overlay, "flash_attn.cute")
 require_under(cutlass, cutlass_packages, "cutlass")
-
-receipt = json.loads((prefix / "FASTVIDEO_KERNEL_V10_RECEIPT.json").read_text(encoding="utf-8"))
-if receipt.get("schema_version") != "fastvideo-h3-v10-kernel-v1":
-    raise SystemExit(f"unexpected kernel receipt: {receipt}")
-source_commit = str(receipt["source_commit"])
-subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", source_commit, "HEAD"], check=True)
-current_kernel_tree = subprocess.check_output(
-    ["git", "-C", str(repo), "rev-parse", "HEAD:fastvideo-kernel"], text=True).strip()
-if current_kernel_tree != receipt["kernel_tree"]:
-    raise SystemExit(
-        f"installed kernel tree {receipt['kernel_tree']} != execution tree {current_kernel_tree}")
 if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (10, 0):
     raise SystemExit("kernel gate requires a GB200 with compute capability (10, 0)")
 if not sm100a._HAS_VSA_SM100A:
     raise SystemExit("the imported extension has no sm_100a block-sparse symbols")
-print(f"RECEIPT source_commit={source_commit} kernel_tree={current_kernel_tree} gpu={torch.cuda.get_device_name(0)}")
+print(
+    f"RECEIPT source_commit={source_commit} kernel_tree={current_kernel_tree} "
+    f"wheel_sha256={observed_wheel_sha256} prefix_sha256={observed_prefix_tree_sha256} "
+    f"gpu={torch.cuda.get_device_name(0)}")
 PY
 
 "${VENV}/bin/python" -m pytest -q -s \

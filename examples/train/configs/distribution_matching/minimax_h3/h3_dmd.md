@@ -255,7 +255,8 @@ REPO=/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10 \
 
 The procedure requires merged PR #1719 (sm_100a forward) and #1730 (correct
 Triton backward), uses the pinned CUDA-13/aarch64 toolchain, records the source
-commit/kernel tree/wheel hash, and atomically publishes
+commit/kernel tree/retained-wheel hash/stable installed-prefix hash, and
+atomically publishes
 `/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix` while retaining the old
 prefix as a backup. Production import order is exact:
 
@@ -270,10 +271,12 @@ copy and exists only to supply `flash_attn.cute` plus its pinned CUTLASS DSL.
 The older `vsa_gate/sm100a_main/prefix` must not be used because its Triton
 backward predates #1730. The v10 submit helper exports this exact path and the
 generic sbatch runs `gate_h3_v10_kernel.sh` on the head compute tray only when
-`H3_V10_KERNEL_GATE=1`. That gate checks module provenance and receipt/tree
-identity, compares real Triton-64 forward and dQ/dK/dV to FP32 dense attention
-across activation scales, checks sm_100a against its reference, and proves the
-production H3 no-grad call used sm_100a by making fallback to Triton fatal.
+`H3_V10_KERNEL_GATE=1`. That gate requires the receipt's source commit to equal
+the execution HEAD, verifies the retained wheel and installed-prefix content
+hashes, checks module provenance and kernel-tree identity, compares real
+Triton-64 forward and dQ/dK/dV to FP32 dense attention across activation scales,
+checks sm_100a against its reference, and proves the production H3 no-grad call
+used sm_100a by making fallback to Triton fatal.
 
 Audit of `integration/h3-vsa-fullgraph-all-20260822`: packed-varlen FA4 commit
 `99cd355a2` is the only additional initial-training optimization (teacher

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build a single-arch GB200 fastvideo-kernel from the execution checkout and
-# atomically publish it as the first entry in v10's production PYTHONPATH.
-# Existing prefixes are retained as timestamped backups; this script never
-# mutates the execution venv or the shared FA4 overlay.
+# atomically publish it as the first entry in v10's production PYTHONPATH. The
+# receipt binds the exact source commit, retained wheel, and stable installed
+# prefix contents. Existing prefixes are retained as timestamped backups; this
+# script never mutates the execution venv or the shared FA4 overlay.
 
 set -euo pipefail
 
@@ -30,6 +31,7 @@ require_file "${CUDA_VIEW}/bin/nvcc"
 require_file "${HOST_TOOLCHAIN}/bin/aarch64-conda-linux-gnu-g++"
 require_file "${BUILD_TOOLS}/scikit_build_core/__init__.py"
 require_file "${REPO}/fastvideo-kernel/pyproject.toml"
+require_file "${REPO}/scripts/train/h3_v10_kernel_receipt.py"
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
   echo "ERROR: the pinned host compiler targets aarch64; host is $(uname -m)" >&2
@@ -94,21 +96,26 @@ fi
 "${UV}" pip install --python "${VENV}/bin/python" --target "${staged_prefix}" --no-deps "${wheel_path}"
 
 wheel_sha256="$(sha256sum "${wheel_path}" | cut -d' ' -f1)"
+installed_prefix_tree_sha256="$(
+  "${VENV}/bin/python" "${REPO}/scripts/train/h3_v10_kernel_receipt.py" "${staged_prefix}"
+)"
 "${VENV}/bin/python" - \
   "${staged_prefix}/FASTVIDEO_KERNEL_V10_RECEIPT.json" \
-  "${source_commit}" "${kernel_tree}" "${wheel_path}" "${wheel_sha256}" <<'PY'
+  "${source_commit}" "${kernel_tree}" "${wheel_path}" "${wheel_sha256}" \
+  "${installed_prefix_tree_sha256}" <<'PY'
 import datetime as dt
 import json
 import pathlib
 import sys
 
-receipt_path, source_commit, kernel_tree, wheel_path, wheel_sha256 = sys.argv[1:]
+receipt_path, source_commit, kernel_tree, wheel_path, wheel_sha256, installed_prefix_tree_sha256 = sys.argv[1:]
 receipt = {
     "schema_version": "fastvideo-h3-v10-kernel-v1",
     "source_commit": source_commit,
     "kernel_tree": kernel_tree,
     "wheel": wheel_path,
     "wheel_sha256": wheel_sha256,
+    "installed_prefix_tree_sha256": installed_prefix_tree_sha256,
     "cuda_arch": "10.0a",
     "contains_prs": [1719, 1730],
     "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),

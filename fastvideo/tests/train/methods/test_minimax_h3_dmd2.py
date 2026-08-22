@@ -31,6 +31,7 @@ _V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_s
 _H3_SBATCH = _REPO_ROOT / "examples/train/slurm/dmd2_32xgb200.sbatch"
 _V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
 _V10_KERNEL_REBUILD = _REPO_ROOT / "scripts/train/rebuild_h3_v10_kernel.sh"
+_V10_KERNEL_RECEIPT_HELPER = _REPO_ROOT / "scripts/train/h3_v10_kernel_receipt.py"
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -798,6 +799,19 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     launcher = _V10_PREPARE_LAUNCHER.read_text()
 
     assert "/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10" in launcher
+    assert ('readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/'
+            'dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"') in launcher
+    assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"' in launcher
+    assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
+    assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
+            'minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"') in launcher
+    for removed_override in ("CONFIG", "DATA_ROOT", "VALIDATION_MANIFEST", "OUTPUT_DIR"):
+        assert f'${{{removed_override}:-' not in launcher
+    assert 'readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"' in launcher
+    assert 'merge-base --is-ancestor "${REVIEWED_V10_COMMIT}" HEAD' in launcher
+    assert "actual_data_paths = training[\"data\"][\"data_path\"]" in launcher
+    assert "actual_validation = document[\"callbacks\"][\"validation\"][\"dataset_file\"]" in launcher
+    assert "actual_output = training[\"checkpoint\"][\"output_dir\"]" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
     assert 'require_file "${source_root}/MANIFEST.json"' in launcher
@@ -819,6 +833,7 @@ def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None
     sbatch = _H3_SBATCH.read_text()
     gate = _V10_KERNEL_GATE.read_text()
     rebuild = _V10_KERNEL_REBUILD.read_text()
+    receipt_helper = _V10_KERNEL_RECEIPT_HELPER.read_text()
     expected_pythonpath = (
         "${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}")
 
@@ -832,8 +847,43 @@ def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None
     assert "test_real_sm100a_no_grad_route_receipt" in gate
     assert "timeout --signal=TERM --kill-after=30s 300s" in gate
     assert "FASTVIDEO_KERNEL_V10_RECEIPT.json" in gate
+    assert 'if source_commit != execution_commit:' in gate
+    assert 'observed_wheel_sha256 != receipt.get("wheel_sha256")' in gate
+    assert 'observed_prefix_tree_sha256 != receipt.get("installed_prefix_tree_sha256")' in gate
+    assert '"installed_prefix_tree_sha256": installed_prefix_tree_sha256' in rebuild
+    assert '"__pycache__" not in relative.parts' in receipt_helper
+    assert 'path.suffix != ".pyc"' in receipt_helper
     assert "907f2100e" in rebuild and "56d4a6074" in rebuild
     assert "TORCH_CUDA_ARCH_LIST=10.0a" in rebuild
+
+
+def test_h3_dmd2_v10_kernel_prefix_receipt_hashes_only_stable_installed_files(tmp_path: Path) -> None:
+    from scripts.train.h3_v10_kernel_receipt import RECEIPT_FILENAME, installed_prefix_tree_sha256
+
+    prefix = tmp_path / "prefix"
+    package = prefix / "fastvideo_kernel"
+    package.mkdir(parents=True)
+    installed = package / "kernel.so"
+    installed.write_bytes(b"installed-kernel-v1")
+    (prefix / "metadata.txt").write_text("metadata-v1", encoding="utf-8")
+
+    receipt = prefix / RECEIPT_FILENAME
+    receipt.write_text("receipt-v1", encoding="utf-8")
+    bytecode_dir = package / "__pycache__"
+    bytecode_dir.mkdir()
+    bytecode = bytecode_dir / "module.cpython-312.pyc"
+    bytecode.write_bytes(b"bytecode-v1")
+    stray_bytecode = package / "generated.pyc"
+    stray_bytecode.write_bytes(b"stray-v1")
+
+    original = installed_prefix_tree_sha256(prefix)
+    receipt.write_text("receipt-v2", encoding="utf-8")
+    bytecode.write_bytes(b"bytecode-v2")
+    stray_bytecode.write_bytes(b"stray-v2")
+    assert installed_prefix_tree_sha256(prefix) == original
+
+    installed.write_bytes(b"installed-kernel-v2")
+    assert installed_prefix_tree_sha256(prefix) != original
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
