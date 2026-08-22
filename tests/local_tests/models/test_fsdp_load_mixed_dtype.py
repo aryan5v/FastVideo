@@ -3,8 +3,9 @@
 
 import argparse
 import os
-from pathlib import Path
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -298,7 +299,9 @@ def test_declared_fp32_group_distributed_forward_backward() -> None:
 
     process = subprocess.run(
         [
-            "torchrun",
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
             "--standalone",
             "--nproc_per_node=2",
             str(Path(__file__).resolve()),
