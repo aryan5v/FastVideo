@@ -283,6 +283,15 @@ custom-op commit `658c56d00` and regional graph commits `9432a87ee` /
 with compile disabled until mixed-shape parity/recompile coverage exists, do
 not import that inference stack wholesale.
 
+The initial v10 launch deliberately remains eager. The earlier fixed-shape,
+8-GPU compile A/B accidentally exercised SDPA rather than v10's FA4 routes and
+showed a reproducible `-24.7%` first-step critic total-grad-norm shift despite
+near-equal loss. V10 adds 90 exact media buckets plus variable valid prompt
+lengths, while the regional compiler has no measured dynamic-shape/recompile
+envelope for that distribution. Qualify compile separately from a healthy v10
+checkpoint with per-layer gradient parity and a full second-sweep zero-new-
+compilation gate; do not turn it on as a launch-time MFU assumption.
+
 ## Verification
 
 CPU contracts cover cadence, optimizer/resume selection, FP32 group policy,
