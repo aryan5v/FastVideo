@@ -10,8 +10,10 @@ from collections.abc import Callable
 import torch
 
 from fastvideo.attention.selector import (
+    NO_REQUEST,
     _component_attention_backend_scope,
     coerce_attn_backend,
+    component_attention_backend,
 )
 from fastvideo.configs.pipelines.base import PipelineConfig
 from fastvideo.fastvideo_args import ExecutionMode, TrainingArgs
@@ -179,4 +181,15 @@ def load_module_from_path(
     if not isinstance(module, torch.nn.Module):
         raise TypeError(f"Loaded {module_type!r} is not a "
                         f"torch.nn.Module: {type(module)}")
+    if resolved_attention_backend is not None:
+        receipt = component_attention_backend(module)
+        if receipt is NO_REQUEST:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} did not record its "
+                               f"requested attention backend {resolved_attention_backend.name}. "
+                               "The component loader must stamp the construction decision on "
+                               "module.config._resolved_attention_backend.")
+        if receipt is not resolved_attention_backend:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} requested attention "
+                               f"backend {resolved_attention_backend.name}, but recorded "
+                               f"{receipt.name}.")
     return module
