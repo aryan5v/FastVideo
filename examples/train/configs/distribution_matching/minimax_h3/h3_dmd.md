@@ -219,6 +219,70 @@ H3-specific state and follow-ups before enabling it on a real run:
 - Upstream PR #1718 is unmerged (CI/review pending); re-diff against the
   merged version when it lands.
 
+## v10 data-only native-shape launch candidate (2026-08-22)
+
+`dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml` starts a fresh lineage over
+the five finalized shared T2VA sources. It has no simulated/carry rollout:
+every microbatch forward-noises a real video/audio latent at a uniformly
+sampled non-zero rung of the four-step grid. Eight four-GPU trays at local
+batch 1 and accumulation 2 give global batch 64; student and critic learning
+rates are both `2e-6`. Native-shape bucketing is mandatory. Validation uses
+only `validation/heldout64.json`, honors each record's width/height/frame
+triplet, and logs the raw held-out video beside its generated counterpart.
+
+The non-submitting preflight is:
+
+```bash
+bash examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh
+```
+
+It targets the dedicated execution clone `FastVideo-v10`, runs the native
+data finalizer in `--verify-only` mode (including READY/manifests, parquet
+schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
+videos, requires a fresh output namespace, and prints but does not execute the
+eight-tray `sbatch` command. Rack-3 is the default Slinky demand because v8's
+retired allocation freed that lane; no speculative warm-up allocations are
+needed. `PARTITION=hpc-rack-2` remains an explicit operator override.
+
+### v10 kernel and FA4 environment
+
+Build the kernel only from the final execution commit:
+
+```bash
+REPO=/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10 \
+  bash scripts/train/rebuild_h3_v10_kernel.sh
+```
+
+The procedure requires merged PR #1719 (sm_100a forward) and #1730 (correct
+Triton backward), uses the pinned CUDA-13/aarch64 toolchain, records the source
+commit/kernel tree/wheel hash, and atomically publishes
+`/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix` while retaining the old
+prefix as a backup. Production import order is exact:
+
+```text
+/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix:
+/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay:
+/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay/nvidia_cutlass_dsl/python_packages
+```
+
+The new prefix must win: `fa4_overlay` contains a stale `fastvideo_kernel`
+copy and exists only to supply `flash_attn.cute` plus its pinned CUTLASS DSL.
+The older `vsa_gate/sm100a_main/prefix` must not be used because its Triton
+backward predates #1730. The v10 submit helper exports this exact path and the
+generic sbatch runs `gate_h3_v10_kernel.sh` on the head compute tray only when
+`H3_V10_KERNEL_GATE=1`. That gate checks module provenance and receipt/tree
+identity, compares real Triton-64 forward and dQ/dK/dV to FP32 dense attention
+across activation scales, checks sm_100a against its reference, and proves the
+production H3 no-grad call used sm_100a by making fallback to Triton fatal.
+
+Audit of `integration/h3-vsa-fullgraph-all-20260822`: packed-varlen FA4 commit
+`99cd355a2` is the only additional initial-training optimization (teacher
+no-grad forwards; critic grad calls retain the established route). Kernel
+custom-op commit `658c56d00` and regional graph commits `9432a87ee` /
+`37927079f` are needed only for compiled sparse inference. Since v10 launches
+with compile disabled until mixed-shape parity/recompile coverage exists, do
+not import that inference stack wholesale.
+
 ## Verification
 
 CPU contracts cover cadence, optimizer/resume selection, FP32 group policy,

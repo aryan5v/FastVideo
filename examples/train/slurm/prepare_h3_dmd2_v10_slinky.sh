@@ -17,6 +17,10 @@ LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
 # speculative warm-up jobs; override PARTITION if the operator selects rack-2.
 PARTITION="${PARTITION:-hpc-rack-3}"
 LUSTRE_HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
+KERNEL_PREFIX="${KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
+FA4_OVERLAY="${FA4_OVERLAY:-/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay}"
+FA4_CUTLASS_PACKAGES="${FA4_CUTLASS_PACKAGES:-${FA4_OVERLAY}/nvidia_cutlass_dsl/python_packages}"
+V10_PYTHONPATH="${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}"
 
 sources=(
   h3_t2av_video_nuva_50k_720_mixed_len
@@ -39,8 +43,17 @@ require_file "${VENV}/bin/python"
 require_file "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 require_file "${REPO}/scripts/train/gate_h3_v10_kernel.sh"
 require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/finalize_dataset.py"
+require_file "${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
 require_file "${DATA_ROOT}/FROZEN_MANIFEST.json"
 require_file "${DATA_ROOT}/READY.json"
+if [[ ! -d "${FA4_OVERLAY}/flash_attn/cute" ]]; then
+  echo "NOT READY: missing FA4 CuTe package under ${FA4_OVERLAY}" >&2
+  failures=$((failures + 1))
+fi
+if [[ ! -d "${FA4_CUTLASS_PACKAGES}/cutlass" ]]; then
+  echo "NOT READY: missing pinned CUTLASS DSL package under ${FA4_CUTLASS_PACKAGES}" >&2
+  failures=$((failures + 1))
+fi
 
 for source in "${sources[@]}"; do
   source_root="${DATA_ROOT}/${source}"
@@ -140,8 +153,9 @@ if (( failures > 0 )); then
 fi
 
 printf -v payload \
-  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=32 FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
+  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=32 FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
   "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" \
+  "${KERNEL_PREFIX}" "${FA4_OVERLAY}" "${FA4_CUTLASS_PACKAGES}" "${V10_PYTHONPATH}" \
   /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 

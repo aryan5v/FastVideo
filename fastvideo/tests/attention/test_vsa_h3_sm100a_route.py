@@ -20,24 +20,32 @@ _SPEC = dict(raw_latent_shape=(4, 8, 16), patch_size=(1, 2, 2), prefix_segments=
 _HEADS, _DIM = 2, 128
 
 
-def _build_meta():
+def _build_meta(device: torch.device = torch.device("cpu")):
     return MiniMaxH3VSAMetadataBuilder().build(
         current_timestep=0,
         raw_latent_shape=_SPEC["raw_latent_shape"],
         patch_size=_SPEC["patch_size"],
         VSA_sparsity=0.0,
         prefix_segments=_SPEC["prefix_segments"],
-        device=torch.device("cpu"),
+        device=device,
         tile_size=64,
     )
 
 
-def _tiled_qkv(meta, requires_grad=False):
+def _tiled_qkv(meta, requires_grad=False, device: torch.device = torch.device("cpu")):
     # bf16 like the real tiled buffers, so forward()'s dtype-cast warning
     # stays out of the warning assertions below.
     s_pad = meta.variable_block_sizes.numel() * 64
     return tuple(
-        torch.randn(1, s_pad, _HEADS, _DIM, dtype=torch.bfloat16, requires_grad=requires_grad) for _ in range(3))
+        torch.randn(
+            1,
+            s_pad,
+            _HEADS,
+            _DIM,
+            dtype=torch.bfloat16,
+            device=device,
+            requires_grad=requires_grad,
+        ) for _ in range(3))
 
 
 class _FakeSm100a:
@@ -179,3 +187,35 @@ def test_env_on_no_grad_context_detaches_route_from_leaf_flags(routed, monkeypat
         impl.forward(q, k, v, None, meta)
     assert len(fake_sm.calls) == 1
     assert fake_triton.calls == 0
+
+
+def test_real_sm100a_no_grad_route_receipt(monkeypatch):
+    """Exercise the actual GB200 extension through the production H3 route.
+
+    The v10 compute-node gate runs this test only after verifying that the
+    imported extension resolves from its immutable kernel prefix. Replacing
+    the Triton fallback with a hard failure makes this a route receipt, not
+    merely a direct kernel smoke test.
+    """
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("requires a GB200 (sm_100a) compute node")
+    if vsa_h3._sm100a is None or not vsa_h3._sm100a._HAS_VSA_SM100A:
+        pytest.skip("requires a fastvideo_kernel build containing sm_100a VSA")
+
+    def reject_triton(*args, **kwargs):
+        raise AssertionError("no-grad VSA-H3 unexpectedly fell back to Triton-64")
+
+    monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", reject_triton)
+    monkeypatch.setenv(VSA_SM100A_ENV, "1")
+    device = torch.device("cuda")
+    meta = _build_meta(device)
+    q, k, v = _tiled_qkv(meta, device=device)
+    impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
+
+    with torch.no_grad():
+        output = impl.forward(q, k, v, None, meta)
+    torch.cuda.synchronize()
+
+    assert output.shape == q.shape
+    assert torch.isfinite(output).all().item()
+    print("V10_SM100A_ROUTE_RECEIPT=real_no_grad_h3_route")

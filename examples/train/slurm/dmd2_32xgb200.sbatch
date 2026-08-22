@@ -77,6 +77,31 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NNODES MASTER_ADDR MASTER_PORT
 export NUM_GPUS="${GPUS_PER_NODE}"
 
+# V10-only hardware gate. Generic launches are unchanged when the opt-in is
+# unset. The new kernel prefix must precede the FA4 overlay because that
+# overlay contains an older fastvideo_kernel copy; reversing the order would
+# silently resurrect the pre-#1719/#1730 implementation.
+H3_V10_KERNEL_GATE="${H3_V10_KERNEL_GATE:-0}"
+if [ "${H3_V10_KERNEL_GATE}" = "1" ]; then
+  H3_V10_KERNEL_PREFIX="${H3_V10_KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
+  H3_V10_FA4_OVERLAY="${H3_V10_FA4_OVERLAY:-/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay}"
+  H3_V10_CUTLASS_PACKAGES="${H3_V10_CUTLASS_PACKAGES:-${H3_V10_FA4_OVERLAY}/nvidia_cutlass_dsl/python_packages}"
+  EXPECTED_V10_PYTHONPATH="${H3_V10_KERNEL_PREFIX}:${H3_V10_FA4_OVERLAY}:${H3_V10_CUTLASS_PACKAGES}"
+  if [ "${PYTHONPATH:-}" != "${EXPECTED_V10_PYTHONPATH}" ]; then
+    echo "V10 KERNEL GATE FAILED: PYTHONPATH must be exactly ${EXPECTED_V10_PYTHONPATH}" >&2
+    echo "Observed: ${PYTHONPATH:-<unset>}" >&2
+    exit 1
+  fi
+  export REPO VENV H3_V10_KERNEL_PREFIX H3_V10_FA4_OVERLAY H3_V10_CUTLASS_PACKAGES
+  echo "=== v10 kernel gate: real Triton gradients + sm_100a route (head tray) ==="
+  if ! srun --nodes=1 --ntasks=1 -w "$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)" \
+    bash "${REPO}/scripts/train/gate_h3_v10_kernel.sh"; then
+    echo "V10 KERNEL GATE FAILED — aborting before training."
+    exit 1
+  fi
+  echo "=== v10 kernel gate passed ==="
+fi
+
 # Boot watchdog: NCCL communicator init can wedge silently (all ranks parked
 # in ib_uverbs_event_read/poll, no WARN output, GPUs at 0%). If no weight
 # loading has been logged within BOOT_TIMEOUT_MIN minutes, abort the job so
@@ -106,9 +131,9 @@ if [ "${GATE_TEST}" = "1" ]; then
     set -euo pipefail
     source '${VENV}/bin/activate'
     cd '${REPO}'
-    pytest -q tests/local_tests/models/test_fsdp_load_mixed_dtype.py \
+    '${VENV}/bin/python' -m pytest -q tests/local_tests/models/test_fsdp_load_mixed_dtype.py \
       -k declared_fp32_group_distributed_forward_backward
-    pytest -q fastvideo/tests/train/methods/test_dmd2_fake_score_loss_space.py \
+    '${VENV}/bin/python' -m pytest -q fastvideo/tests/train/methods/test_dmd2_fake_score_loss_space.py \
       fastvideo/tests/train/methods/test_dmd2_rollout_carry.py \
       fastvideo/tests/train/methods/test_dmd2_data_forcing.py \
       fastvideo/tests/train/methods/test_minimax_h3_dmd2.py \

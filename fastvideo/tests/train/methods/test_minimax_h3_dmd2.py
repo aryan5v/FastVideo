@@ -28,6 +28,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml")
 _V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml")
 _V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"
+_H3_SBATCH = _REPO_ROOT / "examples/train/slurm/dmd2_32xgb200.sbatch"
+_V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
+_V10_KERNEL_REBUILD = _REPO_ROOT / "scripts/train/rebuild_h3_v10_kernel.sh"
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -804,6 +807,27 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "--verify-only" in launcher
     assert "H3_V10_KERNEL_GATE=1" in launcher
     assert "This helper never calls sbatch" in launcher
+
+
+def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None:
+    launcher = _V10_PREPARE_LAUNCHER.read_text()
+    sbatch = _H3_SBATCH.read_text()
+    gate = _V10_KERNEL_GATE.read_text()
+    rebuild = _V10_KERNEL_REBUILD.read_text()
+    expected_pythonpath = (
+        "${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}")
+
+    assert f'V10_PYTHONPATH="{expected_pythonpath}"' in launcher
+    assert "H3_V10_KERNEL_GATE=1" in launcher
+    assert 'if [ "${H3_V10_KERNEL_GATE}" = "1" ]' in sbatch
+    assert "scripts/train/gate_h3_v10_kernel.sh" in sbatch
+    assert "python' -m pytest" in sbatch
+    assert "test_vsa_triton_backward_scale.py" in gate
+    assert "test_forward_matches_reference[64]" in gate
+    assert "test_real_sm100a_no_grad_route_receipt" in gate
+    assert "FASTVIDEO_KERNEL_V10_RECEIPT.json" in gate
+    assert "907f2100e" in rebuild and "56d4a6074" in rebuild
+    assert "TORCH_CUDA_ARCH_LIST=10.0a" in rebuild
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
