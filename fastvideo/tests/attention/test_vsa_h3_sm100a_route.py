@@ -208,7 +208,19 @@ def test_real_sm100a_no_grad_route_receipt(monkeypatch):
     monkeypatch.setattr(vsa_h3, "block_sparse_attn_64_bhsd", reject_triton)
     monkeypatch.setenv(VSA_SM100A_ENV, "1")
     device = torch.device("cuda")
-    meta = _build_meta(device)
+    # The CUDA kernel assigns an adjacent pair of query tiles to each CTA, so
+    # its route receipt must use an even tile count. Keep the default fixture's
+    # odd/partial-prefix geometry for fallback coverage, but make this hardware
+    # leg exercise a shape the production CUDA entry actually supports.
+    meta = MiniMaxH3VSAMetadataBuilder().build(
+        current_timestep=0,
+        raw_latent_shape=_SPEC["raw_latent_shape"],
+        patch_size=_SPEC["patch_size"],
+        VSA_sparsity=0.0,
+        prefix_segments=(64, 64),
+        device=device,
+        tile_size=64,
+    )
     q, k, v = _tiled_qkv(meta, device=device)
     impl = MiniMaxH3VSAImpl(num_heads=_HEADS, head_size=_DIM, causal=False, softmax_scale=_DIM**-0.5)
 
