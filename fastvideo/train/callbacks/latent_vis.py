@@ -76,12 +76,13 @@ class LatentVisCallback(Callback):
             return
 
         artifacts: dict[str, Any] = {}
+        latent_layout = vis.get("_fv_latent_layout")
         for key in self.keys:
             latent = vis.get(key)
             if not isinstance(latent, torch.Tensor):
                 continue
             try:
-                clip = decode(latent)
+                clip = decode(latent) if latent_layout is None else decode(latent, layout=latent_layout)
             except Exception as exc:
                 logger.warning("Latent visualization decode failed for %r: %s", key, exc)
                 continue

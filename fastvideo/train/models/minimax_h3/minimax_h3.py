@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal, TYPE_CHECKING
 
 import torch
@@ -10,12 +11,14 @@ import torch
 import fastvideo.envs as envs
 from fastvideo.attention.backends.video_sparse_attn_h3 import (
     MiniMaxH3VSAMetadataBuilder, )
+from fastvideo.dataset.shape_bucket import parse_video_shape_bucket_id
 from fastvideo.distributed import get_sp_group
 from fastvideo.forward_context import set_forward_context
 from fastvideo.models.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 from fastvideo.pipelines import TrainingBatch
 from fastvideo.pipelines.basic.minimax_h3.packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_TEXT_TAG,
     MiniMaxH3PackedLayout,
     audio_latent_num_frames,
@@ -24,6 +27,7 @@ from fastvideo.pipelines.basic.minimax_h3.packing import (
     patchify_video_latents,
     unpack_audio_tokens,
     unpatchify_video_tokens,
+    video_latent_num_frames,
 )
 from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_denoising import (
     _h3_vsa_prefix_segments, )
@@ -43,6 +47,7 @@ _VIDEO_SCHEDULER_SHIFT = 12.0
 _AUDIO_SCHEDULER_SHIFT = 3.0
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
+_AUDIO_SAMPLE_RATE = 32_000
 
 # Dense TORCH_SDPA is the default; per-role overrides allow FLASH_ATTN
 # (teacher/critic, FA4 via FASTVIDEO_FA4=1) and the packed-sequence VSA-H3
@@ -171,7 +176,7 @@ class MiniMaxH3Model(ModelBase):
         dtype: torch.dtype,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resolve fixed visual and stereo-audio latent tensors for one sample."""
+        """Resolve fixed or native visual and stereo-audio latents."""
         data_config = self.training_config.data
         if latents_source == "data":
             if "vae_latent" not in raw_batch or "audio_latent" not in raw_batch:
@@ -195,6 +200,10 @@ class MiniMaxH3Model(ModelBase):
         else:
             raise ValueError(f"Unknown latents_source: {latents_source!r}")
 
+        if not isinstance(video_latents, torch.Tensor):
+            raise ValueError(f"vae_latent must be a tensor, got {type(video_latents).__name__}")
+        if not isinstance(audio_latents, torch.Tensor):
+            raise ValueError(f"audio_latent must be a tensor, got {type(audio_latents).__name__}")
         if video_latents.ndim != 5 or tuple(video_latents.shape[:2]) != (1, _VIDEO_LATENT_CHANNELS):
             raise ValueError("vae_latent must have shape [1, 24, latent_frames, latent_height, latent_width], "
                              f"got {tuple(video_latents.shape)}")
@@ -205,18 +214,102 @@ class MiniMaxH3Model(ModelBase):
         ):
             raise ValueError("audio_latent must have shape [1, 2, 32, audio_frames], "
                              f"got {tuple(audio_latents.shape)}")
-        if data_config.num_latent_t > 0:
-            video_latents = video_latents[:, :, :data_config.num_latent_t]
-        expected_audio_frames = audio_latent_num_frames(data_config.num_frames)
-        audio_latents = audio_latents[:, :, :, :expected_audio_frames]
-        if video_latents.shape[2] != data_config.num_latent_t:
-            raise ValueError("vae_latent contains fewer frames than training.data.num_latent_t")
-        if audio_latents.shape[-1] != expected_audio_frames:
-            raise ValueError("audio_latent length does not match training.data.num_frames")
+
+        native_shapes = bool(getattr(data_config, "native_shape_bucketing", False))
+        if latents_source == "data" and native_shapes:
+            self._validate_native_latents(raw_batch, video_latents, audio_latents)
+        else:
+            # Preserve the legacy fixed-shape contract for simulate/data-free
+            # and for data configs that have not opted into native bucketing.
+            if data_config.num_latent_t > 0:
+                video_latents = video_latents[:, :, :data_config.num_latent_t]
+            expected_audio_frames = audio_latent_num_frames(data_config.num_frames)
+            audio_latents = audio_latents[:, :, :, :expected_audio_frames]
+            if video_latents.shape[2] != data_config.num_latent_t:
+                raise ValueError("vae_latent contains fewer frames than training.data.num_latent_t")
+            if audio_latents.shape[-1] != expected_audio_frames:
+                raise ValueError("audio_latent length does not match training.data.num_frames")
         return (
             video_latents.to(device=device, dtype=dtype),
             audio_latents.to(device=device, dtype=dtype),
         )
+
+    def _validate_native_latents(
+        self,
+        raw_batch: dict[str, Any],
+        video_latents: torch.Tensor,
+        audio_latents: torch.Tensor,
+    ) -> None:
+        """Cross-check the canonical bucket, row metadata, and latent clocks."""
+        bucket_id = raw_batch.get("_shape_bucket_id")
+        if not isinstance(bucket_id, str):
+            raise ValueError("Native-shape T2VA batches require the exact-shape sampler to set _shape_bucket_id")
+        bucket = parse_video_shape_bucket_id(bucket_id)
+
+        infos = raw_batch.get("info_list")
+        if not isinstance(infos, list) or len(infos) != 1 or not isinstance(infos[0], dict):
+            raise ValueError("Native-shape T2VA batches require exactly one info_list metadata record")
+        info = infos[0]
+
+        def _metadata_int(name: str) -> int:
+            value = info.get(name)
+            if value is None or isinstance(value, bool):
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}")
+            try:
+                result = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}") from exc
+            if result <= 0 or result != value:
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}")
+            return result
+
+        width = _metadata_int("width")
+        height = _metadata_int("height")
+        num_frames = _metadata_int("num_frames")
+        audio_sample_rate = _metadata_int("audio_sample_rate")
+        if (width, height, num_frames) != (bucket.width, bucket.height, bucket.num_frames):
+            raise ValueError(f"Shape bucket {bucket_id!r} disagrees with row metadata "
+                             f"width={width}, height={height}, num_frames={num_frames}")
+        if audio_sample_rate != _AUDIO_SAMPLE_RATE:
+            raise ValueError(
+                f"MiniMax H3 T2VA audio must be encoded at {_AUDIO_SAMPLE_RATE} Hz, got {audio_sample_rate}")
+        fps_value = info.get("fps")
+        if fps_value is None:
+            raise ValueError("T2VA metadata 'fps' must be numeric, got None")
+        try:
+            fps = float(fps_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"T2VA metadata 'fps' must be numeric, got {info.get('fps')!r}") from exc
+        if not math.isfinite(fps) or not math.isclose(fps, 24.0, rel_tol=0.0, abs_tol=0.05):
+            raise ValueError(f"MiniMax H3 T2VA video must use the 24 fps clock, got {fps}")
+
+        if width % MINIMAX_H3_CANVAS_MULTIPLE or height % MINIMAX_H3_CANVAS_MULTIPLE:
+            raise ValueError(f"Native pixel geometry {width}x{height} must use the H3 canvas multiple "
+                             f"{MINIMAX_H3_CANVAS_MULTIPLE}")
+        expected_video_shape = (
+            1,
+            _VIDEO_LATENT_CHANNELS,
+            video_latent_num_frames(num_frames),
+            height // 16,
+            width // 16,
+        )
+        expected_audio_shape = (
+            1,
+            MINIMAX_H3_AUDIO_CHANNELS,
+            _AUDIO_LATENT_CHANNELS,
+            audio_latent_num_frames(num_frames),
+        )
+        if tuple(video_latents.shape) != expected_video_shape:
+            raise ValueError(f"vae_latent shape does not match {bucket_id!r}: expected {expected_video_shape}, "
+                             f"got {tuple(video_latents.shape)}")
+        if tuple(audio_latents.shape) != expected_audio_shape:
+            raise ValueError(f"audio_latent shape does not match the {num_frames}-frame H3 audio clock: "
+                             f"expected {expected_audio_shape}, got {tuple(audio_latents.shape)}")
+        latent_geometry = (expected_video_shape[2], expected_video_shape[3], expected_video_shape[4])
+        patch_size = tuple(int(value) for value in self.transformer.patch_size)
+        if any(value % patch for value, patch in zip(latent_geometry, patch_size, strict=True)):
+            raise ValueError(
+                f"Native latent geometry {latent_geometry} is not divisible by transformer patch {patch_size}")
 
     def _sample_noise_amounts(
         self,

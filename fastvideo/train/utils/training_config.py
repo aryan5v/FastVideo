@@ -32,6 +32,10 @@ class DataConfig:
     num_width: int = 0
     num_latent_t: int = 0
     num_frames: int = 0
+    # Preserve each T2VA row's native temporal/spatial latent geometry and
+    # schedule exact-shape global microbatches across data-parallel ranks.
+    # False retains the legacy fixed-shape/truncation contract.
+    native_shape_bucketing: bool = False
 
 
 @dataclass(slots=True)

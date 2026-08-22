@@ -166,6 +166,8 @@ class DMD2Method(TrainingMethod):
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
+            "_fv_latent_layout":
+            getattr(training_batch, "minimax_h3_dmd_layout", None),
         }
         return loss_map, outputs, metrics
 
@@ -603,8 +605,42 @@ class DMD2Method(TrainingMethod):
             scheduler_name=critic_sched,
         )
 
-    def _modality_slices(self) -> tuple[tuple[str, slice], ...] | None:
+    @staticmethod
+    def _add_noise_for_batch(
+        model: ModelBase,
+        clean_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: Any,
+    ) -> torch.Tensor:
+        """Call the batch-aware hook while retaining lightweight test doubles."""
+        hook = getattr(model, "add_noise_for_batch", None)
+        if hook is not None and batch is not None:
+            return hook(clean_latents, noise, timestep, batch)
+        return model.add_noise(clean_latents, noise, timestep)
+
+    @staticmethod
+    def _extract_eps_for_batch(
+        model: ModelBase,
+        noisy_latents: torch.Tensor,
+        clean_latents: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: Any,
+    ) -> torch.Tensor:
+        hook = getattr(model, "extract_eps_for_batch", None)
+        if hook is not None and batch is not None:
+            return hook(noisy_latents, clean_latents, timestep, batch)
+        extractor = getattr(model, "extract_eps", None)
+        if not callable(extractor):
+            raise TypeError(f"{type(model).__name__} does not implement extract_eps")
+        return extractor(noisy_latents, clean_latents, timestep)
+
+    def _modality_slices(self, batch: Any) -> tuple[tuple[str, slice], ...] | None:
         """Return slices used to normalize packed modalities independently."""
+        batch_getter = getattr(self.student, "modality_slices_for_batch", None)
+        if batch_getter is not None:
+            slices = tuple(batch_getter(batch))
+            return slices or None
         getter = getattr(self.student, "modality_slices", None)
         if getter is None:
             return None
@@ -837,7 +873,7 @@ class DMD2Method(TrainingMethod):
                 dtype=dtype,
                 generator=self.cuda_generator,
             )
-            noisy_latents = self.student.add_noise(latents, noise, timestep)
+            noisy_latents = self._add_noise_for_batch(self.student, latents, noise, timestep, batch)
             pred_x0 = self.student.predict_x0(
                 noisy_latents,
                 timestep,
@@ -903,11 +939,13 @@ class DMD2Method(TrainingMethod):
                         dtype=pred_clean.dtype,
                         generator=self.cuda_generator,
                     )
-                    current_noise_latents = (self.student.add_noise(
+                    current_noise_latents = self._add_noise_for_batch(
+                        self.student,
                         pred_clean,
                         noise,
                         next_timestep_tensor,
-                    ))
+                        batch,
+                    )
                     noise_latents.append(current_noise_latents.clone())
 
         if noise_latent_index >= 0:
@@ -1078,6 +1116,7 @@ class DMD2Method(TrainingMethod):
             timestep,
             rung,
             step_list,
+            training_batch,
             raw_batch,
         )
 
@@ -1108,6 +1147,8 @@ class DMD2Method(TrainingMethod):
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
+            "_fv_latent_layout":
+            getattr(training_batch, "minimax_h3_dmd_layout", None),
         }
         return loss_map, outputs, metrics
 
@@ -1177,7 +1218,7 @@ class DMD2Method(TrainingMethod):
             dtype=latents.dtype,
             generator=self.cuda_generator,
         )
-        noisy_latents = self.student.add_noise(latents, noise, forced_timestep)
+        noisy_latents = self._add_noise_for_batch(self.student, latents, noise, forced_timestep, training_batch)
 
         update_student = self._should_update_student(iteration)
 
@@ -1246,6 +1287,8 @@ class DMD2Method(TrainingMethod):
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
+            "_fv_latent_layout":
+            getattr(training_batch, "minimax_h3_dmd_layout", None),
         }
         return loss_map, outputs, metrics
 
@@ -1315,6 +1358,7 @@ class DMD2Method(TrainingMethod):
                     timestep,
                     rung + 1,
                     step_list,
+                    training_batch,
                 )
                 if rung + 1 == offset:
                     snapshot = state
@@ -1327,6 +1371,7 @@ class DMD2Method(TrainingMethod):
         timestep: torch.Tensor,
         next_rung: int,
         step_list: torch.Tensor,
+        batch: Any | None = None,
     ) -> torch.Tensor:
         """Re-noise an x0 prediction made at ``timestep`` onto the next rung.
 
@@ -1343,7 +1388,7 @@ class DMD2Method(TrainingMethod):
             dtype=torch.long,
         )
         if self._rollout_sample_type == "ode":
-            eps = self.student.extract_eps(state, pred_x0, timestep)
+            eps = self._extract_eps_for_batch(self.student, state, pred_x0, timestep, batch)
         else:
             eps = torch.randn(
                 state.shape,
@@ -1351,7 +1396,7 @@ class DMD2Method(TrainingMethod):
                 dtype=pred_x0.dtype,
                 generator=self.cuda_generator,
             )
-        return self.student.add_noise(pred_x0, eps, next_timestep)
+        return self._add_noise_for_batch(self.student, pred_x0, eps, next_timestep, batch)
 
     def _advance_carry(
         self,
@@ -1361,6 +1406,7 @@ class DMD2Method(TrainingMethod):
         timestep: torch.Tensor,
         rung: int,
         step_list: torch.Tensor,
+        training_batch: Any,
         raw_batch: dict[str, Any],
     ) -> None:
         """Hand the one paid-for step to the slot, or clear a finished walk.
@@ -1380,6 +1426,7 @@ class DMD2Method(TrainingMethod):
                 timestep,
                 rung + 1,
                 step_list,
+                training_batch,
             )
         self._carry_slots[slot] = {
             "state": next_state.detach(),
@@ -1406,7 +1453,13 @@ class DMD2Method(TrainingMethod):
             dtype=generator_pred_x0.dtype,
             generator=self.cuda_generator,
         )
-        noisy_x0 = self.student.add_noise(generator_pred_x0, noise, fake_score_timestep)
+        noisy_x0 = self._add_noise_for_batch(
+            self.student,
+            generator_pred_x0,
+            noise,
+            fake_score_timestep,
+            batch,
+        )
 
         pred_noise = self.critic.predict_noise(
             noisy_x0,
@@ -1416,8 +1469,10 @@ class DMD2Method(TrainingMethod):
             cfg_uncond=self._cfg_uncond,
             attn_kind="dense",
         )
+        if not isinstance(pred_noise, torch.Tensor):
+            raise TypeError("DMD2 critic predict_noise must return one packed tensor")
         target = noise - generator_pred_x0
-        slices = self._modality_slices()
+        slices = self._modality_slices(batch)
         emit_modality_metrics = slices is not None
         if slices is None:
             slices = (("packed", slice(None)), )
@@ -1472,7 +1527,13 @@ class DMD2Method(TrainingMethod):
                 dtype=generator_pred_x0.dtype,
                 generator=self.cuda_generator,
             )
-            noisy_latents = self.student.add_noise(generator_pred_x0, noise, timestep)
+            noisy_latents = self._add_noise_for_batch(
+                self.student,
+                generator_pred_x0,
+                noise,
+                timestep,
+                batch,
+            )
 
             faker_x0 = self.critic.predict_x0(
                 noisy_latents,
@@ -1512,7 +1573,7 @@ class DMD2Method(TrainingMethod):
                 "dmd_timestep": timestep.detach(),
             })
 
-        slices = self._modality_slices()
+        slices = self._modality_slices(batch)
         emit_modality_metrics = slices is not None
         if slices is None:
             slices = (("packed", slice(None)), )

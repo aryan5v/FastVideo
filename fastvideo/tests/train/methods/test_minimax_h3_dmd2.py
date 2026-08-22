@@ -16,6 +16,7 @@ import yaml
 
 from fastvideo.attention.backends.video_sparse_attn_h3 import MiniMaxH3VSAMetadata
 from fastvideo.forward_context import get_forward_context
+from fastvideo.pipelines.basic.minimax_h3.packing import audio_latent_num_frames, video_latent_num_frames
 from fastvideo.platforms import AttentionBackendEnum
 from fastvideo.train.methods.distribution_matching.dmd2 import DMD2Method
 from fastvideo.train.models.minimax_h3 import MiniMaxH3DMDModel, MiniMaxH3Model
@@ -91,6 +92,45 @@ def _raw_batch(seed: int = 1) -> dict[str, torch.Tensor]:
         "audio_latent": torch.randn(1, 2, 32, 8, generator=generator),
         "text_embedding": torch.randn(1, 4, 5120, generator=generator),
         "text_attention_mask": torch.tensor([[1, 1, 0, 0]], dtype=torch.float32),
+    }
+
+
+def _native_raw_batch(
+    width: int,
+    height: int,
+    num_frames: int,
+    *,
+    seed: int = 1,
+) -> dict:
+    generator = torch.Generator().manual_seed(seed)
+    return {
+        "vae_latent": torch.randn(
+            1,
+            24,
+            video_latent_num_frames(num_frames),
+            height // 16,
+            width // 16,
+            generator=generator,
+            dtype=torch.bfloat16,
+        ),
+        "audio_latent": torch.randn(
+            1,
+            2,
+            32,
+            audio_latent_num_frames(num_frames),
+            generator=generator,
+            dtype=torch.bfloat16,
+        ),
+        "text_embedding": torch.randn(1, 4, 5120, generator=generator),
+        "text_attention_mask": torch.tensor([[1, 1, 0, 0]], dtype=torch.float32),
+        "_shape_bucket_id": f"bucket={width}x{height}-{num_frames}f",
+        "info_list": [{
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "fps": 24.0,
+            "audio_sample_rate": 32_000,
+        }],
     }
 
 
@@ -257,6 +297,169 @@ def test_packed_adapter_roundtrip_and_prepare_batch(monkeypatch: pytest.MonkeyPa
         raw_batch["vae_latent"].permute(0, 2, 1, 3, 4).to(torch.bfloat16),
     )
     torch.testing.assert_close(audio_clean, batch.audio_latents)
+
+
+def test_native_layout_is_batch_local_across_successive_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later shape must not mutate how an earlier packed tensor is split."""
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+
+    first = model.prepare_batch(
+        _native_raw_batch(64, 64, 5),
+        generator=torch.Generator().manual_seed(3),
+    )
+    first_packed = first.latents.clone()
+    first_layout = first.minimax_h3_dmd_layout
+    second = model.prepare_batch(
+        _native_raw_batch(96, 64, 22),
+        generator=torch.Generator().manual_seed(4),
+    )
+
+    assert first.minimax_h3_dmd_layout is first_layout
+    assert first_layout != second.minimax_h3_dmd_layout
+    first_video, first_audio = model.unpack_latents(first_packed, layout=first_layout)
+    assert first_video.shape == (1, 2, 24, 4, 4)
+    assert first_audio.shape == (1, 2, 32, 8)
+    second_video, second_audio = model.unpack_latents(second.latents, layout=second.minimax_h3_dmd_layout)
+    assert second_video.shape == (1, 7, 24, 4, 6)
+    assert second_audio.shape == (1, 2, 32, 37)
+
+    noise = torch.zeros_like(second.latents)
+    mixed = model.add_noise_for_batch(second.latents, noise, torch.tensor([500]), second)
+    assert mixed.shape == second.latents.shape
+    slices = dict(model.modality_slices_for_batch(second))
+    assert slices["video"].stop == math.prod(second_video.shape)
+    assert slices["audio"].stop == second.latents.shape[1]
+
+    prediction = model.predict_noise(
+        second.latents,
+        torch.tensor([500]),
+        second,
+        conditional=True,
+    )
+    torch.testing.assert_close(prediction, -second.latents)
+
+
+def test_dmd_losses_follow_successive_native_modality_slices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Student and critic phases both use the active batch's exact split."""
+    method = _build_method(
+        monkeypatch,
+        rollout_mode="data_latent",
+        generator_update_interval=2,
+    )
+    method.training_config.data.native_shape_bucketing = True
+    method.method_config["modality_loss_weights"] = {"video": 0.25, "audio": 2.0}
+
+    student_losses, _, student_metrics = method.single_train_step(
+        _native_raw_batch(64, 64, 5),
+        iteration=2,
+    )
+    critic_losses, _, critic_metrics = method.single_train_step(
+        _native_raw_batch(96, 64, 22),
+        iteration=3,
+    )
+
+    assert student_metrics["update_student"] == 1.0
+    assert {"generator_loss_video", "generator_loss_audio"} <= student_metrics.keys()
+    assert torch.isfinite(student_losses["generator_loss"])
+    assert critic_metrics["update_student"] == 0.0
+    assert {"fake_score_loss_video", "fake_score_loss_audio"} <= critic_metrics.keys()
+    assert torch.isfinite(critic_losses["fake_score_loss"])
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "num_frames"),
+    [
+        (1344, 768, 124),
+        (768, 1344, 362),
+        (832, 480, 90),
+        (480, 832, 124),
+    ],
+)
+def test_native_validation_accepts_min_max_portrait_and_lowres(
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    height: int,
+    num_frames: int,
+) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+    raw = _native_raw_batch(width, height, num_frames)
+
+    video, audio = model._resolve_clean_latents(raw, "data", torch.bfloat16, torch.device("cpu"))
+
+    assert video.shape == (
+        1,
+        24,
+        video_latent_num_frames(num_frames),
+        height // 16,
+        width // 16,
+    )
+    assert audio.shape == (1, 2, 32, audio_latent_num_frames(num_frames))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda raw: raw["info_list"][0].update(width=96), "disagrees with row metadata"),
+        (lambda raw: raw["info_list"][0].update(fps=30.0), "24 fps clock"),
+        (lambda raw: raw["info_list"][0].update(audio_sample_rate=44_100), "32000 Hz"),
+        (lambda raw: raw.update(audio_latent=raw["audio_latent"][..., :-1]), "audio clock"),
+        (lambda raw: raw.update(vae_latent=raw["vae_latent"][:, :, :-1]), "vae_latent shape"),
+    ],
+)
+def test_native_validation_rejects_bucket_metadata_and_clock_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
+    message: str,
+) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+    raw = _native_raw_batch(64, 64, 5)
+    mutation(raw)
+
+    with pytest.raises(ValueError, match=message):
+        model._resolve_clean_latents(raw, "data", torch.bfloat16, torch.device("cpu"))
+
+
+def test_native_validation_requires_production_canvas_multiple(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+    raw = _native_raw_batch(64, 64, 5)
+    raw["_shape_bucket_id"] = "bucket=80x64-5f"
+    raw["info_list"][0]["width"] = 80
+    raw["vae_latent"] = torch.zeros(1, 24, 2, 4, 5)
+
+    with pytest.raises(ValueError, match="canvas multiple 32"):
+        model._resolve_clean_latents(raw, "data", torch.bfloat16, torch.device("cpu"))
+
+
+def test_legacy_fixed_data_path_still_truncates_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _tiny_training_config()
+    model = _make_model(monkeypatch, config)
+    raw = _raw_batch()
+    raw["vae_latent"] = torch.cat((raw["vae_latent"], raw["vae_latent"][:, :, :1]), dim=2)
+    raw["audio_latent"] = torch.cat((raw["audio_latent"], raw["audio_latent"][..., :2]), dim=-1)
+
+    video, audio = model._resolve_clean_latents(raw, "data", torch.bfloat16, torch.device("cpu"))
+
+    assert video.shape == (1, 24, 2, 4, 4)
+    assert audio.shape == (1, 2, 32, 8)
+
+
+def test_simulate_zeros_remain_fixed_when_native_data_bucketing_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+
+    video, audio = model._resolve_clean_latents({}, "zeros", torch.bfloat16, torch.device("cpu"))
+
+    assert video.shape == (1, 24, 2, 4, 4)
+    assert audio.shape == (1, 2, 32, 8)
 
 
 def test_packed_add_noise_applies_modality_shifts(monkeypatch: pytest.MonkeyPatch) -> None:

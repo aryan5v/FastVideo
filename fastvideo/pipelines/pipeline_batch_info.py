@@ -321,6 +321,10 @@ class TrainingBatch:
     # MiniMax H3 reuses the packed row boundaries from batch preparation to
     # split the transformer's joint sequence back into video and audio outputs.
     minimax_h3_layout: Any | None = None
+    # DMD2 flattens video and audio into one tensor. This immutable, batch-local
+    # layout records the exact native shapes needed to split it again; keeping
+    # it on the batch avoids mutable geometry state on compiled role models.
+    minimax_h3_dmd_layout: Any | None = None
 
     attn_metadata_vsa: AttentionMetadata | None = None
     attn_metadata: AttentionMetadata | None = None

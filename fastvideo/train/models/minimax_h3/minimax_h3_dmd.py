@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, cast, Literal
 
 import torch
 
@@ -25,6 +26,56 @@ from fastvideo.train.models.minimax_h3.minimax_h3 import (
 # DMD2 uses integer score timesteps on [0, 1000]. H3 maps them to its shared
 # base noise amount before applying the modality shifts.
 _DMD_TIMESTEP_SCALE = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class MiniMaxH3DMDLatentLayout:
+    """Exact batch-local shapes behind one packed H3 DMD latent tensor."""
+
+    video_shape: tuple[int, int, int, int, int]
+    audio_shape: tuple[int, int, int, int]
+
+    def __post_init__(self) -> None:
+        if self.video_shape[0] != 1 or self.video_shape[2] != _VIDEO_LATENT_CHANNELS:
+            raise ValueError("DMD video latents must have shape [1, T, 24, H, W], got "
+                             f"{self.video_shape}")
+        if self.audio_shape[:3] != (1, MINIMAX_H3_AUDIO_CHANNELS, _AUDIO_LATENT_CHANNELS):
+            raise ValueError("DMD audio latents must have shape [1, 2, 32, Ta], got "
+                             f"{self.audio_shape}")
+        if any(value <= 0 for value in self.video_shape + self.audio_shape):
+            raise ValueError("DMD latent layout dimensions must all be positive")
+
+    @classmethod
+    def from_latents(
+        cls,
+        video_latents: torch.Tensor,
+        audio_latents: torch.Tensor,
+    ) -> MiniMaxH3DMDLatentLayout:
+        if video_latents.ndim != 5 or audio_latents.ndim != 4:
+            raise ValueError("H3 DMD pack expects video [1,T,24,H,W] and audio [1,2,32,Ta], "
+                             f"got {tuple(video_latents.shape)} and {tuple(audio_latents.shape)}")
+        return cls(
+            video_shape=cast(tuple[int, int, int, int, int], tuple(int(value) for value in video_latents.shape)),
+            audio_shape=cast(tuple[int, int, int, int], tuple(int(value) for value in audio_latents.shape)),
+        )
+
+    @property
+    def video_numel(self) -> int:
+        return math.prod(self.video_shape)
+
+    @property
+    def audio_numel(self) -> int:
+        return math.prod(self.audio_shape)
+
+    @property
+    def packed_numel(self) -> int:
+        return self.video_numel + self.audio_numel
+
+    def modality_slices(self) -> tuple[tuple[str, slice], ...]:
+        return (
+            ("video", slice(0, self.video_numel)),
+            ("audio", slice(self.video_numel, self.packed_numel)),
+        )
 
 
 class MiniMaxH3DMDModel(MiniMaxH3Model):
@@ -51,7 +102,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
     # Packed dual-modality helpers
     # ------------------------------------------------------------------
 
-    def _modality_shapes(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def _modality_shapes(self) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int]]:
         """Return the ``[1, T, C, H, W]`` video and ``[1, 2, 32, Ta]`` audio shapes."""
         data = self.training_config.data
         video_shape = (
@@ -69,41 +120,65 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         )
         return video_shape, audio_shape
 
+    def _fixed_latent_layout(self) -> MiniMaxH3DMDLatentLayout:
+        video_shape, audio_shape = self._modality_shapes()
+        return MiniMaxH3DMDLatentLayout(
+            video_shape=video_shape,
+            audio_shape=audio_shape,
+        )
+
+    def _batch_latent_layout(self, batch: TrainingBatch) -> MiniMaxH3DMDLatentLayout:
+        layout = batch.minimax_h3_dmd_layout
+        if not isinstance(layout, MiniMaxH3DMDLatentLayout):
+            raise RuntimeError("prepare_batch() must set TrainingBatch.minimax_h3_dmd_layout")
+        return layout
+
     def pack_latents(
         self,
         video_latents: torch.Tensor,
         audio_latents: torch.Tensor,
+        *,
+        layout: MiniMaxH3DMDLatentLayout | None = None,
     ) -> torch.Tensor:
         """Flatten both modality latents into one ``[1, N]`` tensor."""
+        actual_layout = MiniMaxH3DMDLatentLayout.from_latents(video_latents, audio_latents)
+        if layout is not None and actual_layout != layout:
+            raise ValueError(f"Latent tensors do not match their batch layout: {actual_layout} != {layout}")
         return torch.cat(
             (video_latents.reshape(1, -1), audio_latents.reshape(1, -1)),
             dim=1,
         )
 
-    def modality_slices(self) -> tuple[tuple[str, slice], ...]:
+    def modality_slices(
+        self,
+        *,
+        layout: MiniMaxH3DMDLatentLayout | None = None,
+    ) -> tuple[tuple[str, slice], ...]:
         """Named packed-latent column slices for per-modality DMD2 losses.
 
         Video is ~3.6M packed elements against audio's ~15-30k, so a single
         global mean would give audio <1% of the distillation signal; DMD2
         consumes these slices to normalize and weight each stream separately.
         """
-        video_shape, audio_shape = self._modality_shapes()
-        split = math.prod(video_shape)
-        return (
-            ("video", slice(0, split)),
-            ("audio", slice(split, split + math.prod(audio_shape))),
-        )
+        return (layout or self._fixed_latent_layout()).modality_slices()
 
-    def unpack_latents(self, packed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def modality_slices_for_batch(self, batch: TrainingBatch) -> tuple[tuple[str, slice], ...]:
+        """Return per-modality slices for this batch's native shape."""
+        return self.modality_slices(layout=self._batch_latent_layout(batch))
+
+    def unpack_latents(
+        self,
+        packed: torch.Tensor,
+        *,
+        layout: MiniMaxH3DMDLatentLayout | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Split one packed ``[1, N]`` tensor back into (video, audio) latents."""
-        video_shape, audio_shape = self._modality_shapes()
-        split = math.prod(video_shape)
-        if packed.shape != (1, split + math.prod(audio_shape)):
-            raise ValueError("Packed latents must have shape "
-                             f"[1, {split + math.prod(audio_shape)}], got {tuple(packed.shape)}")
+        resolved = layout or self._fixed_latent_layout()
+        if packed.shape != (1, resolved.packed_numel):
+            raise ValueError(f"Packed latents must have shape [1, {resolved.packed_numel}], got {tuple(packed.shape)}")
         return (
-            packed[:, :split].reshape(video_shape),
-            packed[:, split:].reshape(audio_shape),
+            packed[:, :resolved.video_numel].reshape(resolved.video_shape),
+            packed[:, resolved.video_numel:].reshape(resolved.audio_shape),
         )
 
     def _noise_amounts(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -142,7 +217,11 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         # clean latents matter here (the base prepare_batch already built the
         # VSA metadata view for VSA-H3 roles). The fine-tuning noisy fields
         # are refreshed by predict_noise on every call.
-        batch.latents = self.pack_latents(batch.latents, batch.audio_latents)
+        if batch.latents is None or batch.audio_latents is None:
+            raise RuntimeError("MiniMax H3 batch preparation did not produce paired latents")
+        layout = MiniMaxH3DMDLatentLayout.from_latents(batch.latents, batch.audio_latents)
+        batch.minimax_h3_dmd_layout = layout
+        batch.latents = self.pack_latents(batch.latents, batch.audio_latents, layout=layout)
         return batch
 
     def add_noise(
@@ -151,13 +230,48 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         noise: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        """Noise packed latents at one shared timestep, shifted per modality."""
+        """Noise legacy fixed-shape packed latents at one shared timestep."""
+        return self._add_noise_with_layout(
+            clean_latents,
+            noise,
+            timestep,
+            self._fixed_latent_layout(),
+        )
+
+    def add_noise_for_batch(
+        self,
+        clean_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: TrainingBatch,
+    ) -> torch.Tensor:
+        """Noise packed latents using immutable geometry from ``batch``."""
+        layout = self._batch_latent_layout(batch)
+        if not bool(getattr(self.training_config.data, "native_shape_bucketing", False)):
+            # Keep the established fixed-shape call path observable and
+            # byte-identical for existing data-free/data-forcing recipes.
+            return self.add_noise(clean_latents, noise, timestep)
+        return self._add_noise_with_layout(
+            clean_latents,
+            noise,
+            timestep,
+            layout,
+        )
+
+    def _add_noise_with_layout(
+        self,
+        clean_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timestep: torch.Tensor,
+        layout: MiniMaxH3DMDLatentLayout,
+    ) -> torch.Tensor:
         sigma_video, sigma_audio = self._noise_amounts(timestep)
-        clean_video, clean_audio = self.unpack_latents(clean_latents)
-        noise_video, noise_audio = self.unpack_latents(noise)
+        clean_video, clean_audio = self.unpack_latents(clean_latents, layout=layout)
+        noise_video, noise_audio = self.unpack_latents(noise, layout=layout)
         return self.pack_latents(
             self._mix(clean_video, noise_video, sigma_video),
             self._mix(clean_audio, noise_audio, sigma_audio),
+            layout=layout,
         )
 
     @staticmethod
@@ -175,7 +289,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         clean_latents: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        """Recover the noise a packed state implies, per modality.
+        """Recover noise for legacy fixed-shape packed latents.
 
         The inverse of :meth:`add_noise` at the same shared timestep: with
         ``x_t = (1 - sigma_m) x0 + sigma_m eps`` under each modality's
@@ -184,12 +298,45 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         uses this to step a carried trajectory deterministically between
         grid rungs.
         """
+        return self._extract_eps_with_layout(
+            noisy_latents,
+            clean_latents,
+            timestep,
+            self._fixed_latent_layout(),
+        )
+
+    def extract_eps_for_batch(
+        self,
+        noisy_latents: torch.Tensor,
+        clean_latents: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: TrainingBatch,
+    ) -> torch.Tensor:
+        """Recover packed noise using immutable geometry from ``batch``."""
+        layout = self._batch_latent_layout(batch)
+        if not bool(getattr(self.training_config.data, "native_shape_bucketing", False)):
+            return self.extract_eps(noisy_latents, clean_latents, timestep)
+        return self._extract_eps_with_layout(
+            noisy_latents,
+            clean_latents,
+            timestep,
+            layout,
+        )
+
+    def _extract_eps_with_layout(
+        self,
+        noisy_latents: torch.Tensor,
+        clean_latents: torch.Tensor,
+        timestep: torch.Tensor,
+        layout: MiniMaxH3DMDLatentLayout,
+    ) -> torch.Tensor:
         sigma_video, sigma_audio = self._noise_amounts(timestep)
-        noisy_video, noisy_audio = self.unpack_latents(noisy_latents)
-        clean_video, clean_audio = self.unpack_latents(clean_latents)
+        noisy_video, noisy_audio = self.unpack_latents(noisy_latents, layout=layout)
+        clean_video, clean_audio = self.unpack_latents(clean_latents, layout=layout)
         return self.pack_latents(
             self._unmix(noisy_video, clean_video, sigma_video),
             self._unmix(noisy_audio, clean_audio, sigma_audio),
+            layout=layout,
         )
 
     @staticmethod
@@ -220,7 +367,8 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         forward-context stay coherent with this call.
         """
         sigma_video, sigma_audio = self._noise_amounts(timestep)
-        noisy_video, noisy_audio = self.unpack_latents(noisy_latents)
+        layout = self._batch_latent_layout(batch)
+        noisy_video, noisy_audio = self.unpack_latents(noisy_latents, layout=layout)
         batch.timesteps = (1.0 - sigma_video).to(noisy_latents.device)
         batch.audio_timesteps = (1.0 - sigma_audio).to(noisy_latents.device)
         batch.audio_noisy_model_input = noisy_audio
@@ -232,7 +380,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
             cfg_uncond=cfg_uncond,
             attn_kind=attn_kind,
         )
-        return self.pack_latents(video_pred, audio_pred)
+        return self.pack_latents(video_pred, audio_pred, layout=layout)
 
     def predict_x0(
         self,
@@ -254,11 +402,13 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
             attn_kind=attn_kind,
         )
         sigma_video, sigma_audio = self._noise_amounts(timestep)
-        noisy_video, noisy_audio = self.unpack_latents(noisy_latents)
-        pred_video, pred_audio = self.unpack_latents(pred_noise)
+        layout = self._batch_latent_layout(batch)
+        noisy_video, noisy_audio = self.unpack_latents(noisy_latents, layout=layout)
+        pred_video, pred_audio = self.unpack_latents(pred_noise, layout=layout)
         return self.pack_latents(
             self._to_x0(noisy_video, pred_video, sigma_video),
             self._to_x0(noisy_audio, pred_audio, sigma_audio),
+            layout=layout,
         )
 
     @staticmethod
@@ -317,7 +467,12 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         return vae
 
     @torch.no_grad()
-    def decode_vis_latents(self, packed: torch.Tensor) -> Any:
+    def decode_vis_latents(
+        self,
+        packed: torch.Tensor,
+        *,
+        layout: MiniMaxH3DMDLatentLayout | None = None,
+    ) -> Any:
         """Decode the packed video stream into a uint8 ``[B, T, C, H, W]`` clip.
 
         Follows ``MiniMaxH3VideoDecodingStage``: denormalize latents, decode
@@ -325,7 +480,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         pixels. The audio stream is dropped — the tracker artifact is a
         silent video.
         """
-        video_latents, _ = self.unpack_latents(packed.detach())
+        video_latents, _ = self.unpack_latents(packed.detach(), layout=layout)
         latents = video_latents.permute(0, 2, 1, 3, 4).to(device=self.device, dtype=torch.float32)
         vae = self._load_vis_vae()
         vae.to(self.device)
@@ -340,4 +495,4 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         return (video * 255.0).to(torch.uint8).numpy()
 
 
-__all__ = ["MiniMaxH3DMDModel"]
+__all__ = ["MiniMaxH3DMDLatentLayout", "MiniMaxH3DMDModel"]

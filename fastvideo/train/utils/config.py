@@ -406,6 +406,7 @@ def _build_training_config(
             num_width=int(da.get("num_width", 0) or 0),
             num_latent_t=int(da.get("num_latent_t", 0) or 0),
             num_frames=int(da.get("num_frames", 0) or 0),
+            native_shape_bucketing=bool(da.get("native_shape_bucketing", False)),
         ),
         optimizer=OptimizerConfig(
             learning_rate=float(o.get("learning_rate", 0.0) or 0.0),

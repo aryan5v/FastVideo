@@ -153,6 +153,22 @@ class ModelBase(ABC):
     ) -> torch.Tensor:
         """Apply forward-process noise at *timestep*."""
 
+    def add_noise_for_batch(
+        self,
+        clean_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: TrainingBatch,
+    ) -> torch.Tensor:
+        """Apply noise with optional immutable geometry carried by ``batch``.
+
+        Video-only and fixed-shape models keep their existing behavior. Joint
+        packed models override this hook when splitting the tensor requires
+        batch-local shape context.
+        """
+        del batch
+        return self.add_noise(clean_latents, noise, timestep)
+
     @abstractmethod
     def predict_noise(
         self,
