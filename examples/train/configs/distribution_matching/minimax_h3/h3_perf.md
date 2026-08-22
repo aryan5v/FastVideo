@@ -549,9 +549,10 @@ MP4 in the comparison root below.
 | 15s / 345f | **N/A: no valid vllm-omni source MP4** | `t2va_15s_sp4_vllm_base_vs_fasth3_f3.mp4` (`aec88230`) |
 
 The 345f F3 comparison predates the odd-tile composition and truthfully records its
-Triton-64 fallback. No Ref2VA F3 montage exists: the Preview export does not contain a distilled
-`transformer_ref`, so such a file would compare vllm-omni base against FastVideo base weights
-while falsely labeling the right side FastH3.
+Triton-64 fallback. No Ref2VA F3 montage exists: the Preview export does not contain distilled
+`transformer_ref` weights. Aliasing its T2VA student into that role would be an untrained
+cross-variant transplant, while using the advertised external component would compare two base
+Ref2VA models and falsely label the right side FastH3.
 
 ### Ref2VA: genuine base grid and the FastVideo four-forward latency proxy
 
@@ -561,10 +562,15 @@ output passed the exact H.264 1344x768@24-fps frame contract and carries stereo 
 three repeats within each successful cell are byte-identical.
 
 **Identity guardrail: genuine FastH3 Preview Ref2VA is N/A.** Preview manifest
-`modular_model_index.json` (SHA256 `63a5c56b...`) has no distilled `transformer_ref` and resolves
-that component to official `MiniMaxAI/MiniMax-H3/transformer_ref`. The first table is genuine
-vllm-omni **base H3 Ref2VA**. The second table is a FastVideo **official-base transformer_ref,
-four-forward F4 latency proxy only**; it is neither FastH3 nor quality-valid.
+`modular_model_index.json` (SHA256 `63a5c56b...`) advertises
+`MiniMaxAI/MiniMax-H3/transformer_ref`, but the release contains no physical `transformer_ref/`
+and no distilled weights for that role. The current FastVideo loader selects
+`<model_path>/transformer_ref` and does not follow the nested component source metadata, so the
+standalone Preview snapshot cannot transparently materialize the advertised base component.
+The raw step-1400 export used by the latency-proxy harness instead has `transformer_ref` linked to
+the official base component. The first table is genuine vllm-omni **base H3 Ref2VA**. The second
+table is a FastVideo **official-base transformer_ref, four-forward F4 latency proxy only**; it is
+neither FastH3 nor quality-valid.
 
 The identity audit also compared the official base components directly: `transformer` and
 `transformer_ref` expose the same 638-key architecture but all 14 corresponding shard SHA256s
@@ -639,7 +645,7 @@ supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUD
 The public-serving extraction is intentionally split by concern. As of this refresh, #1741
 (regional inference compile) is merged at public main `d3cff517c`; #1742 (packed-varlen FA4)
 is conflict-free at `9eb7b5d3a`; #1743 (schema-inventory repair) is at `d1ee99ac2`; #1744
-(parallel VAE) is at `88e241a75`; and #1745 (odd-tile sm100a) is at `286203d9e`. None of these
+(parallel VAE) is at `88e241a75`; and #1745 (odd-tile sm100a) is at `82a5b0db6`. None of these
 public PRs contains a training path or training configuration. The exact `e0bb6a5`/`bbc8d35`
 acceptance above is now the current public-serving authority; `99cd355a` remains the historical
 timing and feature-attribution authority for rows that have not been rerun on those compositions.
