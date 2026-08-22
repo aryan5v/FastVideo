@@ -501,6 +501,14 @@ that component to official `MiniMaxAI/MiniMax-H3/transformer_ref`. The first tab
 vllm-omni **base H3 Ref2VA**. The second table is a FastVideo **official-base transformer_ref,
 four-forward F4 latency proxy only**; it is neither FastH3 nor quality-valid.
 
+The identity audit also compared the official base components directly: `transformer` and
+`transformer_ref` expose the same 638-key architecture but all 14 corresponding shard SHA256s
+differ, and sampled tensors differ. FastVideo's Ref2VA preset maps `transformer` to
+`transformer_ref` and loads that component as the sole denoiser; it does not combine the two
+DiTs. Copying the Preview T2VA student into that slot would therefore be an untrained
+cross-variant transplant, while materializing the manifest's external component would simply
+run the 50-step base Ref2VA model. Neither is a genuine FastH3 measurement.
+
 vllm-omni base uses dense CuTe FA4 plus lazy regional `torch.compile(dynamic=True)` on all 52 DiT
 blocks. SP-4 additionally uses USP-4, text-encoder TP-4, and spatial-tile VAE patch parallelism 4.
 
@@ -560,6 +568,32 @@ supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUD
   `73b623f2f7db092053c1c86fe796bed89eb3dc71` plus timing-only profiler patches. Hardware is
   GB200 (189471 MiB/GPU), driver 580.82.07. No benchmark launcher overrides `HOME`; caches are
   explicit and job/task scoped.
+
+### Public inference lineage and excluded PR #1740 factor
+
+The public-serving extraction is intentionally split by concern. As of this refresh, #1741
+(regional inference compile) is merged at public main `d3cff517c`; #1742 (packed-varlen FA4)
+is conflict-free at `9eb7b5d3a`; #1743 (schema-inventory repair) is at `d1ee99ac2`; #1744
+(parallel VAE) is at `88e241a75`; and #1745 (odd-tile sm100a) is at `286203d9e`. None of these
+public PRs contains a training path or training configuration. The original `99cd355a` rows
+remain the timing authority until the clean public-head composition acceptance run completes.
+
+PR #1740 (`61ab307aa`, fused Ulysses NVLink all-to-all) is an explicit **excluded factor**, not
+a missing timing. Exact-head review found two distributed-correctness blockers: up to 36 CUDA
+CTAs reuse one NCCL LSA barrier index, and only the initial capability decision is voted while
+allocation, build, per-call guards, and buffer growth can diverge rank-locally. The current
+benchmark kernel prefix also lacks the new communication symbol, and the raw pybind path is not
+traceable inside base d4's `fullgraph=True` regions. Running a timing grid before those issues
+are fixed risks a mismatched collective hang and would not prove engagement.
+
+| topology | #1740 grid status | reason |
+|---|---|---|
+| 1x | N/A (intended no-op) | no Ulysses collective or allocation exists at world size one |
+| SP-4, one tray | excluded / not run | potentially useful topology, but current head is not group-atomic or safely initialized |
+| SP-8, two trays | excluded / not run | current NVL72 layout is expected to expose LSA teams of four, requiring unanimous 0/8 fallback |
+
+No number in this document includes #1740. PR #1739's packed-SP route also bypasses #1740, and
+Preview VSA rejects packed SP, so those factors must never be described as additive.
 
 ## 8. Historical pre-merge stacked-PR integration
 
