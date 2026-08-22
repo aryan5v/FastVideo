@@ -791,6 +791,7 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     validation = config["callbacks"]["validation"]
     assert validation["dataset_file"].endswith("/validation/heldout64.json")
     assert validation["use_record_dimensions"] is True
+    assert validation["max_record_num_frames"] == 345
     assert validation["use_validation_media_conditioning"] is False
 
 
@@ -803,6 +804,7 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
             'dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"') in launcher
     assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"' in launcher
     assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
+    assert "readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345" in launcher
     assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
             'minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"') in launcher
     for removed_override in ("CONFIG", "DATA_ROOT", "VALIDATION_MANIFEST", "OUTPUT_DIR"):
@@ -810,7 +812,8 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert 'readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"' in launcher
     assert 'merge-base --is-ancestor "${REVIEWED_V10_COMMIT}" HEAD' in launcher
     assert "actual_data_paths = training[\"data\"][\"data_path\"]" in launcher
-    assert "actual_validation = document[\"callbacks\"][\"validation\"][\"dataset_file\"]" in launcher
+    assert 'actual_validation = validation["dataset_file"]' in launcher
+    assert "actual_validation_max_record_num_frames" in launcher
     assert "actual_output = training[\"checkpoint\"][\"output_dir\"]" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher

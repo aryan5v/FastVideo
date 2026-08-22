@@ -139,6 +139,7 @@ class ValidationCallback(Callback):
         guidance_scale: float | None = None,
         num_frames: int | None = None,
         use_record_dimensions: bool = False,
+        max_record_num_frames: int | None = None,
         num_videos_per_prompt: int = 1,
         use_validation_media_conditioning: bool = True,
         output_dir: str | None = None,
@@ -164,6 +165,9 @@ class ValidationCallback(Callback):
         self.guidance_scale = (float(guidance_scale) if guidance_scale is not None else None)
         self.num_frames = (int(num_frames) if num_frames is not None else None)
         self.use_record_dimensions = self._coerce_bool(use_record_dimensions)
+        self.max_record_num_frames = (int(max_record_num_frames) if max_record_num_frames is not None else None)
+        if self.max_record_num_frames is not None and self.max_record_num_frames <= 0:
+            raise ValueError("callbacks.validation.max_record_num_frames must be positive")
         self.num_videos_per_prompt = int(num_videos_per_prompt)
         if self.num_videos_per_prompt <= 0:
             raise ValueError("callbacks.validation.num_videos_per_prompt must be positive")
@@ -780,6 +784,7 @@ class ValidationCallback(Callback):
                                 caption,
                                 metadata,
                                 prefix="held-out reference",
+                                use_reference_num_frames=True,
                             ))
                     # Media and completion counts share one tracker event so
                     # artifacts and verification data remain aligned.
@@ -990,6 +995,7 @@ class ValidationCallback(Callback):
         metadata: dict[str, Any],
         *,
         prefix: str = "generated",
+        use_reference_num_frames: bool = False,
     ) -> str:
         fields = [prefix]
         source = metadata.get("source")
@@ -1000,7 +1006,8 @@ class ValidationCallback(Callback):
             fields.append(f"id={sample_id}")
         width = metadata.get("width")
         height = metadata.get("height")
-        num_frames = metadata.get("num_frames")
+        num_frames = (metadata.get("reference_num_frames", metadata.get("num_frames"))
+                      if use_reference_num_frames else metadata.get("num_frames"))
         if width and height and num_frames:
             fields.append(f"shape={width}x{height}x{num_frames}f")
         return f"[{' | '.join(fields)}] {caption}"
@@ -1643,7 +1650,9 @@ class ValidationCallback(Callback):
         Native-shape validation is explicit because cached ``SamplingParam``
         instances are shared across records. A complete record triplet wins;
         partial metadata fails instead of combining dimensions from unrelated
-        shapes. With the option off (the default), legacy callback/config
+        shapes. ``max_record_num_frames`` optionally caps only the temporal
+        member of a complete record triplet; fixed/default geometry is never
+        changed. With the option off (the default), legacy callback/config
         behavior is unchanged.
         """
         tc = self.training_config
@@ -1665,6 +1674,8 @@ class ValidationCallback(Callback):
                                  f"missing {missing} for prompt {validation_batch.get('prompt')!r}.")
             if all(present.values()):
                 dimensions = {name: int(validation_batch[name]) for name in dimensions}
+                if self.max_record_num_frames is not None:
+                    dimensions["num_frames"] = min(dimensions["num_frames"], self.max_record_num_frames)
 
         for name, value in dimensions.items():
             if value <= 0:
@@ -1822,13 +1833,17 @@ class ValidationCallback(Callback):
             audio_waveforms.append(output_audio)
             audio_sample_rates.append(int(output_audio_sample_rate) if output_audio_sample_rate is not None else None)
             ref_videos.append(ref_video if isinstance(ref_video, str) else None)
-            metadata.append({
+            record_metadata: dict[str, Any] = {
                 "source": validation_batch.get("source", "unknown"),
                 "sample_id": validation_batch.get("sample_id", validation_batch.get("id")),
                 "width": int(batch.width),
                 "height": int(batch.height),
                 "num_frames": int(batch.num_frames),
-            })
+            }
+            reference_num_frames = validation_batch.get("num_frames")
+            if reference_num_frames is not None and int(reference_num_frames) != int(batch.num_frames):
+                record_metadata["reference_num_frames"] = int(reference_num_frames)
+            metadata.append(record_metadata)
             actions.append(action)
             mouse_pitch_signs.append(self._validation_mouse_pitch_sign(validation_batch))
             if self.overlay_actions:

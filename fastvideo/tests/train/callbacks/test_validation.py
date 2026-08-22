@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from fastvideo.api.sampling_param import SamplingParam
+from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_input_preparation import resolve_target_num_frames
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.callbacks.ema import EMACallback
 from fastvideo.train.callbacks.validation import (
@@ -45,6 +46,7 @@ def _make_callback(
     guidance_scale: float | None = None,
     num_frames: int | None = None,
     use_record_dimensions: bool = False,
+    max_record_num_frames: int | None = None,
     num_videos_per_prompt: int = 1,
     use_validation_media_conditioning: bool = True,
     sampling_timesteps: list[int] | None = None,
@@ -61,6 +63,7 @@ def _make_callback(
         guidance_scale=guidance_scale,
         num_frames=num_frames,
         use_record_dimensions=use_record_dimensions,
+        max_record_num_frames=max_record_num_frames,
         num_videos_per_prompt=num_videos_per_prompt,
         use_validation_media_conditioning=use_validation_media_conditioning,
         sampling_timesteps=sampling_timesteps,
@@ -87,6 +90,7 @@ class TestConstructor:
         assert cb.guidance_scale is None
         assert cb.num_frames is None
         assert cb.use_record_dimensions is False
+        assert cb.max_record_num_frames is None
         assert cb.num_videos_per_prompt == 1
         assert cb.use_validation_media_conditioning is True
         assert cb.run_at_start is True
@@ -114,6 +118,7 @@ class TestConstructor:
             guidance_scale="4.5",  # type: ignore[arg-type]
             num_frames="77",  # type: ignore[arg-type]
             use_record_dimensions="true",  # type: ignore[arg-type]
+            max_record_num_frames="345",  # type: ignore[arg-type]
             num_videos_per_prompt="2",  # type: ignore[arg-type]
             use_validation_media_conditioning="false",  # type: ignore[arg-type]
             sampling_timesteps=["1000", "500"],
@@ -128,6 +133,7 @@ class TestConstructor:
         assert cb.guidance_scale == 4.5
         assert cb.num_frames == 77
         assert cb.use_record_dimensions is True
+        assert cb.max_record_num_frames == 345
         assert cb.num_videos_per_prompt == 2
         assert cb.use_validation_media_conditioning is False
         assert cb.run_at_start is False
@@ -141,6 +147,12 @@ class TestConstructor:
         """Verify every prompt requests at least one generated video."""
         with pytest.raises(ValueError, match="num_videos_per_prompt must be positive"):
             _make_callback(num_videos_per_prompt=0)
+
+    @pytest.mark.parametrize("max_record_num_frames", [0, -1])
+    def test_init_rejects_nonpositive_record_frame_cap(self, max_record_num_frames: int) -> None:
+        """A configured native-record cap must describe a usable request."""
+        with pytest.raises(ValueError, match="max_record_num_frames must be positive"):
+            _make_callback(max_record_num_frames=max_record_num_frames)
 
     def test_pipeline_kwargs_collected(self) -> None:
         cb = ValidationCallback(
@@ -354,6 +366,47 @@ class TestH3ValidationContract:
                 "width": 128,
             })
 
+    @pytest.mark.parametrize(
+        ("record_num_frames", "max_record_num_frames", "expected_num_frames"),
+        [
+            (328, 345, 328),
+            (362, 345, 345),
+            (362, None, 362),
+        ],
+    )
+    def test_record_frame_cap_preserves_shorter_and_legacy_geometry(
+        self,
+        record_num_frames: int,
+        max_record_num_frames: int | None,
+        expected_num_frames: int,
+    ) -> None:
+        """The opt-in cap affects only over-limit native record lengths."""
+        cb = _make_callback(
+            use_record_dimensions=True,
+            max_record_num_frames=max_record_num_frames,
+        )
+        cb.training_config = SimpleNamespace(
+            data=SimpleNamespace(
+                num_height=64,
+                num_width=96,
+                num_latent_t=2,
+            ),
+            pipeline_config=SimpleNamespace(vae_config=SimpleNamespace(
+                arch_config=SimpleNamespace(temporal_compression_ratio=4), ), ),
+        )
+
+        assert cb._validation_sampling_dimensions({
+            "width": 1344,
+            "height": 768,
+            "num_frames": record_num_frames,
+        }) == (768, 1344, expected_num_frames)
+
+    def test_record_frame_cap_matches_h3_inference_boundary(self) -> None:
+        """The v10 cap is the largest released H3 geometry below 15 seconds."""
+        assert resolve_target_num_frames(345) == 345
+        with pytest.raises(ValueError, match="aligned num_frames=362"):
+            resolve_target_num_frames(362)
+
     def test_record_dimensions_are_ignored_without_opt_in(self) -> None:
         cb = _make_callback(num_frames=77, use_record_dimensions=False)
         cb.training_config = SimpleNamespace(
@@ -543,13 +596,15 @@ class TestH3ValidationContract:
             "sample_id": "sample-1",
             "width": 1344,
             "height": 768,
-            "num_frames": 362,
+            "num_frames": 345,
+            "reference_num_frames": 362,
         }]
         caption = cb._validation_artifact_caption("A prompt", metadata[0])
         ref_caption = cb._validation_artifact_caption(
             "A prompt",
             metadata[0],
             prefix="held-out reference",
+            use_reference_num_frames=True,
         )
         scalar_metrics = cb._validation_metadata_scalar_metrics(
             metadata,
@@ -573,8 +628,10 @@ class TestH3ValidationContract:
         assert artifacts["validation_videos_4_steps"][0][0] == "generated.mp4"
         assert artifacts["validation_references_4_steps"][0][0] == "reference.mp4"
         assert "source=nuva/50k" in artifacts["validation_videos_4_steps"][0][1]
+        assert "shape=1344x768x345f" in artifacts["validation_videos_4_steps"][0][1]
+        assert "shape=1344x768x362f" in artifacts["validation_references_4_steps"][0][1]
         assert artifacts["validation/4_steps/source/nuva_50k_count"] == 1.0
-        assert artifacts["validation/4_steps/shape/1344x768x362f_count"] == 1.0
+        assert artifacts["validation/4_steps/shape/1344x768x345f_count"] == 1.0
 
 
 class TestAttnQatInferValidation:

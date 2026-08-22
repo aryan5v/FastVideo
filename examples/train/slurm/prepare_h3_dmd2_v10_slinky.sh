@@ -13,6 +13,7 @@ VENV="${VENV:-${REPO}/.venv}"
 readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"
 readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"
 readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
+readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345
 readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"
 readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"
 LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
@@ -64,7 +65,8 @@ fi
 # validate different data, validation, or output paths than training uses.
 if [[ -x "${VENV}/bin/python" && -f "${CONFIG}" ]]; then
   if ! "${VENV}/bin/python" - \
-    "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" "${OUTPUT_DIR}" "${sources[@]}" <<'PY'
+    "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" "${VALIDATION_MAX_RECORD_NUM_FRAMES}" \
+    "${OUTPUT_DIR}" "${sources[@]}" <<'PY'
 import pathlib
 import sys
 
@@ -73,13 +75,16 @@ import yaml
 config_path = pathlib.Path(sys.argv[1])
 data_root = pathlib.Path(sys.argv[2])
 validation_manifest = sys.argv[3]
-output_dir = sys.argv[4]
-sources = sys.argv[5:]
+validation_max_record_num_frames = int(sys.argv[4])
+output_dir = sys.argv[5]
+sources = sys.argv[6:]
 document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 try:
     training = document["training"]
     actual_data_paths = training["data"]["data_path"]
-    actual_validation = document["callbacks"]["validation"]["dataset_file"]
+    validation = document["callbacks"]["validation"]
+    actual_validation = validation["dataset_file"]
+    actual_validation_max_record_num_frames = validation["max_record_num_frames"]
     actual_output = training["checkpoint"]["output_dir"]
 except (KeyError, TypeError) as error:
     raise SystemExit(f"v10 YAML is missing a required launch path: {error}") from error
@@ -89,6 +94,9 @@ if actual_data_paths != expected_data_paths:
     raise SystemExit(f"v10 YAML data_path {actual_data_paths!r} != fixed preflight roots {expected_data_paths!r}")
 if actual_validation != validation_manifest:
     raise SystemExit(f"v10 YAML validation dataset {actual_validation!r} != {validation_manifest!r}")
+if actual_validation_max_record_num_frames != validation_max_record_num_frames:
+    raise SystemExit("v10 YAML validation max_record_num_frames "
+                     f"{actual_validation_max_record_num_frames!r} != {validation_max_record_num_frames}")
 if actual_output != output_dir:
     raise SystemExit(f"v10 YAML output directory {actual_output!r} != {output_dir!r}")
 print("READY: committed v10 YAML paths match the fixed preflight contract")
@@ -127,13 +135,15 @@ fi
 
 require_file "${VALIDATION_MANIFEST}"
 if [[ -x "${VENV}/bin/python" && -f "${VALIDATION_MANIFEST}" ]]; then
-  if ! "${VENV}/bin/python" - "${VALIDATION_MANIFEST}" "${sources[@]}" <<'PY'
+  if ! "${VENV}/bin/python" - "${VALIDATION_MANIFEST}" "${VALIDATION_MAX_RECORD_NUM_FRAMES}" \
+    "${sources[@]}" <<'PY'
 import json
 import pathlib
 import sys
 
 manifest = pathlib.Path(sys.argv[1])
-required_sources = set(sys.argv[2:])
+max_record_num_frames = int(sys.argv[2])
+required_sources = set(sys.argv[3:])
 document = json.loads(manifest.read_text(encoding="utf-8"))
 rows = document.get("data") if isinstance(document, dict) else document
 if not isinstance(rows, list) or len(rows) != 64:
@@ -141,6 +151,7 @@ if not isinstance(rows, list) or len(rows) != 64:
 
 seen_sources = set()
 seen_refs = set()
+capped_rows = 0
 for index, row in enumerate(rows):
     required = ("caption", "ref_video", "source", "sample_id", "width", "height", "num_frames")
     missing = [key for key in required if row.get(key) in (None, "")]
@@ -149,6 +160,13 @@ for index, row in enumerate(rows):
     width, height, frames = (int(row["width"]), int(row["height"]), int(row["num_frames"]))
     if min(width, height, frames) <= 0 or width % 8 or height % 8:
         raise SystemExit(f"validation row {index} has invalid shape {width}x{height}x{frames}f")
+    requested_frames = min(frames, max_record_num_frames)
+    aligned_frames = requested_frames
+    while aligned_frames % 17 != 5:
+        aligned_frames += 1
+    if not 5 <= aligned_frames / 24 <= 15:
+        raise SystemExit(f"validation row {index} resolves to unsupported H3 target {aligned_frames}f")
+    capped_rows += int(requested_frames != frames)
     ref = pathlib.Path(str(row["ref_video"]))
     if not ref.is_absolute():
         ref = manifest.parent / ref
@@ -163,7 +181,8 @@ for index, row in enumerate(rows):
 missing_sources = sorted(required_sources - seen_sources)
 if missing_sources:
     raise SystemExit(f"validation manifest does not cover sources: {missing_sources}")
-print(f"READY: validation manifest has 64 unique references across {len(seen_sources)} sources")
+print(f"READY: validation manifest has 64 unique references across {len(seen_sources)} sources; "
+      f"{capped_rows} generation requests cap at {max_record_num_frames}f")
 PY
   then
     failures=$((failures + 1))

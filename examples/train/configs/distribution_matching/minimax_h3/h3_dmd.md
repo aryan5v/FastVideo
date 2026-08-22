@@ -227,8 +227,12 @@ every microbatch forward-noises a real video/audio latent at a uniformly
 sampled non-zero rung of the four-step grid. Eight four-GPU trays at local
 batch 1 and accumulation 2 give global batch 64; student and critic learning
 rates are both `2e-6`. Native-shape bucketing is mandatory. Validation uses
-only `validation/heldout64.json`, honors each record's width/height/frame
-triplet, and logs the raw held-out video beside its generated counterpart.
+only `validation/heldout64.json`, honors each record's native spatial shape,
+and logs the raw held-out video beside its generated counterpart. Raw
+15-second references contain 362 frames; validation generation caps those
+requests at 345 frames, the largest released `17*n+5` geometry within H3's
+15-second inference ceiling. Shorter record lengths are unchanged, and the
+full 362-frame reference remains intact for side-by-side logging.
 
 The non-submitting preflight is:
 

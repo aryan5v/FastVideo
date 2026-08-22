@@ -135,6 +135,9 @@ callbacks:
     sampling_steps: [4]
     guidance_scale: 1.0
     use_record_dimensions: true
+    # Raw 15-second sources contain 362 frames, but released H3 generation is
+    # capped at the largest aligned request within 15 seconds: 345 frames.
+    max_record_num_frames: 345
     num_videos_per_prompt: 1
     # Raw held-out video is a logging reference, never generation conditioning.
     use_validation_media_conditioning: false
