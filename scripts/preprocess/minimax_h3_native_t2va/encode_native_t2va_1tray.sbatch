@@ -14,7 +14,7 @@ set -uo pipefail
 
 export HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 REPO="${REPO:-/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10}"
-VENV="${VENV:-/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo/.venv}"
+VENV="${VENV:-${REPO}/.venv}"
 HARNESS="${HARNESS:-${REPO}/scripts/preprocess/minimax_h3_native_t2va}"
 MODEL="${MODEL:-/mnt/lustre/vlm-k1kong/models/MiniMax-H3}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
