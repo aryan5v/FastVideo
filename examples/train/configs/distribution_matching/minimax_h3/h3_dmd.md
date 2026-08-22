@@ -23,7 +23,7 @@ parity.
 
 ## Current recipe
 
-The launch candidate is `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml`:
+The live recipe is `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml`:
 all-real video/audio latents from the five frozen native-shape sources at
 global batch 64 (32 DP x accum 2), with no data-free carry. It starts a fresh
 base-model and optimizer lineage; never resume v8/v9 into its output. The
@@ -219,7 +219,7 @@ H3-specific state and follow-ups before enabling it on a real run:
 - Upstream PR #1718 is unmerged (CI/review pending); re-diff against the
   merged version when it lands.
 
-## v10 data-only native-shape launch candidate (2026-08-22)
+## v10 data-only native-shape launch (2026-08-22)
 
 `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml` starts a fresh lineage over
 the five finalized shared T2VA sources. It has no simulated/carry rollout:
@@ -234,6 +234,22 @@ requests at 345 frames, the largest released `17*n+5` geometry within H3's
 15-second inference ceiling. Shorter record lengths are unchanged, and the
 full 362-frame reference remains intact for side-by-side logging.
 
+### Live launch receipt
+
+Production job `2960` started at 2026-08-22 17:08:12 UTC on
+`hpc-rack-3-[2-9]`: eight Slinky trays, 32 GB200 GPUs, SP=1, and HSDP=(1,32).
+It runs exact source SHA `9142b0249799d23c5959c85783346b2733f361b3` from the
+dedicated `FastVideo-v10` execution clone. W&B run `48kti012` is online under
+project `wlsaidhi/h3-dmd2-vsa`.
+
+The launch repeated the Triton-backward, sm_100a, real odd-tile-route, and
+grouped-FSDP gates before loading weights. Step-zero validation generated all
+64 held-out records across the five sources; every output was readable with
+the requested spatial shape, 24 fps, and audio. Four finite critic updates
+were followed by the first finite student update at step 5
+(`generator_loss=0.0399398`, `grad_norm/student=0.125461`). This is a fresh
+lineage: the output namespace contained no checkpoint to resume.
+
 The non-submitting preflight is:
 
 ```bash
@@ -245,8 +261,14 @@ data finalizer in `--verify-only` mode (including READY/manifests, parquet
 schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
 videos, requires a fresh output namespace, and prints but does not execute the
 eight-tray `sbatch` command. Rack-3 is the default Slinky demand because v8's
-retired allocation freed that lane; no speculative warm-up allocations are
-needed. `PARTITION=hpc-rack-2` remains an explicit operator override.
+retired allocation freed that lane. A cold Slinky topology can reject a direct
+eight-node request even when the backing Kubernetes pool has capacity. Follow
+`/home/vlm-wlsaidhi/ddnet-rl/SLURM_LAUNCH.md`: start enough one-node primer
+jobs to materialize the target topology, wait until eight are running, cancel
+only those exact primer IDs, and immediately race the real eight-node submit.
+Job 2960 was accepted on the second production submit after primers 2938 and
+2944 warmed rack-3. `PARTITION=hpc-rack-2` remains an explicit operator
+override.
 The sbatch keeps `HOME` untouched on Slinky workers: `LUSTRE_HOME` seeds
 dedicated HF/W&B/NETRC paths, while compiler caches use a job-scoped node-local
 root under `/tmp`.
