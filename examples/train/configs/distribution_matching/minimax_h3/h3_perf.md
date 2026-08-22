@@ -393,7 +393,7 @@ FastVideo Ref2VA proxy use five points and make exactly **four DiT forwards**. T
 logs finish at `49/49`; FastVideo activation traces record transformer step indices
 `[0,1,2,3]` for every request.
 
-### T2VA: vllm-omni base H3 versus FastH3 F4 all-features
+### T2VA: vllm-omni base H3, FastVideo base d4, and FastH3 F4
 
 All T2VA rows use synth64 prompt 0 (SHA256 `04116fe2...`), seed 1000, 768x1344, guidance 1.0,
 and the same released checkpoints named in section 6. vllm-omni uses dense CuTe FA4 and its
@@ -436,6 +436,38 @@ the Triton-64 oracle comparison (maximum absolute difference 0.007812).
 Timing definitions differ only at the serving boundary: vllm-omni e2e is HTTP client wall time
 for `/v1/videos/sync`, while FastVideo e2e surrounds `VideoGenerator.generate` including save;
 denoise is `MiniMaxH3Pipeline.diffuse` versus `FASTVIDEO_STAGE_LOGGING`'s `denoising_stage`.
+
+#### FastVideo official-base d4 completion at 10s and 15s
+
+Jobs 2963 and 2964 complete the official-base duration grid on the exact clean
+`99cd355a2452ce040591fe54ef340d192e26fe48` serving tree. These are base MiniMax-H3 rows, not
+FastH3: every request used the same section-7 prompt/seed/geometry contract and a 50-point sigma
+grid with exactly **49 observed DiT forwards**. Values are medians of three saved requests after
+one excluded shape-specific warmup; parentheses are the timed-request range. The three-copy
+FastVideo prompt JSON has SHA256 `b1f21b1832f38af42fb631a243da8803c00cf48baa4aa42ce3cc448fb9008b0b`.
+
+| target / frames | FastVideo d4 1x e2e, s | FastVideo d4 1x denoise, s | vllm-omni 1x e2e, s | vllm-omni 1x denoise, s | FastVideo d4 SP-4 e2e, s | FastVideo d4 SP-4 denoise, s | vllm-omni SP-4 e2e, s | vllm-omni SP-4 denoise, s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10s / 243f | **377.372 (377.217-378.109)** | **366.493 (366.340-366.508)** | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | **108.714 (108.418-108.811)** | **103.379 (103.275-103.501)** | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) |
+| 15s / 345f | **678.690 (678.338-679.394)** | **659.523 (659.493-659.570)** | **N/A** | **N/A** | **193.068 (192.838-193.429)** | **186.429 (186.262-186.472)** | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) |
+
+The 1x and SP-4 results stay in separate columns because SP-4 uses four-rank temporal-parallel
+VAE decode while the same flag is a one-rank no-op at 1x. The shared d4 profile is a replicated
+DiT with packed-varlen FA4, regional `torch.compile(fullgraph=True)` on all 52 DiT submodules, a
+compiled VAE decoder, and H3 fusions off. It remains **report-only/non-parity** because regional
+compile and packed FA4 change floating-point reduction order.
+
+| target / frames | 1x job | 1x peak MiB | 1x repeat MP4 SHA256 | SP-4 job | SP-4 peak MiB | SP-4 repeat MP4 SHA256 |
+|---:|---:|---:|---|---:|---:|---|
+| 10s / 243f | 2964_0 | 74767 | `24a57c8181d6...` | 2963_0 | 75736 | `cc38c1e9c1fa...` |
+| 15s / 345f | 2964_1 | 77771 | `b4665badd9a7...` | 2963_1 | 75770 | `79ad65b9050b...` |
+
+All twelve timed MP4s decode as H.264 1344x768 at 24 fps with the exact 243/345 frame count and
+stereo 32-kHz AAC. The three fixed-seed files in each cell are byte-identical; that proves repeat
+determinism, not cross-route parity. Against the matched vllm-omni cells, FastVideo is 2.98% e2e /
+1.41% denoise faster at 10s 1x, 2.74% / 1.01% faster at 10s SP-4, and 3.61% / 1.91% faster at
+15s SP-4. vllm-omni 15s 1x remains unsupported after the preserved runtime failures above, so the
+valid 678.690/659.523-second FastVideo result is one-sided and makes no match or speedup claim.
 
 ### T2VA comparison videos: vllm-omni base versus FastH3 F3 strict
 
@@ -509,6 +541,13 @@ supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUD
 - T2VA: `vsa_gate/h3_duration_grid_20260822/t2va/{RESULTS_T2VA.md,RESULTS_T2VA.json}` (SHA256
   `ab29b5c4...` / `d828f7d6...`). The machine receipt hashes every raw result, log, primary MP4,
   and validated media contract. Primary jobs: 2657, 2707, 2885, 2890, 2903, 2908, 2961, 2962.
+- FastVideo official-base duration completion: SP-4 job 2963 is under
+  `t2va/fastvideo_base_duration_99cd_20260822/` (`RESULTS.md` SHA256 `3f9a82ae...`; 243f/345f
+  receipt SHA256 `a63716bc...` / `33f4076c...`). The 1x job-2964 ledger is under
+  `h3_duration_grid_20260822/fastvideo_base_1x_10s_15s/` (`RESULTS_FASTVIDEO_BASE_1X.md` /
+  `.json` SHA256 `1709d222...` / `fd089d84...`; 243f/345f receipt SHA256 `d5ad5b78...` /
+  `822f350d...`). Both workspaces retain the launchers, terminal logs, raw timing JSON,
+  schedule contracts, warmups, and all timed MP4s.
 - T2VA comparisons: `vsa_gate/h3_duration_grid_20260822/comparisons_vllm_vs_f3/`; each
   `.receipt.json` names and hashes both inputs and the output. The sibling `README.md` records
   the final 15s/1x N/A state.
@@ -692,10 +731,11 @@ Baselines: stack defaults (leg a) 186.6 / 66.0; pre-stack 185.2-188.2 / 62.8-63.
    the strict visual-comparison/serving profile; F4 is the all-features speed ceiling and remains
    report-only/non-parity. At 15s, use the corrected odd-tile sm100a-64 route for F4 rather than
    silently inheriting the older Triton-64 fallback.
-2. Base H3 at 5s: packed d4 matches vllm-omni at both exact 49-forward shapes (132.468 s 1x,
-   40.587 s SP-4), but it is a report-only route. Keep fixed FA4 for parity-sensitive work until
-   the deterministic cross-route drift receives an explicit quality-acceptance decision. The
-   duration refresh does not claim a FastVideo-base match at 10s or 15s.
+2. Base H3 packed d4 matches or slightly beats every supported matched vllm-omni cell: 5s and
+   10s at both 1x and SP-4, plus 15s at SP-4, all on the exact 49-forward contract. The valid
+   FastVideo 15s 1x result is one-sided because the vllm-omni comparator is N/A. d4 remains a
+   report-only route; keep fixed FA4 for parity-sensitive work until the deterministic
+   cross-route drift receives an explicit quality-acceptance decision.
 3. Genuine FastH3 Preview Ref2VA is N/A because the export has no distilled `transformer_ref`.
    Never label the four-forward FastVideo base-weight latency proxy as FastH3 or quality-valid.
 4. Ref2VA/long-sequence (>=100k): never Triton-256; select a supported CuTe-256 or sm100a-64
