@@ -152,15 +152,16 @@ if (( failures > 0 )); then
   exit 1
 fi
 
+execution_commit="$(git -C "${REPO}" rev-parse HEAD)"
 printf -v payload \
-  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=32 FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
-  "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" \
+  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=32 FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
+  "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" "${execution_commit}" \
   "${KERNEL_PREFIX}" "${FA4_OVERLAY}" "${FA4_CUTLASS_PACKAGES}" "${V10_PYTHONPATH}" \
   /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 
 printf 'READY: review, then submit exactly:\n'
-printf 'sbatch --export=NIL --nodes=8 --ntasks-per-node=1 --gpus-per-node=4 --exclusive '
+printf 'sbatch --export=NIL --chdir=%q --nodes=8 --ntasks-per-node=1 --gpus-per-node=4 --exclusive ' "${REPO}"
 printf '%q ' -p "${PARTITION}" -t 120:00:00 --requeue -J h3-dmd2-v10 \
   -o "${LOG_DIR}/slurm-%x-%j.out" --wrap="${payload}"
 printf '\n'

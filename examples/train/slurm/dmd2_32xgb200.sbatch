@@ -48,6 +48,17 @@ echo "Topology:     sp=${SP_SIZE} hsdp=(replicate=${HSDP_REPLICATE}, shard=${HSD
 echo "Rendezvous:   ${MASTER_ADDR}:${MASTER_PORT}"
 echo "Config:       ${CONFIG}"
 
+# A preflighted v10 launch pins the execution checkout in its wrapper. This
+# catches a mutable shared checkout before any model or data state is loaded.
+if [ -n "${EXPECTED_V10_COMMIT:-}" ]; then
+  observed_commit="$(git -C "${REPO}" rev-parse HEAD)"
+  if [ "${observed_commit}" != "${EXPECTED_V10_COMMIT}" ]; then
+    echo "V10 SOURCE GATE FAILED: execution HEAD ${observed_commit} != ${EXPECTED_V10_COMMIT}" >&2
+    exit 1
+  fi
+  echo "Execution:    ${observed_commit} (pinned)"
+fi
+
 # ── per-rank environment (srun propagates exported vars) ─────────────────
 # CLUSTER: if compute nodes lack the login /home (k8s worker pods), submit
 # with LUSTRE_HOME=<shared writable dir> — triton's JIT cache (touched at
