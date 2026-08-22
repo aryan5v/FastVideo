@@ -12,6 +12,7 @@ import contextlib
 import gc
 import json
 import os
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ class _ValidationStepResult:
     overlay_videos: list[list[np.ndarray]] = field(default_factory=list)
     overlay_captions: list[str] = field(default_factory=list)
     ref_videos: list[str | None] = field(default_factory=list)
+    metadata: list[dict[str, Any]] = field(default_factory=list)
     actions: list[dict[str, Any] | None] = field(default_factory=list)
     mouse_pitch_signs: list[int | None] = field(default_factory=list)
 
@@ -136,6 +138,7 @@ class ValidationCallback(Callback):
         sampling_steps: list[int] | None = None,
         guidance_scale: float | None = None,
         num_frames: int | None = None,
+        use_record_dimensions: bool = False,
         num_videos_per_prompt: int = 1,
         use_validation_media_conditioning: bool = True,
         output_dir: str | None = None,
@@ -160,6 +163,7 @@ class ValidationCallback(Callback):
         self.sampling_steps = ([int(s) for s in sampling_steps] if sampling_steps else [40])
         self.guidance_scale = (float(guidance_scale) if guidance_scale is not None else None)
         self.num_frames = (int(num_frames) if num_frames is not None else None)
+        self.use_record_dimensions = self._coerce_bool(use_record_dimensions)
         self.num_videos_per_prompt = int(num_videos_per_prompt)
         if self.num_videos_per_prompt <= 0:
             raise ValueError("callbacks.validation.num_videos_per_prompt must be positive")
@@ -695,6 +699,10 @@ class ValidationCallback(Callback):
                     result.ref_videos,
                     local_videos.indices,
                 )
+                local_metadata = self._select_by_indices(
+                    result.metadata,
+                    local_videos.indices,
+                )
                 local_actions = self._select_by_indices(
                     result.actions,
                     local_videos.indices,
@@ -720,6 +728,8 @@ class ValidationCallback(Callback):
                     all_overlay_video_filenames = list(local_overlay_video_filenames)
                     all_captions = list(local_captions)
                     all_overlay_captions = list(local_overlay_captions)
+                    all_ref_videos = list(local_ref_videos)
+                    all_metadata = list(local_metadata)
                     all_audio_video_count = local_videos.audio_video_count
                     all_metric_stats = local_metric_stats
                     for sp_idx in range(1, num_sp_groups):
@@ -730,12 +740,16 @@ class ValidationCallback(Callback):
                         recv_c = (self.world_group.recv_object(src=src))
                         recv_ov = (self.world_group.recv_object(src=src))
                         recv_oc = (self.world_group.recv_object(src=src))
+                        recv_ref = (self.world_group.recv_object(src=src))
+                        recv_metadata = (self.world_group.recv_object(src=src))
                         recv_m = (self.world_group.recv_object(src=src))
                         recv_audio_video_count = (self.world_group.recv_object(src=src))
                         all_video_filenames.extend(recv_v)
                         all_overlay_video_filenames.extend(recv_ov)
                         all_captions.extend(recv_c)
                         all_overlay_captions.extend(recv_oc)
+                        all_ref_videos.extend(recv_ref)
+                        all_metadata.extend(recv_metadata)
                         all_audio_video_count += int(recv_audio_video_count)
                         self._merge_metric_stats(
                             all_metric_stats,
@@ -746,14 +760,38 @@ class ValidationCallback(Callback):
                         all_metric_stats,
                         step=step,
                     )
+                    display_captions = [
+                        self._validation_artifact_caption(caption, metadata)
+                        for caption, metadata in zip(all_captions, all_metadata, strict=True)
+                    ]
+                    reference_filenames: list[str] = []
+                    reference_captions: list[str] = []
+                    for caption, ref_video, metadata in zip(
+                            all_captions,
+                            all_ref_videos,
+                            all_metadata,
+                            strict=True,
+                    ):
+                        if ref_video is None or not os.path.isfile(ref_video):
+                            continue
+                        reference_filenames.append(ref_video)
+                        reference_captions.append(
+                            self._validation_artifact_caption(
+                                caption,
+                                metadata,
+                                prefix="held-out reference",
+                            ))
                     # Media and completion counts share one tracker event so
                     # artifacts and verification data remain aligned.
                     self._log_validation_video_artifacts(
                         all_video_filenames,
-                        all_captions,
+                        display_captions,
                         key=f"validation_videos_{num_inference_steps}_steps",
                         step=step,
                         fps=sp.fps,
+                        reference_video_filenames=reference_filenames,
+                        reference_captions=reference_captions,
+                        reference_key=f"validation_references_{num_inference_steps}_steps",
                         scalar_metrics={
                             f"validation/{num_inference_steps}_steps_video_count":
                             float(len(all_video_filenames)),
@@ -761,6 +799,12 @@ class ValidationCallback(Callback):
                             (time.perf_counter() - validation_started_at),
                             f"validation/{num_inference_steps}_steps_audio_video_count":
                             float(all_audio_video_count),
+                            f"validation/{num_inference_steps}_steps_reference_video_count":
+                            float(len(reference_filenames)),
+                            **self._validation_metadata_scalar_metrics(
+                                all_metadata,
+                                num_inference_steps=num_inference_steps,
+                            ),
                         },
                     )
                     if all_overlay_video_filenames:
@@ -787,6 +831,14 @@ class ValidationCallback(Callback):
                     )
                     self.world_group.send_object(
                         local_overlay_captions,
+                        dst=0,
+                    )
+                    self.world_group.send_object(
+                        local_ref_videos,
+                        dst=0,
+                    )
+                    self.world_group.send_object(
+                        local_metadata,
                         dst=0,
                     )
                     self.world_group.send_object(
@@ -883,6 +935,9 @@ class ValidationCallback(Callback):
         step: int,
         fps: int,
         scalar_metrics: dict[str, float] | None = None,
+        reference_video_filenames: list[str] | None = None,
+        reference_captions: list[str] | None = None,
+        reference_key: str | None = None,
     ) -> None:
         """Log validation media and its scalar verification data at one step."""
         video_logs = []
@@ -898,14 +953,84 @@ class ValidationCallback(Callback):
             )
             if art is not None:
                 video_logs.append(art)
+        artifacts: dict[str, Any] = {}
         if video_logs:
-            artifacts: dict[str, Any] = {key: video_logs}
-            if scalar_metrics:
-                artifacts.update(scalar_metrics)
+            artifacts[key] = video_logs
+        if ((reference_video_filenames is None) != (reference_captions is None)
+                or (reference_video_filenames is not None) != (reference_key is not None)):
+            raise ValueError("Validation reference filenames, captions, and key must be provided together.")
+        if reference_video_filenames is not None:
+            reference_logs = []
+            for fname, cap in zip(
+                    reference_video_filenames,
+                    reference_captions or [],
+                    strict=True,
+            ):
+                art = self.tracker.video(
+                    fname,
+                    caption=cap,
+                    fps=fps,
+                )
+                if art is not None:
+                    reference_logs.append(art)
+            if reference_logs:
+                assert reference_key is not None
+                artifacts[reference_key] = reference_logs
+        if scalar_metrics:
+            artifacts.update(scalar_metrics)
+        if artifacts:
             self.tracker.log_artifacts(
                 artifacts,
                 step,
             )
+
+    @staticmethod
+    def _validation_artifact_caption(
+        caption: str,
+        metadata: dict[str, Any],
+        *,
+        prefix: str = "generated",
+    ) -> str:
+        fields = [prefix]
+        source = metadata.get("source")
+        sample_id = metadata.get("sample_id")
+        if source:
+            fields.append(f"source={source}")
+        if sample_id:
+            fields.append(f"id={sample_id}")
+        width = metadata.get("width")
+        height = metadata.get("height")
+        num_frames = metadata.get("num_frames")
+        if width and height and num_frames:
+            fields.append(f"shape={width}x{height}x{num_frames}f")
+        return f"[{' | '.join(fields)}] {caption}"
+
+    @staticmethod
+    def _validation_metric_segment(value: Any) -> str:
+        segment = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+        return segment.strip("_") or "unknown"
+
+    @classmethod
+    def _validation_metadata_scalar_metrics(
+        cls,
+        metadata: list[dict[str, Any]],
+        *,
+        num_inference_steps: int,
+    ) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        prefix = f"validation/{num_inference_steps}_steps"
+        for record in metadata:
+            source = cls._validation_metric_segment(record.get("source", "unknown"))
+            source_key = f"{prefix}/source/{source}_count"
+            metrics[source_key] = metrics.get(source_key, 0.0) + 1.0
+            width = record.get("width")
+            height = record.get("height")
+            num_frames = record.get("num_frames")
+            if width and height and num_frames:
+                shape = f"{int(width)}x{int(height)}x{int(num_frames)}f"
+                shape_key = f"{prefix}/shape/{shape}_count"
+                metrics[shape_key] = metrics.get(shape_key, 0.0) + 1.0
+        return metrics
 
     # ----------------------------------------------------------
     # Metric evaluation
@@ -1437,8 +1562,9 @@ class ValidationCallback(Callback):
         tc = self.training_config
 
         sampling_param.prompt = validation_batch["prompt"]
-        sampling_param.height = tc.data.num_height
-        sampling_param.width = tc.data.num_width
+        height, width, num_frames = self._validation_sampling_dimensions(validation_batch)
+        sampling_param.height = height
+        sampling_param.width = width
         sampling_param.num_inference_steps = int(num_inference_steps)
         sampling_param.data_type = "video"
         if self.guidance_scale is not None:
@@ -1457,14 +1583,7 @@ class ValidationCallback(Callback):
             if img_path is not None and (img_path.startswith("http") or os.path.isfile(img_path)):
                 sampling_param.image_path = img_path
 
-        temporal_compression_factor = int(
-            tc.pipeline_config.vae_config.arch_config.temporal_compression_ratio  # type: ignore[union-attr]
-        )
-        default_num_frames = ((tc.data.num_latent_t - 1) * temporal_compression_factor + 1)
-        if self.num_frames is not None:
-            sampling_param.num_frames = int(self.num_frames)
-        else:
-            sampling_param.num_frames = int(default_num_frames)
+        sampling_param.num_frames = num_frames
 
         latents_size = [
             (sampling_param.num_frames - 1) // 4 + 1,
@@ -1514,6 +1633,46 @@ class ValidationCallback(Callback):
         )
 
         return batch
+
+    def _validation_sampling_dimensions(
+        self,
+        validation_batch: dict[str, Any],
+    ) -> tuple[int, int, int]:
+        """Resolve output geometry, optionally from one validation record.
+
+        Native-shape validation is explicit because cached ``SamplingParam``
+        instances are shared across records. A complete record triplet wins;
+        partial metadata fails instead of combining dimensions from unrelated
+        shapes. With the option off (the default), legacy callback/config
+        behavior is unchanged.
+        """
+        tc = self.training_config
+        temporal_compression_factor = int(
+            tc.pipeline_config.vae_config.arch_config.temporal_compression_ratio  # type: ignore[union-attr]
+        )
+        default_num_frames = ((tc.data.num_latent_t - 1) * temporal_compression_factor + 1)
+        dimensions = {
+            "height": int(tc.data.num_height),
+            "width": int(tc.data.num_width),
+            "num_frames": (int(self.num_frames) if self.num_frames is not None else int(default_num_frames)),
+        }
+
+        if self.use_record_dimensions:
+            present = {name: validation_batch.get(name) is not None for name in dimensions}
+            if any(present.values()) and not all(present.values()):
+                missing = [name for name, is_present in present.items() if not is_present]
+                raise ValueError("Native-shape validation records must provide width, height, and num_frames together; "
+                                 f"missing {missing} for prompt {validation_batch.get('prompt')!r}.")
+            if all(present.values()):
+                dimensions = {name: int(validation_batch[name]) for name in dimensions}
+
+        for name, value in dimensions.items():
+            if value <= 0:
+                raise ValueError(f"Validation {name} must be positive, got {value}")
+        if dimensions["height"] % 8 or dimensions["width"] % 8:
+            raise ValueError("Validation width and height must be divisible by 8, got "
+                             f"{dimensions['width']}x{dimensions['height']}")
+        return dimensions["height"], dimensions["width"], dimensions["num_frames"]
 
     def _attach_action_conditions(
         self,
@@ -1602,6 +1761,7 @@ class ValidationCallback(Callback):
         captions: list[str] = []
         overlay_captions: list[str] = []
         ref_videos: list[str | None] = []
+        metadata: list[dict[str, Any]] = []
         actions: list[dict[str, Any] | None] = []
         mouse_pitch_signs: list[int | None] = []
 
@@ -1613,7 +1773,11 @@ class ValidationCallback(Callback):
             )
 
             assert (batch.prompt is not None and isinstance(batch.prompt, str))
-            ref_video = validation_batch.get("ref_video")
+            # Text-only validation may still carry the held-out raw video for
+            # side-by-side logging. ``ref_video`` avoids decoding it during
+            # dataset iteration; ``video_path`` remains a backward-compatible
+            # fallback for existing manifests.
+            ref_video = (validation_batch.get("ref_video") or validation_batch.get("video_path"))
             action = self._validation_actions(validation_batch)
 
             with torch.no_grad():
@@ -1658,6 +1822,13 @@ class ValidationCallback(Callback):
             audio_waveforms.append(output_audio)
             audio_sample_rates.append(int(output_audio_sample_rate) if output_audio_sample_rate is not None else None)
             ref_videos.append(ref_video if isinstance(ref_video, str) else None)
+            metadata.append({
+                "source": validation_batch.get("source", "unknown"),
+                "sample_id": validation_batch.get("sample_id", validation_batch.get("id")),
+                "width": int(batch.width),
+                "height": int(batch.height),
+                "num_frames": int(batch.num_frames),
+            })
             actions.append(action)
             mouse_pitch_signs.append(self._validation_mouse_pitch_sign(validation_batch))
             if self.overlay_actions:
@@ -1677,6 +1848,7 @@ class ValidationCallback(Callback):
             overlay_videos=overlay_videos,
             overlay_captions=overlay_captions,
             ref_videos=ref_videos,
+            metadata=metadata,
             actions=actions,
             mouse_pitch_signs=mouse_pitch_signs,
         )

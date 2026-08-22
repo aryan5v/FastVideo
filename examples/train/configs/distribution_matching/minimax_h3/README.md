@@ -3,9 +3,10 @@
 Agent handoff: [`HANDOFF-h3-dmd2-vsa.md`](../../../../../HANDOFF-h3-dmd2-vsa.md).
 
 Few-step DMD2 distillation of the joint video/audio MiniMax-H3 transformer:
-a carried backward-simulation walk over the 4-step grid, optionally mixed
-per batch with data-forced training on real t2va latents (v9). The current
-recipe, comparison scope, open issues, and launch preflight are tracked in
+the v10 launch candidate is data-only over native-shape T2VA latents; earlier
+recipes use a carried backward-simulation walk over the 4-step grid, optionally
+mixed per batch with data-forced training (v9). The recipe history, comparison
+scope, open issues, and launch preflight are tracked in
 [`h3_dmd.md`](h3_dmd.md).
 
 SFT configs live in
@@ -17,7 +18,8 @@ Slurm launcher is
 
 | File | Purpose |
 |---|---|
-| `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` | **Current.** v8 + per-batch data forcing over mixed prompt/latent data (NuVA t2va + text-only roots), batch 128 (accum 4), regional compile pending its gate. |
+| `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml` | **Launch candidate.** Data-only FastGen regime over five native-shape T2VA sources, global batch 64 on 32 GPUs, eager-at-launch pending mixed-shape compile gates. |
+| `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` | Previous v8 + per-batch data-forcing experiment over mixed prompt/latent data, batch 128 (accum 4). |
 | `dmd2_sp1_fsdp40_vidprom_v8_bwdsim_vsa64.yaml` | Carry-only FastGen-parity recipe (data-free backward simulation, VSA-64 student). |
 | `dmd2_sp1_fsdp40_vidprom_v7_vsa90.yaml` | Pre-parity 256-tile VSA recipe. |
 | `dmd2_sp1_fsdp40_vidprom_v6.yaml` | Dense-student recipe: SP=1/full-shard, text-only simulate rollout, exclusive 4:1 cadence, FP32 compute boundaries. |

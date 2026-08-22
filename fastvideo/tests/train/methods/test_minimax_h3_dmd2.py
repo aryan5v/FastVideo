@@ -26,6 +26,8 @@ from fastvideo.train.utils.config import load_run_config
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd2_min.yaml"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml")
+_V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml")
+_V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"
 
 # Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
 # [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
@@ -736,6 +738,72 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     # The compile A/B (vsa_gate/compile_ab/VERDICT.md) validated the flip
     # with NO torch_compile_kwargs — the config must not add any.
     assert "torch_compile_kwargs" not in training["model"]
+
+
+def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
+    """V10 is a fresh 32-GPU, global-batch-64, all-real-latent lineage."""
+    config = yaml.safe_load(_V10_EXPERIMENT_CONFIG.read_text())
+    method = config["method"]
+    training = config["training"]
+    distributed = training["distributed"]
+    data = training["data"]
+
+    assert method["rollout_mode"] == "data_latent"
+    for carry_key in (
+            "rollout_carry",
+            "rollout_carry_slots",
+            "rollout_sample_type",
+            "rollout_data_forcing",
+    ):
+        assert carry_key not in method
+    assert method["dmd_denoising_steps"] == [999, 749, 500, 250]
+    assert method["fake_score_learning_rate"] == 2.0e-6
+    assert training["optimizer"]["learning_rate"] == 2.0e-6
+
+    assert distributed == {
+        "num_gpus": 32,
+        "sp_size": 1,
+        "tp_size": 1,
+        "hsdp_replicate_dim": 1,
+        "hsdp_shard_dim": 32,
+    }
+    global_batch = (distributed["num_gpus"] // distributed["sp_size"] * data["train_batch_size"] *
+                    training["loop"]["gradient_accumulation_steps"])
+    assert global_batch == 64
+    assert data["preprocessed_data_type"] == "t2va"
+    assert data["native_shape_bucketing"] is True
+    assert len(data["data_path"]) == 5
+    assert all(path.startswith("/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/")
+               and path.endswith("/data") for path in data["data_path"])
+
+    assert training["checkpoint"]["output_dir"].endswith("v10_dataonly_mixed_vsa64")
+    assert training["tracker"]["run_name"] == "dmd2_sp1_v10_dataonly_mixed_vsa64"
+    assert training["model"]["enable_torch_compile"] is False
+    assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
+    assert config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
+    for role in ("teacher", "critic"):
+        assert config["models"][role]["attention_backend"] == "FLASH_ATTN"
+
+    validation = config["callbacks"]["validation"]
+    assert validation["dataset_file"].endswith("/validation/heldout64.json")
+    assert validation["use_record_dimensions"] is True
+    assert validation["use_validation_media_conditioning"] is False
+
+
+def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() -> None:
+    """The non-submitting helper gates the dedicated clone and immutable dataset."""
+    launcher = _V10_PREPARE_LAUNCHER.read_text()
+
+    assert "/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10" in launcher
+    assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
+    assert 'require_file "${source_root}/READY.json"' in launcher
+    assert 'require_file "${source_root}/MANIFEST.json"' in launcher
+    assert 'require_file "${source_root}/MANIFEST_rows.jsonl"' in launcher
+    assert 'require_file "${source_root}/data/map_style_cache/file_info.pkl"' in launcher
+    assert "finalize_dataset.py" in launcher
+    assert "--verify-only" in launcher
+    assert "H3_V10_KERNEL_GATE=1" in launcher
+    assert "This helper never calls sbatch" in launcher
 
 
 def test_validation_dmd_sigmas_match_training_noise_amounts() -> None:
