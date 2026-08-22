@@ -1,14 +1,16 @@
 # MiniMax-H3 / FastH3 performance numbers (measured, GB200)
 
-This is a dated results ledger. Sections 1-4 and historical section 7 preserve the measurements
-through 2026-08-21 at their row-local SHAs; section 5 is the job-2666 merged-preview baseline, and
-section 6 is the current 2026-08-22 matched-serving refresh. Unless a row says otherwise, the
+This is a dated results ledger. Sections 1-4 and historical section 8 preserve the measurements
+through 2026-08-21 at their row-local SHAs; section 5 is the job-2666 merged-preview baseline,
+section 6 is the current 5-second matched-serving refresh, and section 7 is the matched 5/10/15-
+second T2VA and Ref2VA duration grid. Unless a row says otherwise, the
 FastVideo runs use the lustre venv (torch 2.12.0+cu130), driver 580.82.07, synth64 prompt 0, seed
 1000, warmup excluded, and 2-3 timed repeats. "FastH3" = the 4-forward DMD2 student (v8 data-free
-step-1400 preview export) with VSA @0.9; it does not mean the live v9 training run. Raw artifacts:
+step-1400 preview export) with VSA @0.9; it does not mean the live v10 training run. Raw artifacts:
 `/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/`
-`{sm100a_e2e,sp8,ref2va_grid,vsa64bench,preview_merged_20260822,h3_vllm_match_20260822,`
-`h3_vllm_match_varlen_99cd_20260822}` and `vllm_omni_bench/`; master index
+`{sm100a_e2e,sp8,ref2va_grid,ref2va_duration_grid_20260822,vsa64bench,`
+`preview_merged_20260822,h3_vllm_match_20260822,h3_vllm_match_varlen_99cd_20260822,`
+`h3_duration_grid_20260822}` and `vllm_omni_bench/`; master index
 `~/h3-results-index.md`.
 
 ## 1. T2VA @ 5s (768x1344, 124 frames, S=38,224)
@@ -55,7 +57,9 @@ vllm-omni @73b623f2, isolated venv `vllm_omni_bench/venv`; jobs 2562/2563.)
 
 ## 2. Ref2VA @ 15s (345 frames, 768x1344 ref + target, S=220,628)
 
-Base `transformer_ref` weights; full grid in `vsa_gate/ref2va_grid/ROOFLINE.md`.
+Historical roofline/prototype study using base `transformer_ref` weights; full grid in
+`vsa_gate/ref2va_grid/ROOFLINE.md`. Section 7 is the current matched duration grid and identity
+contract.
 
 | leg (SP-4 unless noted) | fwds | DiT s/fwd | e2e |
 |---|---:|---:|---:|
@@ -375,9 +379,152 @@ speed ceiling at 6.910 s but changes model numerics and must remain report-only.
 - Corrected current FastH3 f3/f4 pairing: current workspace
   `logs/fast_current_parity_2780.out` and per-leg `parity_current_vs_eager.json` files.
 
-## 7. Historical pre-merge stacked-PR integration
+## 7. Matched duration grids: T2VA and Ref2VA (2026-08-22)
 
-Historical only; sections 5-6 supersede this branch as the current preview serving result. The
+This refresh extends the same prompt/seed/geometry contract to valid H3 frame counts 124, 243,
+and 345: nominal 5/10/15-second buckets with exact encoded durations 5.167/10.125/14.375 seconds
+at 24 fps. Every successful row is the median of three timed requests after a shape-specific
+warmup; ranges are the minimum and maximum timed requests. Server boot, model load, and warmup
+compile are excluded.
+
+`num_inference_steps` means scheduler points in both implementations, not model calls. Base H3
+uses 50 points and makes exactly **49 DiT forwards**; FastH3/F4 and the explicitly labeled
+FastVideo Ref2VA proxy use five points and make exactly **four DiT forwards**. Timed vllm-omni
+logs finish at `49/49`; FastVideo activation traces record transformer step indices
+`[0,1,2,3]` for every request.
+
+### T2VA: vllm-omni base H3 versus FastH3 F4 all-features
+
+All T2VA rows use synth64 prompt 0 (SHA256 `04116fe2...`), seed 1000, 768x1344, guidance 1.0,
+and the same released checkpoints named in section 6. vllm-omni uses dense CuTe FA4 and its
+regional DiT compile path. FastH3 F4 uses eager sparse DiT, VSA@0.9 tile-64, compiled video
+decoder, temporal-parallel VAE at SP-4, and H3 fusions. F4 is the all-compatible-features speed
+ceiling and remains **report-only/non-parity**; its sparse DiT is not compiled.
+
+| system / profile | GPUs | target / frames | points / fwds | attention route | e2e median (range), s | denoise median (range), s | peak MiB | job |
+|---|---|---:|---:|---|---:|---:|---:|---|
+| vllm-omni base | 1x | 5s / 124 | 50 / 49 | dense CuTe FA4 | 136.003 (135.944-136.160) | 127.744 (127.689-127.868) | 131698 | 2657 |
+| FastH3 F4 | 1x | 5s / 124 | 5 / 4 | VSA64 sm100a CUDA | 16.694 (16.053-16.716) | 8.664 (8.608-8.785) | 78424 | 2707_2 |
+| vllm-omni base | SP-4 | 5s / 124 | 50 / 49 | dense CuTe FA4 | 40.804 (40.615-40.825) | 37.222 (37.220-37.224) | 95564 | 2657 |
+| FastH3 F4 | SP-4 | 5s / 124 | 5 / 4 | VSA64 sm100a CUDA | 6.879 (6.763-7.088) | 2.923 (2.917-3.039) | 79397 | 2707_3 |
+| vllm-omni base | 1x | 10s / 243 | 50 / 49 | dense CuTe FA4 | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | 139572 | 2890_0 |
+| FastH3 F4 | 1x | 10s / 243 | 5 / 4 | VSA64 sm100a CUDA | 31.116 (30.985-31.305) | 19.328 (19.198-19.340) | 86968 | 2885_0 |
+| vllm-omni base | SP-4 | 10s / 243 | 50 / 49 | dense CuTe FA4 | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) | 101036 | 2890_1 |
+| FastH3 F4 | SP-4 | 10s / 243 | 5 / 4 | VSA64 sm100a CUDA | 12.045 (10.804-15.219) | 5.786 (5.782-5.883) | 79438 | 2885_1 |
+| vllm-omni base | 1x | 15s / 345 | 50 / 49 | runtime failure | **N/A** | **N/A** | **N/A** | 2890_0, 2961, 2962 |
+| FastH3 F4 | 1x | 15s / 345 | 5 / 4 | VSA64 corrected sm100a CUDA | 47.212 (46.729-47.978) | 29.699 (29.688-29.716) | 96037 | 2908_0 |
+| vllm-omni base | SP-4 | 15s / 345 | 50 / 49 | dense CuTe FA4 | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) | 113266 | 2890_1 |
+| FastH3 F4 | SP-4 | 15s / 345 | 5 / 4 | VSA64 corrected sm100a CUDA | 15.468 (15.379-15.557) | 9.107 (9.098-9.119) | 79615 | 2908_1 |
+
+vllm-omni 345f/1x is deliberately N/A, not a one-sample timing. Job 2890_0 completed one
+intentionally unsaved warmup (703.305 s e2e, 678.364 s denoise, 19.634 s decode, 153654 MiB,
+49/49 forwards), then all three timed requests failed with `v must be finite`. Fresh-server jobs
+2961 and 2962 retained their first request but both failed with CUDA illegal-memory-access/CUBLAS
+execution errors before producing media. The warmup remains diagnostic-only and cannot supply a
+timing row or comparison video.
+
+The original job-2885 345f F4 cells ran at integration SHA `99cd355a` and correctly selected the
+Triton-64 fallback because the logical VSA grid had 1,743 tiles: 54.809
+(54.493-54.836) / 39.998 (39.960-40.051) s e2e/denoise at 1x and 18.236
+(17.880-18.517) / 11.428 (11.427-11.429) s at SP-4. They remain preserved as legacy rows; they
+are not relabeled. The primary table's corrected 345f rows use private composition
+`8f8529d9789b54e78b519e5c60737d29db0ceb72` (99cd plus source commit `7635a5295`) and extension
+SHA256 `3f960423...`: one zero-valid transport partner makes 1,744 internal tiles without changing
+the 1,743-tile logical score/mask/output geometry. GB200 gate job 2903 passed 17 tests, including
+the Triton-64 oracle comparison (maximum absolute difference 0.007812).
+
+Timing definitions differ only at the serving boundary: vllm-omni e2e is HTTP client wall time
+for `/v1/videos/sync`, while FastVideo e2e surrounds `VideoGenerator.generate` including save;
+denoise is `MiniMaxH3Pipeline.diffuse` versus `FASTVIDEO_STAGE_LOGGING`'s `denoising_stage`.
+
+### T2VA comparison videos: vllm-omni base versus FastH3 F3 strict
+
+The visual comparisons deliberately use **F3 strict**, not the F4 timing profile: VSA64,
+compiled decoder, temporal-parallel VAE at SP-4, and fusions off. Each montage is 2688x768 at
+24 fps with the exact source frame count; it copies the left vllm-omni AAC packets and omits the
+right-side audio. Full input/output hashes, stream probes, and FFmpeg commands sit beside each
+MP4 in the comparison root below.
+
+| target | 1x MP4 (SHA256 prefix) | SP-4 MP4 (SHA256 prefix) |
+|---:|---|---|
+| 5s / 124f | `t2va_5s_1x_vllm_base_vs_fasth3_f3.mp4` (`d54d7de8`) | `t2va_5s_sp4_vllm_base_vs_fasth3_f3.mp4` (`3fd6e0f4`) |
+| 10s / 243f | `t2va_10s_1x_vllm_base_vs_fasth3_f3.mp4` (`8516e8a0`) | `t2va_10s_sp4_vllm_base_vs_fasth3_f3.mp4` (`0cee1523`) |
+| 15s / 345f | **N/A: no valid vllm-omni source MP4** | `t2va_15s_sp4_vllm_base_vs_fasth3_f3.mp4` (`aec88230`) |
+
+The 345f F3 comparison predates the odd-tile composition and truthfully records its
+Triton-64 fallback. No Ref2VA F3 montage exists: the Preview export does not contain a distilled
+`transformer_ref`, so such a file would compare vllm-omni base against FastVideo base weights
+while falsely labeling the right side FastH3.
+
+### Ref2VA: genuine base grid and the FastVideo four-forward latency proxy
+
+The Ref2VA contract uses the same prompt and seed, plus the first N frames/audio of
+`vsa_gate/ref2va_grid/C/reference_15s.mp4` (SHA256 `5b74f889...`) for each target. Every saved
+output passed the exact H.264 1344x768@24-fps frame contract and carries stereo 32-kHz AAC;
+three repeats within each successful cell are byte-identical.
+
+**Identity guardrail: genuine FastH3 Preview Ref2VA is N/A.** Preview manifest
+`modular_model_index.json` (SHA256 `63a5c56b...`) has no distilled `transformer_ref` and resolves
+that component to official `MiniMaxAI/MiniMax-H3/transformer_ref`. The first table is genuine
+vllm-omni **base H3 Ref2VA**. The second table is a FastVideo **official-base transformer_ref,
+four-forward F4 latency proxy only**; it is neither FastH3 nor quality-valid.
+
+vllm-omni base uses dense CuTe FA4 plus lazy regional `torch.compile(dynamic=True)` on all 52 DiT
+blocks. SP-4 additionally uses USP-4, text-encoder TP-4, and spatial-tile VAE patch parallelism 4.
+
+| implementation | GPUs | target / frames | points / fwds | e2e median (range), s | denoise median (range), s | peak MiB | route / status |
+|---|---|---:|---:|---:|---:|---:|---|
+| vllm-omni base Ref2VA | 1x | 5s / 124 | 50 / 49 | 463.700 (463.462-463.907) | 441.801 (441.525-442.237) | 142652 | dense CuTe FA4 + regional compile |
+| vllm-omni base Ref2VA | 1x | 10s / 243 | N/A | **N/A** | **N/A** | **N/A** | fresh one-forward warmup: CUDA illegal-address |
+| vllm-omni base Ref2VA | 1x | 15s / 345 | N/A | **N/A** | **N/A** | **N/A** | fresh one-forward warmup: CUDA illegal-address |
+| vllm-omni base Ref2VA | SP-4 | 5s / 124 | 50 / 49 | 135.535 (135.448-136.668) | 126.628 (126.621-127.808) | 97686 | dense CuTe FA4 + regional compile |
+| vllm-omni base Ref2VA | SP-4 | 10s / 243 | 50 / 49 | 416.717 (415.745-417.267) | 399.994 (399.991-400.441) | 109316 | dense CuTe FA4 + regional compile |
+| vllm-omni base Ref2VA | SP-4 | 15s / 345 | 50 / 49 | 758.643 (758.533-760.182) | 735.051 (734.863-735.209) | 125762 | dense CuTe FA4 + regional compile |
+
+The 1x 243f/345f rows are N/A, not extrapolations. Fresh default-route job 2906 reproduced the
+failures. Together, jobs 2906/2910/2912 tested FA4 dynamic/static/eager, CuDNN dynamic, and SDPA
+eager at 243f; every route failed during the two-point/one-forward shape warmup while sampled
+peaks stayed below the 189471-MiB GB200 capacity. These are runtime/kernel failures, not reported
+OOMs and not valid 49-forward timing runs. Successful base rows come from job 2892.
+
+The FastVideo proxy uses eager sparse DiT, VSA@0.9, compiled VAE, H3 fusions, and parallel
+reference encode/decode at SP-4. It is report-only/non-parity.
+
+| implementation | GPUs | target / frames | points / fwds | e2e median (range), s | denoise median (range), s | peak MiB | sparse route / job |
+|---|---|---:|---:|---:|---:|---:|---|
+| FV **base-weight proxy, not FastH3** | 1x | 5s / 124 | 5 / 4 | 65.135 (64.435-65.247) | 45.414 (45.332-45.425) | 84929 | sm100a CUDA-64 / 2877 |
+| FV **base-weight proxy, not FastH3** | 1x | 10s / 243 | 5 / 4 | 164.521 (163.042-172.343) | 130.868 (130.618-130.871) | 97494 | FA4 CuTe-256 / 2894 |
+| FV **base-weight proxy, not FastH3** | 1x | 15s / 345 | 5 / 4 | 292.989 (292.382-294.289) | 246.206 (246.120-246.318) | 117289 | sm100a CUDA-64 / 2901 |
+| FV **base-weight proxy, not FastH3** | SP-4 | 5s / 124 | 5 / 4 | 21.733 (21.499-22.125) | 12.847 (12.814-12.884) | 82517 | sm100a CUDA-64 / 2877 |
+| FV **base-weight proxy, not FastH3** | SP-4 | 10s / 243 | 5 / 4 | 48.282 (48.166-48.804) | 34.886 (34.869-35.010) | 83006 | FA4 CuTe-256 / 2894 |
+| FV **base-weight proxy, not FastH3** | SP-4 | 15s / 345 | 5 / 4 | 81.666 (81.395-82.904) | 64.025 (63.997-64.149) | 89117 | FA4 CuTe-256 / 2894 |
+
+At 243f the legacy CUDA-64 even-tile predicate rejects the exact packed Ref2VA geometry, so the
+supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUDA-64 at
+292.989/246.206 s versus CuTe-256 at 293.343/249.344; SP-4 selected CuTe-256 at
+81.666/64.025 versus CUDA-64 at 83.884/66.109. Route timings are not asserted bit-identical.
+
+### Duration-grid receipts
+
+- T2VA: `vsa_gate/h3_duration_grid_20260822/t2va/{RESULTS_T2VA.md,RESULTS_T2VA.json}` (SHA256
+  `ab29b5c4...` / `d828f7d6...`). The machine receipt hashes every raw result, log, primary MP4,
+  and validated media contract. Primary jobs: 2657, 2707, 2885, 2890, 2903, 2908, 2961, 2962.
+- T2VA comparisons: `vsa_gate/h3_duration_grid_20260822/comparisons_vllm_vs_f3/`; each
+  `.receipt.json` names and hashes both inputs and the output. The sibling `README.md` records
+  the final 15s/1x N/A state.
+- Ref2VA: `vsa_gate/ref2va_duration_grid_20260822/{RESULTS.md,RESULTS.json}` (SHA256
+  `a9f7220e...` / `55509996...`). This is the sole source for the current Ref2VA duration grid;
+  it contains every raw timing, MP4/ffprobe contract, route probe, failure envelope, command, and
+  environment receipt. Primary jobs: 2877, 2892, 2894, 2901; failure/probe jobs 2906, 2910, 2912.
+- Main T2VA code SHA is `99cd355a`; only corrected FastH3 F4 345f uses private composition
+  `8f8529d9`. Ref2VA FastVideo proxy code is `99cd355a`. vllm-omni is
+  `73b623f2f7db092053c1c86fe796bed89eb3dc71` plus timing-only profiler patches. Hardware is
+  GB200 (189471 MiB/GPU), driver 580.82.07. No benchmark launcher overrides `HOME`; caches are
+  explicit and job/task scoped.
+
+## 8. Historical pre-merge stacked-PR integration
+
+Historical only; sections 5-7 supersede this branch as the current preview serving result. The
 detail remains here because it contains the node-pinned attribution and the dense 50-step job
 2653.
 
@@ -541,14 +688,19 @@ Baselines: stack defaults (leg a) 186.6 / 66.0; pre-stack 185.2-188.2 / 62.8-63.
 
 ## Route guidance (from the measurements)
 
-1. FastH3/Preview at 5s: use SP-4, VSA-64 sm100a, and exactly four forwards. f3 combines decoder
-   compile with parallel VAE, passes the corrected current-output gate, and is the strict serving
-   result at 7.318 s. f4 reaches 6.910 s with every compatible optimization but remains
-   report-only/non-parity because it enables H3 fusions.
+1. FastH3 Preview uses exactly four forwards. F3 (decoder compile + parallel VAE, fusions off) is
+   the strict visual-comparison/serving profile; F4 is the all-features speed ceiling and remains
+   report-only/non-parity. At 15s, use the corrected odd-tile sm100a-64 route for F4 rather than
+   silently inheriting the older Triton-64 fallback.
 2. Base H3 at 5s: packed d4 matches vllm-omni at both exact 49-forward shapes (132.468 s 1x,
    40.587 s SP-4), but it is a report-only route. Keep fixed FA4 for parity-sensitive work until
-   the deterministic cross-route drift receives an explicit quality-acceptance decision.
-3. Ref2VA/long-sequence (>=100k): never Triton-256; CuTe-256 or sm100a-64; adopt P2
-   ref-sparsification (keep 0.10 trained / 0.25 zero-finetune).
-4. Do not infer compile coverage from the headline alone: base d4 regionally compiles the DiT and
-   decoder; FastH3 never compiles the VSA DiT and only f1/f3/f4 compile the decoder.
+   the deterministic cross-route drift receives an explicit quality-acceptance decision. The
+   duration refresh does not claim a FastVideo-base match at 10s or 15s.
+3. Genuine FastH3 Preview Ref2VA is N/A because the export has no distilled `transformer_ref`.
+   Never label the four-forward FastVideo base-weight latency proxy as FastH3 or quality-valid.
+4. Ref2VA/long-sequence (>=100k): never Triton-256; select a supported CuTe-256 or sm100a-64
+   route by exact packed geometry. P2 ref-sparsification remains the training/quality direction
+   (keep 0.10 trained / 0.25 zero-finetune), not part of the section-7 serving grid.
+5. Do not infer compile coverage from the headline alone: base d4 and vllm-omni regionally compile
+   the DiT; FastH3 F3/F4 keep the sparse DiT eager and compile only the decoder. The Ref2VA proxy
+   likewise uses eager sparse DiT.
