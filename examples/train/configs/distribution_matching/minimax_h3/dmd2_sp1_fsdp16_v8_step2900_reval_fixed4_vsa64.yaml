@@ -1,0 +1,134 @@
+# Validation-only replay of the latest complete v8 checkpoint. This recipe
+# deliberately performs zero optimizer updates: it restores checkpoint-2900,
+# validates at resumed step 2900, and exits because max_train_steps is 2900.
+#
+# Canonical validation contract:
+#   checkpoint: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/
+#     minimax_h3_dmd2_sp1_vidprom_v8_bwdsim_vsa64/checkpoint-2900
+#   prompt manifest: h3_validation_synth64.json
+#     sha256 24c431d8f2af4a24331e2912e20d8e171235dda87c1dd2fb358aa7fd206f5c1a
+#   schedule: method.dmd_denoising_steps=[999, 749, 500, 250]
+#
+# Do not add callbacks.validation.sampling_timesteps here. Validation must
+# inherit the trained ladder from the method and emit the fail-loud log:
+#   validation: adopting the trained denoising ladder [...] (4 forwards)
+# A fresh output directory preserves the historical, pre-fix v8 media.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: FLASH_ATTN
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: FLASH_ATTN
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: simulate
+  rollout_carry: true
+  rollout_carry_slots: 2
+  rollout_sample_type: ode
+  generator_update_interval: 5
+  real_score_guidance_scale: 1.0
+  dmd_denoising_steps: [999, 749, 500, 250]
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  fake_score_loss_space: x0
+  cfg_uncond:
+    text: zero
+  fake_score_learning_rate: 1.0e-6
+  fake_score_betas: [0.9, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+
+  # The dataloader is reconstructed because it is part of the v8 DCP state,
+  # but max_train_steps prevents it from yielding a training microbatch.
+  data:
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/h3_synth10k_text_only_train
+      - /mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_text_only_248k
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 768
+    num_width: 1344
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 2900
+    gradient_accumulation_steps: 2
+
+  checkpoint:
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/h3_v8_step2900_reval_fixed4_synth64
+    resume_from_checkpoint: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_vidprom_v8_bwdsim_vsa64/checkpoint-2900
+    training_state_checkpointing_steps: 0
+    checkpointing_start_step: 0
+    checkpoints_total_limit: 0
+
+  # Launch with WANDB_MODE=disabled; the local run receipt remains beside the
+  # generated media without creating an online experiment.
+  tracker:
+    trackers: [wandb]
+    project_name: h3-v8-step2900-reval
+    run_name: fixed4-synth64
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+
+  dit_precision: fp32
+  vsa:
+    sparsity: 0.9
+    tile_size: 64
+
+callbacks:
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    dataset_file: /mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64.json
+    every_steps: 100
+    run_at_start: true
+    sampling_steps: [4]
+    guidance_scale: 1.0
+    num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/h3_v8_step2900_reval_fixed4_synth64
+    offload_training_state: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false
