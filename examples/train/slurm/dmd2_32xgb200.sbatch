@@ -65,10 +65,27 @@ if [ -n "${EXPECTED_V10_COMMIT:-}" ]; then
 fi
 
 # ── per-rank environment (srun propagates exported vars) ─────────────────
-# CLUSTER: if compute nodes lack the login /home (k8s worker pods), submit
-# with LUSTRE_HOME=<shared writable dir> — triton's JIT cache (touched at
-# fastvideo import), HF caches, and ~/.netrc all resolve through $HOME.
-export HOME="${LUSTRE_HOME:-${HOME}}"
+# CLUSTER: Slinky worker pods do not mount the login-node home. Point every
+# runtime consumer at a dedicated writable location instead of changing HOME,
+# which is process-global and can redirect unrelated libraries unexpectedly.
+if [ -n "${LUSTRE_HOME:-}" ]; then
+  FASTVIDEO_SHARED_RUNTIME_ROOT="${LUSTRE_HOME}"
+  FASTVIDEO_JOB_CACHE_ROOT="/tmp/fastvideo-${SLURM_JOB_ID}"
+  export FASTVIDEO_SHARED_RUNTIME_ROOT FASTVIDEO_JOB_CACHE_ROOT
+  export HF_HOME="${HF_HOME:-${FASTVIDEO_SHARED_RUNTIME_ROOT}/.cache/huggingface}"
+  export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${FASTVIDEO_JOB_CACHE_ROOT}/xdg-cache}"
+  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${FASTVIDEO_JOB_CACHE_ROOT}/xdg-config}"
+  export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${FASTVIDEO_JOB_CACHE_ROOT}/triton}"
+  export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${FASTVIDEO_JOB_CACHE_ROOT}/torchinductor}"
+  export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${FASTVIDEO_JOB_CACHE_ROOT}/torch-extensions}"
+  export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-${FASTVIDEO_JOB_CACHE_ROOT}/cuda}"
+  export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-${FASTVIDEO_JOB_CACHE_ROOT}/numba}"
+  export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-${FASTVIDEO_SHARED_RUNTIME_ROOT}/.config/wandb}"
+  export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${FASTVIDEO_SHARED_RUNTIME_ROOT}/.cache/wandb}"
+  export WANDB_DATA_DIR="${WANDB_DATA_DIR:-${FASTVIDEO_SHARED_RUNTIME_ROOT}/.local/share/wandb}"
+  export NETRC="${NETRC:-${FASTVIDEO_SHARED_RUNTIME_ROOT}/.netrc}"
+  mkdir -p "${WANDB_CONFIG_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_DATA_DIR}"
+fi
 export FASTVIDEO_FA4=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
@@ -77,7 +94,7 @@ export TOKENIZERS_PARALLELISM=false
 # (single-writer semantics would leave 7 of 8 trays permanently cold).
 export FASTVIDEO_WEIGHT_SHARD_CACHE=/dev/shm/fastvideo-wcache
 export FASTVIDEO_WEIGHT_SHARD_CACHE_PER_NODE=1
-# W&B: credentials come from ~/.netrc on the shared home; flip to offline if
+# W&B: online v10 uses the explicit shared NETRC above; flip to offline if
 # compute nodes have no egress.
 export WANDB_MODE="${WANDB_MODE:-online}"
 # CLUSTER: NCCL fabric tuning. These three come from the cluster onboarding

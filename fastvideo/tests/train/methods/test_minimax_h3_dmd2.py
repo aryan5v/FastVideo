@@ -829,6 +829,21 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     sbatch = _H3_SBATCH.read_text()
     assert 'git -C "${REPO}" status --porcelain' in sbatch
     assert "V10 SOURCE GATE FAILED: execution checkout is dirty" in sbatch
+    assert "export HOME=" not in sbatch
+    for runtime_variable in (
+            "HF_HOME",
+            "XDG_CACHE_HOME",
+            "TRITON_CACHE_DIR",
+            "TORCHINDUCTOR_CACHE_DIR",
+            "TORCH_EXTENSIONS_DIR",
+            "CUDA_CACHE_PATH",
+            "NUMBA_CACHE_DIR",
+            "WANDB_CONFIG_DIR",
+            "WANDB_CACHE_DIR",
+            "WANDB_DATA_DIR",
+            "NETRC",
+    ):
+        assert f"export {runtime_variable}=" in sbatch
 
 
 def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None:

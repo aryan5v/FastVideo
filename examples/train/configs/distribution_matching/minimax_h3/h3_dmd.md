@@ -247,6 +247,9 @@ videos, requires a fresh output namespace, and prints but does not execute the
 eight-tray `sbatch` command. Rack-3 is the default Slinky demand because v8's
 retired allocation freed that lane; no speculative warm-up allocations are
 needed. `PARTITION=hpc-rack-2` remains an explicit operator override.
+The sbatch keeps `HOME` untouched on Slinky workers: `LUSTRE_HOME` seeds
+dedicated HF/W&B/NETRC paths, while compiler caches use a job-scoped node-local
+root under `/tmp`.
 
 ### v10 kernel and FA4 environment
 
