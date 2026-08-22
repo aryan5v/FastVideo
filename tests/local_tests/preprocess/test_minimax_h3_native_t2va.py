@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import pickle
 from types import SimpleNamespace
@@ -45,6 +46,193 @@ def chunk(*record_ids: str) -> dict:
         "shape": {"width": 480, "height": 832, "num_frames": 294},
         "conditioning_ids": list(record_ids),
     }
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(item, sort_keys=True) + "\n" for item in rows))
+
+
+def write_t2va_parquet(finalizer, path: Path, frozen_row: dict, **overrides) -> dict:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    video_shape, audio_shape = finalizer.expected_shapes(frozen_row)
+    text_shape = [1, 5120]
+    record = {
+        "id": frozen_row["conditioning_id"],
+        "vae_latent_bytes": bytes(4 * 24 * video_shape[1] * video_shape[2] * video_shape[3]),
+        "vae_latent_shape": video_shape,
+        "vae_latent_dtype": "float32",
+        "audio_latent_bytes": bytes(4 * 2 * 32 * audio_shape[2]),
+        "audio_latent_shape": audio_shape,
+        "audio_latent_dtype": "float32",
+        "text_embedding_bytes": bytes(4 * text_shape[0] * text_shape[1]),
+        "text_embedding_shape": text_shape,
+        "text_embedding_dtype": "float32",
+        "file_name": Path(frozen_row["raw_video_path"]).name,
+        "caption": frozen_row["prompt"],
+        "media_type": "video_with_audio",
+        "width": frozen_row["width"],
+        "height": frozen_row["height"],
+        "num_frames": frozen_row["num_frames"],
+        "duration_sec": frozen_row["duration_sec"],
+        "fps": frozen_row["fps"],
+        "audio_sample_rate": frozen_row["audio_sample_rate"],
+    }
+    record.update(overrides)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pylist([record], schema=finalizer.load_t2va_schema())
+    pq.write_table(table, path, compression="zstd", row_group_size=1)
+    return record
+
+
+def create_frozen_tree(tmp_path: Path) -> tuple[Path, Path]:
+    freezer = load_script("freeze_sources")
+    root = (tmp_path / "dataset").resolve()
+    source = "source"
+    source_root = root / source
+    inputs = (tmp_path / "inputs").resolve()
+    videos_dir = inputs / "videos"
+    videos_dir.mkdir(parents=True)
+    status_path = inputs / "status.jsonl"
+    prompts_path = inputs / "prompts.jsonl"
+    status_path.write_text("")
+    prompts_path.write_text("")
+
+    frozen_rows = []
+    for index in range(65):
+        record_id = f"sample-{index:02d}"
+        video = videos_dir / f"{record_id}.mp4"
+        video.write_bytes(f"frozen-{record_id}".encode())
+        stat = video.stat()
+        frozen_rows.append({
+            "schema_version": freezer.SCHEMA_VERSION,
+            "source": source,
+            "family": "nuva",
+            "conditioning_id": record_id,
+            "prompt": f"prompt {record_id}",
+            "raw_video_path": str(video),
+            "width": 16,
+            "height": 16,
+            "num_frames": 5,
+            "fps": 24.0,
+            "duration_sec": 5 / 24,
+            "audio_sample_rate": 32000,
+            "audio_channels": 2,
+            "audio_samples": 0,
+            "audio_duration_sec": 0.0,
+            "bucket_id": "",
+            "status_line": index + 1,
+            "prompt_line": index + 1,
+            "video_size_bytes": stat.st_size,
+            "video_mtime_ns": stat.st_mtime_ns,
+        })
+    validation_rows = [freezer.validation_row(item) for item in frozen_rows[:64]]
+    training_rows = frozen_rows[64:]
+    write_jsonl(source_root / "media" / "frozen.jsonl", frozen_rows)
+    write_jsonl(source_root / "media" / "train.jsonl", training_rows)
+    write_jsonl(
+        source_root / "prompts" / "source.jsonl",
+        [{"conditioning_id": item["conditioning_id"], "prompt": item["prompt"]} for item in frozen_rows],
+    )
+    worklist = freezer.build_worklist(training_rows, 32)
+    worklist.update({
+        "source": source,
+        "train_manifest": str(source_root / "media" / "train.jsonl"),
+        "set_root": str(source_root),
+    })
+    (source_root / "work").mkdir(parents=True)
+    (source_root / "work" / "worklist.json").write_text(json.dumps(worklist, indent=2, sort_keys=True) + "\n")
+    artifact_paths = {
+        "source.jsonl": source_root / "prompts" / "source.jsonl",
+        "frozen.jsonl": source_root / "media" / "frozen.jsonl",
+        "train.jsonl": source_root / "media" / "train.jsonl",
+        "worklist.json": source_root / "work" / "worklist.json",
+    }
+    artifacts_sha256 = {name: freezer.sha256_file(path) for name, path in artifact_paths.items()}
+    (source_root / "prompts" / "SOURCE.sha256").write_text(
+        f"{artifacts_sha256['source.jsonl']}  source.jsonl\n"
+    )
+    source_summary = {
+        "source": source,
+        "completed_status_ids": 65,
+        "completed_status_lines": 65,
+        "canonical_mp4s": 65,
+        "completed_and_canonical_mp4": 65,
+        "prompt_records_seen": 65,
+        "frozen_rows": 65,
+        "missing_canonical_mp4": 0,
+        "canonical_mp4_without_completed_status": 0,
+        "eligible_without_valid_prompt": 0,
+        "status_jsonl": str(status_path),
+        "status_snapshot_sha256": freezer.sha256_file(status_path),
+        "status_snapshot_bytes": 0,
+        "prompts_jsonl": str(prompts_path),
+        "prompts_snapshot_sha256": freezer.sha256_file(prompts_path),
+        "prompts_snapshot_bytes": 0,
+        "videos_dir": str(videos_dir),
+        "training_rows": 1,
+        "validation_exclusions": 64,
+        "artifacts_sha256": artifacts_sha256,
+        "shape_counts": {"16x16x5": 65},
+    }
+    (source_root / "MANIFEST.source.json").write_text(json.dumps(source_summary, indent=2, sort_keys=True) + "\n")
+
+    validation_root = root / "validation"
+    write_jsonl(validation_root / "manifest.jsonl", validation_rows)
+    validation_summary = {
+        "schema_version": freezer.VALIDATION_SCHEMA_VERSION,
+        "seed": 20260822,
+        "rows": 64,
+        "unique_conditioning_ids": 64,
+        "source_counts": {source: 64},
+        "family_counts": {"nuva": 64},
+        "training_exclusions_by_source": {source: 64},
+    }
+    (validation_root / "manifest.json").write_text(json.dumps(validation_summary, indent=2, sort_keys=True) + "\n")
+    heldout = freezer.heldout_payload(validation_rows)
+    (validation_root / "heldout64.json").write_text(json.dumps(heldout, indent=2) + "\n")
+    validation_videos = validation_root / "videos"
+    validation_videos.mkdir()
+    for item in validation_rows:
+        (validation_videos / f"{source}__{item['conditioning_id']}.mp4").symlink_to(item["raw_video_path"])
+
+    config = {
+        "schema_version": "minimax-h3-native-t2va-sources-v1",
+        "snapshot_seed": 20260822,
+        "output_root": str(root),
+        "legacy_validation_ids": str(inputs / "legacy.txt"),
+        "validation_quotas": {source: 64},
+        "sources": [{
+            "name": source,
+            "family": "nuva",
+            "videos_dir": str(videos_dir),
+            "status_jsonl": str(status_path),
+            "prompts_jsonl": str(prompts_path),
+            "prompt_id_field": "id",
+            "prompt_text_field": "prompt",
+            "require_prompt_validation_passed": False,
+        }],
+    }
+    config_path = inputs / "config.json"
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    frozen_manifest = {
+        "schema_version": freezer.SCHEMA_VERSION,
+        "created_utc": "2026-08-22T00:00:00+00:00",
+        "config_path": str(config_path),
+        "config_sha256": freezer.sha256_file(config_path),
+        "seed": 20260822,
+        "sources": [source_summary],
+        "frozen_rows": 65,
+        "training_rows": 1,
+        "validation_rows": 64,
+        "validation_manifest_sha256": freezer.sha256_file(validation_root / "manifest.jsonl"),
+        "heldout64_sha256": freezer.sha256_file(validation_root / "heldout64.json"),
+        "ready": False,
+    }
+    (root / "FROZEN_MANIFEST.json").write_text(json.dumps(frozen_manifest, indent=2, sort_keys=True) + "\n")
+    return root, Path(training_rows[0]["raw_video_path"])
 
 
 def test_failed_chunk_publishes_no_data_or_done(tmp_path, monkeypatch) -> None:
@@ -99,8 +287,14 @@ def test_finalizer_rejects_unreferenced_parquet(tmp_path) -> None:
     stray = source_root / "data" / "bucket=480x832-294f" / "stray.parquet"
     stray.parent.mkdir(parents=True)
     stray.touch()
+    source_summary = {
+        "source": "source",
+        "artifacts_sha256": {
+            "train.jsonl": finalizer.sha256_file(source_root / "media" / "train.jsonl"),
+        },
+    }
     with pytest.raises(ValueError, match="unreferenced parquet"):
-        finalizer.audit_source(source_root, {"source": "source"})
+        finalizer.audit_source(source_root, source_summary)
 
 
 def test_cache_must_exactly_match_audited_files(tmp_path) -> None:
@@ -124,6 +318,52 @@ def test_shape_and_bucket_contracts() -> None:
     video, audio = finalizer.expected_shapes({"width": 480, "height": 832, "num_frames": 294})
     assert video == [24, 87, 52, 30]
     assert audio == [2, 32, 490]
+
+
+def test_finalizer_rejects_one_byte_short_tensor_payload(tmp_path) -> None:
+    finalizer = load_script("finalize_dataset")
+    frozen_row = row("one")
+    frozen_row.update({"width": 16, "height": 16, "num_frames": 5, "duration_sec": 5 / 24})
+    video_shape, _ = finalizer.expected_shapes(frozen_row)
+    valid_bytes = 4 * video_shape[0] * video_shape[1] * video_shape[2] * video_shape[3]
+    parquet_path = tmp_path / "bucket=16x16-5f" / "one.parquet"
+    write_t2va_parquet(finalizer, parquet_path, frozen_row, vae_latent_bytes=bytes(valid_bytes - 1))
+
+    with pytest.raises(ValueError, match=r"vae_latent_bytes length .* != shape\*dtype"):
+        finalizer.inspect_parquet(parquet_path, "16x16-5f", {"one": frozen_row})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "message"),
+    [
+        ("vae_latent_dtype", "float16", "vae_latent_dtype"),
+        ("audio_latent_dtype", "float16", "audio_latent_dtype"),
+        ("text_embedding_dtype", "float16", "text_embedding_dtype"),
+        ("media_type", "video", "media_type"),
+        ("width", 32, "row geometry"),
+        ("height", 32, "row geometry"),
+        ("num_frames", 22, "row geometry"),
+        ("caption", "changed", "caption"),
+        ("file_name", "changed.mp4", "file_name"),
+        ("duration_sec", 1.0, "duration"),
+        ("fps", 23.0, "fps"),
+        ("audio_sample_rate", 16000, "audio sample rate"),
+    ],
+)
+def test_finalizer_rejects_parquet_fields_that_differ_from_frozen_row(
+    tmp_path,
+    field_name: str,
+    bad_value,
+    message: str,
+) -> None:
+    finalizer = load_script("finalize_dataset")
+    frozen_row = row("one")
+    frozen_row.update({"width": 16, "height": 16, "num_frames": 5, "duration_sec": 5 / 24})
+    parquet_path = tmp_path / "bucket=16x16-5f" / "one.parquet"
+    write_t2va_parquet(finalizer, parquet_path, frozen_row, **{field_name: bad_value})
+
+    with pytest.raises(ValueError, match=message):
+        finalizer.inspect_parquet(parquet_path, "16x16-5f", {"one": frozen_row})
 
 
 def test_audio_clock_contract_covers_every_frame_count_through_supported_max() -> None:
@@ -194,6 +434,102 @@ def test_frozen_video_stat_is_enforced(tmp_path) -> None:
     video.write_bytes(b"changed")
     with pytest.raises(ValueError, match="frozen source changed"):
         worker.verify_frozen_video(frozen)
+
+
+def test_finalizer_rejects_changed_frozen_artifact(tmp_path) -> None:
+    finalizer = load_script("finalize_dataset")
+    root, _ = create_frozen_tree(tmp_path)
+    finalizer.verify_frozen_sources(root)
+
+    train_path = root / "source" / "media" / "train.jsonl"
+    train_path.write_text(train_path.read_text() + "\n")
+    with pytest.raises(ValueError, match="train.jsonl.*sha256"):
+        finalizer.verify_frozen_sources(root)
+
+
+def test_finalizer_rejects_changed_raw_video(tmp_path) -> None:
+    finalizer = load_script("finalize_dataset")
+    root, training_video = create_frozen_tree(tmp_path)
+    finalizer.verify_frozen_sources(root)
+
+    training_video.write_bytes(training_video.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="frozen source changed"):
+        finalizer.verify_frozen_sources(root)
+
+
+def test_finalization_resumes_partial_source_publication_and_keeps_root_ready_last(tmp_path, monkeypatch) -> None:
+    finalizer = load_script("finalize_dataset")
+    root = (tmp_path / "dataset").resolve()
+    summaries = [{"source": source, "validation_exclusions": 0} for source in ("source-a", "source-b")]
+    frozen = {
+        "sources": summaries,
+        "training_rows": 0,
+        "validation_rows": 64,
+    }
+    root.mkdir()
+    (root / "FROZEN_MANIFEST.json").write_text(json.dumps(frozen, sort_keys=True) + "\n")
+    audits = {}
+    for summary in summaries:
+        source = summary["source"]
+        source_root = root / source
+        source_root.mkdir()
+        (source_root / "MANIFEST.source.json").write_text(json.dumps(summary, sort_keys=True) + "\n")
+        audits[source] = {
+            "source": source,
+            "training_rows": 0,
+            "encoded_rows": 0,
+            "manifest_rows": [],
+            "parquet_files": (),
+            "parquet_lengths": (),
+            "parquet_hashes": {},
+            "train_manifest_sha256": "0" * 64,
+        }
+
+    monkeypatch.setattr(finalizer, "verify_frozen_sources", lambda _root: frozen)
+    monkeypatch.setattr(
+        finalizer,
+        "audit_source",
+        lambda source_root, _summary: audits[source_root.name],
+    )
+    write_pickle_atomic = finalizer.write_pickle_atomic
+    crashed = False
+
+    def crash_during_second_source(path, payload):
+        nonlocal crashed
+        if "source-b" in path.parts and not crashed:
+            crashed = True
+            raise RuntimeError("simulated crash")
+        write_pickle_atomic(path, payload)
+
+    monkeypatch.setattr(finalizer, "write_pickle_atomic", crash_during_second_source)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        finalizer.finalize_dataset(root)
+
+    assert (root / "source-a" / "READY.json").is_file()
+    first_manifest = (root / "source-a" / "MANIFEST.json").read_bytes()
+    assert (root / "source-b" / "MANIFEST_rows.jsonl").is_file()
+    assert not (root / "source-b" / "READY.json").exists()
+    assert not (root / "READY.json").exists()
+
+    monkeypatch.setattr(finalizer, "write_pickle_atomic", write_pickle_atomic)
+    finalizer.finalize_dataset(root)
+
+    assert (root / "source-a" / "MANIFEST.json").read_bytes() == first_manifest
+    assert (root / "source-b" / "READY.json").is_file()
+    assert (root / "READY.json").is_file()
+    valid_ready = json.loads((root / "READY.json").read_text())
+    assert valid_ready["sources"] == ["source-a", "source-b"]
+    assert valid_ready["data_paths"] == [str(root / "source-a" / "data"), str(root / "source-b" / "data")]
+
+    wrong_sources = {**valid_ready, "sources": ["source-a"]}
+    (root / "READY.json").write_text(json.dumps(wrong_sources) + "\n")
+    with pytest.raises(ValueError, match="root READY sources"):
+        finalizer.verify_ready(root)
+
+    wrong_paths = {**valid_ready, "data_paths": [str(root / "wrong" / "data")] * 2}
+    (root / "READY.json").write_text(json.dumps(wrong_paths) + "\n")
+    with pytest.raises(ValueError, match="root READY data_paths"):
+        finalizer.verify_ready(root)
 
 
 def test_heldout_payload_uses_validation_dataset_data_field() -> None:

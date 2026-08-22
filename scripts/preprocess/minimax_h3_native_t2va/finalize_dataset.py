@@ -9,6 +9,7 @@ import functools
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import pickle
@@ -16,6 +17,15 @@ import re
 from typing import Any
 
 BUCKET_RE = re.compile(r"^bucket=([1-9][0-9]*)x([1-9][0-9]*)-([1-9][0-9]*)f$")
+FINAL_SCHEMA_VERSION = "minimax-h3-native-t2va-final-v1"
+SOURCE_READY_SCHEMA_VERSION = "minimax-h3-native-t2va-source-ready-v1"
+ROOT_READY_SCHEMA_VERSION = "minimax-h3-native-t2va-ready-v1"
+TENSOR_DTYPES = {
+    "vae_latent": "float32",
+    "audio_latent": "float32",
+    "text_embedding": "float32",
+}
+DTYPE_ITEM_SIZES = {"float32": 4}
 
 
 def packed_audio_latent_num_frames(num_frames: int) -> int:
@@ -53,12 +63,31 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+@functools.lru_cache(maxsize=1)
+def load_freeze_sources():
+    """Load the stdlib-only freezer module without importing GPU backends."""
+    freeze_path = Path(__file__).with_name("freeze_sources.py")
+    spec = importlib.util.spec_from_file_location("_minimax_h3_native_freeze_sources", freeze_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load freeze verifier from {freeze_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def verify_frozen_sources(root: Path) -> dict[str, Any]:
+    """Validate frozen hashes, provenance, and raw-video stats."""
+    return load_freeze_sources().verify_existing(root, emit_summary=False)
+
+
 def expected_shapes(row: dict[str, Any]) -> tuple[list[int], list[int]]:
     width = int(row["width"])
     height = int(row["height"])
     frames = int(row["num_frames"])
     if frames % 17 != 5:
         raise ValueError(f"num_frames must be 17*n+5, got {frames}")
+    if height % 16 or width % 16:
+        raise ValueError(f"source geometry {width}x{height} is not divisible by the H3 VAE spatial ratio 16")
     video_frames = (frames - 5) // 17 * 5 + 2
     audio_frames = packed_audio_latent_num_frames(frames)
     return [24, video_frames, height // 16, width // 16], [
@@ -90,6 +119,7 @@ def inspect_parquet(
     expected_bucket: str,
     expected_rows: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
     pyarrow_schema_t2va = load_t2va_schema()
 
@@ -102,13 +132,22 @@ def inspect_parquet(
     parquet = pq.ParquetFile(path)
     if parquet.schema_arrow != pyarrow_schema_t2va:
         raise ValueError(f"{path}: schema does not equal pyarrow_schema_t2va")
-    if parquet.num_row_groups != parquet.metadata.num_rows:
+    if parquet.num_row_groups != parquet.metadata.num_rows or any(
+        parquet.metadata.row_group(index).num_rows != 1 for index in range(parquet.num_row_groups)
+    ):
         raise ValueError(f"{path}: row_group_size must be exactly one")
     columns = [
         "id",
+        "vae_latent_bytes",
         "vae_latent_shape",
+        "vae_latent_dtype",
+        "audio_latent_bytes",
         "audio_latent_shape",
+        "audio_latent_dtype",
+        "text_embedding_bytes",
         "text_embedding_shape",
+        "text_embedding_dtype",
+        "media_type",
         "width",
         "height",
         "num_frames",
@@ -118,32 +157,73 @@ def inspect_parquet(
         "file_name",
         "duration_sec",
     ]
-    rows = parquet.read(columns=columns).to_pylist()
+    metadata_columns = [column for column in columns if not column.endswith("_bytes")]
+    rows: list[dict[str, Any]] = []
+    for row_group_index in range(parquet.num_row_groups):
+        table = parquet.read_row_group(row_group_index, columns=columns)
+        row = table.select(metadata_columns).to_pylist()[0]
+        for tensor_name in TENSOR_DTYPES:
+            byte_length = pc.binary_length(table.column(f"{tensor_name}_bytes"))[0].as_py()
+            row[f"{tensor_name}_nbytes"] = byte_length
+        rows.append(row)
     width, height, frames = (int(value) for value in match.groups())
     for row in rows:
         record_id = str(row["id"])
         if record_id not in expected_rows:
             raise ValueError(f"{path}: unexpected id {record_id}")
         expected_row = expected_rows[record_id]
+        expected_geometry = (
+            int(expected_row["width"]),
+            int(expected_row["height"]),
+            int(expected_row["num_frames"]),
+        )
+        if (width, height, frames) != expected_geometry:
+            raise ValueError(
+                f"{path}/{record_id}: bucket geometry {(width, height, frames)} != frozen {expected_geometry}"
+            )
         geometry = (int(row["width"]), int(row["height"]), int(row["num_frames"]))
-        if geometry != (width, height, frames):
-            raise ValueError(f"{path}/{record_id}: row geometry {geometry} != bucket {(width, height, frames)}")
-        video_shape, audio_shape = expected_shapes(row)
+        if geometry != expected_geometry:
+            raise ValueError(f"{path}/{record_id}: row geometry {geometry} != frozen {expected_geometry}")
+        video_shape, audio_shape = expected_shapes(expected_row)
         if row["vae_latent_shape"] != video_shape or row["audio_latent_shape"] != audio_shape:
             raise ValueError(
                 f"{path}/{record_id}: latent shapes {row['vae_latent_shape']}/{row['audio_latent_shape']} "
                 f"!= {video_shape}/{audio_shape}"
             )
-        if len(row["text_embedding_shape"]) != 2 or row["text_embedding_shape"][1] != 5120:
+        if (
+            len(row["text_embedding_shape"]) != 2
+            or int(row["text_embedding_shape"][0]) <= 0
+            or row["text_embedding_shape"][1] != 5120
+        ):
             raise ValueError(f"{path}/{record_id}: invalid text shape {row['text_embedding_shape']}")
-        if float(row["fps"]) != 24.0 or int(row["audio_sample_rate"]) != 32000:
-            raise ValueError(f"{path}/{record_id}: invalid media rate")
+        for tensor_name, expected_dtype in TENSOR_DTYPES.items():
+            shape = row[f"{tensor_name}_shape"]
+            dtype = row[f"{tensor_name}_dtype"]
+            payload_length = row[f"{tensor_name}_nbytes"]
+            if dtype != expected_dtype:
+                raise ValueError(f"{path}/{record_id}: {tensor_name}_dtype {dtype!r} != {expected_dtype!r}")
+            if not isinstance(shape, list) or not shape or any(int(dimension) <= 0 for dimension in shape):
+                raise ValueError(f"{path}/{record_id}: invalid {tensor_name}_shape {shape}")
+            if payload_length is None:
+                raise ValueError(f"{path}/{record_id}: {tensor_name}_bytes is not a byte payload")
+            expected_bytes = math.prod(int(dimension) for dimension in shape) * DTYPE_ITEM_SIZES[expected_dtype]
+            if int(payload_length) != expected_bytes:
+                raise ValueError(
+                    f"{path}/{record_id}: {tensor_name}_bytes length {payload_length} != "
+                    f"shape*dtype {expected_bytes}"
+                )
+        if row["media_type"] != "video_with_audio":
+            raise ValueError(f"{path}/{record_id}: media_type {row['media_type']!r} != 'video_with_audio'")
+        if float(row["fps"]) != float(expected_row["fps"]):
+            raise ValueError(f"{path}/{record_id}: fps does not match frozen training row")
+        if int(row["audio_sample_rate"]) != int(expected_row["audio_sample_rate"]):
+            raise ValueError(f"{path}/{record_id}: audio sample rate does not match frozen training row")
         if row["caption"] != expected_row["prompt"]:
             raise ValueError(f"{path}/{record_id}: caption does not match frozen training prompt")
         if row["file_name"] != Path(expected_row["raw_video_path"]).name:
             raise ValueError(f"{path}/{record_id}: file_name does not match frozen raw video")
-        if abs(float(row["duration_sec"]) - float(expected_row["duration_sec"])) > 1e-9:
-            raise ValueError(f"{path}/{record_id}: duration does not match frozen manifest")
+        if float(row["duration_sec"]) != float(expected_row["duration_sec"]):
+            raise ValueError(f"{path}/{record_id}: duration does not match frozen training row")
     return rows
 
 
@@ -165,8 +245,19 @@ def write_pickle_atomic(path: Path, payload: Any) -> None:
 def audit_source(source_root: Path, source_summary: dict[str, Any]) -> dict[str, Any]:
     source = str(source_summary["source"])
     train_path = source_root / "media" / "train.jsonl"
-    train_by_id = {str(row["conditioning_id"]): row for row in iter_jsonl(train_path)}
+    train_rows = list(iter_jsonl(train_path))
+    train_by_id = {str(row["conditioning_id"]): row for row in train_rows}
+    if len(train_by_id) != len(train_rows):
+        raise ValueError(f"{train_path}: duplicate conditioning id")
+    train_manifest_sha256 = sha256_file(train_path)
+    if train_manifest_sha256 != source_summary["artifacts_sha256"]["train.jsonl"]:
+        raise ValueError(f"{source}: train manifest checksum does not match frozen artifact")
     expected_ids = set(train_by_id)
+    worklist_path = source_root / "work" / "worklist.json"
+    worklist = json.loads(worklist_path.read_text())
+    chunks = {str(chunk["chunk_id"]): chunk for chunk in worklist["chunks"]}
+    if len(chunks) != len(worklist["chunks"]):
+        raise ValueError(f"{worklist_path}: duplicate chunk id")
     observed_ids: set[str] = set()
     referenced_parquet: set[Path] = set()
     parquet_lengths: dict[Path, int] = {}
@@ -176,7 +267,20 @@ def audit_source(source_root: Path, source_summary: dict[str, Any]) -> dict[str,
     done_paths = sorted((source_root / "done").glob("*.json")) if (source_root / "done").is_dir() else []
     for done_path in done_paths:
         done = json.loads(done_path.read_text())
-        failures.update(done.get("failures", {}))
+        chunk_id = done_path.stem
+        if done.get("chunk_id") != chunk_id or chunk_id not in chunks:
+            raise ValueError(f"{done_path}: chunk id does not match frozen worklist")
+        chunk = chunks[chunk_id]
+        expected_bucket = (
+            f"{int(chunk['shape']['width'])}x{int(chunk['shape']['height'])}-"
+            f"{int(chunk['shape']['num_frames'])}f"
+        )
+        if done.get("bucket") != expected_bucket:
+            raise ValueError(f"{done_path}: bucket does not match frozen worklist")
+        done_failures = done.get("failures", {})
+        if not isinstance(done_failures, dict):
+            raise ValueError(f"{done_path}: failures must be an object")
+        failures.update(done_failures)
         parquet_value = done.get("parquet")
         if not parquet_value:
             raise ValueError(f"{done_path}: production done marker has no parquet")
@@ -188,19 +292,40 @@ def audit_source(source_root: Path, source_summary: dict[str, Any]) -> dict[str,
             raise FileNotFoundError(parquet_path)
         if parquet_path in referenced_parquet:
             raise ValueError(f"{source}: duplicate done marker reference to {parquet_path}")
-        rows = inspect_parquet(parquet_path, str(done["bucket"]), train_by_id)
+        rows = inspect_parquet(parquet_path, expected_bucket, train_by_id)
+        if int(done.get("rows", -1)) != len(rows):
+            raise ValueError(f"{done_path}: row count does not match parquet")
+        parquet_ids = {str(row["id"]) for row in rows}
+        expected_chunk_ids = {str(record_id) for record_id in chunk["conditioning_ids"]}
+        if parquet_ids != expected_chunk_ids:
+            raise ValueError(f"{done_path}: parquet ids do not exactly match frozen worklist chunk")
         referenced_parquet.add(parquet_path)
         parquet_lengths[parquet_path] = len(rows)
         parquet_hashes[parquet_path] = sha256_file(parquet_path)
-        done_manifest = {str(row["conditioning_id"]): row for row in done.get("rows_manifest", [])}
-        if len(done_manifest) != len(done.get("rows_manifest", [])):
+        rows_manifest = done.get("rows_manifest")
+        if not isinstance(rows_manifest, list):
+            raise ValueError(f"{done_path}: rows_manifest must be a list")
+        done_manifest = {str(row["conditioning_id"]): row for row in rows_manifest}
+        if len(done_manifest) != len(rows_manifest):
             raise ValueError(f"{done_path}: duplicate id in rows_manifest")
+        if set(done_manifest) != parquet_ids:
+            raise ValueError(f"{done_path}: rows_manifest ids do not exactly match parquet")
         for parquet_row in rows:
             record_id = str(parquet_row["id"])
             if record_id in observed_ids:
                 raise ValueError(f"{source}: duplicate encoded id {record_id}")
             if record_id not in done_manifest:
                 raise ValueError(f"{done_path}: no rows_manifest entry for {record_id}")
+            expected_row = train_by_id[record_id]
+            expected_manifest_provenance = {
+                "conditioning_id": record_id,
+                "source": source,
+                "bucket": expected_bucket,
+                "raw_video_path": expected_row["raw_video_path"],
+            }
+            for field_name, expected_value in expected_manifest_provenance.items():
+                if done_manifest[record_id].get(field_name) != expected_value:
+                    raise ValueError(f"{done_path}/{record_id}: {field_name} disagrees with frozen training row")
             for shape_name in ("vae_latent_shape", "audio_latent_shape", "text_embedding_shape"):
                 if done_manifest[record_id].get(shape_name) != parquet_row[shape_name]:
                     raise ValueError(f"{done_path}/{record_id}: {shape_name} disagrees with parquet")
@@ -225,10 +350,7 @@ def audit_source(source_root: Path, source_summary: dict[str, Any]) -> dict[str,
             f"{source}: incomplete: encoded={len(observed_ids)}/{len(expected_ids)} "
             f"failures={len(failures)} missing={len(missing)} extra={len(extra)}"
         )
-    expected_chunks = {
-        str(chunk["chunk_id"])
-        for chunk in json.loads((source_root / "work" / "worklist.json").read_text())["chunks"]
-    }
+    expected_chunks = set(chunks)
     done_chunks = {path.stem for path in done_paths}
     if done_chunks != expected_chunks:
         raise ValueError(
@@ -243,7 +365,7 @@ def audit_source(source_root: Path, source_summary: dict[str, Any]) -> dict[str,
         "parquet_files": tuple(str(path) for path in sorted(referenced_parquet)),
         "parquet_lengths": tuple(parquet_lengths[path] for path in sorted(referenced_parquet)),
         "parquet_hashes": {str(path): parquet_hashes[path] for path in sorted(referenced_parquet)},
-        "train_manifest_sha256": sha256_file(train_path),
+        "train_manifest_sha256": train_manifest_sha256,
     }
 
 
@@ -257,42 +379,215 @@ def validate_cache(source_root: Path, audit: dict[str, Any]) -> None:
         raise ValueError(f"{cache_path}: cache does not exactly match audited parquet set")
 
 
+def _source_manifest_payload(
+    source_root: Path,
+    source_summary: dict[str, Any],
+    audit: dict[str, Any],
+    created_utc: str,
+) -> dict[str, Any]:
+    rows_path = source_root / "MANIFEST_rows.jsonl"
+    cache_path = source_root / "data" / "map_style_cache" / "file_info.pkl"
+    return {
+        "schema_version": FINAL_SCHEMA_VERSION,
+        "source": audit["source"],
+        "training_rows": audit["training_rows"],
+        "encoded_rows": audit["encoded_rows"],
+        "validation_exclusions": int(source_summary["validation_exclusions"]),
+        "manifest_rows_sha256": sha256_file(rows_path),
+        "train_manifest_sha256": audit["train_manifest_sha256"],
+        "frozen_manifest_sha256": sha256_file(source_root.parent / "FROZEN_MANIFEST.json"),
+        "frozen_source_manifest_sha256": sha256_file(source_root / "MANIFEST.source.json"),
+        "parquet_files": len(audit["parquet_files"]),
+        "parquet_sha256": audit["parquet_hashes"],
+        "map_style_cache_sha256": sha256_file(cache_path),
+        "bucket_contract": "bucket=<width>x<height>-<num_frames>f",
+        "parquet_schema": "fastvideo.dataset.dataloader.schema.pyarrow_schema_t2va",
+        "parquet_row_group_size": 1,
+        "created_utc": created_utc,
+    }
+
+
+def validate_source_publication(
+    source_root: Path,
+    source_summary: dict[str, Any],
+    audit: dict[str, Any],
+) -> dict[str, Any]:
+    source = str(audit["source"])
+    rows_path = source_root / "MANIFEST_rows.jsonl"
+    expected_rows_text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in audit["manifest_rows"])
+    if rows_path.read_text() != expected_rows_text:
+        raise ValueError(f"{source}: MANIFEST_rows.jsonl does not match current parquet audit")
+    validate_cache(source_root, audit)
+
+    manifest_path = source_root / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    created_utc = manifest.get("created_utc")
+    if not isinstance(created_utc, str) or not created_utc:
+        raise ValueError(f"{source}: finalized manifest has no creation timestamp")
+    expected_manifest = _source_manifest_payload(source_root, source_summary, audit, created_utc)
+    if manifest != expected_manifest:
+        raise ValueError(f"{source}: finalized manifest does not exactly match current audit")
+
+    ready_path = source_root / "READY.json"
+    ready = json.loads(ready_path.read_text())
+    expected_ready = {
+        "schema_version": SOURCE_READY_SCHEMA_VERSION,
+        "source": source,
+        "rows": audit["encoded_rows"],
+        "manifest_sha256": sha256_file(manifest_path),
+    }
+    if ready != expected_ready:
+        raise ValueError(f"{source}: READY.json does not exactly match finalized manifest")
+    return manifest
+
+
+def publish_source(
+    source_root: Path,
+    source_summary: dict[str, Any],
+    audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish or resume one source without overwriting mismatched artifacts."""
+    source = str(audit["source"])
+    rows_path = source_root / "MANIFEST_rows.jsonl"
+    rows_text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in audit["manifest_rows"])
+    if rows_path.exists():
+        if rows_path.read_text() != rows_text:
+            raise ValueError(f"{source}: refusing to overwrite mismatched MANIFEST_rows.jsonl")
+    else:
+        write_text_atomic(rows_path, rows_text)
+
+    cache_path = source_root / "data" / "map_style_cache" / "file_info.pkl"
+    if cache_path.exists():
+        validate_cache(source_root, audit)
+    else:
+        write_pickle_atomic(cache_path, (audit["parquet_files"], audit["parquet_lengths"]))
+        validate_cache(source_root, audit)
+
+    manifest_path = source_root / "MANIFEST.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        created_utc = manifest.get("created_utc")
+        if not isinstance(created_utc, str) or not created_utc:
+            raise ValueError(f"{source}: existing finalized manifest has no creation timestamp")
+        expected_manifest = _source_manifest_payload(source_root, source_summary, audit, created_utc)
+        if manifest != expected_manifest:
+            raise ValueError(f"{source}: refusing to overwrite mismatched MANIFEST.json")
+    else:
+        manifest = _source_manifest_payload(
+            source_root,
+            source_summary,
+            audit,
+            dt.datetime.now(dt.timezone.utc).isoformat(),
+        )
+        write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    ready_path = source_root / "READY.json"
+    ready_payload = {
+        "schema_version": SOURCE_READY_SCHEMA_VERSION,
+        "source": source,
+        "rows": audit["encoded_rows"],
+        "manifest_sha256": sha256_file(manifest_path),
+    }
+    if ready_path.exists():
+        if json.loads(ready_path.read_text()) != ready_payload:
+            raise ValueError(f"{source}: refusing to overwrite mismatched READY.json")
+    else:
+        write_text_atomic(ready_path, json.dumps(ready_payload, indent=2, sort_keys=True) + "\n")
+    return validate_source_publication(source_root, source_summary, audit)
+
+
+def _root_ready_payload(
+    root: Path,
+    frozen: dict[str, Any],
+    training_rows: int,
+    created_utc: str,
+) -> dict[str, Any]:
+    sources = [str(summary["source"]) for summary in frozen["sources"]]
+    return {
+        "schema_version": ROOT_READY_SCHEMA_VERSION,
+        "frozen_manifest_sha256": sha256_file(root / "FROZEN_MANIFEST.json"),
+        "training_rows": training_rows,
+        "validation_rows": int(frozen["validation_rows"]),
+        "sources": sources,
+        "data_paths": [str(root / source / "data") for source in sources],
+        "bucket_contract": "bucket=<width>x<height>-<num_frames>f",
+        "preprocessed_data_type": "t2va",
+        "created_utc": created_utc,
+    }
+
+
+def validate_root_ready(root: Path, frozen: dict[str, Any], ready: dict[str, Any]) -> None:
+    created_utc = ready.get("created_utc")
+    if not isinstance(created_utc, str) or not created_utc:
+        raise ValueError("root READY has no creation timestamp")
+    expected = _root_ready_payload(root, frozen, int(frozen["training_rows"]), created_utc)
+    if ready.get("sources") != expected["sources"]:
+        raise ValueError(f"root READY sources {ready.get('sources')} != frozen source set {expected['sources']}")
+    if ready.get("data_paths") != expected["data_paths"]:
+        raise ValueError(f"root READY data_paths {ready.get('data_paths')} != frozen paths {expected['data_paths']}")
+    if ready != expected:
+        raise ValueError("root READY does not exactly match frozen dataset contract")
+
+
+def audit_published_sources(root: Path, frozen: dict[str, Any]) -> int:
+    audited_rows = 0
+    for source_summary in frozen["sources"]:
+        source = str(source_summary["source"])
+        source_root = root / source
+        audit = audit_source(source_root, source_summary)
+        validate_source_publication(source_root, source_summary, audit)
+        audited_rows += int(audit["encoded_rows"])
+    return audited_rows
+
+
 def verify_ready(root: Path) -> None:
+    root = root.resolve()
     ready_path = root / "READY.json"
     if not ready_path.is_file():
         raise FileNotFoundError(ready_path)
+    frozen = verify_frozen_sources(root)
     ready = json.loads(ready_path.read_text())
-    frozen = json.loads((root / "FROZEN_MANIFEST.json").read_text())
-    summaries = {str(item["source"]): item for item in frozen["sources"]}
-    audited_rows = 0
-    for source in ready["sources"]:
-        source_root = root / str(source)
-        if not (source_root / "READY.json").is_file():
-            raise FileNotFoundError(source_root / "READY.json")
-        manifest = json.loads((source_root / "MANIFEST.json").read_text())
-        audit = audit_source(source_root, summaries[str(source)])
-        validate_cache(source_root, audit)
-        if manifest["training_rows"] != manifest["encoded_rows"] or manifest["encoded_rows"] != audit["encoded_rows"]:
-            raise ValueError(f"{source}: incomplete finalized manifest")
-        rows_path = source_root / "MANIFEST_rows.jsonl"
-        if sha256_file(rows_path) != manifest["manifest_rows_sha256"]:
-            raise ValueError(f"{source}: MANIFEST_rows.jsonl checksum mismatch")
-        if manifest.get("parquet_sha256") != audit["parquet_hashes"]:
-            raise ValueError(f"{source}: MANIFEST parquet checksum map mismatch")
-        cache_path = source_root / "data" / "map_style_cache" / "file_info.pkl"
-        if sha256_file(cache_path) != manifest.get("map_style_cache_sha256"):
-            raise ValueError(f"{source}: map-style cache checksum mismatch")
-        stored_rows = list(iter_jsonl(rows_path))
-        if stored_rows != audit["manifest_rows"]:
-            raise ValueError(f"{source}: MANIFEST_rows.jsonl does not match current parquet audit")
-        if sha256_file(source_root / "MANIFEST.json") != json.loads((source_root / "READY.json").read_text())[
-            "manifest_sha256"
-        ]:
-            raise ValueError(f"{source}: READY manifest checksum mismatch")
-        audited_rows += audit["encoded_rows"]
+    validate_root_ready(root, frozen, ready)
+    audited_rows = audit_published_sources(root, frozen)
     if audited_rows != int(ready["training_rows"]):
         raise ValueError(f"root READY row count {ready['training_rows']} != audited {audited_rows}")
-    print(f"verified READY dataset {root}: {audited_rows} rows, all parquet/schema/cache/hash checks passed")
+    print(f"verified READY dataset {root}: {audited_rows} rows, all frozen/parquet/cache/hash checks passed")
+
+
+def finalize_dataset(root: Path) -> None:
+    root = root.resolve()
+    frozen = verify_frozen_sources(root)
+    if (root / "READY.json").exists():
+        raise FileExistsError("dataset is already READY; use --verify-only")
+
+    audits: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
+    for source_summary in frozen["sources"]:
+        source = str(source_summary["source"])
+        source_root = root / source
+        audits.append((source_summary, source_root, audit_source(source_root, source_summary)))
+
+    root_rows = 0
+    for source_summary, source_root, audit in audits:
+        publish_source(source_root, source_summary, audit)
+        root_rows += int(audit["encoded_rows"])
+    if root_rows != int(frozen["training_rows"]):
+        raise ValueError(f"audited training rows {root_rows} != frozen {frozen['training_rows']}")
+
+    # Repeat all read-only gates after publication, so a failure never leaves
+    # an aggregate READY marker behind. READY.json is the final atomic write.
+    frozen = verify_frozen_sources(root)
+    root_rows = audit_published_sources(root, frozen)
+    if root_rows != int(frozen["training_rows"]):
+        raise ValueError(f"published training rows {root_rows} != frozen {frozen['training_rows']}")
+    root_ready = _root_ready_payload(
+        root,
+        frozen,
+        root_rows,
+        dt.datetime.now(dt.timezone.utc).isoformat(),
+    )
+    write_text_atomic(root / "READY.json", json.dumps(root_ready, indent=2, sort_keys=True) + "\n")
+    validate_root_ready(root, frozen, json.loads((root / "READY.json").read_text()))
+    print(f"finalized READY dataset {root}: {root_rows} rows, all frozen/parquet/cache/hash checks passed")
 
 
 def main() -> None:
@@ -301,74 +596,7 @@ def main() -> None:
     if args.verify_only:
         verify_ready(root)
         return
-    frozen = json.loads((root / "FROZEN_MANIFEST.json").read_text())
-    if (root / "READY.json").exists():
-        raise FileExistsError("dataset is already READY; use --verify-only")
-
-    audits: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
-    for source_summary in frozen["sources"]:
-        source = str(source_summary["source"])
-        source_root = root / source
-        for final_name in ("MANIFEST_rows.jsonl", "MANIFEST.json", "READY.json"):
-            if (source_root / final_name).exists():
-                raise FileExistsError(f"refusing to overwrite immutable {source_root / final_name}")
-        if (source_root / "data" / "map_style_cache" / "file_info.pkl").exists():
-            raise FileExistsError(f"refusing to overwrite pre-existing map-style cache for {source}")
-        audits.append((source_summary, source_root, audit_source(source_root, source_summary)))
-
-    root_rows = 0
-    source_manifests: list[dict[str, Any]] = []
-    for source_summary, source_root, audit in audits:
-        source = audit["source"]
-        rows_path = source_root / "MANIFEST_rows.jsonl"
-        rows_text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in audit["manifest_rows"])
-        write_text_atomic(rows_path, rows_text)
-        cache_path = source_root / "data" / "map_style_cache" / "file_info.pkl"
-        write_pickle_atomic(cache_path, (audit["parquet_files"], audit["parquet_lengths"]))
-        validate_cache(source_root, audit)
-        manifest = {
-            "schema_version": "minimax-h3-native-t2va-final-v1",
-            "source": source,
-            "training_rows": audit["training_rows"],
-            "encoded_rows": audit["encoded_rows"],
-            "validation_exclusions": int(source_summary["validation_exclusions"]),
-            "manifest_rows_sha256": sha256_file(rows_path),
-            "train_manifest_sha256": audit["train_manifest_sha256"],
-            "parquet_files": len(audit["parquet_files"]),
-            "parquet_sha256": audit["parquet_hashes"],
-            "map_style_cache_sha256": sha256_file(cache_path),
-            "bucket_contract": "bucket=<width>x<height>-<num_frames>f",
-            "parquet_schema": "fastvideo.dataset.dataloader.schema.pyarrow_schema_t2va",
-            "parquet_row_group_size": 1,
-            "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-        }
-        manifest_path = source_root / "MANIFEST.json"
-        write_text_atomic(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        ready_payload = {
-            "schema_version": "minimax-h3-native-t2va-source-ready-v1",
-            "source": source,
-            "rows": audit["encoded_rows"],
-            "manifest_sha256": sha256_file(manifest_path),
-        }
-        write_text_atomic(source_root / "READY.json", json.dumps(ready_payload, indent=2, sort_keys=True) + "\n")
-        source_manifests.append(manifest)
-        root_rows += audit["encoded_rows"]
-
-    root_ready = {
-        "schema_version": "minimax-h3-native-t2va-ready-v1",
-        "training_rows": root_rows,
-        "validation_rows": 64,
-        "sources": [manifest["source"] for manifest in source_manifests],
-        "data_paths": [str(root / manifest["source"] / "data") for manifest in source_manifests],
-        "bucket_contract": "bucket=<width>x<height>-<num_frames>f",
-        "preprocessed_data_type": "t2va",
-        "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-    }
-    ready_path = root / "READY.json"
-    temporary = root / f".{ready_path.name}.tmp"
-    temporary.write_text(json.dumps(root_ready, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, ready_path)
-    verify_ready(root)
+    finalize_dataset(root)
 
 
 if __name__ == "__main__":

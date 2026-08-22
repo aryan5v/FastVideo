@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import stat as stat_module
 import tempfile
 from typing import Any, Iterable
 
@@ -336,38 +337,230 @@ def distribution(rows: list[dict[str, Any]], field_names: tuple[str, ...]) -> di
     return dict(sorted(counts.items()))
 
 
-def verify_existing(root: Path) -> None:
-    root_manifest = json.loads((root / "FROZEN_MANIFEST.json").read_text())
+def _indexed_rows(path: Path, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        record_id = str(row.get("conditioning_id") or "")
+        if not record_id:
+            raise ValueError(f"{path}: row has no conditioning_id")
+        if record_id in indexed:
+            raise ValueError(f"{path}: duplicate conditioning id {record_id}")
+        indexed[record_id] = row
+    return indexed
+
+
+def _verify_sha256(path: Path, expected: Any, label: str) -> None:
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError(f"{label}: invalid recorded sha256 {expected!r}")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise ValueError(f"{label}: sha256 {actual} != frozen {expected}")
+
+
+def _verify_frozen_video(row: dict[str, Any], videos_dir: Path) -> None:
+    record_id = str(row["conditioning_id"])
+    path = Path(str(row["raw_video_path"]))
+    expected_path = videos_dir / f"{record_id}.mp4"
+    if path != expected_path:
+        raise ValueError(f"{row['source']}/{record_id}: raw video path {path} != canonical {expected_path}")
+    with path.open("rb") as handle:
+        file_stat = os.fstat(handle.fileno())
+    if not stat_module.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"{row['source']}/{record_id}: raw video is not a regular file: {path}")
+    expected_stat = (int(row["video_size_bytes"]), int(row["video_mtime_ns"]))
+    actual_stat = (file_stat.st_size, file_stat.st_mtime_ns)
+    if actual_stat != expected_stat:
+        raise ValueError(
+            f"{row['source']}/{record_id}: frozen source changed: size/mtime {actual_stat} != {expected_stat}"
+        )
+
+
+def verify_existing(root: Path, *, emit_summary: bool = True) -> dict[str, Any]:
+    """Verify the complete immutable freeze contract without importing FastVideo.
+
+    The frozen root manifest is the trust anchor. Every artifact hash and
+    provenance edge recorded by the freezer is checked before callers may use
+    the training rows or publish derived data.
+    """
+    root = root.resolve()
+    root_manifest_path = root / "FROZEN_MANIFEST.json"
+    root_manifest = json.loads(root_manifest_path.read_text())
     if root_manifest.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unexpected frozen manifest schema")
-    validation = list(row for _, row in iter_jsonl(root / "validation" / "manifest.jsonl"))
-    ids = [row["conditioning_id"] for row in validation]
-    if len(validation) != 64 or len(set(ids)) != 64:
-        raise ValueError(f"validation split must have 64 unique ids, got {len(validation)}/{len(set(ids))}")
-    heldout_payload = json.loads((root / "validation" / "heldout64.json").read_text())
-    if not isinstance(heldout_payload, dict) or not isinstance(heldout_payload.get("data"), list):
-        raise ValueError("heldout64.json must be an object containing a data list")
-    heldout = heldout_payload["data"]
-    required = {"caption", "ref_video", "source", "sample_id", "width", "height", "num_frames"}
-    if len(heldout) != 64 or {row["sample_id"] for row in heldout} != set(ids):
-        raise ValueError("heldout64.json must contain the same 64 unique conditioning ids")
-    for row in heldout:
-        if not required <= set(row):
-            raise ValueError(f"heldout64.json row is missing fields: {sorted(required - set(row))}")
-        if not Path(row["ref_video"]).is_file():
-            raise FileNotFoundError(row["ref_video"])
-    for source in root_manifest["sources"]:
-        source_root = root / source["source"]
-        frozen = list(row for _, row in iter_jsonl(source_root / "media" / "frozen.jsonl"))
-        training = list(row for _, row in iter_jsonl(source_root / "media" / "train.jsonl"))
-        if len(frozen) != source["frozen_rows"] or len(training) != source["training_rows"]:
-            raise ValueError(f"{source['source']}: row-count mismatch")
-        if set(ids) & {row["conditioning_id"] for row in training}:
-            raise ValueError(f"{source['source']}: validation id leaked into training")
+
+    config_path = Path(str(root_manifest.get("config_path", "")))
+    if not config_path.is_file():
+        raise FileNotFoundError(f"frozen config provenance is unavailable: {config_path}")
+    _verify_sha256(config_path, root_manifest.get("config_sha256"), "frozen config")
+    config = json.loads(config_path.read_text())
+    configured_specs = config.get("sources")
+    if not isinstance(configured_specs, list):
+        raise ValueError("frozen config sources must be a list")
+    configured_names = [str(spec["name"]) for spec in configured_specs]
+    source_summaries = root_manifest.get("sources")
+    if not isinstance(source_summaries, list):
+        raise ValueError("frozen manifest sources must be a list")
+    source_names = [str(summary.get("source") or "") for summary in source_summaries]
+    if not all(source_names) or len(source_names) != len(set(source_names)):
+        raise ValueError("frozen manifest source names must be non-empty and unique")
+    if source_names != configured_names:
+        raise ValueError(f"frozen manifest sources {source_names} != config sources {configured_names}")
+    if int(root_manifest.get("seed", -1)) != int(config["snapshot_seed"]):
+        raise ValueError("frozen manifest seed does not match frozen config")
+
+    validation_manifest_path = root / "validation" / "manifest.jsonl"
+    heldout_path = root / "validation" / "heldout64.json"
+    _verify_sha256(
+        validation_manifest_path,
+        root_manifest.get("validation_manifest_sha256"),
+        "validation manifest",
+    )
+    _verify_sha256(heldout_path, root_manifest.get("heldout64_sha256"), "heldout64")
+    validation = [row for _, row in iter_jsonl(validation_manifest_path)]
+    validation_by_id = _indexed_rows(validation_manifest_path, validation)
+    validation_ids = set(validation_by_id)
+    if len(validation) != 64 or len(validation_ids) != 64 or int(root_manifest.get("validation_rows", -1)) != 64:
+        raise ValueError(f"validation split must have 64 unique ids, got {len(validation)}/{len(validation_ids)}")
+
+    config_by_name = {str(spec["name"]): spec for spec in configured_specs}
+    frozen_by_source_and_id: dict[tuple[str, str], dict[str, Any]] = {}
+    total_frozen = 0
+    total_training = 0
+    validation_exclusions: dict[str, int] = {}
+    for summary in source_summaries:
+        source = str(summary["source"])
+        source_root = (root / source).resolve()
+        if source_root.parent != root:
+            raise ValueError(f"frozen source must be a direct child of root: {source!r}")
+        stored_summary = json.loads((source_root / "MANIFEST.source.json").read_text())
+        if stored_summary != summary:
+            raise ValueError(f"{source}: MANIFEST.source.json does not match FROZEN_MANIFEST.json")
+
+        artifact_paths = {
+            "source.jsonl": source_root / "prompts" / "source.jsonl",
+            "frozen.jsonl": source_root / "media" / "frozen.jsonl",
+            "train.jsonl": source_root / "media" / "train.jsonl",
+            "worklist.json": source_root / "work" / "worklist.json",
+        }
+        hashes = summary.get("artifacts_sha256")
+        if not isinstance(hashes, dict) or set(hashes) != set(artifact_paths):
+            raise ValueError(f"{source}: frozen artifact checksum set is incomplete")
+        for artifact_name, artifact_path in artifact_paths.items():
+            _verify_sha256(artifact_path, hashes[artifact_name], f"{source}/{artifact_name}")
+        expected_source_checksum = f"{hashes['source.jsonl']}  source.jsonl\n"
+        if (source_root / "prompts" / "SOURCE.sha256").read_text() != expected_source_checksum:
+            raise ValueError(f"{source}: SOURCE.sha256 does not match source.jsonl")
+
+        frozen_path = artifact_paths["frozen.jsonl"]
+        train_path = artifact_paths["train.jsonl"]
+        frozen = [row for _, row in iter_jsonl(frozen_path)]
+        training = [row for _, row in iter_jsonl(train_path)]
+        frozen_by_id = _indexed_rows(frozen_path, frozen)
+        train_by_id = _indexed_rows(train_path, training)
+        if len(frozen) != int(summary["frozen_rows"]) or len(training) != int(summary["training_rows"]):
+            raise ValueError(f"{source}: row-count mismatch")
+        expected_training_ids = set(frozen_by_id) - validation_ids
+        if set(train_by_id) != expected_training_ids:
+            raise ValueError(f"{source}: train.jsonl is not exactly frozen.jsonl minus validation ids")
+        if any(train_by_id[record_id] != frozen_by_id[record_id] for record_id in train_by_id):
+            raise ValueError(f"{source}: train.jsonl rows differ from their frozen rows")
+
+        spec = config_by_name[source]
+        videos_dir = Path(str(summary["videos_dir"]))
+        expected_provenance = {
+            "videos_dir": str(Path(spec["videos_dir"]).resolve()),
+            "status_jsonl": str(Path(spec["status_jsonl"]).resolve()),
+            "prompts_jsonl": str(Path(spec["prompts_jsonl"]).resolve()),
+        }
+        actual_provenance = {name: str(summary.get(name)) for name in expected_provenance}
+        if actual_provenance != expected_provenance:
+            raise ValueError(f"{source}: source-path provenance does not match frozen config")
         for row in frozen:
-            if not Path(row["raw_video_path"]).is_file():
-                raise FileNotFoundError(row["raw_video_path"])
-    print(f"verified {root}: 64 unique validation ids and no training leakage")
+            record_id = str(row["conditioning_id"])
+            if row.get("schema_version") != SCHEMA_VERSION or row.get("source") != source:
+                raise ValueError(f"{source}/{record_id}: invalid frozen row provenance")
+            if row.get("family") != spec["family"]:
+                raise ValueError(f"{source}/{record_id}: family does not match frozen config")
+            _verify_frozen_video(row, videos_dir)
+            frozen_by_source_and_id[(source, record_id)] = row
+
+        prompt_rows = [row for _, row in iter_jsonl(artifact_paths["source.jsonl"])]
+        expected_prompt_rows = [
+            {"conditioning_id": row["conditioning_id"], "prompt": row["prompt"]}
+            for row in frozen
+        ]
+        if prompt_rows != expected_prompt_rows:
+            raise ValueError(f"{source}: prompts/source.jsonl does not exactly match frozen rows")
+
+        worklist = json.loads(artifact_paths["worklist.json"].read_text())
+        expected_worklist = build_worklist(training, int(worklist["chunk_size"]))
+        expected_worklist.update({
+            "source": source,
+            "train_manifest": str(root / source / "media" / "train.jsonl"),
+            "set_root": str(root / source),
+        })
+        if worklist != expected_worklist:
+            raise ValueError(f"{source}: worklist does not exactly derive from train.jsonl")
+        if summary.get("shape_counts") != distribution(frozen, ("width", "height", "num_frames")):
+            raise ValueError(f"{source}: frozen shape counts do not match frozen.jsonl")
+        exclusions = len(frozen) - len(training)
+        if int(summary["validation_exclusions"]) != exclusions:
+            raise ValueError(f"{source}: validation exclusion count mismatch")
+        validation_exclusions[source] = exclusions
+        total_frozen += len(frozen)
+        total_training += len(training)
+
+    if total_frozen != int(root_manifest.get("frozen_rows", -1)):
+        raise ValueError("FROZEN_MANIFEST.json frozen row count mismatch")
+    if total_training != int(root_manifest.get("training_rows", -1)):
+        raise ValueError("FROZEN_MANIFEST.json training row count mismatch")
+
+    for record_id, validation_row_payload in validation_by_id.items():
+        source = str(validation_row_payload.get("source") or "")
+        frozen_row = frozen_by_source_and_id.get((source, record_id))
+        if frozen_row is None:
+            raise ValueError(f"validation row {source}/{record_id} has no matching frozen row")
+        if validation_row_payload != validation_row(frozen_row):
+            raise ValueError(f"validation row {source}/{record_id} differs from its frozen row")
+
+    actual_heldout = json.loads(heldout_path.read_text())
+    expected_heldout = heldout_payload(validation)
+    if actual_heldout != expected_heldout:
+        raise ValueError("heldout64.json does not exactly derive from the validation manifest")
+    expected_links = {
+        f"{row['source']}__{row['conditioning_id']}.mp4": Path(row["raw_video_path"])
+        for row in validation
+    }
+    videos_root = root / "validation" / "videos"
+    actual_links = {path.name: path for path in videos_root.iterdir()}
+    if set(actual_links) != set(expected_links):
+        raise ValueError("validation/videos does not exactly match the validation manifest")
+    for name, target in expected_links.items():
+        link = actual_links[name]
+        if not link.is_symlink() or link.resolve() != target:
+            raise ValueError(f"{link}: validation video link does not target frozen raw video")
+
+    validation_summary = json.loads((root / "validation" / "manifest.json").read_text())
+    expected_validation_summary = {
+        "schema_version": VALIDATION_SCHEMA_VERSION,
+        "seed": int(root_manifest["seed"]),
+        "rows": 64,
+        "unique_conditioning_ids": 64,
+        "source_counts": dict(sorted(collections.Counter(row["source"] for row in validation).items())),
+        "family_counts": dict(sorted(collections.Counter(row["family"] for row in validation).items())),
+        "training_exclusions_by_source": validation_exclusions,
+    }
+    for name, expected in expected_validation_summary.items():
+        if validation_summary.get(name) != expected:
+            raise ValueError(f"validation/manifest.json field {name} does not match frozen rows")
+
+    if emit_summary:
+        print(f"verified {root}: 64 unique validation ids, immutable artifacts, and raw media stats")
+    return root_manifest
 
 
 def main() -> None:
