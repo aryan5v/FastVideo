@@ -68,7 +68,7 @@ def test_reference_video_encode_keeps_pixels_on_cpu() -> None:
     assert rows[0].shape == (7 * 4 * 4, 4)
 
 
-def test_decode_stage_uses_cpu_output_buffer(monkeypatch) -> None:
+def test_decode_stage_uses_cpu_output_buffer_on_sp_group_leader(monkeypatch) -> None:
     latent_shape = (1, 4, 2, 4, 4)
     latents = torch.randn(latent_shape)
     rows = patchify_video_latents(latents, (1, 1, 1))
@@ -93,6 +93,14 @@ def test_decode_stage_uses_cpu_output_buffer(monkeypatch) -> None:
             observed["output"] = output
             output.fill_(0.25)
 
+    monkeypatch.setattr(minimax_h3_decoding, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(minimax_h3_decoding, "get_sp_group", lambda: SimpleNamespace(is_first_rank=True))
+    # Pin the ownership distinction: a data-parallel shard can lead its SP
+    # group without being global rank zero.
+    monkeypatch.setattr(minimax_h3_decoding,
+                        "get_world_group",
+                        lambda: SimpleNamespace(is_first_rank=False),
+                        raising=False)
     monkeypatch.setattr(minimax_h3_decoding, "get_local_torch_device", lambda: torch.device("cpu"))
     result = MiniMaxH3VideoDecodingStage(VAE(), SimpleNamespace(patch_size=(1, 1, 1))).forward(
         batch,
@@ -114,7 +122,11 @@ def test_decode_stages_skip_vae_on_non_output_rank(monkeypatch) -> None:
             raise AssertionError("non-output ranks must not execute a VAE")
 
     monkeypatch.setattr(minimax_h3_decoding, "model_parallel_is_initialized", lambda: True)
-    monkeypatch.setattr(minimax_h3_decoding, "get_world_group", lambda: SimpleNamespace(is_first_rank=False))
+    monkeypatch.setattr(minimax_h3_decoding, "get_sp_group", lambda: SimpleNamespace(is_first_rank=False))
+    monkeypatch.setattr(minimax_h3_decoding,
+                        "get_world_group",
+                        lambda: SimpleNamespace(is_first_rank=True),
+                        raising=False)
     args = SimpleNamespace(output_type="pil", pin_cpu_memory=False, vae_cpu_offload=True)
 
     video = MiniMaxH3VideoDecodingStage(VAE(), SimpleNamespace()).forward(ForwardBatch(data_type="video"), args)

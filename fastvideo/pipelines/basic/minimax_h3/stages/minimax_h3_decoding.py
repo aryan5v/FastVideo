@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from fastvideo.distributed import get_local_torch_device, get_world_group, model_parallel_is_initialized
+from fastvideo.distributed import get_local_torch_device, get_sp_group, model_parallel_is_initialized
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.models.vaes.minimax_h3_audio import MiniMaxH3AudioVAE
 from fastvideo.models.vaes.minimax_h3_video import AutoencoderKLMiniMaxH3
@@ -57,10 +57,11 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
     @torch.no_grad()
     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
         """Decode H3 video latents into normalized CPU pixels."""
-        if model_parallel_is_initialized() and not get_world_group().is_first_rank:
-            # Distributed executors consume rank 0's ForwardBatch. Keep a
-            # verifier-compatible placeholder on other ranks and avoid
-            # duplicating the full VAE decode and CPU output buffer.
+        if model_parallel_is_initialized() and not get_sp_group().is_first_rank:
+            # Every sequence-parallel group produces one sample. Decode on
+            # that group's leader: ordinary inference still decodes once,
+            # while data-parallel validation retains each group's sample.
+            # Keep a verifier-compatible placeholder on the other SP ranks.
             batch.output = torch.empty((0, 3, 0, 0, 0), device="cpu", dtype=torch.float32)
             return batch
 
@@ -128,7 +129,7 @@ class MiniMaxH3AudioDecodingStage(PipelineStage):
     @torch.no_grad()
     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
         """Decode H3 audio latents into a stereo CPU waveform."""
-        if model_parallel_is_initialized() and not get_world_group().is_first_rank:
+        if model_parallel_is_initialized() and not get_sp_group().is_first_rank:
             batch.extra["audio"] = torch.empty((0, 2), device="cpu", dtype=torch.float32)
             batch.extra["audio_sample_rate"] = self.audio_vae.sampling_rate
             self._clear_runtime(batch)
