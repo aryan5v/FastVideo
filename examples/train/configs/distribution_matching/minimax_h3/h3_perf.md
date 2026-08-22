@@ -2,15 +2,16 @@
 
 This is a dated results ledger. Sections 1-4 and historical section 8 preserve the measurements
 through 2026-08-21 at their row-local SHAs; section 5 is the job-2666 merged-preview baseline,
-section 6 is the current 5-second matched-serving refresh, and section 7 is the matched 5/10/15-
-second T2VA and Ref2VA duration grid. Unless a row says otherwise, the
-FastVideo runs use the lustre venv (torch 2.12.0+cu130), driver 580.82.07, synth64 prompt 0, seed
+section 6 is the current 5-second matched-serving and multi-node-launcher refresh, and section 7
+is the 5/10/15-second T2VA and Ref2VA duration grid with row-local input contracts. Unless a row
+says otherwise, FastVideo runs use the lustre venv (torch 2.12.0+cu130), driver 580.82.07,
+synth64 prompt 0, seed
 1000, warmup excluded, and 2-3 timed repeats. "FastH3" = the 4-forward DMD2 student (v8 data-free
 step-1400 preview export) with VSA @0.9; it does not mean the live v10 training run. Raw artifacts:
 `/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/`
 `{sm100a_e2e,sp8,ref2va_grid,ref2va_duration_grid_20260822,vsa64bench,`
 `preview_merged_20260822,h3_vllm_match_20260822,h3_vllm_match_varlen_99cd_20260822,`
-`h3_duration_grid_20260822}` and `vllm_omni_bench/`; master index
+`h3_duration_grid_20260822,public_sp8_54e5_20260822}` and `vllm_omni_bench/`; master index
 `~/h3-results-index.md`.
 
 ## 1. T2VA @ 5s (768x1344, 124 frames, S=38,224)
@@ -38,8 +39,9 @@ step-1400 preview export) with VSA @0.9; it does not mean the live v10 training 
   executor at equal world size (7.26→10.44 s); denoise unaffected; prime suspect torchrun's
   `OMP_NUM_THREADS=1` default.
 - Sharding note: multi-node inference requires the external-launcher path
-  (`FASTVIDEO_EXTERNAL_LAUNCHER=1`, torchrun; byte-identical gate vs stock executor; unmerged
-  worktree commits `c65733463`+`ac24e7e78`).
+  (`FASTVIDEO_EXTERNAL_LAUNCHER=1`, torchrun). The historical row used the unmerged worktree
+  commits `c65733463`+`ac24e7e78`; the clean public extraction and current parity envelope are
+  PR #1746 and job 3026 in section 6.
 
 ### Cross-stack: vllm-omni (same workload, FA4 verified, their commit 73b623f2)
 
@@ -117,16 +119,16 @@ and `ab3a8677...` (transformer safetensor index).
 
 All nine H3 PR merge commits are ancestors of the measured HEAD:
 
-| PR / merge SHA | contribution | disposition in job 2666 |
+| PR and merge SHA | contribution | disposition in job 2666 |
 |---|---|---|
 | #1362 `fca45bc8e` | uint8 conversion before post-decode D2H | active in every leg |
-| #1703 `e0a3db565` | streaming / lower-peak H3 VAE | active in every leg |
+| #1703 `e0a3db565` | streaming, lower-peak H3 VAE | active in every leg |
 | #1711 `0462e1b0e` | stop Qwen3-VL construction after the last consumed layer | active in every leg |
 | #1719 `907f2100e` | Blackwell sm100a block-sparse forward | active through the asserted kernel prefix |
 | #1730 `56d4a6074` | corrected Triton sparse backward scaling | present, but inference-inert |
-| #1731 `6d6a10be7` | preview example plus tile-64 / sm100a H3 route | active in every leg |
+| #1731 `6d6a10be7` | preview example plus tile-64 sm100a H3 route | active in every leg |
 | #1732 `bcffa4026` | slim conditioner plus optional serialized FP8 | slim path active; FP8 deliberately off |
-| #1734 `2f3d40740` | VAE dispatch/compile/NVTX | defaults in all legs; decoder compile on in p1/p2 |
+| #1734 `2f3d40740` | VAE dispatch, compile, and NVTX | defaults in all legs; decoder compile on in p1/p2 |
 | #1735 `73dd105f3` | opt-in Sol-Engine H3 fusions | p2 only; disclosed non-parity |
 
 Method: 768x1344x124, the same synth64 prompt 0 repeated three times, fixed timed seed 1000,
@@ -151,7 +153,7 @@ invalid (shadowed kernel package; then a non-fail-fast preflight) and contribute
 
 ### Timed stage split (seconds, mean of 3)
 
-| shape / leg | text | video decode | audio decode | post-decode | save |
+| shape and leg | text | video decode | audio decode | post-decode | save |
 |---|---:|---:|---:|---:|---:|
 | 1x p0 | 0.56 | 8.69 | 0.18 | 0.47 | 0.35 |
 | 1x p1 | 0.56 | 6.10 | 0.19 | 0.32 | 0.35 |
@@ -200,7 +202,7 @@ and excluded-run provenance in `INVALID_RUNS.md`. Harness SHA `d85b5cc6...`; pro
 This section supersedes the serving headlines in sections 1 and 5. Most attribution rows below
 were measured on the clean `integration/h3-vllm-parity-20260822` tree at exact SHA
 `99cd355a2452ce040591fe54ef340d192e26fe48`; it remains the historical timing/attribution
-authority, while the exact public-head compositions in the final subsection are the current
+authority, while the exact public-head compositions in the final subsections are the current
 public-serving acceptance authority. The `99cd355a` merged-main base is
 `2f3d4074064e4d86f99dc784ebbaa296e6f5925f`, so all nine merged H3 PRs listed in section 5 are
 included. The integration tree additionally carries regional inference compile, temporal-parallel
@@ -255,7 +257,7 @@ Leg definitions used below:
 | f1 | eager VSA | compiled | replicated | off | strict |
 | f2 | eager VSA | eager | temporal parallel | off | strict |
 | f3 | eager VSA | compiled | temporal parallel | off | strict |
-| f4 | eager VSA | compiled | temporal parallel | on | report-only / non-parity |
+| f4 | eager VSA | compiled | temporal parallel | on | report-only (non-parity) |
 
 Temporal VAE parallelism is a one-rank no-op in the 1x d3/d4/d5/d6 and f2/f3/f4 rows. The d1-d6
 rows were run in the fixed-length attribution matrix; only d0/d4 were rerun on the final packed
@@ -267,12 +269,12 @@ Seconds are arithmetic means of three timed requests; the parenthesized interval
 range. The current FastVideo d0 receipts are jobs 2708_0/2708_1, d4 is jobs 2701_0/2699_1, and
 the matched vllm-omni profiler rebench is job 2657.
 
-| implementation / leg | shape | e2e s | denoise s | s/fwd | video decode s | peak GiB |
+| implementation and leg | shape | e2e s | denoise s | seconds per forward | video decode s | peak GiB |
 |---|---|---:|---:|---:|---:|---:|
 | vllm-omni, regional + serial VAE | 1x | 136.036 (135.944-136.160) | 127.767 | 2.607 | 6.320 | 128.61 |
 | FastVideo d0, packed eager | 1x | 161.064 (160.887-161.391) | 152.105 | 3.104 | 7.598 | 77.58 |
 | **FastVideo d4, packed regional + VAE compile** | **1x** | **132.468 (132.213-132.686)** | **125.750** | **2.566** | **5.429** | **72.98** |
-| vllm-omni, regional + USP/TP/tile VAE | SP-4 | 40.748 (40.615-40.825) | 37.222 | 0.760 | 1.733 | 93.32 |
+| vllm-omni, regional + USP, TP, tile VAE | SP-4 | 40.748 (40.615-40.825) | 37.222 | 0.760 | 1.733 | 93.32 |
 | FastVideo d0, packed eager | SP-4 | 59.083 (58.576-60.047) | 43.673 | 0.891 | 13.614 | 77.59 |
 | **FastVideo d4, packed regional + parallel VAE** | **SP-4** | **40.587 (40.440-40.752)** | **37.131** | **0.758** | **2.013** | **73.92** |
 
@@ -286,17 +288,17 @@ FA4 invocation change floating-point reduction order.
 
 Job 2675 (`COMPLETED`, fail=0) ran the full fixed-length matrix at exact SHA
 `3a8f463d4406e1f6feddbd4f3a43b4d14f172645`. Every cell used the same 49-forward contract and
-three timed repeats. Values are `e2e / denoise / video-decode` seconds:
+three timed repeats.
 
-| leg | 1x | SP-4 | parity evidence against d0 |
-|---|---:|---:|---|
-| d0 | 184.292 / 174.863 / 8.113 | 65.282 / 53.426 / 9.749 | reference |
-| d1 | 181.723 / 174.969 / 5.579 | 60.587 / 53.262 / 5.518 | strict PASS: mean/min MS-SSIM 0.988096/0.977004 (1x), 0.988234/0.980846 (SP-4) |
-| d2 | 157.036 / 147.078 / 8.641 | 54.130 / 44.800 / 7.792 | report-only (regional compile) |
-| d3 | 183.063 / 174.734 / 7.033 | 57.612 / 53.322 / 2.992 | exact: MS-SSIM 1.0 |
-| d4 | 153.409 / 147.078 / 5.121 | 47.944 / 44.734 / 2.038 | report-only (regional compile) |
-| d5 | 155.993 / 150.061 / 4.715 | 48.654 / 45.408 / 2.045 | report-only (regional + fusions) |
-| d6 | 157.532 / 150.960 / 5.328 | 51.806 / 48.556 / 2.087 | report-only (eager fusions) |
+| leg | 1x e2e, s | 1x denoise, s | 1x video decode, s | SP-4 e2e, s | SP-4 denoise, s | SP-4 video decode, s | parity evidence against d0 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| d0 | 184.292 | 174.863 | 8.113 | 65.282 | 53.426 | 9.749 | reference |
+| d1 | 181.723 | 174.969 | 5.579 | 60.587 | 53.262 | 5.518 | strict PASS: 1x mean 0.988096, minimum 0.977004; SP-4 mean 0.988234, minimum 0.980846 |
+| d2 | 157.036 | 147.078 | 8.641 | 54.130 | 44.800 | 7.792 | report-only (regional compile) |
+| d3 | 183.063 | 174.734 | 7.033 | 57.612 | 53.322 | 2.992 | exact: MS-SSIM 1.0 |
+| d4 | 153.409 | 147.078 | 5.121 | 47.944 | 44.734 | 2.038 | report-only (regional compile) |
+| d5 | 155.993 | 150.061 | 4.715 | 48.654 | 45.408 | 2.045 | report-only (regional + fusions) |
+| d6 | 157.532 | 150.960 | 5.328 | 51.806 | 48.556 | 2.087 | report-only (eager fusions) |
 
 Across the fixed-run and final packed-run trees, d0 1x fell by 12.60% end-to-end / 13.01% denoise
 and d4 1x by 13.65% / 14.50%. The observed SP-4 changes were 9.50% / 18.26% for d0 and 15.34% /
@@ -308,10 +310,10 @@ for the FA4 invocation itself.
 The direct FA4 API A/B in job 2695 isolates the kernel call at the exact `S=38224`, bf16, D=128
 shape:
 
-| heads | fixed-length | packed-varlen | latency change | fixed-vs-packed max / mean abs error |
-|---:|---:|---:|---:|---:|
-| 56 | 36.873 ms | 28.008 ms | -24.0% (1.317x) | 2.4414e-4 / 1.7990e-6 |
-| 14 | 9.236 ms | 6.386 ms | -30.9% (1.446x) | 2.4414e-4 / 1.7991e-6 |
+| heads | fixed-length | packed-varlen | latency change | maximum abs error | mean abs error |
+|---:|---:|---:|---:|---:|---:|
+| 56 | 36.873 ms | 28.008 ms | -24.0% (1.317x) | 2.4414e-4 | 1.7990e-6 |
+| 14 | 9.236 ms | 6.386 ms | -30.9% (1.446x) | 2.4414e-4 | 1.7991e-6 |
 
 The same packed H=56 call in the older vllm-omni environment was 28.106 ms, ruling out the FA4
 package version as the material remaining difference.
@@ -340,18 +342,18 @@ acceptance decision is made.
 Jobs 2707_2/2707_3 completed with fail=0 at exact SHA `99cd355a`. All rows use VSA@0.9 tile-64
 sm100a; no row uses regional DiT compile. Seconds and memory are defined as in the base table.
 
-| leg | shape | e2e s | denoise s | s/fwd | video decode s | peak GiB | current parity status |
-|---|---|---:|---:|---:|---:|---:|---|
-| f0 eager | 1x | 20.754 (20.111-21.705) | 10.716 | 2.679 | 7.530 | 81.20 | reference |
-| f1 + VAE compile | 1x | 18.662 (17.723-19.713) | 10.718 | 2.680 | 5.788 | 76.59 | PASS, mean/min 0.985239/0.975648 |
-| f2 + parallel VAE (1x no-op) | 1x | 19.890 (19.756-20.057) | 10.706 | 2.676 | 7.519 | 81.20 | exact, 1.0/1.0 |
-| f3 + VAE compile + parallel VAE | 1x | 17.779 (17.171-18.747) | 10.695 | 2.674 | 5.391 | 76.59 | PASS, mean/min 0.985227/0.976443 |
-| f4 + H3 fusions | 1x | 16.488 (16.053-16.716) | 8.686 | 2.171 | 6.110 | 76.59 | report-only / non-parity |
-| f0 eager | SP-4 | 19.618 (18.523-21.558) | 3.473 | 0.868 | 12.082 | 81.20 | reference |
-| f1 + VAE compile | SP-4 | 13.696 (12.705-14.375) | 3.462 | 0.866 | 7.936 | 76.59 | PASS, mean/min 0.985101/0.976192 |
-| f2 + parallel VAE | SP-4 | 8.371 (7.984-8.966) | 3.476 | 0.869 | 2.780 | 82.05 | exact, 1.0/1.0 |
-| **f3 + VAE compile + parallel VAE** | **SP-4** | **7.318 (7.207-7.396)** | **3.463** | **0.866** | **1.997** | **77.54** | **PASS, mean/min 0.985105/0.975796** |
-| f4 + H3 fusions | SP-4 | **6.910 (6.763-7.088)** | **2.959** | **0.740** | 2.077 | 77.54 | report-only / non-parity |
+| leg | shape | e2e s | denoise s | s/fwd | video decode s | peak GiB | parity mean | parity minimum | status |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| f0 eager | 1x | 20.754 (20.111-21.705) | 10.716 | 2.679 | 7.530 | 81.20 | — | — | reference |
+| f1 + VAE compile | 1x | 18.662 (17.723-19.713) | 10.718 | 2.680 | 5.788 | 76.59 | 0.985239 | 0.975648 | PASS |
+| f2 + parallel VAE (1x no-op) | 1x | 19.890 (19.756-20.057) | 10.706 | 2.676 | 7.519 | 81.20 | 1.0 | 1.0 | exact |
+| f3 + VAE compile + parallel VAE | 1x | 17.779 (17.171-18.747) | 10.695 | 2.674 | 5.391 | 76.59 | 0.985227 | 0.976443 | PASS |
+| f4 + H3 fusions | 1x | 16.488 (16.053-16.716) | 8.686 | 2.171 | 6.110 | 76.59 | 0.518061 | 0.391710 | report-only (non-parity) |
+| f0 eager | SP-4 | 19.618 (18.523-21.558) | 3.473 | 0.868 | 12.082 | 81.20 | — | — | reference |
+| f1 + VAE compile | SP-4 | 13.696 (12.705-14.375) | 3.462 | 0.866 | 7.936 | 76.59 | 0.985101 | 0.976192 | PASS |
+| f2 + parallel VAE | SP-4 | 8.371 (7.984-8.966) | 3.476 | 0.869 | 2.780 | 82.05 | 1.0 | 1.0 | exact |
+| **f3 + VAE compile + parallel VAE** | **SP-4** | **7.318 (7.207-7.396)** | **3.463** | **0.866** | **1.997** | **77.54** | **0.985105** | **0.975796** | **PASS** |
+| f4 + H3 fusions | SP-4 | **6.910 (6.763-7.088)** | **2.959** | **0.740** | 2.077 | 77.54 | 0.500509 | 0.358064 | report-only (non-parity) |
 
 The current f3/f4 timing outputs received `_1.mp4` suffixes because their directories retained
 files from an earlier exact-head run. The job-2707 parity tail hard-coded unsuffixed filenames;
@@ -401,10 +403,10 @@ DiT, fusions off, and temporal-parallel VAE decode at SP-4. It requested 50 sche
 the scheduler contract expects 49 forwards; jobs 3008/3009 did **not** instrument a runtime
 forward trace, so this evidence must not be relabeled as 49 observed calls.
 
-| exact composition / route | GPUs | e2e median (range), s | denoise median (range), s | video decode median (range), s | peak MiB | vllm-omni e2e / denoise delta |
-|---|---|---:|---:|---:|---:|---:|
-| `e0bb6a5`, base d4 | 1x | **134.378 (134.234-134.451)** | **126.504 (126.415-126.660)** | **6.313 (6.047-6.342)** | 74726 | -1.20% / -0.97% |
-| `e0bb6a5`, base d4 | SP-4 | **39.946 (39.930-39.960)** | **36.904 (36.855-36.910)** | **1.831 (1.812-1.850)** | 75696 | -2.10% / -0.86% |
+| exact composition and route | GPUs | e2e median (range), s | denoise median (range), s | video decode median (range), s | peak MiB | vllm-omni e2e delta | vllm-omni denoise delta |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `e0bb6a5`, base d4 | 1x | **134.378 (134.234-134.451)** | **126.504 (126.415-126.660)** | **6.313 (6.047-6.342)** | 74726 | -1.20% | -0.97% |
+| `e0bb6a5`, base d4 | SP-4 | **39.946 (39.930-39.960)** | **36.904 (36.855-36.910)** | **1.831 (1.812-1.850)** | 75696 | -2.10% | -0.86% |
 
 Negative deltas mean FastVideo is faster. The base acceptance therefore reproduces the vllm-omni
 match on the public extraction. Against the historical `99cd355a` rows, `e0bb6a5` is 1.44% /
@@ -424,12 +426,12 @@ forwards per request, valid 124-frame media, and byte-identical repeats within t
 mean/min MS-SSIM against the same-composition f0 eager output; f3 has a 0.95 minimum floor, while
 f4 remains an ungated non-parity speed ceiling.
 
-| exact composition / leg | GPUs | e2e median (range), s | denoise median (range), s | parity mean / minimum | status | receipt SHA256 |
-|---|---|---:|---:|---:|---|---|
-| `bbc8d35`, f3 strict | 1x | **17.947 (17.887-18.407)** | **10.696 (10.696-10.715)** | 0.985266 / 0.976376 | PASS | `ad6ca5dab108...` |
-| `bbc8d35`, f4 all features | 1x | **16.228 (16.202-16.385)** | **8.683 (8.663-8.703)** | 0.518112 / 0.391864 | report-only | `0c0bf53e0aad...` |
-| `bbc8d35`, f3 strict | SP-4 | **6.562 (6.560-7.569)** | **3.493 (3.416-3.518)** | 0.985102 / 0.975800 | PASS | `d799c6aa774e...` |
-| `bbc8d35`, f4 all features | SP-4 | **6.107 (5.829-6.480)** | **2.974 (2.842-2.991)** | 0.500538 / 0.358231 | report-only | `0a02d025660a...` |
+| exact composition and leg | GPUs | e2e median (range), s | denoise median (range), s | parity mean | parity minimum | status | receipt SHA256 |
+|---|---|---:|---:|---:|---:|---|---|
+| `bbc8d35`, f3 strict | 1x | **17.947 (17.887-18.407)** | **10.696 (10.696-10.715)** | 0.985266 | 0.976376 | PASS | `ad6ca5dab108...` |
+| `bbc8d35`, f4 all features | 1x | **16.228 (16.202-16.385)** | **8.683 (8.663-8.703)** | 0.518112 | 0.391864 | report-only | `0c0bf53e0aad...` |
+| `bbc8d35`, f3 strict | SP-4 | **6.562 (6.560-7.569)** | **3.493 (3.416-3.518)** | 0.985102 | 0.975800 | PASS | `d799c6aa774e...` |
+| `bbc8d35`, f4 all features | SP-4 | **6.107 (5.829-6.480)** | **2.974 (2.842-2.991)** | 0.500538 | 0.358231 | report-only | `0a02d025660a...` |
 
 The row receipts live under
 `fasth3_preview_acceptance_1744_1745_20260822/runs/fasth3/{1x,sp4}/`
@@ -444,19 +446,88 @@ The adjacent `parity_vs_eager.json` files have SHA256s, in the same order,
 `6c3040671ea61e49bbc3da4128e31c29eeb4e980d6c7e721a37ba6723b587cde`, and
 `6925bc9c82eef15959f9647bac4051dab2df73c487c64afaee53070c65e6b8b6`.
 
+### Public external launcher and genuine two-node SP-8 acceptance
+
+[PR #1746](https://github.com/hao-ai-lab/FastVideo/pull/1746), `[feat] Add
+external-launcher executor for multi-node inference`, is open at exact head
+`accc5a4208bf6f78a4e70fff2f188fb33c3cd697`; GitHub reports `OPEN`, `MERGEABLE`, and
+`REVIEW_REQUIRED`, with merge state `BLOCKED` and check requirements outstanding at this
+refresh. It adds the opt-in `env://` executor used by `torchrun`/`srun` across hosts, binds every
+process to its local
+device, and keeps output ownership on rank 0. The stock multiprocess executor remains the
+default. The PR contains inference runtime, tests, and inference documentation only: no training
+path or configuration.
+
+Slurm job 3026 (`COMPLETED 0:0`, 40m45s) is the terminal GPU gate for that extraction. It ran on
+two real four-GPU GB200 hosts, `hpc-rack-3-3` and `hpc-rack-3-2`, not eight ranks on one host.
+The exact clean execution tree was
+`20d026fd27afc0b3e54bd7cf4be63dfcdfc9386c`: public main `d3cff517c`, the reviewed serving
+contents represented by #1742-#1745, exact PR-head ancestor `accc5a420`, and a logging-only
+follow-up. Therefore the multi-node result proves #1746 in the intended public-serving
+composition; it is not mislabeled as a benchmark of the isolated PR head.
+
+All cells used Preview F3 strict at 768x1344x124, prompt 0, seed 1000, five scheduler points,
+exactly four DiT forwards, one excluded seed-999 warmup, and two saved timed repeats. The DiT
+remained eager VSA@0.9 with tile-64 sm100a CUDA; temporal-parallel VAE decode used gather across
+all ranks; H3 fusions, PR #1739 packed SP, and PR
+#1740 Ulysses all-to-all were explicitly off. `VAE decoder` is the only route difference between
+the two SP-8 rows. Medians below are medians of the two samples, and the broad inter-node denoise
+ranges are retained rather than smoothed away.
+
+| executor | GPUs | hosts | VAE decoder | e2e median, s | e2e range, s | denoise median, s | denoise range, s | video decode median, s | peak MiB |
+|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| stock multiprocess | 4 | 1 | compiled | 7.320 | 7.058-7.581 | 3.384 | 3.383-3.384 | 2.329 | 79399 |
+| external launcher | 4 | 1 | compiled | 10.400 | 10.146-10.654 | 3.979 | 3.574-4.384 | 4.446 | 79397 |
+| external launcher | 8 | 2 | eager | 8.742 | 8.246-9.238 | 2.913 | 2.347-3.480 | 3.784 | 84464 |
+| external launcher | 8 | 2 | compiled | **8.199** | 8.063-8.334 | **2.382** | 1.936-2.828 | **3.763** | 79808 |
+
+The SP-4 launcher comparison passed its strict gate against stock multiprocess output: mean and
+minimum frame MS-SSIM 0.988245 and 0.976679, mean and maximum uint8 absolute error 1.6176 and
+63, and decoded audio exact. The SP-8 compiled-decoder row passed against the SP-8 eager-decoder
+golden at mean and minimum frame MS-SSIM 0.985431 and 0.974849, mean and maximum uint8 absolute
+error 2.1613 and 71, and exact decoded audio.
+Both relationships used floors of 0.98 mean and 0.95 minimum MS-SSIM plus ceilings of 3 mean and
+96 maximum uint8 error. Each cell's two timed MP4s are byte-identical within the cell; this proves
+repeat determinism, not cross-route bit identity.
+
+Route and topology checks were fail-fast. Every external row emitted rank/device receipts for
+exactly ranks 0-3 or 0-7; both SP-8 rows showed local ranks 0-3 on each of the two hosts. Every
+rank recorded 12 forward traces (four DiT forwards for the warmup and each of two timed
+requests). The logs contain one sm100a selection and three VAE gathers per host, one decoder-
+compile marker per host only in compiled cells, and zero Triton fallback markers. All outputs
+passed the exact 124-frame H.264 and stereo 32-kHz AAC contract. Before timing, the exact tree
+passed 108 focused worker, VSA-route, parallel-VAE, and VAE-compile tests in 17.93 seconds.
+
+Authoritative receipts are under `vsa_gate/public_sp8_54e5_20260822/runs/gate_3026/`:
+
+- result JSON SHA256s for stock SP-4, external SP-4, external SP-8 eager, and external SP-8
+  compiled are `4af8a03c9bcc1f026a2dc1c3f3ba9645309216f60d4d54960bffd97e4fa484ee`,
+  `a9f3382ce8ff42c191fe126893b1fb5d3ab15d579212ca17570e46a7b8ac817b`,
+  `ca19365ff99097c653710a66bf329dd9504fb354ef01de52533d6cc6346cca8f`, and
+  `10153cd63eb11eb2a985aae15805492c45e6016b7e6ef47ae898aa2b64941da1`;
+- SP-4 launcher and SP-8 decoder-compile parity JSON SHA256s are
+  `4c11c49a3d7e3231ebc725b9eeda0439d00de4ef7e4dfd38587f28586332ca22` and
+  `88e0eda21e0f53994db6c3ae1488a5090454c9faf213ea2653402a947f527bbc`;
+- the two-node runtime-provenance manifest SHA256 is
+  `04539bc77bf95e74377995083738b74270ae046f2987a43cf389300f02081070`; the checked 60-file
+  model manifest SHA256 is `7950a27656bf4ab5390d638ae55ee13622f78f09bc45065632a4869dfe9bfa62`;
+- the terminal gate-log SHA256 is `d7f335e17ffaf808deec2a1df6b18ac49ae7fc2548efe52c623a5d89ad92ee39`,
+  and the 108-test log SHA256 is `e740170934aae5f6687dbae5805e91c66c4577c4c9d6e502c6f34cd9c0aa9f8c`.
+
 ## 7. Matched duration grids: T2VA and Ref2VA (2026-08-22)
 
-This refresh extends the same prompt/seed/geometry contract to valid H3 frame counts 124, 243,
-and 345: nominal 5/10/15-second buckets with exact encoded durations 5.167/10.125/14.375 seconds
-at 24 fps. Every successful row is the median of three timed requests after a shape-specific
-warmup; ranges are the minimum and maximum timed requests. Server boot, model load, and warmup
-compile are excluded.
+This refresh extends H3 duration benchmarking to valid frame counts 124, 243, and 345: nominal
+5/10/15-second buckets with exact encoded durations 5.167/10.125/14.375 seconds at 24 fps.
+Prompt/reference identities are contract-local and disclosed before each table; rows from
+different input hashes are not treated as matched. Every successful row is the median of three
+timed requests after a shape-specific warmup; ranges are the minimum and maximum timed requests.
+Server boot, model load, and warmup compile are excluded.
 
 `num_inference_steps` means scheduler points in both implementations, not model calls. Base H3
 uses 50 points and makes exactly **49 DiT forwards**; FastH3/F4 and the explicitly labeled
 FastVideo Ref2VA proxy use five points and make exactly **four DiT forwards**. Timed vllm-omni
-logs finish at `49/49`; FastVideo activation traces record transformer step indices
-`[0,1,2,3]` for every request.
+logs finish at `49/49`; FastVideo traces record `[0,1,2,3]` for FastH3/proxy requests and
+`[0,...,48]` for the official-base d4 requests that instrumented the 49-forward path.
 
 ### T2VA: vllm-omni base H3, FastVideo base d4, and FastH3 F4
 
@@ -466,20 +537,20 @@ regional DiT compile path. FastH3 F4 uses eager sparse DiT, VSA@0.9 tile-64, com
 decoder, temporal-parallel VAE at SP-4, and H3 fusions. F4 is the all-compatible-features speed
 ceiling and remains **report-only/non-parity**; its sparse DiT is not compiled.
 
-| system / profile | GPUs | target / frames | points / fwds | attention route | e2e median (range), s | denoise median (range), s | peak MiB | job |
-|---|---|---:|---:|---|---:|---:|---:|---|
-| vllm-omni base | 1x | 5s / 124 | 50 / 49 | dense CuTe FA4 | 136.003 (135.944-136.160) | 127.744 (127.689-127.868) | 131698 | 2657 |
-| FastH3 F4 | 1x | 5s / 124 | 5 / 4 | VSA64 sm100a CUDA | 16.694 (16.053-16.716) | 8.664 (8.608-8.785) | 78424 | 2707_2 |
-| vllm-omni base | SP-4 | 5s / 124 | 50 / 49 | dense CuTe FA4 | 40.804 (40.615-40.825) | 37.222 (37.220-37.224) | 95564 | 2657 |
-| FastH3 F4 | SP-4 | 5s / 124 | 5 / 4 | VSA64 sm100a CUDA | 6.879 (6.763-7.088) | 2.923 (2.917-3.039) | 79397 | 2707_3 |
-| vllm-omni base | 1x | 10s / 243 | 50 / 49 | dense CuTe FA4 | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | 139572 | 2890_0 |
-| FastH3 F4 | 1x | 10s / 243 | 5 / 4 | VSA64 sm100a CUDA | 31.116 (30.985-31.305) | 19.328 (19.198-19.340) | 86968 | 2885_0 |
-| vllm-omni base | SP-4 | 10s / 243 | 50 / 49 | dense CuTe FA4 | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) | 101036 | 2890_1 |
-| FastH3 F4 | SP-4 | 10s / 243 | 5 / 4 | VSA64 sm100a CUDA | 12.045 (10.804-15.219) | 5.786 (5.782-5.883) | 79438 | 2885_1 |
-| vllm-omni base | 1x | 15s / 345 | 50 / 49 | runtime failure | **N/A** | **N/A** | **N/A** | 2890_0, 2961, 2962 |
-| FastH3 F4 | 1x | 15s / 345 | 5 / 4 | VSA64 corrected sm100a CUDA | 47.212 (46.729-47.978) | 29.699 (29.688-29.716) | 96037 | 2908_0 |
-| vllm-omni base | SP-4 | 15s / 345 | 50 / 49 | dense CuTe FA4 | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) | 113266 | 2890_1 |
-| FastH3 F4 | SP-4 | 15s / 345 | 5 / 4 | VSA64 corrected sm100a CUDA | 15.468 (15.379-15.557) | 9.107 (9.098-9.119) | 79615 | 2908_1 |
+| system and profile | GPUs | target, s | frames | scheduler points | observed forwards | attention route | e2e median (range), s | denoise median (range), s | peak MiB | job |
+|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|
+| vllm-omni base | 1x | 5 | 124 | 50 | 49 | dense CuTe FA4 | 136.003 (135.944-136.160) | 127.744 (127.689-127.868) | 131698 | 2657 |
+| FastH3 F4 | 1x | 5 | 124 | 5 | 4 | VSA64 sm100a CUDA | 16.694 (16.053-16.716) | 8.664 (8.608-8.785) | 78424 | 2707_2 |
+| vllm-omni base | SP-4 | 5 | 124 | 50 | 49 | dense CuTe FA4 | 40.804 (40.615-40.825) | 37.222 (37.220-37.224) | 95564 | 2657 |
+| FastH3 F4 | SP-4 | 5 | 124 | 5 | 4 | VSA64 sm100a CUDA | 6.879 (6.763-7.088) | 2.923 (2.917-3.039) | 79397 | 2707_3 |
+| vllm-omni base | 1x | 10 | 243 | 50 | 49 | dense CuTe FA4 | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | 139572 | 2890_0 |
+| FastH3 F4 | 1x | 10 | 243 | 5 | 4 | VSA64 sm100a CUDA | 31.116 (30.985-31.305) | 19.328 (19.198-19.340) | 86968 | 2885_0 |
+| vllm-omni base | SP-4 | 10 | 243 | 50 | 49 | dense CuTe FA4 | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) | 101036 | 2890_1 |
+| FastH3 F4 | SP-4 | 10 | 243 | 5 | 4 | VSA64 sm100a CUDA | 12.045 (10.804-15.219) | 5.786 (5.782-5.883) | 79438 | 2885_1 |
+| vllm-omni base | 1x | 15 | 345 | 50 | 49 | runtime failure | **N/A** | **N/A** | **N/A** | 2890_0, 2961, 2962 |
+| FastH3 F4 | 1x | 15 | 345 | 5 | 4 | VSA64 corrected sm100a CUDA | 47.212 (46.729-47.978) | 29.699 (29.688-29.716) | 96037 | 2908_0 |
+| vllm-omni base | SP-4 | 15 | 345 | 50 | 49 | dense CuTe FA4 | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) | 113266 | 2890_1 |
+| FastH3 F4 | SP-4 | 15 | 345 | 5 | 4 | VSA64 corrected sm100a CUDA | 15.468 (15.379-15.557) | 9.107 (9.098-9.119) | 79615 | 2908_1 |
 
 vllm-omni 345f/1x is deliberately N/A, not a one-sample timing. Job 2890_0 completed one
 intentionally unsaved warmup (703.305 s e2e, 678.364 s denoise, 19.634 s decode, 153654 MiB,
@@ -511,10 +582,10 @@ grid with exactly **49 observed DiT forwards**. Values are medians of three save
 one excluded shape-specific warmup; parentheses are the timed-request range. The three-copy
 FastVideo prompt JSON has SHA256 `b1f21b1832f38af42fb631a243da8803c00cf48baa4aa42ce3cc448fb9008b0b`.
 
-| target / frames | FastVideo d4 1x e2e, s | FastVideo d4 1x denoise, s | vllm-omni 1x e2e, s | vllm-omni 1x denoise, s | FastVideo d4 SP-4 e2e, s | FastVideo d4 SP-4 denoise, s | vllm-omni SP-4 e2e, s | vllm-omni SP-4 denoise, s |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10s / 243f | **377.372 (377.217-378.109)** | **366.493 (366.340-366.508)** | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | **108.714 (108.418-108.811)** | **103.379 (103.275-103.501)** | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) |
-| 15s / 345f | **678.690 (678.338-679.394)** | **659.523 (659.493-659.570)** | **N/A** | **N/A** | **193.068 (192.838-193.429)** | **186.429 (186.262-186.472)** | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) |
+| target, s | frames | FastVideo d4 1x e2e, s | FastVideo d4 1x denoise, s | vllm-omni 1x e2e, s | vllm-omni 1x denoise, s | FastVideo d4 SP-4 e2e, s | FastVideo d4 SP-4 denoise, s | vllm-omni SP-4 e2e, s | vllm-omni SP-4 denoise, s |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 243 | **377.372 (377.217-378.109)** | **366.493 (366.340-366.508)** | 388.952 (388.799-389.511) | 371.753 (371.724-371.762) | **108.714 (108.418-108.811)** | **103.379 (103.275-103.501)** | 111.778 (111.306-111.989) | 104.433 (104.432-104.534) |
+| 15 | 345 | **678.690 (678.338-679.394)** | **659.523 (659.493-659.570)** | **N/A** | **N/A** | **193.068 (192.838-193.429)** | **186.429 (186.262-186.472)** | 200.308 (200.302-200.557) | 190.059 (189.862-190.192) |
 
 The 1x and SP-4 results stay in separate columns because SP-4 uses four-rank temporal-parallel
 VAE decode while the same flag is a one-rank no-op at 1x. The shared d4 profile is a replicated
@@ -522,10 +593,10 @@ DiT with packed-varlen FA4, regional `torch.compile(fullgraph=True)` on all 52 D
 compiled VAE decoder, and H3 fusions off. It remains **report-only/non-parity** because regional
 compile and packed FA4 change floating-point reduction order.
 
-| target / frames | 1x job | 1x peak MiB | 1x repeat MP4 SHA256 | SP-4 job | SP-4 peak MiB | SP-4 repeat MP4 SHA256 |
-|---:|---:|---:|---|---:|---:|---|
-| 10s / 243f | 2964_0 | 74767 | `24a57c8181d6...` | 2963_0 | 75736 | `cc38c1e9c1fa...` |
-| 15s / 345f | 2964_1 | 77771 | `b4665badd9a7...` | 2963_1 | 75770 | `79ad65b9050b...` |
+| target, s | frames | 1x job | 1x peak MiB | 1x repeat MP4 SHA256 | SP-4 job | SP-4 peak MiB | SP-4 repeat MP4 SHA256 |
+|---:|---:|---:|---:|---|---:|---:|---|
+| 10 | 243 | 2964_0 | 74767 | `24a57c8181d6...` | 2963_0 | 75736 | `cc38c1e9c1fa...` |
+| 15 | 345 | 2964_1 | 77771 | `b4665badd9a7...` | 2963_1 | 75770 | `79ad65b9050b...` |
 
 All twelve timed MP4s decode as H.264 1344x768 at 24 fps with the exact 243/345 frame count and
 stereo 32-kHz AAC. The three fixed-seed files in each cell are byte-identical; that proves repeat
@@ -542,11 +613,11 @@ compiled decoder, temporal-parallel VAE at SP-4, and fusions off. Each montage i
 right-side audio. Full input/output hashes, stream probes, and FFmpeg commands sit beside each
 MP4 in the comparison root below.
 
-| target | 1x MP4 (SHA256 prefix) | SP-4 MP4 (SHA256 prefix) |
-|---:|---|---|
-| 5s / 124f | `t2va_5s_1x_vllm_base_vs_fasth3_f3.mp4` (`d54d7de8`) | `t2va_5s_sp4_vllm_base_vs_fasth3_f3.mp4` (`3fd6e0f4`) |
-| 10s / 243f | `t2va_10s_1x_vllm_base_vs_fasth3_f3.mp4` (`8516e8a0`) | `t2va_10s_sp4_vllm_base_vs_fasth3_f3.mp4` (`0cee1523`) |
-| 15s / 345f | **N/A: no valid vllm-omni source MP4** | `t2va_15s_sp4_vllm_base_vs_fasth3_f3.mp4` (`aec88230`) |
+| target, s | frames | 1x MP4 (SHA256 prefix) | SP-4 MP4 (SHA256 prefix) |
+|---:|---:|---|---|
+| 5 | 124 | `t2va_5s_1x_vllm_base_vs_fasth3_f3.mp4` (`d54d7de8`) | `t2va_5s_sp4_vllm_base_vs_fasth3_f3.mp4` (`3fd6e0f4`) |
+| 10 | 243 | `t2va_10s_1x_vllm_base_vs_fasth3_f3.mp4` (`8516e8a0`) | `t2va_10s_sp4_vllm_base_vs_fasth3_f3.mp4` (`0cee1523`) |
+| 15 | 345 | **N/A: no valid vllm-omni source MP4** | `t2va_15s_sp4_vllm_base_vs_fasth3_f3.mp4` (`aec88230`) |
 
 The 345f F3 comparison predates the odd-tile composition and truthfully records its
 Triton-64 fallback. No Ref2VA F3 montage exists: the Preview export does not contain distilled
@@ -556,10 +627,13 @@ Ref2VA models and falsely label the right side FastH3.
 
 ### Ref2VA: genuine base grid and the FastVideo four-forward latency proxy
 
-The Ref2VA contract uses the same prompt and seed, plus the first N frames/audio of
-`vsa_gate/ref2va_grid/C/reference_15s.mp4` (SHA256 `5b74f889...`) for each target. Every saved
-output passed the exact H.264 1344x768@24-fps frame contract and carries stereo 32-kHz AAC;
-three repeats within each successful cell are byte-identical.
+The original matched vllm-omni/proxy contract uses the same prompt and seed, plus the first N
+frames/audio of `vsa_gate/ref2va_grid/C/reference_15s.mp4` (SHA256 `5b74f889...`) for each
+target. The genuine FastVideo official-base d4 completion below is deliberately a separate
+row-local job-3002 contract and discloses its different prompt/reference hashes; its times must
+not be compared directly with the older grid. Every saved output passed the exact H.264
+1344x768@24-fps frame contract and carries stereo 32-kHz AAC; three repeats within each
+successful cell are byte-identical.
 
 **Identity guardrail: genuine FastH3 Preview Ref2VA is N/A.** Preview manifest
 `modular_model_index.json` (SHA256 `63a5c56b...`) advertises
@@ -568,9 +642,9 @@ and no distilled weights for that role. The current FastVideo loader selects
 `<model_path>/transformer_ref` and does not follow the nested component source metadata, so the
 standalone Preview snapshot cannot transparently materialize the advertised base component.
 The raw step-1400 export used by the latency-proxy harness instead has `transformer_ref` linked to
-the official base component. The first table is genuine vllm-omni **base H3 Ref2VA**. The second
-table is a FastVideo **official-base transformer_ref, four-forward F4 latency proxy only**; it is
-neither FastH3 nor quality-valid.
+the official base component. The vllm-omni and FastVideo d4 tables below are genuine **base H3
+Ref2VA** runs. The final table is a FastVideo **official-base transformer_ref, four-forward F4
+latency proxy only**; it is neither FastH3 nor quality-valid.
 
 The identity audit also compared the official base components directly: `transformer` and
 `transformer_ref` expose the same 638-key architecture but all 14 corresponding shard SHA256s
@@ -580,17 +654,29 @@ DiTs. Copying the Preview T2VA student into that slot would therefore be an untr
 cross-variant transplant, while materializing the manifest's external component would simply
 run the 50-step base Ref2VA model. Neither is a genuine FastH3 measurement.
 
+Consequently every requested Preview Ref2VA cell is explicitly N/A; none is silently replaced
+by the official-base component or the latency proxy:
+
+| requested checkpoint role | GPUs | target, s | frames | result | reason |
+|---|---:|---:|---:|---|---|
+| FastH3 Preview `transformer_ref` | 1 | 5 | 124 | **N/A** | no distilled Preview Ref2VA weights |
+| FastH3 Preview `transformer_ref` | 1 | 10 | 243 | **N/A** | no distilled Preview Ref2VA weights |
+| FastH3 Preview `transformer_ref` | 1 | 15 | 345 | **N/A** | no distilled Preview Ref2VA weights |
+| FastH3 Preview `transformer_ref` | 4 | 5 | 124 | **N/A** | no distilled Preview Ref2VA weights |
+| FastH3 Preview `transformer_ref` | 4 | 10 | 243 | **N/A** | no distilled Preview Ref2VA weights |
+| FastH3 Preview `transformer_ref` | 4 | 15 | 345 | **N/A** | no distilled Preview Ref2VA weights |
+
 vllm-omni base uses dense CuTe FA4 plus lazy regional `torch.compile(dynamic=True)` on all 52 DiT
 blocks. SP-4 additionally uses USP-4, text-encoder TP-4, and spatial-tile VAE patch parallelism 4.
 
-| implementation | GPUs | target / frames | points / fwds | e2e median (range), s | denoise median (range), s | peak MiB | route / status |
-|---|---|---:|---:|---:|---:|---:|---|
-| vllm-omni base Ref2VA | 1x | 5s / 124 | 50 / 49 | 463.700 (463.462-463.907) | 441.801 (441.525-442.237) | 142652 | dense CuTe FA4 + regional compile |
-| vllm-omni base Ref2VA | 1x | 10s / 243 | N/A | **N/A** | **N/A** | **N/A** | fresh one-forward warmup: CUDA illegal-address |
-| vllm-omni base Ref2VA | 1x | 15s / 345 | N/A | **N/A** | **N/A** | **N/A** | fresh one-forward warmup: CUDA illegal-address |
-| vllm-omni base Ref2VA | SP-4 | 5s / 124 | 50 / 49 | 135.535 (135.448-136.668) | 126.628 (126.621-127.808) | 97686 | dense CuTe FA4 + regional compile |
-| vllm-omni base Ref2VA | SP-4 | 10s / 243 | 50 / 49 | 416.717 (415.745-417.267) | 399.994 (399.991-400.441) | 109316 | dense CuTe FA4 + regional compile |
-| vllm-omni base Ref2VA | SP-4 | 15s / 345 | 50 / 49 | 758.643 (758.533-760.182) | 735.051 (734.863-735.209) | 125762 | dense CuTe FA4 + regional compile |
+| implementation | GPUs | target, s | frames | scheduler points | observed forwards | e2e median (range), s | denoise median (range), s | peak MiB | route | status |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| vllm-omni base Ref2VA | 1 | 5 | 124 | 50 | 49 | 463.700 (463.462-463.907) | 441.801 (441.525-442.237) | 142652 | dense CuTe FA4 + regional compile | PASS |
+| vllm-omni base Ref2VA | 1 | 10 | 243 | N/A | N/A | **N/A** | **N/A** | **N/A** | runtime probes | fresh one-forward warmup: CUDA illegal-address |
+| vllm-omni base Ref2VA | 1 | 15 | 345 | N/A | N/A | **N/A** | **N/A** | **N/A** | runtime probes | fresh one-forward warmup: CUDA illegal-address |
+| vllm-omni base Ref2VA | 4 | 5 | 124 | 50 | 49 | 135.535 (135.448-136.668) | 126.628 (126.621-127.808) | 97686 | dense CuTe FA4 + regional compile | PASS |
+| vllm-omni base Ref2VA | 4 | 10 | 243 | 50 | 49 | 416.717 (415.745-417.267) | 399.994 (399.991-400.441) | 109316 | dense CuTe FA4 + regional compile | PASS |
+| vllm-omni base Ref2VA | 4 | 15 | 345 | 50 | 49 | 758.643 (758.533-760.182) | 735.051 (734.863-735.209) | 125762 | dense CuTe FA4 + regional compile | PASS |
 
 The 1x 243f/345f rows are N/A, not extrapolations. Fresh default-route job 2906 reproduced the
 failures. Together, jobs 2906/2910/2912 tested FA4 dynamic/static/eager, CuDNN dynamic, and SDPA
@@ -598,17 +684,69 @@ eager at 243f; every route failed during the two-point/one-forward shape warmup 
 peaks stayed below the 189471-MiB GB200 capacity. These are runtime/kernel failures, not reported
 OOMs and not valid 49-forward timing runs. Successful base rows come from job 2892.
 
+#### FastVideo official-base d4 on the separate job-3002 input contract
+
+This is a genuine 50-point base Ref2VA grid, not the four-forward proxy. Slurm array job 3002
+completed all six cells with exit code 0 at exact clean code SHA
+`99cd355a2452ce040591fe54ef340d192e26fe48`. Every request loaded the official
+`/mnt/lustre/vlm-k1kong/models/MiniMax-H3/transformer_ref` component as the sole denoiser; the
+Preview checkpoint was not used. Each cell ran one excluded full warmup followed by three saved
+seed-1000 requests. Activation traces prove 49 DiT forwards per request and four requests per
+rank, rather than inferring the forward count from the 50 scheduler points.
+
+The row-local prompt is `A cinematic drone shot over coastal cliffs at sunrise, golden light,
+gentle ocean waves, ultra detailed.` (SHA256
+`92a4224855ef1ea61602eb4debdb1a32dbd9a301fbdece1623ef2af4cdb06e60`), **not** synth64
+prompt 0. The reference is
+`ref2va_grid/B/videos/ref_372f_768x1344_24fps.mp4` (SHA256
+`5bce6f81e97ec726ad6143154a258bd149351880937ba10c78fa6d6ed0e0e636`), a byte-pinned
+372-frame VFR H.264/AAC source. Both hashes differ from the older vllm-omni/proxy contract.
+Accordingly these rows establish FastVideo base behavior across durations and GPU counts, but
+make **no direct vllm-omni speedup or match claim**.
+
+| implementation | GPUs | target, s | frames | scheduler points | observed forwards | e2e median, s | e2e minimum, s | e2e maximum, s | denoise median, s | denoise minimum, s | denoise maximum, s | reference encode median, s | video decode median, s | peak MiB | job |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| FastVideo official-base d4 Ref2VA | 1 | 5 | 124 | 50 | 49 | **455.290** | 455.216 | 455.662 | **436.043** | 435.882 | 436.116 | 10.358 | 6.205 | 78949 | 3002_0 |
+| FastVideo official-base d4 Ref2VA | 4 | 5 | 124 | 50 | 49 | **125.354** | 124.526 | 125.417 | **117.453** | 117.345 | 117.515 | 2.946 | 1.915 | 78799 | 3002_3 |
+| FastVideo official-base d4 Ref2VA | 1 | 10 | 243 | 50 | 49 | **1437.518** | 1437.463 | 1437.970 | **1405.001** | 1404.674 | 1405.095 | 19.053 | 9.837 | 85308 | 3002_1 |
+| FastVideo official-base d4 Ref2VA | 4 | 10 | 243 | 50 | 49 | **381.834** | 381.676 | 382.284 | **369.190** | 369.080 | 369.253 | 5.615 | 3.500 | 79015 | 3002_3 |
+| FastVideo official-base d4 Ref2VA | 1 | 15 | 345 | 50 | 49 | **2686.231** | 2683.925 | 2686.743 | **2637.297** | 2637.215 | 2637.369 | 26.637 | 17.454 | 93762 | 3002_2 |
+| FastVideo official-base d4 Ref2VA | 4 | 15 | 345 | 50 | 49 | **700.342** | 700.178 | 700.541 | **683.647** | 683.536 | 683.758 | 7.978 | 4.376 | 79257 | 3002_3 |
+
+All rows use replicated DiT weights, packed-varlen FA4, regional
+`torch.compile(fullgraph=True)` on 52 DiT submodules, a compiled VAE decoder, and no H3 fusions.
+At four GPUs, both reference encode and target decode use four-rank temporal parallelism; the
+same flags are one-rank no-ops at one GPU. Route gates found no SDPA fallback, FSDP transformer,
+regional-compile disable, or H3-fusion marker. Every rank produced 196 trace records
+(`49 forwards × 4 requests`), every timed triplet was byte-identical within its cell, and all
+outputs passed the strict frame, codec, resolution, fps, and audio checks.
+
+The terminal machine receipt is `results_summary_job3002.json` under
+`h3_duration_grid_20260822/ref2va/fastvideo_official_base_99cd_d4_20260822/` (SHA256
+`86d8ef86d222ee1c1cf6a70a431a72753de3dbf72200c7e31a6ffd188587bcd2`). Its all-or-nothing
+builder SHA256 is `628353860aee63d2b17ccfc5a1ce85d3d6e1f3c82efaf09e3e963cc890fa5420`;
+the timed harness SHA256 is `b6f1fe05d1ae225e49e0f0a5af0aabbdab5094053d29c76f59e94f24d77b217e`.
+The six cell-receipt SHA256s, in table order, are
+`4184fb7a808773a6a980cb0fc540af22d74851d2c23e6dc6bd929b8c130c11b6`,
+`14a5801baff1de9458d23c471782dbcd3f0a778ba55a48872ec55cf50c76dccc`,
+`03c66272d5681b701ab251ec6bb48e3ad8e5499aeccca404af9a477dea27cc6c`,
+`ad557f62fa9fcf20ecf028473b0cdf01988c8b16fece5332a2dfa04207abce83`,
+`fa5aa5fd0a447bff5f133ac76573c6847f2527bf95bf47f6612fbf59bd88390f`, and
+`03d4cdb6d47157e693c70ac4bb8f572087405649f78b3a77d7ee3b462d527775`.
+The source is VFR while generated media are strict 24-fps CFR; a post-submission validator-only
+correction fixed source-media validation without changing the byte-pinned harness or timed path.
+
 The FastVideo proxy uses eager sparse DiT, VSA@0.9, compiled VAE, H3 fusions, and parallel
 reference encode/decode at SP-4. It is report-only/non-parity.
 
-| implementation | GPUs | target / frames | points / fwds | e2e median (range), s | denoise median (range), s | peak MiB | sparse route / job |
-|---|---|---:|---:|---:|---:|---:|---|
-| FV **base-weight proxy, not FastH3** | 1x | 5s / 124 | 5 / 4 | 65.135 (64.435-65.247) | 45.414 (45.332-45.425) | 84929 | sm100a CUDA-64 / 2877 |
-| FV **base-weight proxy, not FastH3** | 1x | 10s / 243 | 5 / 4 | 164.521 (163.042-172.343) | 130.868 (130.618-130.871) | 97494 | FA4 CuTe-256 / 2894 |
-| FV **base-weight proxy, not FastH3** | 1x | 15s / 345 | 5 / 4 | 292.989 (292.382-294.289) | 246.206 (246.120-246.318) | 117289 | sm100a CUDA-64 / 2901 |
-| FV **base-weight proxy, not FastH3** | SP-4 | 5s / 124 | 5 / 4 | 21.733 (21.499-22.125) | 12.847 (12.814-12.884) | 82517 | sm100a CUDA-64 / 2877 |
-| FV **base-weight proxy, not FastH3** | SP-4 | 10s / 243 | 5 / 4 | 48.282 (48.166-48.804) | 34.886 (34.869-35.010) | 83006 | FA4 CuTe-256 / 2894 |
-| FV **base-weight proxy, not FastH3** | SP-4 | 15s / 345 | 5 / 4 | 81.666 (81.395-82.904) | 64.025 (63.997-64.149) | 89117 | FA4 CuTe-256 / 2894 |
+| implementation | GPUs | target, s | frames | scheduler points | observed forwards | e2e median (range), s | denoise median (range), s | peak MiB | sparse route | job |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
+| FV **base-weight proxy, not FastH3** | 1 | 5 | 124 | 5 | 4 | 65.135 (64.435-65.247) | 45.414 (45.332-45.425) | 84929 | sm100a CUDA-64 | 2877 |
+| FV **base-weight proxy, not FastH3** | 1 | 10 | 243 | 5 | 4 | 164.521 (163.042-172.343) | 130.868 (130.618-130.871) | 97494 | FA4 CuTe-256 | 2894 |
+| FV **base-weight proxy, not FastH3** | 1 | 15 | 345 | 5 | 4 | 292.989 (292.382-294.289) | 246.206 (246.120-246.318) | 117289 | sm100a CUDA-64 | 2901 |
+| FV **base-weight proxy, not FastH3** | 4 | 5 | 124 | 5 | 4 | 21.733 (21.499-22.125) | 12.847 (12.814-12.884) | 82517 | sm100a CUDA-64 | 2877 |
+| FV **base-weight proxy, not FastH3** | 4 | 10 | 243 | 5 | 4 | 48.282 (48.166-48.804) | 34.886 (34.869-35.010) | 83006 | FA4 CuTe-256 | 2894 |
+| FV **base-weight proxy, not FastH3** | 4 | 15 | 345 | 5 | 4 | 81.666 (81.395-82.904) | 64.025 (63.997-64.149) | 89117 | FA4 CuTe-256 | 2894 |
 
 At 243f the legacy CUDA-64 even-tile predicate rejects the exact packed Ref2VA geometry, so the
 supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUDA-64 at
@@ -630,12 +768,18 @@ supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUD
 - T2VA comparisons: `vsa_gate/h3_duration_grid_20260822/comparisons_vllm_vs_f3/`; each
   `.receipt.json` names and hashes both inputs and the output. The sibling `README.md` records
   the final 15s/1x N/A state.
-- Ref2VA: `vsa_gate/ref2va_duration_grid_20260822/{RESULTS.md,RESULTS.json}` (SHA256
-  `a9f7220e...` / `55509996...`). This is the sole source for the current Ref2VA duration grid;
-  it contains every raw timing, MP4/ffprobe contract, route probe, failure envelope, command, and
-  environment receipt. Primary jobs: 2877, 2892, 2894, 2901; failure/probe jobs 2906, 2910, 2912.
+- Original matched-input Ref2VA vllm-omni/proxy grid:
+  `vsa_gate/ref2va_duration_grid_20260822/{RESULTS.md,RESULTS.json}` (SHA256 `a9f7220e...` and
+  `55509996...`). It contains every raw timing, MP4/ffprobe contract, route probe, failure
+  envelope, command, and environment receipt. Primary jobs: 2877, 2892, 2894, 2901;
+  failure/probe jobs 2906, 2910, 2912.
+- FastVideo official-base d4 Ref2VA, separate row-local contract:
+  `vsa_gate/h3_duration_grid_20260822/ref2va/fastvideo_official_base_99cd_d4_20260822/`.
+  `results_summary_job3002.json` has SHA256 `86d8ef86d222ee1c1cf6a70a431a72753de3dbf72200c7e31a6ffd188587bcd2`
+  and hashes all six terminal cell receipts. Primary array job: 3002.
 - Main T2VA code SHA is `99cd355a`; only corrected FastH3 F4 345f uses private composition
-  `8f8529d9`. Ref2VA FastVideo proxy code is `99cd355a`. vllm-omni is
+  `8f8529d9`. Ref2VA FastVideo proxy and official-base d4 code are `99cd355a`, under the distinct
+  input contracts disclosed above. vllm-omni is
   `73b623f2f7db092053c1c86fe796bed89eb3dc71` plus timing-only profiler patches. Hardware is
   GB200 (189471 MiB/GPU), driver 580.82.07. No benchmark launcher overrides `HOME`; caches are
   explicit and job/task scoped.
@@ -645,10 +789,12 @@ supported primary route is CuTe-256. Both 345f routes completed: 1x selected CUD
 The public-serving extraction is intentionally split by concern. As of this refresh, #1741
 (regional inference compile) is merged at public main `d3cff517c`; #1742 (packed-varlen FA4)
 is conflict-free at `9eb7b5d3a`; #1743 (schema-inventory repair) is at `d1ee99ac2`; #1744
-(parallel VAE) is at `88e241a75`; and #1745 (odd-tile sm100a) is at `82a5b0db6`. None of these
-public PRs contains a training path or training configuration. The exact `e0bb6a5`/`bbc8d35`
-acceptance above is now the current public-serving authority; `99cd355a` remains the historical
-timing and feature-attribution authority for rows that have not been rerun on those compositions.
+(parallel VAE) is at `88e241a75`; #1745 (odd-tile sm100a) is at `82a5b0db6`; and #1746
+(external multi-node launcher) is open, mergeable, and awaiting review at `accc5a420`. None of
+these public PRs contains a training path or training configuration. The exact
+`e0bb6a5`/`bbc8d35` acceptance and the job-3026 `20d026fd2` multi-node composition above are the
+current public-serving authorities; `99cd355a` remains the historical timing and feature-
+attribution authority for rows that have not been rerun on those compositions.
 
 PR #1740 (fused Ulysses NVLink all-to-all) was re-audited after the public-head acceptance and is
 unchanged at exact head `61ab307aaf469969d2b72d36b39a4d835a19867f`; it remains an explicit
@@ -663,8 +809,8 @@ engagement.
 | topology | #1740 grid status | reason |
 |---|---|---|
 | 1x | N/A (intended no-op) | no Ulysses collective or allocation exists at world size one |
-| SP-4, one tray | excluded / not run | potentially useful topology, but current head is not group-atomic or safely initialized |
-| SP-8, two trays | excluded / not run | current NVL72 layout is expected to expose LSA teams of four, requiring unanimous 0/8 fallback |
+| SP-4, one tray | excluded (not run) | potentially useful topology, but current head is not group-atomic or safely initialized |
+| SP-8, two trays | excluded (not run) | current NVL72 layout is expected to expose LSA teams of four, requiring unanimous 0/8 fallback |
 
 No number in this document includes #1740. PR #1739's packed-SP route also bypasses #1740, and
 Preview VSA rejects packed SP, so those factors must never be described as additive.
@@ -720,23 +866,24 @@ numerics, speed reference only; never enable for parity/SSIM work).
 
 ### End-to-end / denoise (seconds, mean of 3, range in parens)
 
-| leg | 1x e2e | 1x denoise | SP-4 e2e | SP-4 denoise | sec.1 baseline (e2e 1x / SP-4) |
-|---|---:|---:|---:|---:|---|
-| a. dense FA4 50-step | 186.6 (186.5-186.7) | 176.39 | 66.0 (65.7-66.2) | 52.63 | 185.2-188.2 / 62.8-63.7 |
-| b. FastH3 VSA-64 triton | 22.9 (21.7-25.3) | 12.48 | 17.2 (16.4-18.7) | 4.14 | 22.3-22.8 / 13.6-15.0 |
-| c. FastH3 VSA-64 sm100a | 19.4 (19.0-19.7) | 10.80 | 15.9 (15.3-16.3) | 3.72 | 20.7 / 15.1 |
-| d. b + H3 fusions (non-parity) | 20.2 (19.6-20.6) | 10.43 | 15.4 (14.0-16.2) | 3.63 | (new) |
+| leg | 1x e2e | 1x denoise | SP-4 e2e | SP-4 denoise | section-1 baseline 1x e2e | section-1 baseline SP-4 e2e |
+|---|---:|---:|---:|---:|---:|---:|
+| a. dense FA4 50-step | 186.6 (186.5-186.7) | 176.39 | 66.0 (65.7-66.2) | 52.63 | 185.2-188.2 | 62.8-63.7 |
+| b. FastH3 VSA-64 triton | 22.9 (21.7-25.3) | 12.48 | 17.2 (16.4-18.7) | 4.14 | 22.3-22.8 | 13.6-15.0 |
+| c. FastH3 VSA-64 sm100a | 19.4 (19.0-19.7) | 10.80 | 15.9 (15.3-16.3) | 3.72 | 20.7 | 15.1 |
+| d. b + H3 fusions (non-parity) | 20.2 (19.6-20.6) | 10.43 | 15.4 (14.0-16.2) | 3.63 | — | — |
 
 ### Per-stage deltas vs the section-1 baselines
 
-| stage | stack 1x | stack SP-4 | baseline | delta |
-|---|---:|---:|---|---|
-| text encoding (#1732 slim + merged-#1711) | 0.53-0.55 | 0.44-0.59 | ~2 | **-1.5 s (-75%)** |
-| denoising, dense FA4 (49 fwds) | 176.39 | 52.63 | 175-179 / 52.9-54.2 | parity |
-| denoising, student (same kernel) | 12.48 triton / 10.80 sm100a | 4.14 / 3.72 | 12.4 / 10.7 (1x), 4.3 / 3.9 (SP-4) | parity to -5% |
-| denoising, +fusions vs leg b | 10.43 | 3.63 | — | **-16% (1x) / -12% (SP-4)** |
-| video VAE decode (#1703 streaming + #1734 tile compile) | 7.05-8.81 | 9.9-11.7 | 6.4-7.5 (stock SP-4 7.26) | **REGRESSION, see below** |
-| audio decode + post + save | ~0.8-1.1 | ~0.9-1.2 | ~1 | parity |
+| stage | stack 1x | stack SP-4 | baseline 1x | baseline SP-4 | delta 1x | delta SP-4 |
+|---|---:|---:|---:|---:|---|---|
+| text encoding (#1732 slim + merged-#1711) | 0.53-0.55 | 0.44-0.59 | ~2 | ~2 | **about -1.5 s (-75%)** | **about -1.5 s (-75%)** |
+| denoising, dense FA4 (49 fwds) | 176.39 | 52.63 | 175-179 | 52.9-54.2 | parity | parity |
+| denoising, student, Triton | 12.48 | 4.14 | 12.4 | 4.3 | parity to -5% | parity to -5% |
+| denoising, student, sm100a | 10.80 | 3.72 | 10.7 | 3.9 | parity to -5% | parity to -5% |
+| denoising, +fusions vs leg b | 10.43 | 3.63 | — | — | **-16%** | **-12%** |
+| video VAE decode (#1703 streaming + #1734 tile compile) | 7.05-8.81 | 9.9-11.7 | 6.4-7.5 | 7.26 stock | **REGRESSION, see below** | **REGRESSION, see below** |
+| audio decode + post + save | ~0.8-1.1 | ~0.9-1.2 | ~1 | ~1 | parity | parity |
 
 **VAE decode: regression at defaults, win behind the opt-in flag (attributed).**
 Same-node/same-day A/B (jobs 2630/2641, hpc-rack-3-8, identical leg-b config):
