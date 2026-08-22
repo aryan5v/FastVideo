@@ -830,6 +830,7 @@ def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None
     assert "test_vsa_triton_backward_scale.py" in gate
     assert "test_forward_matches_reference[64]" in gate
     assert "test_real_sm100a_no_grad_route_receipt" in gate
+    assert "timeout --signal=TERM --kill-after=30s 300s" in gate
     assert "FASTVIDEO_KERNEL_V10_RECEIPT.json" in gate
     assert "907f2100e" in rebuild and "56d4a6074" in rebuild
     assert "TORCH_CUDA_ARCH_LIST=10.0a" in rebuild

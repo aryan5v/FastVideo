@@ -34,9 +34,13 @@ for the tile-64 FORWARD only: ``FASTVIDEO_VSA_SM100A=1`` sends no-grad
 forwards through the sm_100a CUDA block-sparse kernel
 (``fastvideo_kernel.block_sparse_attn_sm100a``, upstream PR #1719 plus
 our per-q-tile ``q2k_num`` fix) when the extension is built, the device
-is sm_100, and the geometry qualifies; grad-tracking forwards and every
-backward stay on Triton unchanged. If the env is set but a precondition
-fails, the route logs one warning and falls back.
+is sm_100, and the geometry qualifies. The CUDA kernel assigns an adjacent
+pair of query tiles to each CTA; an odd logical tile count is therefore given
+one internal, zero-valid partner tile for the no-grad call only. Score search,
+the trained mask, gate-compress, and the returned packed sequence all stay on
+the original logical tiles. Grad-tracking forwards and every backward stay on
+Triton unchanged. If the env is set but a precondition fails, the route logs
+one warning and falls back.
 """
 
 import functools
@@ -225,6 +229,14 @@ class MiniMaxH3VSABackend(AttentionBackend):
         return MiniMaxH3VSAMetadataBuilder
 
 
+class _MiniMaxH3VSATileBufferHolder:
+    """Builder-owned no-grad tile scratch and its active untile geometry."""
+
+    def __init__(self) -> None:
+        self.buffer: torch.Tensor | None = None
+        self.untile_geometry: torch.Tensor | None = None
+
+
 @dataclass
 class MiniMaxH3VSAMetadata(AttentionMetadata):
     total_seq_length: int
@@ -238,18 +250,20 @@ class MiniMaxH3VSAMetadata(AttentionMetadata):
     tile_elems: int = _TILE_ELEMS
     # layers forced dense regardless of sparsity (probe-guided opt-outs)
     dense_layers: tuple[int, ...] = ()
-    # Single-slot holder for the padded tile buffer, owned by the BUILDER so
-    # one buffer serves the whole denoising loop (pad slots stay zero and
-    # every non-pad slot is fully overwritten per tile(), so cross-step reuse
-    # is valid; saves a ~1.4 GB alloc+memset per step at 720p). VSA-H3 runs
-    # eager today — revisit the reuse if it ever goes under cudagraphs.
-    tile_buf_holder: list = None  # type: ignore[assignment]
+    # Holder for the padded tile buffer, owned by the BUILDER so one allocation
+    # serves the whole denoising loop. It also records which cached untile
+    # geometry last populated the buffer: steady-state calls overwrite only
+    # valid rows, while a shape-compatible geometry change clears stale pad
+    # rows once before scattering. Saves a ~1.4 GB alloc+memset per step at
+    # 720p. Grad-tracked calls never use it. VSA-H3 runs eager today — revisit
+    # the reuse if it ever goes under cudagraphs.
+    tile_buf_holder: _MiniMaxH3VSATileBufferHolder | None = None
 
 
 class MiniMaxH3VSAMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self) -> None:
-        self._tile_buf_holder: list = [None]
+        self._tile_buf_holder = _MiniMaxH3VSATileBufferHolder()
 
     def prepare(self) -> None:
         pass
@@ -372,14 +386,23 @@ class MiniMaxH3VSAImpl(AttentionImpl):
 
         The returned tensor aliases the builder-owned buffer; callers must
         consume it before the next ``tile()`` (both call sites in
-        ``forward()`` read it immediately).
+        ``forward()`` read it immediately). For an odd tile-64 no-grad sm100a
+        request, the buffer has one additional all-zero tile. This avoids a
+        second, full-size Q/K/V copy merely to satisfy the CUDA kernel's
+        adjacent-query-tile CTA contract; the metadata remains the logical
+        (trained) geometry and ``forward()`` removes the partner before every
+        observable output or fallback.
         """
         if x.shape[1] != attn_metadata.total_seq_length:
             raise ValueError(f"VSA-H3 metadata was built for sequence length {attn_metadata.total_seq_length}, "
                              f"got {x.shape[1]}. A non-packed sequence (e.g. the token refiner) is "
                              "routed to the VSA-H3 backend; exclude it from the supported backends.")
         n_tiles = attn_metadata.variable_block_sizes.numel()
-        target_shape = (x.shape[0], n_tiles * attn_metadata.tile_elems, x.shape[-2], x.shape[-1])
+        grad_mode = torch.is_grad_enabled() and x.requires_grad
+        needs_sm100a_pair = (attn_metadata.tile_elems == 64 and n_tiles % 2 != 0 and not grad_mode
+                             and os.environ.get(VSA_SM100A_ENV, "0") == "1")
+        kernel_tiles = n_tiles + int(needs_sm100a_pair)
+        target_shape = (x.shape[0], kernel_tiles * attn_metadata.tile_elems, x.shape[-2], x.shape[-1])
 
         if torch.is_grad_enabled() and x.requires_grad:
             # Grad-tracking forwards (VSA-H3 training students) get a fresh
@@ -390,11 +413,28 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             # vsa_cache_tile_buf=False default.
             return scatter_into_tile_buf(x, target_shape, attn_metadata.untile_combined_index, None)
 
-        # single scatter: untile_combined_index maps original row i to its
-        # padded slot, so this is exactly the inverse of postprocess_output
+        # Single scatter: untile_combined_index maps original row i to its
+        # padded slot, so this is exactly the inverse of postprocess_output.
+        # A builder spans native-shape batches. Two different geometries can
+        # have the same padded transport shape, so clear that reused allocation
+        # once on identity change before the new scatter leaves its pad slots
+        # untouched. Cached metadata reuses the same index tensor identity,
+        # keeping the steady-state layer/step path free of the large memset.
         holder = attn_metadata.tile_buf_holder
-        holder[0] = scatter_into_tile_buf(x, target_shape, attn_metadata.untile_combined_index, holder[0])
-        return holder[0]
+        if holder is None:
+            raise RuntimeError("VSA-H3 metadata has no builder-owned tile buffer holder")
+        buffer_matches = (holder.buffer is not None and holder.buffer.shape == target_shape
+                          and holder.buffer.dtype == x.dtype and holder.buffer.device == x.device)
+        if buffer_matches and holder.untile_geometry is not attn_metadata.untile_combined_index:
+            holder.buffer.zero_()
+        holder.buffer = scatter_into_tile_buf(x, target_shape, attn_metadata.untile_combined_index, holder.buffer)
+        holder.untile_geometry = attn_metadata.untile_combined_index
+        if needs_sm100a_pair:
+            # A previous even geometry can reuse the same-sized builder buffer
+            # and may have written this tile as logical data. Clear it
+            # explicitly rather than relying on allocation-time zeros.
+            holder.buffer[:, n_tiles * attn_metadata.tile_elems:].zero_()
+        return holder.buffer
 
     def preprocess_qkv(self, qkv: torch.Tensor, attn_metadata: MiniMaxH3VSAMetadata) -> torch.Tensor:
         # Cast before tiling: autocast leaves the packed qkv fp32 (norm
@@ -438,6 +478,34 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             if gate_compress is not None:
                 gate_compress = gate_compress.to(torch.bfloat16)
 
+        # ``variable_block_sizes`` always describes the logical, trained tile
+        # geometry. ``tile()`` may append exactly one zero-filled partner tile
+        # to an odd tile-64 no-grad sm100a request, because the CUDA kernel owns
+        # adjacent pairs. Keep every score/mask/gate calculation on the logical
+        # prefix and validate the internal transport shape before slicing it.
+        n_tiles = attn_metadata.variable_block_sizes.numel()
+        logical_seq_len = n_tiles * tile_elems
+        pair_pad_seq_len = logical_seq_len + tile_elems
+        pair_pad_is_valid = tile_elems == 64 and n_tiles % 2 != 0
+        allowed_seq_lengths = (logical_seq_len, pair_pad_seq_len) if pair_pad_is_valid else (logical_seq_len, )
+        if query.shape[1] not in allowed_seq_lengths:
+            expected = (f"the logical length {logical_seq_len} or one sm100a partner tile "
+                        f"({pair_pad_seq_len})" if pair_pad_is_valid else f"the logical length {logical_seq_len}")
+            raise ValueError(f"VSA-H3 tiled query has length {query.shape[1]}, expected {expected}.")
+        has_sm100a_pair = query.shape[1] == pair_pad_seq_len
+        for name, tensor in (("key", key), ("value", value)):
+            if tensor.shape[1] != query.shape[1]:
+                raise ValueError(f"VSA-H3 tiled {name} length {tensor.shape[1]} does not match query "
+                                 f"length {query.shape[1]}.")
+        if gate_compress is not None and gate_compress.shape[1] != query.shape[1]:
+            raise ValueError(f"VSA-H3 tiled gate length {gate_compress.shape[1]} does not match query "
+                             f"length {query.shape[1]}.")
+
+        logical_query = query[:, :logical_seq_len]
+        logical_key = key[:, :logical_seq_len]
+        logical_value = value[:, :logical_seq_len]
+        logical_gate = gate_compress[:, :logical_seq_len] if gate_compress is not None else None
+
         # probe-guided per-layer opt-out: diffuse layers run dense (all-True
         # mask) while the rest keep the configured sparsity
         layer_sparsity = 0.0 if self.layer_idx in attn_metadata.dense_layers else attn_metadata.VSA_sparsity
@@ -445,14 +513,13 @@ class MiniMaxH3VSAImpl(AttentionImpl):
 
         scores = None
         if layer_sparsity > 0.0 or gate_compress is not None or probe_dir is not None:
-            q_pooled = _pool_tiles(query, attn_metadata.variable_block_sizes, tile_elems)
-            k_pooled = _pool_tiles(key, attn_metadata.variable_block_sizes, tile_elems)
+            q_pooled = _pool_tiles(logical_query, attn_metadata.variable_block_sizes, tile_elems)
+            k_pooled = _pool_tiles(logical_key, attn_metadata.variable_block_sizes, tile_elems)
             scores = torch.matmul(q_pooled, k_pooled.transpose(-2, -1)) / (query.shape[-1]**0.5)
             if probe_dir is not None:
-                record_probe(probe_dir, self.layer_idx, query, key, scores, attn_metadata)
+                record_probe(probe_dir, self.layer_idx, logical_query, logical_key, scores, attn_metadata)
 
         if scores is None:
-            n_tiles = attn_metadata.variable_block_sizes.numel()
             mask = torch.ones(query.shape[0], query.shape[2], n_tiles, n_tiles, dtype=torch.bool, device=query.device)
         else:
             mask = _build_block_mask(
@@ -472,6 +539,22 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             k_bhsd = key.transpose(1, 2).contiguous()
             v_bhsd = value.transpose(1, 2).contiguous()
 
+            sm100a_mask = mask
+            sm100a_variable_block_sizes = attn_metadata.variable_block_sizes
+            if has_sm100a_pair:
+                # The synthetic tile is neither a query nor a key in the
+                # logical attention problem. An all-False row gives it
+                # q2k_num=0; an all-False column keeps it out of every real
+                # row; and vbs=0 masks all 64 of its key slots. The corrected
+                # sm100a kernel explicitly supports both zero-count query rows
+                # and zero-sized KV blocks.
+                sm100a_mask = torch.nn.functional.pad(mask, (0, 1, 0, 1), value=False)
+                sm100a_variable_block_sizes = torch.nn.functional.pad(
+                    attn_metadata.variable_block_sizes,
+                    (0, 1),
+                    value=0,
+                )
+
             # Opt-in sm_100a CUDA forward (upstream PR #1719 + per-q-tile
             # q2k_num fix). Forward-only: grad-tracking calls stay on Triton
             # so autograd keeps the Triton fwd+bwd pairing untouched. The
@@ -481,7 +564,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             if os.environ.get(VSA_SM100A_ENV, "0") == "1":
                 grad_mode = torch.is_grad_enabled() and (query.requires_grad or key.requires_grad
                                                          or value.requires_grad)
-                reason = _sm100a_unavailable_reason(_sm100a, q_bhsd, attn_metadata.variable_block_sizes, grad_mode)
+                reason = _sm100a_unavailable_reason(_sm100a, q_bhsd, sm100a_variable_block_sizes, grad_mode)
                 if reason is None and map_to_index is None:
                     reason = "fastvideo_kernel.triton_kernels.index (map_to_index) is not importable"
                 if reason is None:
@@ -495,17 +578,24 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                 # counts are NON-uniform here (prefix query tiles are dense,
                 # video tiles run prefix+top-k) -- legal for the fixed kernel,
                 # silently wrong on the pre-fix upstream one.
-                q2k_idx, q2k_num = map_to_index(mask)
+                q2k_idx, q2k_num = map_to_index(sm100a_mask)
                 out_bhsd, _ = _sm100a.block_sparse_attn_sm100a(
                     q_bhsd,
                     k_bhsd,
                     v_bhsd,
                     q2k_idx,
                     q2k_num,
-                    attn_metadata.variable_block_sizes.to(torch.int32),
+                    sm100a_variable_block_sizes.to(torch.int32),
                     need_lse=False,
                 )
             else:
+                # If the sm100a request was unavailable after ``tile()`` made
+                # an internal partner, strip it before entering the unchanged
+                # Triton forward/backward contract.
+                if has_sm100a_pair:
+                    q_bhsd = q_bhsd[:, :, :logical_seq_len].contiguous()
+                    k_bhsd = k_bhsd[:, :, :logical_seq_len].contiguous()
+                    v_bhsd = v_bhsd[:, :, :logical_seq_len].contiguous()
                 out_bhsd, _ = block_sparse_attn_64_bhsd(
                     q_bhsd,
                     k_bhsd,
@@ -513,26 +603,33 @@ class MiniMaxH3VSAImpl(AttentionImpl):
                     mask,
                     attn_metadata.variable_block_sizes,
                 )
+            if has_sm100a_pair and use_sm100a:
+                out_bhsd = out_bhsd[:, :, :logical_seq_len]
             out = out_bhsd.transpose(1, 2).contiguous()
         else:
-            out, _ = block_sparse_attn_256_bshd(query, key, value, mask, attn_metadata.variable_block_sizes)
+            out, _ = block_sparse_attn_256_bshd(
+                logical_query,
+                logical_key,
+                logical_value,
+                mask,
+                attn_metadata.variable_block_sizes,
+            )
 
-        if gate_compress is not None:
+        if logical_gate is not None:
             # Wan-style compression branch: dense attention over pooled tiles,
             # broadcast to each tile's rows, scaled by the learned gate
             # (zero-initialized for H3 => branch contributes nothing until
             # finetuned; the model layer skips it entirely for all-zero gates).
-            v_pooled = _pool_tiles(value, attn_metadata.variable_block_sizes, tile_elems)
+            v_pooled = _pool_tiles(logical_value, attn_metadata.variable_block_sizes, tile_elems)
             out_c = torch.matmul(torch.softmax(scores, dim=-1), v_pooled)  # [B, H, n_tiles, D]
             out_c = out_c.permute(0, 2, 1, 3).to(out.dtype)  # [B, n_tiles, H, D]
             batch, seq_len, heads, dim = out.shape
-            n_tiles = attn_metadata.variable_block_sizes.numel()
             # Out-of-place: on the CuTe backend ``out`` is the tensor FA4's
             # autograd node saved for its backward, so an in-place add here
             # bumps its version counter and backward dies with "one of the
             # variables needed for gradient computation has been modified".
             out_tiled = out.view(batch, n_tiles, tile_elems, heads, dim)
-            gate_tiled = gate_compress.view(batch, n_tiles, tile_elems, heads, dim)
+            gate_tiled = logical_gate.view(batch, n_tiles, tile_elems, heads, dim)
             out = (out_tiled + out_c.unsqueeze(2) * gate_tiled).view(batch, seq_len, heads, dim)
         if out.dtype != orig_dtype:
             out = out.to(orig_dtype)

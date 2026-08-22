@@ -101,7 +101,8 @@ PY
   fastvideo-kernel/tests/test_vsa_triton_backward_scale.py
 "${VENV}/bin/python" -m pytest -q -s \
   'tests/test_block_sparse_sm100a.py::test_forward_matches_reference[64]'
-"${VENV}/bin/python" -m pytest -q -s \
+timeout --signal=TERM --kill-after=30s 300s \
+  "${VENV}/bin/python" -m pytest -q -s \
   fastvideo/tests/attention/test_vsa_h3_sm100a_route.py::test_real_sm100a_no_grad_route_receipt
 
 echo "H3_V10_KERNEL_GATE=PASSED"
