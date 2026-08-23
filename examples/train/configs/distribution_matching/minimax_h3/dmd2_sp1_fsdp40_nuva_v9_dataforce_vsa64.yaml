@@ -59,6 +59,9 @@ method:
   # v9: per-batch routing — latent-bearing batches train data-forced at a
   # noised grid rung; text-only batches keep the carried walk (see header).
   rollout_data_forcing: true
+  # Historical v9-only hybrid. New launches must choose one global FastGen
+  # regime instead of mixing carried and data-latent batches.
+  allow_mixed_rollout_regimes: true
   generator_update_interval: 5
   # H3 is guidance-distilled; scale 1 uses one conditional teacher forward.
   real_score_guidance_scale: 1.0
@@ -69,6 +72,8 @@ method:
   min_timestep_ratio: 0.001
   max_timestep_ratio: 0.999
   score_timestep_shift: 2.4
+  score_timestep_warp_max: 0.999
+  score_timestep_continuous: true
   # x0 space for both modalities (FastGen standard; see v8 header).
   fake_score_loss_space: x0
   cfg_uncond:

@@ -9,17 +9,18 @@ cross-repository rationale and open issues here.
 
 ## Comparison scope
 
-FastGen currently provides the generic DMD2 method, MiniMax-H3 network and SFT
-configuration, and DMD2 recipes for other model families. It does not provide a
-MiniMax-H3 DMD2 experiment config. The current FastVideo recipe therefore
-combines:
+FastGen now provides the generic DMD2 method and a MiniMax-H3 DMD2 experiment
+on `jberner/h3_new` (`be72602b`, audited 2026-08-23). Treat that H3 experiment
+as the algorithmic oracle. FastVideo intentionally retains its VSA student and
+native-shape data choices, but its clocks, losses, and rollout regimes must
+match that oracle unless a config explicitly labels a deviation.
 
 - FastGen's generic DMD2 loss and optimizer conventions;
 - FastGen's MiniMax-H3 clock, precision policy, and H3 SFT timestep draw; and
 - few-step choices adapted from the Wan and LTX DMD2 recipes.
 
-Treat this as an implementation comparison, not a claim of exact H3 recipe
-parity.
+The parity tests encode the oracle math locally; they do not import a second
+checkout at runtime.
 
 ## Current recipe
 
@@ -29,17 +30,21 @@ global batch 64 (64 DP x accum 1), with no data-free carry. It starts a fresh
 base-model and optimizer lineage; never resume v8/v9 into its output. The
 full v10 contract and launch gates are below. The 32-GPU v10 config is retained
 as the failed job-2960 receipt; it must not share the 64-GPU output namespace.
-The previous
-`dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` remains the mixed data-forcing
-plus carry recipe; `_v8_bwdsim_vsa64` is carry-only (data-free), `_v7_vsa90`
-is the pre-parity 256-tile recipe, and `_v6` is the dense-student recipe.
+The previous `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` is a historical v9
+reproduction config, not a next-launch recipe. Its per-batch hybrid requires
+the explicit `allow_mixed_rollout_regimes: true` escape hatch. New launches
+must choose one FastGen regime globally: `_v8_bwdsim_vsa64` is the carried
+data-free reference; a data-driven launch uses `rollout_mode: data_latent`
+over latent-bearing data only. The method rejects accidental hybrid routing.
+`_v7_vsa90` is the pre-parity 256-tile recipe, and `_v6` is the dense-student
+recipe.
 
 ### Gold-standard refresh (2026-08-21)
 
-The reference tarball was refreshed (`fastgen.tar`, Aug 21; branch
-`jberner/h3_new` @ `2c85efc8`, four commits past the v8 reference
-`3429c171`). The H3 recipe knobs are unchanged — grid, draws, losses, lrs,
-cadence, GAN-off, data-free — so v8's mapping below still holds verbatim.
+The golden checkout is `/home/vlm-wlsaidhi/fastgen_23/fastgen`, branch
+`jberner/h3_new` at `be72602b`. The H3 recipe is data-free carried DMD2,
+four ODE steps, continuous FP64 shifted score times, direct x0 critic loss,
+LR `1e-6` for both roles, cadence 4:1, and GAN off.
 What changed upstream, and our disposition:
 
 - **Data-driven regime (ported as v9 `rollout_data_forcing`)**: FastGen's
@@ -74,9 +79,10 @@ What changed upstream, and our disposition:
   has no GAN branch (see the deliberate omission below). v9 does NOT turn
   it on with the new real data.
 
-### v9 data forcing
+### Historical v9 data forcing
 
-`method.rollout_data_forcing: true` (requires `rollout_carry`) routes each
+`method.rollout_data_forcing: true` (requires `rollout_carry` and the explicit
+legacy opt-in `allow_mixed_rollout_regimes: true`) routes each
 batch by latent presence: a t2va parquet row trains the student at
 `add_noise(real, eps, t)` with `t` drawn uniformly from
 `dmd_denoising_steps` (exact `sample_from_t_list` semantics — the grid's
@@ -98,10 +104,10 @@ per-root `"path:N"` repeat counts in `data_path`.
 | `backward_simulation: true` + `CarryCallback` (per-accum-slot carry) | `method.rollout_carry: true`, `rollout_carry_slots = grad-accum steps`; carry lives on the method instance, transient across resumes |
 | One generation forward per iteration; both phases advance the walk; staggered rank starts (uniform no-grad pre-walk) | Same semantics, offset `(rank·slots + slot) % 4` |
 | `student_sample_steps: 4`, `t_list = f_12(linspace(0.999, 0, 5))`, `student_sample_type: ode` | `dmd_denoising_steps: [999, 749, 500, 250]` in base-t (identical noise levels; the adapter applies the 12/3 shifts), `rollout_sample_type: ode` |
-| Score draw `time_dist_type: shifted`, shift 5.0 on video's clock | `score_timestep_shift: 2.4` (our knob draws `tau = f_{1/s}(U)`; `f_{1/2.4} = f_{5/12}` reproduces `t = f_5(U)` on the shift-12 clock exactly) |
-| `fake_score_pred_type: x0` (both modalities; the shifted draw keeps sigma_audio in range) | `fake_score_loss_space: x0` (global — supersedes v7's `{video: x0, audio: velocity}` patch) |
+| Continuous FP64 score draw `time_dist_type: shifted`, shift 5.0 on video's `max_t=0.999` clock | `score_timestep_shift: 2.4`, `score_timestep_warp_max: 0.999`, `score_timestep_continuous: true`; bounds apply to the pre-shift uniform coordinate, then the inverse clock composes exactly with H3's 12/3 shifts |
+| `fake_score_pred_type: x0`, direct x0 MSE per modality | `fake_score_loss_space: x0`; the critic calls `predict_x0` directly and sums video/audio MSE rather than estimating sigma-squared from rounded tensors |
 | lr `1e-6` both roles; AdamW `(0.9, 0.999)`, wd `0.01`; student clip 1, critic unclipped | Same lrs/AdamW; clip `1.0` applies to whichever role steps (critic norms ~0.1, the clip is slack — accepted deviation) |
-| `precision_fsdp: float32` | FP32 masters + FP32 module groups (already ours) |
+| FP64 scheduler mix/conversion, BF16 latent result, FP32 FSDP masters | H3 DMD add-noise, epsilon extraction, and x0 conversion promote to FP64 and cast once; FP32 masters + FP32 module groups |
 | Prod shape 768×1344 @ 345 frames; validation every 50 | Kept ours: 768×1344 @ 124 frames; validation every 100 on held-out synth64, 4-step sampling (accepted deviations) |
 | Dense student | VSA-H3 student, sparsity 0.9 at **64-token (4,4,4) tiles**, native Triton fwd+bwd (fixed-kernel overlay), no 256 remap; teacher/critic dense (our addition) |
 
@@ -175,15 +181,15 @@ that recipe even after the launcher default changes.
 
 | Priority | Status | Issue |
 |---|---|---|
-| P1 | Addressed in v9 (2026-08-21) | `simulate` builds student trajectories from noise while FastGen's data-driven multistep path forward-noises real data at a sampled ladder point. v9's `rollout_data_forcing` runs both per batch over mixed data. The paired-latent A/B (forced-only vs walk-only at matched seeds) remains open for isolating the quality effect. |
-| P1 | Open until launch | v9 pre-launch gates: (1) the NuVA t2va parquet under `/mnt/lustre/vlm-wlsaidhi/fastvideo/data/nuva_t2va/` must be complete and shaped 768x1344 @ 124 frames (num_latent_t 37; wrong shapes fail loudly at prepare/unpack) — and the root must contain ONLY production parquet: the loader sweeps `*.parquet` recursively, so scratch/harness subdirectories would be swept into training (and the `map_style_cache` pickle must be regenerated after any file change); (2) the regional-compile A/B verdict (`vsa_gate/compile_ab/VERDICT.md`) was not yet written when the v9 YAML was authored — follow its flip lines, and on NO-GO set `enable_torch_compile: false`; (3) confirm the realized latent-row fraction from the `data_forced` metric matches the intended mix. |
+| P1 | Closed for next launch (2026-08-23) | FastGen chooses carried simulation or data-latent forcing globally. The v9 per-batch composition is retained only for reproducibility behind `allow_mixed_rollout_regimes: true`; new configs must choose one regime. |
+| P1 | Archived with v9 | The hybrid v9 launch also depended on a shape-homogeneous latent root, a regenerated map-style cache, and checking its realized `data_forced` fraction. Those requirements are another reason not to reuse it as a next-launch template. |
 | P1 | Open if stochastic validation is used | `dmd_stochastic_renoise` is not a typed pipeline field and its hop noise uses the global RNG rather than the request generator. Default validation remains deterministic. |
-| P2 | Open | The x0 critic objective estimates effective per-modality sigma-squared from already-rounded noised tensors. It is exact algebraically but biased at the lowest BF16 timesteps; direct `critic.predict_x0()` MSE would match FastGen more closely. |
+| P2 | Resolved (2026-08-23) | Global x0 critic training now calls `critic.predict_x0()` and computes direct per-modality MSE. The sigma-squared estimator remains only for legacy mixed `{modality: space}` configs. |
 | P1 | Resolved (2026-08-18, env overlay) | VSA-H3 training gradient explosion root-caused: the fastvideo_kernel 0.3.2 PyPI wheel ships the pre-95f4f547 Triton backward (bf16 K pre-scaling; error exp2-amplified by logit magnitude, so unit-scale tests pass while real activations explode — 1e7-1e9 in DMD2, ~30x in SFT). Fix: the repo's corrected block_sparse_attn_triton.py overlaid into the venv (see site-packages OVERLAY_NOTE.md); scale-sensitivity sweep on H3 packed geometry passed (grad ratios 1.000+-0.0002 across scales 1-32 at keep 0.5/0.2/0.1). Upstream 95f4f547 to public main and cut a fixed kernel release to retire the overlay. PR #1639 (FA4 CuTe backward, unmerged) is a later 3x-speed upgrade, opt-in via FASTVIDEO_VSA_CUTEDSL, and needs the out-of-place addcmul port at video_sparse_attn_h3.py:358. |
 | P1 | Closed (2026-08-19): infra, not the VSA path — confirmed by positive test | The "inference-side VSA fault" (jobs 2307/2321) was an NCCL p2p transport connect failure — `transport/p2p.cc:288 Cuda failure 400 'invalid resource handle'` — at the boot's FIRST FSDP weight all-gather, which step-0 validation reaches before training does. With `hsdp_shard_dim=world` and straggler ranks still loading their validation pipelines, the all-gather could not have completed, so no transformer (hence no VSA) kernel had executed anywhere when the fault fired: malformed VSA metadata cannot have caused it. Both failures were on rack-2 tray sets (2307: 2-4/2-6/2-7/2-9/2-10/2-11/2-14; 2321: 2-2/2-9/...); every later run — VSA training 2384/2385/2392 and dense training + passing validation 2389 — ran on rack-3 and cleared its first all-gathers, and rack-2 trays have prior NCCL-fault history (memory 2026-08-13). The VSA-H3 inference metadata path itself passed a full repro at the exact validation shapes (768x1344x124, S≈37.8k, 56 heads: training/inference metadata parity, in-bounds incl. route-A 64-expansion, real-kernel 3-step ladder at 0.9 with tile-buffer reuse, gate 4-stack, dense parity max 2.4e-4, plus a 4-GPU FSDP2 staggered-validation pattern — `vsa_gate/valfix_repro.py`, job 2399, run on rack-2 tray 2-0). Guard added: `_validate_h3_tile_geometry` now fails synchronously on out-of-bounds tile geometry, so a real metadata bug can never surface as an unattributable async NCCL error again; regression test `fastvideo/tests/attention/test_vsa_h3_inference_metadata_parity.py`. CONFIRMED 2026-08-19: job 2392 resumed from checkpoint-500 on rack-3 with validation re-enabled and completed a full 64-prompt VSA-student validation round (validation now runs every 100 steps, sparse student evaluated sparse — the 8228b394 dense-eval mismatch is retired). |
 | P2 | Deliberate omission | FastVideo has no DMD2 GAN/discriminator branch. FastGen's generic default is `0.001`; several Wan/LTX recipes use `0.03`. There is no H3 value to copy directly. |
-| P3 | Accepted | FastVideo uses the pinned official H3 scheduler endpoint while FastGen's RF schedule is capped at `0.999`. The resulting ladder differences are small and should not be changed without output evidence. |
-| P3 | Accepted | FastVideo clips both student and critic at 10; FastGen's default callback targets only the student. |
+| P3 | Partially resolved (2026-08-23) | Continuous score supervision now uses FastGen's FP64 `max_t=0.999` domain exactly. Integer rollout rungs retain the release pipeline's unit-domain convention so training and offline validation stay aligned; their sub-0.001 ladder difference remains accepted. |
+| P3 | Accepted | FastVideo clips whichever active role steps at 1; FastGen targets only the student. Observed critic norms remain below the threshold. |
 
 Resolved robustness items remain covered by unit tests: the VSD denominator is
 computed in FP32 with a `1e-6` floor, and the uniform integer score sampler draws
@@ -462,11 +468,10 @@ pytest -q tests/local_tests/models/test_fsdp_load_mixed_dtype.py \
   -k declared_fp32_group_distributed_forward_backward
 ```
 
-Quality comparisons still require:
-
-- direct-x0 versus sigma-squared critic loss and gradient parity in BF16; and
-- matched-seed `simulate` versus paired-latent runs, with deterministic
-  validation samples from the same checkpoint.
+Quality comparison still requires matched-seed carried versus data-latent runs
+with deterministic validation samples from the same checkpoint. Direct-x0,
+continuous score-clock, and FP64 scheduler contracts are covered by
+`test_dmd2_fastgen_parity.py`.
 
 ## MFU accounting (2026-08-19)
 
