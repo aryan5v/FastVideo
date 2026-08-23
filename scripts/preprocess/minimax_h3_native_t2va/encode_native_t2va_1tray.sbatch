@@ -8,9 +8,9 @@
 #SBATCH --exclusive
 #SBATCH --partition=all
 #SBATCH --time=20:00:00
-#SBATCH --output=/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/logs/h3-native-enc-%j.out
+#SBATCH --output=/mnt/lustre/vlm-wlsaidhi/fastvideo/logs/h3-native-enc-%j.out
 
-set -uo pipefail
+set -euo pipefail
 
 export HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 REPO="${REPO:-/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10}"
@@ -19,13 +19,24 @@ HARNESS="${HARNESS:-${REPO}/scripts/preprocess/minimax_h3_native_t2va}"
 MODEL="${MODEL:-/mnt/lustre/vlm-k1kong/models/MiniMax-H3}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
-WORKLIST="${WORKLIST:-${1:-}}"
+WORKLIST="${1:-${WORKLIST:-}}"
 if [ -z "$WORKLIST" ]; then
   echo "WORKLIST is required as the first positional argument" >&2
   exit 2
 fi
+case "$WORKLIST" in
+  */work/worklist.json) ;;
+  *)
+    echo "WORKLIST must end in /work/worklist.json: $WORKLIST" >&2
+    exit 2
+    ;;
+esac
+SET_ROOT="${WORKLIST%/work/worklist.json}"
+DATASET_ROOT="${SET_ROOT%/*}"
+LOG_ROOT="${LOG_ROOT:-${DATASET_ROOT}/logs}"
+LINGER_MINUTES="${2:-${LINGER_MINUTES:-60}}"
 
-mkdir -p /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/logs
+mkdir -p "$LOG_ROOT"
 cd "$REPO"
 pids=()
 for gpu in $(seq 0 $((NUM_WORKERS - 1))); do
@@ -34,10 +45,10 @@ for gpu in $(seq 0 $((NUM_WORKERS - 1))); do
       --worklist "$WORKLIST" \
       --model-path "$MODEL" \
       --worker-tag "${SLURM_JOB_ID}_$(hostname)_g${gpu}" \
-      --linger-minutes "${LINGER_MINUTES:-60}" \
+      --linger-minutes "$LINGER_MINUTES" \
       ${LIMIT_CHUNKS:+--limit-chunks "$LIMIT_CHUNKS"} \
       ${TIMING:+--timing} \
-      > "/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/logs/h3-native-enc-${SLURM_JOB_ID}-g${gpu}.log" 2>&1 &
+      > "${LOG_ROOT}/h3-native-enc-${SLURM_JOB_ID}-g${gpu}.log" 2>&1 &
   pids+=($!)
 done
 

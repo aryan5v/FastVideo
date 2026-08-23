@@ -235,6 +235,170 @@ def create_frozen_tree(tmp_path: Path) -> tuple[Path, Path]:
     return root, Path(training_rows[0]["raw_video_path"])
 
 
+def add_training_only_source(root: Path, source: str) -> None:
+    """Add a second immutable source to the small frozen-tree fixture."""
+    freezer = load_script("freeze_sources")
+    root_manifest_path = root / "FROZEN_MANIFEST.json"
+    root_manifest = json.loads(root_manifest_path.read_text())
+    config_path = Path(root_manifest["config_path"])
+    config = json.loads(config_path.read_text())
+    inputs = config_path.parent / source
+    videos_dir = inputs / "videos"
+    videos_dir.mkdir(parents=True)
+    status_path = inputs / "status.jsonl"
+    prompts_path = inputs / "prompts.jsonl"
+    status_path.write_text("")
+    prompts_path.write_text("")
+
+    record_id = f"{source}-train"
+    video = videos_dir / f"{record_id}.mp4"
+    video.write_bytes(b"fixed-source-video")
+    stat = video.stat()
+    frozen_row = {
+        "schema_version": freezer.SCHEMA_VERSION,
+        "source": source,
+        "family": "nuva",
+        "conditioning_id": record_id,
+        "prompt": "fixed source prompt",
+        "raw_video_path": str(video.resolve()),
+        "width": 16,
+        "height": 16,
+        "num_frames": 5,
+        "fps": 24.0,
+        "duration_sec": 5 / 24,
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "audio_samples": 0,
+        "audio_duration_sec": 0.0,
+        "bucket_id": "",
+        "status_line": 1,
+        "prompt_line": 1,
+        "video_size_bytes": stat.st_size,
+        "video_mtime_ns": stat.st_mtime_ns,
+    }
+    source_root = root / source
+    write_jsonl(source_root / "media" / "frozen.jsonl", [frozen_row])
+    write_jsonl(source_root / "media" / "train.jsonl", [frozen_row])
+    write_jsonl(
+        source_root / "prompts" / "source.jsonl",
+        [{"conditioning_id": record_id, "prompt": frozen_row["prompt"]}],
+    )
+    worklist = freezer.build_worklist([frozen_row], 32)
+    worklist.update({
+        "source": source,
+        "train_manifest": str(source_root / "media" / "train.jsonl"),
+        "set_root": str(source_root),
+    })
+    (source_root / "work").mkdir(parents=True)
+    (source_root / "work" / "worklist.json").write_text(json.dumps(worklist, indent=2, sort_keys=True) + "\n")
+    artifact_paths = {
+        "source.jsonl": source_root / "prompts" / "source.jsonl",
+        "frozen.jsonl": source_root / "media" / "frozen.jsonl",
+        "train.jsonl": source_root / "media" / "train.jsonl",
+        "worklist.json": source_root / "work" / "worklist.json",
+    }
+    artifacts_sha256 = {name: freezer.sha256_file(path) for name, path in artifact_paths.items()}
+    (source_root / "prompts" / "SOURCE.sha256").write_text(
+        f"{artifacts_sha256['source.jsonl']}  source.jsonl\n"
+    )
+    source_summary = {
+        "source": source,
+        "completed_status_ids": 0,
+        "completed_status_lines": 0,
+        "canonical_mp4s": 1,
+        "completed_and_canonical_mp4": 0,
+        "prompt_records_seen": 0,
+        "frozen_rows": 1,
+        "missing_canonical_mp4": 0,
+        "canonical_mp4_without_completed_status": 1,
+        "eligible_without_valid_prompt": 0,
+        "status_jsonl": str(status_path.resolve()),
+        "status_snapshot_sha256": freezer.sha256_file(status_path),
+        "status_snapshot_bytes": 0,
+        "prompts_jsonl": str(prompts_path.resolve()),
+        "prompts_snapshot_sha256": freezer.sha256_file(prompts_path),
+        "prompts_snapshot_bytes": 0,
+        "videos_dir": str(videos_dir.resolve()),
+        "training_rows": 1,
+        "validation_exclusions": 0,
+        "artifacts_sha256": artifacts_sha256,
+        "shape_counts": {"16x16x5": 1},
+    }
+    (source_root / "MANIFEST.source.json").write_text(json.dumps(source_summary, indent=2, sort_keys=True) + "\n")
+
+    config["sources"].append({
+        "name": source,
+        "family": "nuva",
+        "videos_dir": str(videos_dir.resolve()),
+        "status_jsonl": str(status_path.resolve()),
+        "prompts_jsonl": str(prompts_path.resolve()),
+        "prompt_id_field": "id",
+        "prompt_text_field": "prompt",
+        "require_prompt_validation_passed": False,
+    })
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    root_manifest["config_sha256"] = freezer.sha256_file(config_path)
+    root_manifest["sources"].append(source_summary)
+    root_manifest["frozen_rows"] += 1
+    root_manifest["training_rows"] += 1
+    root_manifest_path.write_text(json.dumps(root_manifest, indent=2, sort_keys=True) + "\n")
+
+    validation_summary_path = root / "validation" / "manifest.json"
+    validation_summary = json.loads(validation_summary_path.read_text())
+    validation_summary["training_exclusions_by_source"][source] = 0
+    validation_summary_path.write_text(json.dumps(validation_summary, indent=2, sort_keys=True) + "\n")
+
+
+def create_seed_trees(tmp_path: Path) -> tuple[object, Path, Path, str, dict]:
+    seeder = load_script("seed_encoded_chunks")
+    base_root = (tmp_path / "base").resolve()
+    new_root = (tmp_path / "new").resolve()
+    source = "source"
+    base_source = base_root / source
+    new_source = new_root / source
+    frozen_rows = [row("one"), row("two")]
+    for frozen_row in frozen_rows:
+        frozen_row["source"] = source
+    write_jsonl(base_source / "media" / "train.jsonl", frozen_rows)
+    write_jsonl(new_source / "media" / "train.jsonl", frozen_rows)
+    base_worklist = {
+        "chunks": [{
+            "chunk_id": "c00000",
+            "shape": {"width": 480, "height": 832, "num_frames": 294},
+            "conditioning_ids": ["one", "two"],
+        }],
+    }
+    new_worklist = {
+        "chunks": [{
+            "chunk_id": "c00042",
+            "shape": {"width": 480, "height": 832, "num_frames": 294},
+            "conditioning_ids": ["one", "two"],
+        }],
+    }
+    (base_source / "work").mkdir(parents=True)
+    (new_source / "work").mkdir(parents=True)
+    (base_source / "work" / "worklist.json").write_text(json.dumps(base_worklist) + "\n")
+    (new_source / "work" / "worklist.json").write_text(json.dumps(new_worklist) + "\n")
+
+    base_parquet = (base_source / "data" / "bucket=480x832-294f" / "c00000.parquet").resolve()
+    base_parquet.parent.mkdir(parents=True)
+    base_parquet.write_bytes(b"trusted encoded rows")
+    parquet_sha256 = seeder.sha256_file(base_parquet)
+    receipt_rows = {
+        frozen_row["conditioning_id"]: {
+            **frozen_row,
+            "parquet": str(base_parquet),
+            "parquet_sha256": parquet_sha256,
+        }
+        for frozen_row in frozen_rows
+    }
+    base_receipt = {
+        "manifest": {"parquet_sha256": {str(base_parquet): parquet_sha256}},
+        "rows_by_id": receipt_rows,
+    }
+    return seeder, base_root, new_root, source, base_receipt
+
+
 def test_failed_chunk_publishes_no_data_or_done(tmp_path, monkeypatch) -> None:
     worker = load_script("encode_worker")
     rows = {record_id: row(record_id) for record_id in ("ok", "retry")}
@@ -550,3 +714,164 @@ def test_heldout_payload_uses_validation_dataset_data_field() -> None:
     assert list(payload) == ["data"]
     assert payload["data"][0]["caption"] == "caption"
     assert payload["data"][0]["ref_video"] == "/raw/ref.mp4"
+
+
+def test_extension_preserves_base_rows_and_heldout_and_only_grows_allowed_source(tmp_path) -> None:
+    freezer = load_script("freeze_sources")
+    base_root, _ = create_frozen_tree(tmp_path)
+    fixed_source = "fixed-source"
+    add_training_only_source(base_root, fixed_source)
+    freezer.verify_existing(base_root, emit_summary=False)
+
+    base_frozen = {
+        source: [item for _, item in freezer.iter_jsonl(base_root / source / "media" / "frozen.jsonl")]
+        for source in ("source", fixed_source)
+    }
+    base_heldout = (base_root / "validation" / "heldout64.json").read_bytes()
+    base_validation = (base_root / "validation" / "manifest.jsonl").read_bytes()
+    base_fixed_frozen = (base_root / fixed_source / "media" / "frozen.jsonl").read_bytes()
+
+    base_manifest = json.loads((base_root / "FROZEN_MANIFEST.json").read_text())
+    base_config = json.loads(Path(base_manifest["config_path"]).read_text())
+    growing_spec = base_config["sources"][0]
+    status_rows = []
+    prompt_rows = []
+    for index in range(2):
+        record_id = f"new-{index}"
+        video = Path(growing_spec["videos_dir"]) / f"{record_id}.mp4"
+        video.write_bytes(f"new-video-{index}".encode())
+        status_rows.append({
+            "status": "completed",
+            "id": record_id,
+            "media": {
+                "width": 16,
+                "height": 16,
+                "frames": 5,
+                "fps": 24.0,
+                "audio_sample_rate": 32000,
+                "audio_channels": 2,
+                "audio_samples": 0,
+                "audio_duration_s": 0.0,
+            },
+        })
+        prompt_rows.append({"id": record_id, "prompt": f"new prompt {index}"})
+    write_jsonl(Path(growing_spec["status_jsonl"]), status_rows)
+    write_jsonl(Path(growing_spec["prompts_jsonl"]), prompt_rows)
+
+    new_root = (tmp_path / "extended").resolve()
+    extension_config = {**base_config, "output_root": str(new_root)}
+    extension_config_path = tmp_path / "extension-config.json"
+    extension_config_path.write_text(json.dumps(extension_config, indent=2, sort_keys=True) + "\n")
+    freezer.freeze_extension(
+        SimpleNamespace(
+            extend_existing=base_root,
+            extend_source=["source"],
+            chunk_size=32,
+            dry_run=False,
+            config=extension_config_path,
+        ),
+        extension_config,
+        new_root,
+    )
+
+    extended_manifest = freezer.verify_existing(new_root, emit_summary=False)
+    extension = extended_manifest["extension"]
+    assert (new_root / "validation" / "heldout64.json").read_bytes() == base_heldout
+    assert (new_root / "validation" / "manifest.jsonl").read_bytes() == base_validation
+    assert (new_root / fixed_source / "media" / "frozen.jsonl").read_bytes() == base_fixed_frozen
+    for source in ("source", fixed_source):
+        combined_rows = {
+            item["conditioning_id"]: item
+            for _, item in freezer.iter_jsonl(new_root / source / "media" / "frozen.jsonl")
+        }
+        for base_row in base_frozen[source]:
+            assert combined_rows[base_row["conditioning_id"]] == base_row
+    assert extension["extend_sources"] == ["source"]
+    assert extension["sources"]["source"]["added_frozen_rows"] == 2
+    assert extension["sources"]["source"]["added_training_rows"] == 2
+    assert extension["sources"][fixed_source]["added_frozen_rows"] == 0
+    assert extension["sources"][fixed_source]["added_training_rows"] == 0
+
+
+def test_frozen_config_uses_matching_local_snapshot_when_recorded_path_is_unavailable(tmp_path) -> None:
+    freezer = load_script("freeze_sources")
+    root = (tmp_path / "frozen").resolve()
+    root.mkdir()
+    snapshot = root / "CONFIG.snapshot.json"
+    snapshot.write_text('{"snapshot_seed":20260822}\n')
+    manifest = {
+        "config_path": "/home/removed-login-user/unique-v10-source-config.json",
+        "config_sha256": freezer.sha256_file(snapshot),
+    }
+
+    assert freezer.resolve_frozen_config(root, manifest) == snapshot
+
+    snapshot.write_text('{"snapshot_seed":20260823}\n')
+    with pytest.raises(FileNotFoundError, match="unavailable or has the wrong checksum"):
+        freezer.resolve_frozen_config(root, manifest)
+
+
+def test_seed_reuses_exact_signature_and_rewrites_destination_receipt(tmp_path) -> None:
+    seeder, base_root, new_root, source, base_receipt = create_seed_trees(tmp_path)
+
+    counts = seeder.seed_source(base_root, new_root, source, base_receipt, "hardlink", False)
+
+    base_parquet = Path(next(iter(base_receipt["manifest"]["parquet_sha256"])))
+    destination = (new_root / source / "data" / "bucket=480x832-294f" / "c00042.parquet").resolve()
+    done_path = new_root / source / "done" / "c00042.json"
+    done = json.loads(done_path.read_text())
+    assert counts["seeded_chunks"] == 1
+    assert counts["reused_rows"] == 2
+    assert counts["remaining_gpu_chunks"] == 0
+    assert destination.is_file()
+    assert destination.samefile(base_parquet)
+    assert done["chunk_id"] == "c00042"
+    assert done["bucket"] == "480x832-294f"
+    assert done["parquet"] == str(destination)
+    assert done["seeded_from"]["chunk_id"] == "c00000"
+    assert done["seeded_from"]["parquet"] == str(base_parquet)
+    assert all("parquet" not in item and "parquet_sha256" not in item for item in done["rows_manifest"])
+
+    repeated = seeder.seed_source(base_root, new_root, source, base_receipt, "hardlink", False)
+    assert repeated["already_seeded_chunks"] == 1
+    assert repeated["seeded_chunks"] == 0
+
+
+@pytest.mark.parametrize("mismatch", ["shape", "id-order", "frozen-row"])
+def test_seed_leaves_non_exact_chunks_for_gpu_encoding(tmp_path, mismatch: str) -> None:
+    seeder, base_root, new_root, source, base_receipt = create_seed_trees(tmp_path)
+    new_source = new_root / source
+    if mismatch in {"shape", "id-order"}:
+        worklist_path = new_source / "work" / "worklist.json"
+        worklist = json.loads(worklist_path.read_text())
+        chunk_payload = worklist["chunks"][0]
+        if mismatch == "shape":
+            chunk_payload["shape"]["width"] = 832
+        else:
+            chunk_payload["conditioning_ids"].reverse()
+        worklist_path.write_text(json.dumps(worklist) + "\n")
+    else:
+        train_path = new_source / "media" / "train.jsonl"
+        frozen_rows = [item for _, item in load_script("freeze_sources").iter_jsonl(train_path)]
+        frozen_rows[0]["prompt"] = "not the frozen base prompt"
+        write_jsonl(train_path, frozen_rows)
+
+    counts = seeder.seed_source(base_root, new_root, source, base_receipt, "hardlink", False)
+
+    assert counts["reusable_chunks"] == 0
+    assert counts["remaining_gpu_chunks"] == 1
+    assert not (new_source / "done" / "c00042.json").exists()
+    assert not list((new_source / "data").rglob("c00042.parquet")) if (new_source / "data").exists() else True
+
+
+def test_seed_rejects_corrupt_base_parquet_before_publishing(tmp_path) -> None:
+    seeder, base_root, new_root, source, base_receipt = create_seed_trees(tmp_path)
+    base_parquet = Path(next(iter(base_receipt["manifest"]["parquet_sha256"])))
+    base_parquet.write_bytes(b"corrupt after finalization")
+
+    with pytest.raises(ValueError, match="checksum does not match the finalized base receipt"):
+        seeder.seed_source(base_root, new_root, source, base_receipt, "hardlink", False)
+
+    new_source = new_root / source
+    assert not (new_source / "done" / "c00042.json").exists()
+    assert not list((new_source / "data").rglob("c00042.parquet")) if (new_source / "data").exists() else True

@@ -29,6 +29,7 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = "minimax-h3-native-t2va-freeze-v1"
 VALIDATION_SCHEMA_VERSION = "minimax-h3-native-t2va-validation-v1"
+EXTENSION_SCHEMA_VERSION = "minimax-h3-native-t2va-extension-v1"
 EXPECTED_FPS = 24.0
 EXPECTED_AUDIO_SAMPLE_RATE = 32000
 
@@ -42,10 +43,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--verify-existing",
         action="store_true",
         help="verify an already-frozen tree without consulting live sources",
+    )
+    mode.add_argument(
+        "--extend-existing",
+        type=Path,
+        default=None,
+        metavar="BASE_ROOT",
+        help="create a new immutable freeze by extending a verified base root",
+    )
+    parser.add_argument(
+        "--extend-source",
+        action="append",
+        default=[],
+        metavar="SOURCE",
+        help="source allowed to gain live eligible rows (repeatable; requires --extend-existing)",
     )
     parser.add_argument("--chunk-size", type=int, default=32)
     return parser.parse_args()
@@ -337,6 +353,24 @@ def distribution(rows: list[dict[str, Any]], field_names: tuple[str, ...]) -> di
     return dict(sorted(counts.items()))
 
 
+def conditioning_ids_sha256(ids: Iterable[str]) -> str:
+    payload = "".join(f"{record_id}\n" for record_id in sorted(ids)).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_frozen_rows(root: Path, source: str) -> list[dict[str, Any]]:
+    return [row for _, row in iter_jsonl(root / source / "media" / "frozen.jsonl")]
+
+
+def extension_compatible_config(base_config: dict[str, Any], config: dict[str, Any]) -> None:
+    """Require every source and split input except output_root to remain fixed."""
+    ignored = {"output_root"}
+    base_contract = {name: value for name, value in base_config.items() if name not in ignored}
+    extension_contract = {name: value for name, value in config.items() if name not in ignored}
+    if extension_contract != base_contract:
+        raise ValueError("extension config must equal the base config except for output_root")
+
+
 def _indexed_rows(path: Path, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     indexed: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -361,6 +395,31 @@ def _verify_sha256(path: Path, expected: Any, label: str) -> None:
         raise ValueError(f"{label}: sha256 {actual} != frozen {expected}")
 
 
+def resolve_frozen_config(root: Path, root_manifest: dict[str, Any]) -> Path:
+    """Resolve config provenance without trusting an unavailable login path."""
+    expected = root_manifest.get("config_sha256")
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError(f"frozen config: invalid recorded sha256 {expected!r}")
+    recorded_value = str(root_manifest.get("config_path", ""))
+    if not recorded_value:
+        raise ValueError("frozen manifest has no config_path")
+    recorded = Path(recorded_value)
+    candidates = [recorded, root / "CONFIG.snapshot.json", Path(__file__).with_name(recorded.name)]
+    checked: list[str] = []
+    for candidate in dict.fromkeys(path.resolve() for path in candidates):
+        checked.append(str(candidate))
+        if candidate.is_file() and sha256_file(candidate) == expected:
+            return candidate
+    raise FileNotFoundError(
+        "frozen config provenance is unavailable or has the wrong checksum; "
+        f"expected sha256={expected}, checked={checked}"
+    )
+
+
 def _verify_frozen_video(row: dict[str, Any], videos_dir: Path) -> None:
     record_id = str(row["conditioning_id"])
     path = Path(str(row["raw_video_path"]))
@@ -379,7 +438,109 @@ def _verify_frozen_video(row: dict[str, Any], videos_dir: Path) -> None:
         )
 
 
-def verify_existing(root: Path, *, emit_summary: bool = True) -> dict[str, Any]:
+def _verify_extension_contract(
+    root: Path,
+    root_manifest: dict[str, Any],
+    config: dict[str, Any],
+    seen_roots: set[Path],
+) -> None:
+    extension = root_manifest.get("extension")
+    if extension is None:
+        return
+    if not isinstance(extension, dict) or extension.get("schema_version") != EXTENSION_SCHEMA_VERSION:
+        raise ValueError("invalid frozen extension receipt")
+    receipt_path = root / "EXTENSION_RECEIPT.json"
+    _verify_sha256(receipt_path, root_manifest.get("extension_receipt_sha256"), "extension receipt")
+    if json.loads(receipt_path.read_text()) != extension:
+        raise ValueError("EXTENSION_RECEIPT.json does not match FROZEN_MANIFEST.json")
+    base_root = Path(str(extension.get("base_root", ""))).resolve()
+    if base_root == root:
+        raise ValueError("extension base root cannot equal output root")
+    base_manifest = verify_existing(base_root, emit_summary=False, _seen_roots=seen_roots)
+    _verify_sha256(
+        base_root / "FROZEN_MANIFEST.json",
+        extension.get("base_frozen_manifest_sha256"),
+        "extension base frozen manifest",
+    )
+    base_config_path = resolve_frozen_config(base_root, base_manifest)
+    base_config = json.loads(base_config_path.read_text())
+    extension_compatible_config(base_config, config)
+
+    validation_pairs = (
+        ("manifest.jsonl", "validation_manifest_sha256"),
+        ("heldout64.json", "heldout64_sha256"),
+    )
+    for artifact_name, receipt_name in validation_pairs:
+        base_path = base_root / "validation" / artifact_name
+        current_path = root / "validation" / artifact_name
+        expected_hash = extension.get(receipt_name)
+        _verify_sha256(base_path, expected_hash, f"extension base {artifact_name}")
+        _verify_sha256(current_path, expected_hash, f"extension {artifact_name}")
+        if current_path.read_bytes() != base_path.read_bytes():
+            raise ValueError(f"extension validation/{artifact_name} is not byte-identical to the base")
+
+    extend_sources = extension.get("extend_sources")
+    if not isinstance(extend_sources, list) or not extend_sources:
+        raise ValueError("extension receipt must name at least one extended source")
+    if len(extend_sources) != len(set(extend_sources)):
+        raise ValueError("extension receipt has duplicate extended sources")
+    configured_names = [str(spec["name"]) for spec in config["sources"]]
+    if any(source not in configured_names for source in extend_sources):
+        raise ValueError("extension receipt names a source outside the frozen config")
+    source_receipts = extension.get("sources")
+    if not isinstance(source_receipts, dict) or set(source_receipts) != set(configured_names):
+        raise ValueError("extension receipt must cover every configured source")
+
+    actual_totals = {
+        "base_frozen_rows": 0,
+        "combined_frozen_rows": 0,
+        "base_training_rows": 0,
+        "combined_training_rows": 0,
+    }
+    for source in configured_names:
+        base_path = base_root / source / "media" / "frozen.jsonl"
+        current_path = root / source / "media" / "frozen.jsonl"
+        base_rows = _indexed_rows(base_path, load_frozen_rows(base_root, source))
+        current_rows = _indexed_rows(current_path, load_frozen_rows(root, source))
+        base_train_path = base_root / source / "media" / "train.jsonl"
+        current_train_path = root / source / "media" / "train.jsonl"
+        base_train = _indexed_rows(base_train_path, [row for _, row in iter_jsonl(base_train_path)])
+        current_train = _indexed_rows(current_train_path, [row for _, row in iter_jsonl(current_train_path)])
+        missing = set(base_rows) - set(current_rows)
+        if missing:
+            raise ValueError(f"{source}: extension dropped {len(missing)} base frozen rows")
+        changed = [record_id for record_id, row in base_rows.items() if current_rows[record_id] != row]
+        if changed:
+            raise ValueError(f"{source}: extension changed {len(changed)} base frozen rows")
+        added_ids = set(current_rows) - set(base_rows)
+        if source not in extend_sources and added_ids:
+            raise ValueError(f"{source}: non-extended source gained {len(added_ids)} rows")
+        receipt = source_receipts[source]
+        expected_receipt = {
+            "base_frozen_rows": len(base_rows),
+            "added_frozen_rows": len(added_ids),
+            "combined_frozen_rows": len(current_rows),
+            "base_training_rows": len(base_train),
+            "added_training_rows": len(set(current_train) - set(base_train)),
+            "combined_training_rows": len(current_train),
+            "combined_prompt_rows": len(current_rows),
+            "added_conditioning_ids_sha256": conditioning_ids_sha256(added_ids),
+        }
+        if receipt != expected_receipt:
+            raise ValueError(f"{source}: extension receipt does not match the frozen row delta")
+        for total_name in actual_totals:
+            actual_totals[total_name] += expected_receipt[total_name]
+    for total_name, expected_total in actual_totals.items():
+        if int(extension.get(total_name, -1)) != expected_total:
+            raise ValueError(f"extension receipt {total_name} does not match its source totals")
+
+
+def verify_existing(
+    root: Path,
+    *,
+    emit_summary: bool = True,
+    _seen_roots: set[Path] | None = None,
+) -> dict[str, Any]:
     """Verify the complete immutable freeze contract without importing FastVideo.
 
     The frozen root manifest is the trust anchor. Every artifact hash and
@@ -387,15 +548,16 @@ def verify_existing(root: Path, *, emit_summary: bool = True) -> dict[str, Any]:
     the training rows or publish derived data.
     """
     root = root.resolve()
+    seen_roots = set() if _seen_roots is None else _seen_roots
+    if root in seen_roots:
+        raise ValueError(f"cyclic frozen extension ancestry at {root}")
+    seen_roots.add(root)
     root_manifest_path = root / "FROZEN_MANIFEST.json"
     root_manifest = json.loads(root_manifest_path.read_text())
     if root_manifest.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unexpected frozen manifest schema")
 
-    config_path = Path(str(root_manifest.get("config_path", "")))
-    if not config_path.is_file():
-        raise FileNotFoundError(f"frozen config provenance is unavailable: {config_path}")
-    _verify_sha256(config_path, root_manifest.get("config_sha256"), "frozen config")
+    config_path = resolve_frozen_config(root, root_manifest)
     config = json.loads(config_path.read_text())
     configured_specs = config.get("sources")
     if not isinstance(configured_specs, list):
@@ -558,9 +720,230 @@ def verify_existing(root: Path, *, emit_summary: bool = True) -> dict[str, Any]:
         if validation_summary.get(name) != expected:
             raise ValueError(f"validation/manifest.json field {name} does not match frozen rows")
 
+    _verify_extension_contract(root, root_manifest, config, seen_roots)
+    seen_roots.remove(root)
     if emit_summary:
         print(f"verified {root}: 64 unique validation ids, immutable artifacts, and raw media stats")
     return root_manifest
+
+
+def freeze_extension(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    root: Path,
+) -> None:
+    """Freeze a combined tree while retaining the verified base rows and split."""
+    base_root = args.extend_existing.resolve()
+    if base_root == root:
+        raise ValueError("--extend-existing must differ from the output root")
+    base_manifest = verify_existing(base_root, emit_summary=False)
+    base_config_path = resolve_frozen_config(base_root, base_manifest)
+    base_config = json.loads(base_config_path.read_text())
+    extension_compatible_config(base_config, config)
+
+    configured_names = [str(spec["name"]) for spec in config["sources"]]
+    extend_sources = list(dict.fromkeys(str(name) for name in args.extend_source))
+    if not extend_sources:
+        raise ValueError("--extend-existing requires at least one --extend-source")
+    unknown_sources = sorted(set(extend_sources) - set(configured_names))
+    if unknown_sources:
+        raise ValueError(f"unknown --extend-source values: {unknown_sources}")
+    base_summaries = {str(summary["source"]): summary for summary in base_manifest["sources"]}
+    if set(base_summaries) != set(configured_names):
+        raise ValueError("base frozen sources do not match extension config")
+    base_chunk_sizes = {
+        int(json.loads((base_root / source / "work" / "worklist.json").read_text())["chunk_size"])
+        for source in configured_names
+    }
+    if base_chunk_sizes != {args.chunk_size}:
+        raise ValueError(
+            f"--chunk-size {args.chunk_size} must equal the base freeze chunk size {sorted(base_chunk_sizes)}"
+        )
+
+    validation_manifest_path = base_root / "validation" / "manifest.jsonl"
+    validation_rows = [row for _, row in iter_jsonl(validation_manifest_path)]
+    validation_ids = {str(row["conditioning_id"]) for row in validation_rows}
+    if len(validation_rows) != 64 or len(validation_ids) != 64:
+        raise ValueError("base validation manifest must contain 64 unique conditioning ids")
+
+    all_rows: dict[str, list[dict[str, Any]]] = {}
+    training_rows: dict[str, list[dict[str, Any]]] = {}
+    all_stats: dict[str, dict[str, Any]] = {}
+    source_receipts: dict[str, dict[str, Any]] = {}
+    extension_specs = {str(spec["name"]): spec for spec in config["sources"]}
+    for source in configured_names:
+        base_rows = load_frozen_rows(base_root, source)
+        base_by_id = _indexed_rows(base_root / source / "media" / "frozen.jsonl", base_rows)
+        added_by_id: dict[str, dict[str, Any]] = {}
+        if source in extend_sources:
+            live_rows, live_stats = source_inventory(extension_specs[source])
+            live_by_id = _indexed_rows(Path(live_stats["status_jsonl"]), live_rows)
+            added_by_id = {record_id: row for record_id, row in live_by_id.items() if record_id not in base_by_id}
+            stats = dict(live_stats)
+        else:
+            derived_fields = {
+                "artifacts_sha256",
+                "training_rows",
+                "validation_exclusions",
+                "shape_counts",
+                "extension",
+            }
+            stats = {
+                name: value
+                for name, value in base_summaries[source].items()
+                if name not in derived_fields
+            }
+        combined_by_id = {**base_by_id, **added_by_id}
+        combined = [combined_by_id[record_id] for record_id in sorted(combined_by_id)]
+        train = [row for row in combined if row["conditioning_id"] not in validation_ids]
+        base_train_path = base_root / source / "media" / "train.jsonl"
+        base_train_ids = {str(row["conditioning_id"]) for _, row in iter_jsonl(base_train_path)}
+        combined_train_ids = {str(row["conditioning_id"]) for row in train}
+        if not base_train_ids <= combined_train_ids:
+            raise ValueError(f"{source}: extension would drop base training rows")
+        stats["frozen_rows"] = len(combined)
+        all_rows[source] = combined
+        training_rows[source] = train
+        all_stats[source] = stats
+        source_receipts[source] = {
+            "base_frozen_rows": len(base_rows),
+            "added_frozen_rows": len(added_by_id),
+            "combined_frozen_rows": len(combined),
+            "base_training_rows": len(base_train_ids),
+            "added_training_rows": len(combined_train_ids - base_train_ids),
+            "combined_training_rows": len(train),
+            "combined_prompt_rows": len(combined),
+            "added_conditioning_ids_sha256": conditioning_ids_sha256(added_by_id),
+        }
+        print(
+            f"{source}: base={len(base_rows)} added={len(added_by_id)} "
+            f"combined={len(combined)} training={len(train)}"
+        )
+
+    base_validation_summary = json.loads((base_root / "validation" / "manifest.json").read_text())
+    validation_exclusions = {
+        source: len(all_rows[source]) - len(training_rows[source])
+        for source in configured_names
+    }
+    validation_summary = {
+        **base_validation_summary,
+        "training_exclusions_by_source": validation_exclusions,
+        "extension": {
+            "schema_version": EXTENSION_SCHEMA_VERSION,
+            "base_root": str(base_root),
+            "extend_sources": extend_sources,
+            "note": "heldout64.json and validation/manifest.jsonl are byte-identical to the verified base freeze",
+        },
+    }
+    extension_receipt = {
+        "schema_version": EXTENSION_SCHEMA_VERSION,
+        "base_root": str(base_root),
+        "base_frozen_manifest_sha256": sha256_file(base_root / "FROZEN_MANIFEST.json"),
+        "validation_manifest_sha256": sha256_file(base_root / "validation" / "manifest.jsonl"),
+        "heldout64_sha256": sha256_file(base_root / "validation" / "heldout64.json"),
+        "extend_sources": extend_sources,
+        "sources": source_receipts,
+        "base_frozen_rows": int(base_manifest["frozen_rows"]),
+        "combined_frozen_rows": sum(len(rows) for rows in all_rows.values()),
+        "base_training_rows": int(base_manifest["training_rows"]),
+        "combined_training_rows": sum(len(rows) for rows in training_rows.values()),
+    }
+    print(json.dumps(extension_receipt, indent=2, sort_keys=True))
+    if args.dry_run:
+        return
+
+    if root.exists():
+        raise FileExistsError(f"freeze root already exists at {root}; use --verify-existing instead of overwriting")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Assemble the complete tree as a sibling and publish it with one rename.
+    # A killed process can leave only an unreferenced sibling staging tree;
+    # the canonical root remains absent and a retry can safely start anew.
+    stage = Path(tempfile.mkdtemp(prefix=f".{root.name}.freeze-extension-", dir=root.parent))
+    try:
+        source_summaries: list[dict[str, Any]] = []
+        for source in configured_names:
+            source_root = stage / source
+            frozen = all_rows[source]
+            train = training_rows[source]
+            write_jsonl(source_root / "media" / "frozen.jsonl", frozen)
+            write_jsonl(source_root / "media" / "train.jsonl", train)
+            write_jsonl(
+                source_root / "prompts" / "source.jsonl",
+                ({"conditioning_id": row["conditioning_id"], "prompt": row["prompt"]} for row in frozen),
+            )
+            worklist = build_worklist(train, args.chunk_size)
+            worklist.update({
+                "source": source,
+                "train_manifest": str(root / source / "media" / "train.jsonl"),
+                "set_root": str(root / source),
+            })
+            (source_root / "work").mkdir(parents=True, exist_ok=True)
+            (source_root / "work" / "worklist.json").write_text(
+                json.dumps(worklist, indent=2, sort_keys=True) + "\n"
+            )
+            hashes = {
+                "source.jsonl": sha256_file(source_root / "prompts" / "source.jsonl"),
+                "frozen.jsonl": sha256_file(source_root / "media" / "frozen.jsonl"),
+                "train.jsonl": sha256_file(source_root / "media" / "train.jsonl"),
+                "worklist.json": sha256_file(source_root / "work" / "worklist.json"),
+            }
+            (source_root / "prompts" / "SOURCE.sha256").write_text(hashes["source.jsonl"] + "  source.jsonl\n")
+            source_summary = {
+                **all_stats[source],
+                "training_rows": len(train),
+                "validation_exclusions": validation_exclusions[source],
+                "artifacts_sha256": hashes,
+                "shape_counts": distribution(frozen, ("width", "height", "num_frames")),
+                "extension": source_receipts[source],
+            }
+            (source_root / "MANIFEST.source.json").write_text(
+                json.dumps(source_summary, indent=2, sort_keys=True) + "\n"
+            )
+            source_summaries.append(source_summary)
+
+        validation_root = stage / "validation"
+        validation_root.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base_root / "validation" / "manifest.jsonl", validation_root / "manifest.jsonl")
+        shutil.copy2(base_root / "validation" / "heldout64.json", validation_root / "heldout64.json")
+        (validation_root / "manifest.json").write_text(
+            json.dumps(validation_summary, indent=2, sort_keys=True) + "\n"
+        )
+        videos_root = validation_root / "videos"
+        videos_root.mkdir()
+        for row in validation_rows:
+            (videos_root / f"{row['source']}__{row['conditioning_id']}.mp4").symlink_to(row["raw_video_path"])
+
+        (stage / "EXTENSION_RECEIPT.json").write_text(
+            json.dumps(extension_receipt, indent=2, sort_keys=True) + "\n"
+        )
+        shutil.copy2(args.config, stage / "CONFIG.snapshot.json")
+        frozen_manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "config_path": str(root / "CONFIG.snapshot.json"),
+            "config_source_path": str(args.config.resolve()),
+            "config_sha256": sha256_file(args.config),
+            "seed": int(config["snapshot_seed"]),
+            "sources": source_summaries,
+            "frozen_rows": sum(len(rows) for rows in all_rows.values()),
+            "training_rows": sum(len(rows) for rows in training_rows.values()),
+            "validation_rows": 64,
+            "validation_manifest_sha256": sha256_file(validation_root / "manifest.jsonl"),
+            "heldout64_sha256": sha256_file(validation_root / "heldout64.json"),
+            "extension": extension_receipt,
+            "extension_receipt_sha256": sha256_file(stage / "EXTENSION_RECEIPT.json"),
+            "ready": False,
+            "ready_policy": (
+                "READY.json is created only by finalize_dataset.py after every training row is encoded and validated."
+            ),
+        }
+        (stage / "FROZEN_MANIFEST.json").write_text(json.dumps(frozen_manifest, indent=2, sort_keys=True) + "\n")
+
+        os.replace(stage, root)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    verify_existing(root)
 
 
 def main() -> None:
@@ -568,10 +951,17 @@ def main() -> None:
     config = json.loads(args.config.read_text())
     root = (args.output_root or Path(config["output_root"])).resolve()
     if args.verify_existing:
+        if args.extend_source:
+            raise ValueError("--extend-source is only valid with --extend-existing")
         verify_existing(root)
         return
     if args.chunk_size <= 0:
         raise ValueError("--chunk-size must be positive")
+    if args.extend_existing is not None:
+        freeze_extension(args, config, root)
+        return
+    if args.extend_source:
+        raise ValueError("--extend-source requires --extend-existing")
 
     all_rows: dict[str, list[dict[str, Any]]] = {}
     all_stats: dict[str, dict[str, Any]] = {}
