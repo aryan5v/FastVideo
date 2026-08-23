@@ -547,7 +547,7 @@ def test_save_inference_stages_full_state_and_publishes_once(
     def fake_dcp_save(states: dict[str, Any], *, checkpoint_id: str) -> None:
         staged_states.append(states)
         dcp_dir = Path(checkpoint_id)
-        dcp_dir.mkdir(parents=True)
+        dcp_dir.mkdir(parents=True, exist_ok=True)
         (dcp_dir / ".metadata").touch()
 
     def fake_export(**kwargs: Any) -> Path:

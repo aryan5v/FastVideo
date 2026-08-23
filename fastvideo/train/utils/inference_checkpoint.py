@@ -243,7 +243,8 @@ def _component_tensor_shapes(module_dir: Path) -> dict[str, tuple[int, ...]]:
     for path in files:
         try:
             with safe_open(str(path), framework="pt", device="cpu") as handle:
-                for key in handle:
+                # ``safe_open`` exposes ``keys()`` but is not itself iterable.
+                for key in handle.keys():  # noqa: SIM118
                     if key in shapes:
                         raise InferenceCheckpointExportError(f"Duplicate base transformer tensor key {key!r}")
                     shapes[key] = tuple(int(dim) for dim in handle.get_slice(key).get_shape())
