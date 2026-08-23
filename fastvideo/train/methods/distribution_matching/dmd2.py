@@ -436,12 +436,11 @@ class DMD2Method(TrainingMethod):
                 raise ValueError("method.allow_mixed_rollout_regimes must be a bool, "
                                  f"got {type(allow_mixed).__name__}")
             if not allow_mixed:
-                raise ValueError(
-                    "method.rollout_data_forcing mixes carried and data-latent "
-                    "rollout regimes per batch, which is not a FastGen recipe. "
-                    "Choose one global regime with rollout_mode={simulate, "
-                    "data_latent}; set allow_mixed_rollout_regimes: true only "
-                    "to reproduce the legacy v9 experiment.")
+                raise ValueError("method.rollout_data_forcing mixes carried and data-latent "
+                                 "rollout regimes per batch, which is not a FastGen recipe. "
+                                 "Choose one global regime with rollout_mode={simulate, "
+                                 "data_latent}; set allow_mixed_rollout_regimes: true only "
+                                 "to reproduce the legacy v9 experiment.")
         return raw
 
     @staticmethod
@@ -883,8 +882,7 @@ class DMD2Method(TrainingMethod):
             ) * (t_hi - t_lo) + t_lo
             inverse_shift = 1.0 / shift
             warp_max = getattr(self, "_score_timestep_warp_max", 1.0)
-            t = (u * inverse_shift * warp_max /
-                 (u * (inverse_shift - 1.0) + warp_max))
+            t = (u * inverse_shift * warp_max / (u * (inverse_shift - 1.0) + warp_max))
             timestep = t * num_timesteps
             timestep = self.student.shift_and_clamp_timestep(timestep)
             return timestep.clamp(0.0, warp_max * num_timesteps)
@@ -1571,12 +1569,10 @@ class DMD2Method(TrainingMethod):
         for name, modality in slices:
             if all_x0:
                 assert pred_x0 is not None
-                loss_m = torch.mean((pred_x0[:, modality].float() -
-                                     generator_pred_x0[:, modality].float())**2)
+                loss_m = torch.mean((pred_x0[:, modality].float() - generator_pred_x0[:, modality].float())**2)
             else:
                 assert pred_noise is not None and target is not None
-                loss_m = torch.mean((pred_noise[:, modality].float() -
-                                     target[:, modality].float())**2)
+                loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
             if not all_x0 and self._fake_score_space_for(name) == "x0":
                 # For affine rectified flow, x0 MSE is sigma_m(t)^2 times
                 # velocity MSE. This compatibility path is retained only for

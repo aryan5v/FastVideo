@@ -298,8 +298,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         clean_fp64 = clean.to(torch.float64)
         noise_fp64 = noise.to(torch.float64)
         sigma_fp64 = sigma.to(device=clean.device, dtype=torch.float64)
-        return ((1.0 - sigma_fp64) * clean_fp64 +
-                sigma_fp64 * noise_fp64).to(original_dtype)
+        return ((1.0 - sigma_fp64) * clean_fp64 + sigma_fp64 * noise_fp64).to(original_dtype)
 
     def extract_eps(
         self,
@@ -369,8 +368,7 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         sigma_fp64 = sigma.to(device=noisy.device, dtype=torch.float64)
         # The DMD grid never renoises from t=0, but clamp so a degenerate
         # call cannot divide by zero.
-        eps = ((noisy_fp64 - (1.0 - sigma_fp64) * clean_fp64) /
-               sigma_fp64.clamp_min(1e-6))
+        eps = ((noisy_fp64 - (1.0 - sigma_fp64) * clean_fp64) / sigma_fp64.clamp_min(1e-6))
         return eps.to(original_dtype)
 
     def predict_noise(
