@@ -30,6 +30,7 @@ _V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matc
 _V10_MAXSHAPE_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml")
 _V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"
 _H3_SBATCH = _REPO_ROOT / "examples/train/slurm/dmd2_32xgb200.sbatch"
+_V10_GATED_LAUNCHER = _REPO_ROOT / "scripts/train/run_h3_v10_gated.sh"
 _V10_MAXSHAPE_RUNNER = _REPO_ROOT / "scripts/train/run_h3_v10_maxshape_gate.sh"
 _V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
 _V10_KERNEL_REBUILD = _REPO_ROOT / "scripts/train/rebuild_h3_v10_kernel.sh"
@@ -860,11 +861,19 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "no successful final-commit 64-GPU 1760x768x362 capacity receipt" in launcher
     assert "available_bytes < MIN_OUTPUT_FREE_BYTES" in launcher
     assert "validated same-recipe pre-step-100 restart namespace" in launcher
-    assert 'training_checkpoints = sorted(path.name for path in output_dir.glob("checkpoint-*")' in launcher
-    assert 'inference_entries != ["checkpoint-0"]' in launcher
+    assert 'checkpoint_dir_re = re.compile(r"^checkpoint-([0-9]+)$")' in launcher
+    assert 'dcp_metadata = checkpoint / "dcp" / ".metadata"' in launcher
+    assert 'marker != "complete\\n"' in launcher
+    assert 'expected_rng_names = {f"rng_state_rank{rank}.pt" for rank in range(world_size)}' in launcher
+    assert 'len(rng_paths) != world_size' in launcher
+    assert "incomplete training checkpoint is not newer than the latest strict fallback" in launcher
+    assert "required_inference_steps = set(range(0, latest_step + 1, 100))" in launcher
+    assert "missing unlimited-retention inference checkpoints" in launcher
+    assert "completed validation step {step} does not have all 64 DP-padded names" in launcher
     assert 'saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]' in launcher
-    assert "checkpoint-0 belongs to a different data/validation recipe" in launcher
-    assert "checkpoint-0 shard/tensor counts differ from its index" in launcher
+    assert "belongs to a different data/heldout60 recipe" in launcher
+    assert "shard/tensor counts differ from its index" in launcher
+    assert "step-zero validation must preserve all 64 DP-padded four-forward names" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${DATA_ROOT}/DERIVATION_RECEIPT.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
@@ -882,9 +891,11 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "validation DP padding does not repeat exactly the first four retained records" in launcher
     assert "excluded resolution leaked into v3 cache" in launcher
     assert "--verify-only" in launcher
-    assert "H3_V10_KERNEL_GATE=1" in launcher
-    assert "HSDP_SHARD=%q" in launcher
+    assert 'require_file "${REPO}/scripts/train/run_h3_v10_gated.sh"' in launcher
     assert "--nodes=%q" in launcher
+    assert "--no-requeue" in launcher
+    assert "--wrap" not in launcher
+    assert '"${REPO}/scripts/train/run_h3_v10_gated.sh" "${execution_commit}"' in launcher
     assert 'git -C "${REPO}" status --porcelain' in launcher
     assert "This helper never calls sbatch" in launcher
 
@@ -949,22 +960,51 @@ def test_h3_dmd2_v10_maxshape_gate_matches_production_capacity_contract() -> Non
     assert "student_grad_finite_positive" in runner
     assert "dense_teacher_and_critic_compiled" in runner
     assert "vsa_grad_used_triton64" in runner
+    assert '"execution_commit_unchanged": observed_execution_commit == expected_execution_commit' in runner
+    assert '"execution_checkout_clean": execution_checkout_clean' in runner
+    assert '"execution_commit": expected_execution_commit' in runner
 
     sbatch = _H3_SBATCH.read_text()
     assert 'TRAIN_LOG_ROOT="${H3_V10_TRAIN_LOG_ROOT:-${REPO}/examples/train/logs}"' in sbatch
 
 
+def test_h3_dmd2_v10_gated_launcher_defers_requeue_until_all_gates_pass() -> None:
+    launcher = _V10_GATED_LAUNCHER.read_text()
+
+    assert launcher.startswith("#!/bin/bash\n")
+    assert "#SBATCH --nodes=16" in launcher
+    assert "#SBATCH --gpus-per-node=4" in launcher
+    assert "#SBATCH --no-requeue" in launcher
+    assert "--wrap" not in launcher
+    assert '(( $# != 1 ))' in launcher
+    assert '[[ ! "$1" =~ ^[0-9a-f]{40}$ ]]' in launcher
+    assert 'readonly EXPECTED_V10_COMMIT="$1"' in launcher
+    assert 'requested commit ${EXPECTED_V10_COMMIT} != execution HEAD ${execution_commit}' in launcher
+    assert launcher.count("require_exact_execution_checkout") == 4
+    assert 'MAXSHAPE_RECEIPT="${MAXSHAPE_ROOT}/audit/job-${SLURM_JOB_ID:' in launcher
+    assert 'if [[ ! -f "${MAXSHAPE_RECEIPT}" ]]' in launcher
+    assert '"job_id": job_id' in launcher
+    assert '"${MAXSHAPE_CONFIG}" "${EXPECTED_V10_COMMIT}" "${SLURM_JOB_ID}"' in launcher
+    assert 'bash "${REPO}/scripts/train/run_h3_v10_maxshape_gate.sh"' in launcher
+    preflight = 'bash "${REPO}/examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"'
+    enable_requeue = 'scontrol update JobId="${SLURM_JOB_ID}" Requeue=1'
+    production = 'exec bash "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"'
+    assert launcher.index(preflight) < launcher.index(enable_requeue) < launcher.index(production)
+    assert 'scontrol update JobId="${SLURM_JOB_ID}" Requeue=0' in launcher
+    assert "export H3_V10_KERNEL_GATE=0" in launcher
+    assert "export GATE_TEST=0" in launcher
+
+
 def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None:
-    launcher = _V10_PREPARE_LAUNCHER.read_text()
+    gated_launcher = _V10_GATED_LAUNCHER.read_text()
     sbatch = _H3_SBATCH.read_text()
     gate = _V10_KERNEL_GATE.read_text()
     rebuild = _V10_KERNEL_REBUILD.read_text()
     receipt_helper = _V10_KERNEL_RECEIPT_HELPER.read_text()
-    expected_pythonpath = (
-        "${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}")
+    expected_pythonpath = "${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}"
 
-    assert f'V10_PYTHONPATH="{expected_pythonpath}"' in launcher
-    assert "H3_V10_KERNEL_GATE=1" in launcher
+    assert f'export PYTHONPATH="{expected_pythonpath}"' in gated_launcher
+    assert "export H3_V10_KERNEL_GATE=1" in gated_launcher
     assert 'if [ "${H3_V10_KERNEL_GATE}" = "1" ]' in sbatch
     assert "scripts/train/gate_h3_v10_kernel.sh" in sbatch
     assert "python' -m pytest" in sbatch

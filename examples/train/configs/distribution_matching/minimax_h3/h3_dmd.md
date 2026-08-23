@@ -313,24 +313,43 @@ the newest three are retained. At 4000 steps, 41 H3 student exports use about
 Write-before-rotate peak is about 5.6 TiB, so preflight requires at least 6 TiB
 free.
 
-The non-submitting preflight is:
+The committed one-allocation launcher is submitted as an explicit Bash file,
+with the reviewed execution commit as its only positional argument:
 
 ```bash
-bash examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh
+sbatch --export=NIL scripts/train/run_h3_v10_gated.sh <40-character-execution-commit>
 ```
 
-It targets the dedicated execution clone `FastVideo-v10`, runs the native
-data finalizer in `--verify-only` mode (including READY/manifests, parquet
-schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
-videos, and prints but does not execute the sixteen-tray `sbatch` command. It
-accepts either a fresh fsdp64 output namespace or the exact safe state left by
-a failure before step 100: no resumable/staging training checkpoint, one
-complete step-zero bf16 student export, and all 64 nonempty four-forward
-validation videos. It rejects every other nonempty namespace. It also binds the kernel receipt to
-the final execution commit and requires at least 6 TiB free for the immutable
-bf16 inference lineage plus keep-three resumable states and transient rotation
-write. Rack-2 is the selected production lane. A cold Slinky topology can reject a direct
-sixteen-node request even when the backing Kubernetes pool has capacity. Follow
+The script starts with Slurm requeue disabled, rejects a queued job if the
+shared execution checkout no longer equals that positional commit, runs the
+exact 64-GPU max-shape gate when this job has no receipt, and then runs
+`prepare_h3_dmd2_v10_slinky.sh`. Only after those gates succeed does it set
+`Requeue=1` and exec the production launcher. On a requeue, it temporarily
+disables requeue again and accepts only its own successful, commit/config-bound
+max-shape receipt before repeating preflight.
+
+The non-submitting preflight targets the dedicated execution clone
+`FastVideo-v10`, runs the native data finalizer in `--verify-only` mode
+(including READY/manifests, parquet schema/hash/buckets, and exact map-style
+cache), and checks all 60 unique held-out raw videos plus the four-record DP-64
+padding contract. It accepts a fresh namespace, the exact pre-step-100 state
+(one complete step-zero bf16 student export and all 64 nonempty four-forward
+validation videos), or a strict resumable checkpoint on the 100-step cadence.
+A resumable checkpoint must match the current data, heldout60, output,
+full-shard topology, and four-forward metadata; contain nonempty DCP metadata,
+the post-RNG `.complete` marker, and exactly 64 nonempty rank RNG snapshots;
+and retain every complete inference export through that step. Every validation
+event before the latest checkpoint must also have all 64 DP-padded output
+names; the latest may be partial because its checkpoint is published before
+validation and the resume path reruns that event. Incomplete checkpoint
+directories are tolerated only when newer than the latest strict checkpoint,
+which is a conservative hygiene layer around the runtime's safe `latest`
+fallback. The preflight also binds
+the kernel receipt to the final execution commit and requires at least 6 TiB
+free for the immutable bf16 inference lineage plus keep-three resumable states
+and transient rotation write. Rack-3 is the selected production lane. A cold
+Slinky topology can reject a direct sixteen-node request even when the backing
+Kubernetes pool has capacity. Follow
 `/home/vlm-wlsaidhi/ddnet-rl/SLURM_LAUNCH.md`: start enough one-node primer
 jobs (the guide uses 26 demands for a 16-node target), wait until at least 16
 are running, cancel only those exact primer IDs, and immediately race the real

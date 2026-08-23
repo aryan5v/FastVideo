@@ -1,7 +1,7 @@
 #!/bin/bash
 # Validate the shared v10 inputs and print the exact sixteen-tray Slinky submit
-# command. This helper never calls sbatch; copy the final line deliberately
-# after every gate reports READY.
+# command for the committed one-allocation gated launcher. This helper never
+# calls sbatch; copy the final line deliberately after every gate reports READY.
 
 set -euo pipefail
 
@@ -44,12 +44,10 @@ LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
 # procedure when the rack is cold. Override PARTITION only if the operator
 # explicitly selects another rack.
 PARTITION="${PARTITION:-hpc-rack-3}"
-LUSTRE_HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 KERNEL_PREFIX="${KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
 KERNEL_RECEIPT="${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
 FA4_OVERLAY="${FA4_OVERLAY:-/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay}"
 FA4_CUTLASS_PACKAGES="${FA4_CUTLASS_PACKAGES:-${FA4_OVERLAY}/nvidia_cutlass_dsl/python_packages}"
-V10_PYTHONPATH="${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}"
 
 sources=(
   h3_t2av_video_nuva_50k_720_mixed_len
@@ -71,6 +69,7 @@ require_file "${CONFIG}"
 require_file "${MAXSHAPE_CONFIG}"
 require_file "${VENV}/bin/python"
 require_file "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
+require_file "${REPO}/scripts/train/run_h3_v10_gated.sh"
 require_file "${REPO}/scripts/train/gate_h3_v10_kernel.sh"
 require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/finalize_dataset.py"
 require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/derive_filtered_dataset.py"
@@ -551,17 +550,19 @@ if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
   failures=$((failures + 1))
 fi
 
-# A pre-step-100 failure has no resumable training state, but it may have
-# already published the immutable step-zero inference export and all 64
-# DP-padded validation videos (60 retained records plus four repeats). Accept
-# only that exact, fully validated namespace. This
-# makes an incident restart idempotent without deleting a good 66-GiB export
-# or accidentally resuming incompatible optimizer/RNG state.
+# A restart may have only the exact step-zero products, or it may have one or
+# more strict resumable checkpoints. Select resumable state with the same
+# publication contract as the runtime: DCP metadata, the post-RNG `.complete`
+# marker, and exactly one nonempty RNG file per rank. A crashed newer save is
+# allowed only when an older strict checkpoint exists, so `latest` can fall
+# back safely. Every published checkpoint and inference export is also bound to
+# this exact data, validation, output, topology, and four-forward recipe.
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   if ! "${VENV}/bin/python" - \
     "${OUTPUT_DIR}" "${WORLD_SIZE}" "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 import yaml
@@ -574,106 +575,304 @@ validation_manifest = sys.argv[5]
 current_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 expected_data_paths = current_config["training"]["data"]["data_path"]
 expected_validation_manifest = current_config["callbacks"]["validation"]["dataset_file"]
+expected_output_dir = current_config["training"]["checkpoint"]["output_dir"]
+expected_topology = current_config["training"]["distributed"]
+expected_checkpoint_policy = {
+    "resume_from_checkpoint": "latest",
+    "save_inference_checkpoint_on_validation": True,
+    "inference_checkpoint_role": "student",
+    "inference_checkpoint_dtype": "bfloat16",
+    "training_state_checkpointing_steps": 100,
+    "require_complete_training_checkpoint": True,
+    "checkpointing_start_step": 100,
+    "checkpoints_total_limit": 3,
+}
+checkpoint_dir_re = re.compile(r"^checkpoint-([0-9]+)$")
+checkpoint_staging_re = re.compile(r"^\.checkpoint-([0-9]+)$")
+inference_temp_re = re.compile(r"^\.checkpoint-([0-9]+)\.tmp-.+$")
+validation_video_re = re.compile(
+    r"^validation_step_([0-9]+)_inference_steps_4_rank_([0-9]+)_video_0\.mp4$"
+)
 if any(not str(path).startswith(f"{data_root}/") for path in expected_data_paths):
     raise SystemExit("NOT READY: current v10 config data paths are outside the filtered v3 root")
 if expected_validation_manifest != validation_manifest:
     raise SystemExit("NOT READY: current v10 validation path differs from the fixed v3 launch contract")
-validation_names = {
+if expected_output_dir != str(output_dir):
+    raise SystemExit(f"NOT READY: current v10 output {expected_output_dir!r} != {str(output_dir)!r}")
+
+
+def load_json(path, label):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"NOT READY: invalid {label}: {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise SystemExit(f"NOT READY: {label} must be a JSON object: {path}")
+    return value
+
+
+def validate_saved_recipe(saved_config, label):
+    if not isinstance(saved_config, dict):
+        raise SystemExit(f"NOT READY: {label} has no saved v10 config")
+    saved_training = saved_config.get("training", {})
+    saved_callbacks = saved_config.get("callbacks", {})
+    saved_validation = saved_callbacks.get("validation", {}) if isinstance(saved_callbacks, dict) else {}
+    saved_method = saved_config.get("method", {})
+    if not all(isinstance(value, dict) for value in (saved_training, saved_validation, saved_method)):
+        raise SystemExit(f"NOT READY: {label} has malformed training/validation/method metadata")
+    saved_data_paths = saved_training.get("data", {}).get("data_path")
+    saved_validation_manifest = saved_validation.get("dataset_file")
+    if saved_data_paths != expected_data_paths or saved_validation_manifest != expected_validation_manifest:
+        raise SystemExit(
+            f"NOT READY: {label} belongs to a different data/heldout60 recipe; "
+            f"saved_data={saved_data_paths!r} expected_data={expected_data_paths!r} "
+            f"saved_validation={saved_validation_manifest!r} expected_validation={expected_validation_manifest!r}"
+        )
+    saved_checkpoint = saved_training.get("checkpoint", {})
+    if not isinstance(saved_checkpoint, dict) or saved_checkpoint.get("output_dir") != str(output_dir):
+        raise SystemExit(f"NOT READY: {label} belongs to a different output namespace")
+    observed_checkpoint_policy = {key: saved_checkpoint.get(key) for key in expected_checkpoint_policy}
+    if observed_checkpoint_policy != expected_checkpoint_policy:
+        raise SystemExit(
+            f"NOT READY: {label} checkpoint policy {observed_checkpoint_policy!r} "
+            f"!= {expected_checkpoint_policy!r}"
+        )
+    if saved_training.get("distributed") != expected_topology:
+        raise SystemExit(
+            f"NOT READY: {label} topology {saved_training.get('distributed')!r} != {expected_topology!r}"
+        )
+    if saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]:
+        raise SystemExit(f"NOT READY: {label} does not use the trained four-forward ladder")
+    if (saved_validation.get("sampling_steps") != [4]
+            or saved_validation.get("every_steps") != 100
+            or saved_validation.get("run_at_start") is not True
+            or saved_validation.get("num_videos_per_prompt") != 1):
+        raise SystemExit(f"NOT READY: {label} does not use the v10 four-forward validation cadence")
+
+
+def validate_inference_checkpoint(step):
+    checkpoint = output_dir / "inference" / f"checkpoint-{step}"
+    try:
+        marker = (checkpoint / ".complete").read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"NOT READY: missing inference completion marker: {checkpoint}: {error}") from error
+    if marker != "complete\n":
+        raise SystemExit(f"NOT READY: invalid inference completion marker: {checkpoint / '.complete'}")
+    metadata = load_json(checkpoint / "metadata.json", f"inference checkpoint-{step} metadata")
+    expected_metadata = {
+        "format_version": 1,
+        "kind": "inference",
+        "step": step,
+        "role": "student",
+        "dtype": "bfloat16",
+        "module": "transformer",
+    }
+    observed_metadata = {key: metadata.get(key) for key in expected_metadata}
+    if observed_metadata != expected_metadata:
+        raise SystemExit(
+            f"NOT READY: checkpoint-{step} metadata is not the v10 student inference contract; "
+            f"observed={observed_metadata}"
+        )
+    validate_saved_recipe(metadata.get("config"), f"inference checkpoint-{step}")
+    module_dir = checkpoint / "transformer"
+    index_path = module_dir / "diffusion_pytorch_model.safetensors.index.json"
+    index = load_json(index_path, f"inference checkpoint-{step} shard index")
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise SystemExit(f"NOT READY: checkpoint-{step} has an invalid shard index: {index_path}")
+    if any(not isinstance(name, str) or pathlib.Path(name).name != name for name in weight_map.values()):
+        raise SystemExit(f"NOT READY: checkpoint-{step} shard index contains an invalid path")
+    expected_shards = set(weight_map.values())
+    actual_shards = {path.name for path in module_dir.glob("*.safetensors") if path.is_file()}
+    if expected_shards != actual_shards or any((module_dir / name).stat().st_size <= 0 for name in expected_shards):
+        raise SystemExit(
+            f"NOT READY: checkpoint-{step} shard set differs from its index; "
+            f"missing={sorted(expected_shards - actual_shards)} extra={sorted(actual_shards - expected_shards)}"
+        )
+    if metadata.get("shard_count") != len(expected_shards) or metadata.get("tensor_count") != len(weight_map):
+        raise SystemExit(f"NOT READY: checkpoint-{step} shard/tensor counts differ from its index")
+
+
+checkpoint_dirs = {}
+checkpoint_staging = {}
+validation_by_step = {}
+nonempty_validation_by_step = {}
+inference_root = None
+inference_staging_root = None
+unexpected = []
+for path in output_dir.iterdir():
+    name = path.name
+    match = checkpoint_dir_re.fullmatch(name)
+    if match:
+        if not path.is_dir():
+            raise SystemExit(f"NOT READY: training checkpoint path is not a directory: {path}")
+        checkpoint_dirs[int(match.group(1))] = path
+        continue
+    match = checkpoint_staging_re.fullmatch(name)
+    if match:
+        if not path.is_dir():
+            raise SystemExit(f"NOT READY: training staging path is not a directory: {path}")
+        checkpoint_staging[int(match.group(1))] = path
+        continue
+    match = validation_video_re.fullmatch(name)
+    if match:
+        step, rank = map(int, match.groups())
+        if step % 100 != 0 or not 0 <= rank < world_size:
+            raise SystemExit(f"NOT READY: validation artifact is outside the v10 step/rank contract: {path}")
+        if not path.is_file():
+            raise SystemExit(f"NOT READY: validation artifact is not a file: {path}")
+        validation_by_step.setdefault(step, set()).add(name)
+        if path.stat().st_size > 0:
+            nonempty_validation_by_step.setdefault(step, set()).add(name)
+        continue
+    if name == "inference" and path.is_dir():
+        inference_root = path
+    elif name == ".inference-staging" and path.is_dir():
+        inference_staging_root = path
+    elif name == "tracker" and path.is_dir():
+        pass
+    else:
+        unexpected.append(name)
+if unexpected:
+    raise SystemExit(f"NOT READY: unexpected v10 output entries: {sorted(unexpected)}")
+if inference_root is None:
+    raise SystemExit("NOT READY: nonempty v10 output is missing its inference directory")
+
+inference_dirs = {}
+inference_temps = {}
+for path in inference_root.iterdir():
+    match = checkpoint_dir_re.fullmatch(path.name)
+    if match:
+        if not path.is_dir():
+            raise SystemExit(f"NOT READY: inference checkpoint path is not a directory: {path}")
+        inference_dirs[int(match.group(1))] = path
+        continue
+    match = inference_temp_re.fullmatch(path.name)
+    if match and path.is_dir():
+        inference_temps.setdefault(int(match.group(1)), []).append(path)
+        continue
+    raise SystemExit(f"NOT READY: unexpected inference entry: {path}")
+for step in inference_dirs:
+    if step != 0 and (step < 100 or step % 100 != 0):
+        raise SystemExit(f"NOT READY: inference checkpoint-{step} violates the v10 100-step cadence")
+    validate_inference_checkpoint(step)
+
+expected_step_zero_videos = {
     f"validation_step_0_inference_steps_4_rank_{rank}_video_0.mp4"
     for rank in range(world_size)
 }
-allowed_top_level = {"inference", "tracker", *validation_names}
-actual_top_level = {path.name for path in output_dir.iterdir()}
-unexpected = sorted(actual_top_level - allowed_top_level)
-missing = sorted(({"inference", *validation_names}) - actual_top_level)
-if unexpected or missing:
+observed_step_zero_videos = nonempty_validation_by_step.get(0, set())
+if observed_step_zero_videos != expected_step_zero_videos:
     raise SystemExit(
-        "NOT READY: v10 restart output is not the exact step-zero namespace; "
-        f"unexpected={unexpected} missing={missing}"
+        "NOT READY: step-zero validation must preserve all 64 DP-padded four-forward names; "
+        f"missing={sorted(expected_step_zero_videos - observed_step_zero_videos)} "
+        f"extra={sorted(observed_step_zero_videos - expected_step_zero_videos)}"
     )
 
-training_checkpoints = sorted(path.name for path in output_dir.glob("checkpoint-*"))
-training_staging = sorted(path.name for path in output_dir.glob(".checkpoint-*"))
-if training_checkpoints or training_staging:
-    raise SystemExit(
-        "NOT READY: step-zero restart namespace contains resumable/staging training state; "
-        f"checkpoints={training_checkpoints} staging={training_staging}"
+if not checkpoint_dirs:
+    if checkpoint_staging or inference_staging_root is not None or inference_temps:
+        raise SystemExit("NOT READY: pre-step-100 namespace contains incomplete checkpoint staging")
+    if set(inference_dirs) != {0} or set(validation_by_step) != {0}:
+        raise SystemExit(
+            "NOT READY: pre-step-100 namespace must contain only checkpoint-0 inference/validation products; "
+            f"inference_steps={sorted(inference_dirs)} validation_steps={sorted(validation_by_step)}"
+        )
+    print(
+        "READY: validated same-recipe pre-step-100 restart namespace: no training state, "
+        "complete step-zero bf16 student export, and 64 DP-padded four-forward validation videos"
     )
+else:
+    strict_checkpoints = {}
+    incomplete_checkpoints = {}
+    expected_rng_names = {f"rng_state_rank{rank}.pt" for rank in range(world_size)}
+    for step, checkpoint in sorted(checkpoint_dirs.items()):
+        if step < 100 or step % 100 != 0:
+            raise SystemExit(f"NOT READY: training checkpoint-{step} violates the v10 100-step cadence")
+        defects = []
+        dcp_metadata = checkpoint / "dcp" / ".metadata"
+        if not dcp_metadata.is_file() or dcp_metadata.stat().st_size <= 0:
+            defects.append("missing/empty dcp/.metadata")
+        try:
+            marker = (checkpoint / ".complete").read_text(encoding="utf-8")
+        except OSError:
+            marker = None
+        if marker != "complete\n":
+            defects.append("missing/invalid .complete")
+        metadata = None
+        try:
+            metadata = load_json(checkpoint / "metadata.json", f"training checkpoint-{step} metadata")
+        except SystemExit:
+            defects.append("missing/invalid metadata.json")
+        if metadata is not None and metadata.get("step") != step:
+            defects.append("metadata step mismatch")
+        rng_paths = list(checkpoint.glob("rng_state_rank*.pt"))
+        rng_names = {path.name for path in rng_paths if path.is_file()}
+        if (rng_names != expected_rng_names or len(rng_paths) != world_size
+                or any(path.stat().st_size <= 0 for path in rng_paths if path.is_file())):
+            defects.append("expected exactly 64 nonempty per-rank RNG files")
+        if defects:
+            incomplete_checkpoints[step] = defects
+            continue
+        assert metadata is not None
+        validate_saved_recipe(metadata.get("config"), f"training checkpoint-{step}")
+        strict_checkpoints[step] = checkpoint
 
-for name in validation_names:
-    video = output_dir / name
-    if not video.is_file() or video.stat().st_size <= 0:
-        raise SystemExit(f"NOT READY: missing or empty step-zero validation video: {video}")
-
-inference_root = output_dir / "inference"
-checkpoint = inference_root / "checkpoint-0"
-inference_entries = sorted(path.name for path in inference_root.iterdir())
-if inference_entries != ["checkpoint-0"]:
-    raise SystemExit(
-        "NOT READY: inference namespace must contain only checkpoint-0; "
-        f"found={inference_entries}"
+    if not strict_checkpoints:
+        raise SystemExit(
+            "NOT READY: output has training checkpoint directories but no strict complete resumable checkpoint; "
+            f"incomplete={incomplete_checkpoints}"
+        )
+    latest_step = max(strict_checkpoints)
+    unsafe_incomplete = {step: defects for step, defects in incomplete_checkpoints.items() if step <= latest_step}
+    if unsafe_incomplete:
+        raise SystemExit(
+            "NOT READY: incomplete training checkpoint is not newer than the latest strict fallback; "
+            f"latest={latest_step} incomplete={unsafe_incomplete}"
+        )
+    for step in checkpoint_staging:
+        if step < 100 or step % 100 != 0 or step <= latest_step:
+            raise SystemExit(
+                f"NOT READY: training staging checkpoint-{step} is not a newer cadence-aligned fallback artifact"
+            )
+    required_inference_steps = set(range(0, latest_step + 1, 100))
+    missing_inference_steps = sorted(required_inference_steps - set(inference_dirs))
+    if missing_inference_steps:
+        raise SystemExit(
+            "NOT READY: resumable v10 namespace is missing unlimited-retention inference checkpoints through "
+            f"latest strict checkpoint-{latest_step}: {missing_inference_steps}"
+        )
+    for step in range(0, latest_step, 100):
+        expected_names = {
+            f"validation_step_{step}_inference_steps_4_rank_{rank}_video_0.mp4"
+            for rank in range(world_size)
+        }
+        observed_names = nonempty_validation_by_step.get(step, set())
+        if observed_names != expected_names:
+            raise SystemExit(
+                f"NOT READY: completed validation step {step} does not have all 64 DP-padded names; "
+                f"missing={sorted(expected_names - observed_names)} extra={sorted(observed_names - expected_names)}"
+            )
+    for step in inference_temps:
+        if step <= latest_step:
+            raise SystemExit(
+                f"NOT READY: stale inference temp for step {step} is not newer than strict checkpoint-{latest_step}"
+            )
+    if inference_staging_root is not None:
+        for path in inference_staging_root.iterdir():
+            match = checkpoint_dir_re.fullmatch(path.name)
+            if not match or not path.is_dir():
+                raise SystemExit(f"NOT READY: unexpected inference staging entry: {path}")
+            step = int(match.group(1))
+            if step < 100 or step % 100 != 0 or step <= latest_step:
+                raise SystemExit(
+                    f"NOT READY: inference staging checkpoint-{step} is not a newer cadence-aligned artifact"
+                )
+    newer = sorted(step for step in incomplete_checkpoints if step > latest_step)
+    print(
+        f"READY: strict resumable checkpoint-{latest_step} matches the v10 recipe, has DCP metadata, "
+        f".complete, 64 nonempty RNG files, and the complete inference lineage through step {latest_step}; "
+        f"newer incomplete checkpoints allowed for runtime fallback={newer}"
     )
-if (checkpoint / ".complete").read_text(encoding="utf-8") != "complete\n":
-    raise SystemExit(f"NOT READY: invalid inference completion marker: {checkpoint / '.complete'}")
-metadata = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
-expected_metadata = {
-    "format_version": 1,
-    "kind": "inference",
-    "step": 0,
-    "role": "student",
-    "dtype": "bfloat16",
-    "module": "transformer",
-}
-observed_metadata = {key: metadata.get(key) for key in expected_metadata}
-if observed_metadata != expected_metadata:
-    raise SystemExit(
-        "NOT READY: checkpoint-0 metadata is not the v10 student inference contract; "
-        f"observed={observed_metadata}"
-    )
-saved_config = metadata.get("config", {})
-saved_training = saved_config.get("training", {})
-saved_distributed = saved_training.get("distributed", {})
-saved_method = saved_config.get("method", {})
-saved_data_paths = saved_training.get("data", {}).get("data_path")
-saved_validation_manifest = saved_config.get("callbacks", {}).get("validation", {}).get("dataset_file")
-if saved_data_paths != expected_data_paths or saved_validation_manifest != expected_validation_manifest:
-    raise SystemExit(
-        "NOT READY: checkpoint-0 belongs to a different data/validation recipe; "
-        f"saved_data={saved_data_paths!r} expected_data={expected_data_paths!r} "
-        f"saved_validation={saved_validation_manifest!r} expected_validation={expected_validation_manifest!r}"
-    )
-if saved_training.get("checkpoint", {}).get("output_dir") != str(output_dir):
-    raise SystemExit("NOT READY: checkpoint-0 metadata belongs to a different output namespace")
-if saved_distributed != {
-    "num_gpus": 64,
-    "sp_size": 1,
-    "tp_size": 1,
-    "hsdp_replicate_dim": 1,
-    "hsdp_shard_dim": 64,
-}:
-    raise SystemExit(f"NOT READY: checkpoint-0 topology is not v10 fsdp64: {saved_distributed}")
-if saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]:
-    raise SystemExit("NOT READY: checkpoint-0 does not use the trained four-forward ladder")
-
-module_dir = checkpoint / "transformer"
-index_path = module_dir / "diffusion_pytorch_model.safetensors.index.json"
-index = json.loads(index_path.read_text(encoding="utf-8"))
-weight_map = index.get("weight_map")
-if not isinstance(weight_map, dict) or not weight_map:
-    raise SystemExit(f"NOT READY: checkpoint-0 has an invalid shard index: {index_path}")
-expected_shards = {filename for filename in weight_map.values()}
-actual_shards = {path.name for path in module_dir.glob("*.safetensors") if path.is_file()}
-if expected_shards != actual_shards or any((module_dir / name).stat().st_size <= 0 for name in expected_shards):
-    raise SystemExit(
-        "NOT READY: checkpoint-0 shard set differs from its index; "
-        f"missing={sorted(expected_shards - actual_shards)} extra={sorted(actual_shards - expected_shards)}"
-    )
-if metadata.get("shard_count") != len(expected_shards) or metadata.get("tensor_count") != len(weight_map):
-    raise SystemExit("NOT READY: checkpoint-0 shard/tensor counts differ from its index")
-print(
-    "READY: validated same-recipe pre-step-100 restart namespace: no training state, "
-    "complete step-zero bf16 student export, and 64 four-forward validation videos"
-)
 PY
   then
     failures=$((failures + 1))
@@ -708,17 +907,10 @@ if (( failures > 0 )); then
 fi
 
 execution_commit="$(git -C "${REPO}" rev-parse HEAD)"
-printf -v payload \
-  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=%q HSDP_REPLICATE=%q HSDP_SHARD=%q FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 H3_V10_COMPILE_LOGS=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
-  "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" "${execution_commit}" \
-  "${KERNEL_PREFIX}" "${FA4_OVERLAY}" "${FA4_CUTLASS_PACKAGES}" "${V10_PYTHONPATH}" \
-  "${SP_SIZE}" "${HSDP_REPLICATE}" "${HSDP_SHARD}" \
-  /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
-
 printf 'READY: review, then submit exactly:\n'
 printf 'sbatch --export=NIL --chdir=%q --nodes=%q --ntasks-per-node=1 --gpus-per-node=%q --exclusive ' \
   "${REPO}" "${NUM_NODES}" "${GPUS_PER_NODE}"
-printf '%q ' -p "${PARTITION}" -t 120:00:00 --requeue -J h3-dmd2-v10-64g \
-  -o "${LOG_DIR}/slurm-%x-%j.out" --wrap="${payload}"
+printf '%q ' -p "${PARTITION}" -t 120:00:00 --no-requeue -J h3-dmd2-v10-64g \
+  -o "${LOG_DIR}/slurm-%x-%j.out" \
+  "${REPO}/scripts/train/run_h3_v10_gated.sh" "${execution_commit}"
 printf '\n'

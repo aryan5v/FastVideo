@@ -103,7 +103,7 @@ set -e
 set +e
 "${VENV}/bin/python" - \
   "${AUDIT_DIR}" "${TRAIN_LOG_ROOT}" "${SLURM_JOB_ID}" "${training_rc}" "${monitor_rc}" \
-  "${REPO}" "${CONFIG}" <<'PY'
+  "${REPO}" "${CONFIG}" "${EXPECTED_V10_COMMIT}" <<'PY'
 import csv
 import hashlib
 import json
@@ -120,6 +120,7 @@ training_rc = int(sys.argv[4])
 monitor_rc = int(sys.argv[5])
 repo = pathlib.Path(sys.argv[6])
 config = pathlib.Path(sys.argv[7])
+expected_execution_commit = sys.argv[8]
 
 ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 log_paths = sorted((train_log_root / f"{job_id}-node0").glob("*.log"))
@@ -154,6 +155,10 @@ compile_receipts = text.count("Enabled regional torch.compile for 52 submodules"
 fa4_receipts = text.count("Using FlashAttention-4 backend")
 vsa_eager_receipts = text.count("attention backend resolved to VIDEO_SPARSE_ATTN_H3")
 vsa_triton_backward_receipts = text.count("inputs require grad and the sm_100a kernel is forward-only")
+observed_execution_commit = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+execution_checkout_clean = not subprocess.check_output(
+    ["git", "-C", str(repo), "status", "--porcelain"], text=True).strip()
 
 
 def finite_positive(value):
@@ -178,13 +183,16 @@ checks = {
     "vsa_grad_used_triton64": vsa_triton_backward_receipts > 0,
     "all_64_gpus_sampled": len(peaks) == 64,
     "memory_samples_present": samples > 0,
+    "execution_commit_unchanged": observed_execution_commit == expected_execution_commit,
+    "execution_checkout_clean": execution_checkout_clean,
 }
 receipt = {
     "schema_version": "fastvideo-h3-v10-maxshape-gate-v1",
     "success": all(checks.values()),
     "checks": checks,
     "job_id": job_id,
-    "execution_commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
+    "execution_commit": expected_execution_commit,
+    "observed_execution_commit_at_receipt": observed_execution_commit,
     "config": str(config),
     "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
     "shape": {"width": 1760, "height": 768, "num_frames": 362, "video_latent_shape": [24, 107, 48, 110]},
