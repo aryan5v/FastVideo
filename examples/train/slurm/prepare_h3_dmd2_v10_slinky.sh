@@ -149,6 +149,7 @@ expected_checkpoint = {
     "inference_checkpoint_role": "student",
     "inference_checkpoint_dtype": "bfloat16",
     "training_state_checkpointing_steps": 100,
+    "require_complete_training_checkpoint": True,
     "checkpointing_start_step": 100,
     "checkpoints_total_limit": 3,
 }

@@ -789,6 +789,7 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     assert checkpoint["inference_checkpoint_role"] == "student"
     assert checkpoint["inference_checkpoint_dtype"] == "bfloat16"
     assert checkpoint["training_state_checkpointing_steps"] == 100
+    assert checkpoint["require_complete_training_checkpoint"] is True
     assert checkpoint["checkpointing_start_step"] == 100
     assert checkpoint["checkpoints_total_limit"] == 3
     assert training["tracker"]["run_name"] == "dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"

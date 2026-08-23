@@ -681,6 +681,15 @@ class CheckpointManager:
                 continue
             if not _CHECKPOINT_DIR_RE.match(child.name):
                 continue
+            # In strict mode, a directory without the post-RNG publication
+            # marker is diagnostic debris, not one of the rolling resumable
+            # checkpoints. It must not consume ``keep_last`` and displace an
+            # older checkpoint that can actually be resumed.
+            if (
+                self.config.require_complete_training_checkpoint
+                and not _is_complete_training_checkpoint(child, require_complete_marker=True)
+            ):
+                continue
             try:
                 step = _parse_step_from_dir(child)
             except Exception:

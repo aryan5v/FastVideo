@@ -90,6 +90,7 @@ def _make_manager(
     keep_last: int = 0,
     start_step: int = 0,
     raw_config: dict[str, Any] | None = None,
+    require_complete_training_checkpoint: bool = False,
 ) -> CheckpointManager:
     """Build a minimal ``CheckpointManager`` for tests that don't touch DCP."""
     return CheckpointManager(
@@ -101,8 +102,14 @@ def _make_manager(
             keep_last=keep_last,
             start_step=start_step,
             save_inference_on_validation=save_inference_on_validation,
+            require_complete_training_checkpoint=require_complete_training_checkpoint,
         ),
-        raw_config=raw_config,
+        raw_config=(
+            raw_config
+            if raw_config is not None
+            else ({"training": {"distributed": {"num_gpus": 1}}}
+                  if require_complete_training_checkpoint else None)
+        ),
     )
 
 
@@ -539,6 +546,27 @@ def test_cleanup_never_removes_inference_checkpoints(tmp_path: Path) -> None:
         "checkpoint-1",
         "checkpoint-2",
         "checkpoint-3",
+    ]
+
+
+def test_strict_cleanup_does_not_count_incomplete_newer_directories(tmp_path: Path) -> None:
+    mgr = _make_manager(
+        tmp_path,
+        keep_last=2,
+        require_complete_training_checkpoint=True,
+    )
+    for step in (100, 200, 300):
+        checkpoint = _make_checkpoint_dir(tmp_path, step)
+        _publish_fake_training_checkpoint(checkpoint, step=step)
+    # A failed later save has DCP metadata but no post-RNG publication marker.
+    _make_checkpoint_dir(tmp_path, 400)
+
+    mgr._cleanup_old_checkpoints()
+
+    assert sorted(path.name for path in tmp_path.glob("checkpoint-*")) == [
+        "checkpoint-200",
+        "checkpoint-300",
+        "checkpoint-400",
     ]
 
 
