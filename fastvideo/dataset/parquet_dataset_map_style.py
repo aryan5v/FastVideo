@@ -334,7 +334,12 @@ def get_parquet_files_and_length(path: str | Sequence[str] | dict[str, int]):
     return file_names_sorted, lengths_sorted
 
 
-def read_row_from_parquet_file(parquet_files: list[str], global_row_idx: int, lengths: list[int]) -> dict[str, Any]:
+def read_row_from_parquet_file(
+    parquet_files: list[str],
+    global_row_idx: int,
+    lengths: list[int],
+    columns: Sequence[str] | None = None,
+) -> dict[str, Any]:
     '''
     Read a row from a parquet file.
     Args:
@@ -376,7 +381,10 @@ def read_row_from_parquet_file(parquet_files: list[str], global_row_idx: int, le
         # If we reach here, local_row_idx is out of bounds for this parquet file
         raise IndexError(f"local_row_idx {local_row_idx} is out of bounds for parquet file {parquet_files[file_index]}")
 
-    row_group = parquet_file.read_row_group(row_group_index).to_pydict()
+    # Project at the Parquet reader boundary. This is especially important for
+    # data-free training over a T2VA superset: the text-only schema must not
+    # pull hundreds of MiB of unused video/audio latent bytes into host memory.
+    row_group = parquet_file.read_row_group(row_group_index, columns=columns).to_pydict()
     row_dict = {k: v[local_index] for k, v in row_group.items()}
     del row_group
 
@@ -443,7 +451,12 @@ class LatentsParquetMapStyleDataset(Dataset):
         file_path = self.parquet_files[0]
         row_idx = 0
         # Read the negative prompt data
-        row_dict = read_row_from_parquet_file([file_path], row_idx, [self.lengths[0]])
+        row_dict = read_row_from_parquet_file(
+            [file_path],
+            row_idx,
+            [self.lengths[0]],
+            columns=self.parquet_schema.names,
+        )
 
         batch = collate_rows_from_parquet_schema([row_dict],
                                                  self.parquet_schema,
@@ -465,7 +478,14 @@ class LatentsParquetMapStyleDataset(Dataset):
         """
         Batch fetch using read_row_from_parquet_file for each index.
         """
-        rows = [read_row_from_parquet_file(self.parquet_files, idx, self.lengths) for idx in indices]
+        rows = [
+            read_row_from_parquet_file(
+                self.parquet_files,
+                idx,
+                self.lengths,
+                columns=self.parquet_schema.names,
+            ) for idx in indices
+        ]
 
         # Inject sample indices for deterministic CFG dropout
         # that is reproducible across checkpoint resume.

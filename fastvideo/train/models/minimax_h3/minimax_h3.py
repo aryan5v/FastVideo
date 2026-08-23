@@ -178,24 +178,47 @@ class MiniMaxH3Model(ModelBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Resolve fixed or native visual and stereo-audio latents."""
         data_config = self.training_config.data
+        native_shapes = bool(getattr(data_config, "native_shape_bucketing", False))
         if latents_source == "data":
             if "vae_latent" not in raw_batch or "audio_latent" not in raw_batch:
                 raise ValueError("A T2VA batch requires vae_latent and audio_latent tensors")
             video_latents = raw_batch["vae_latent"]
             audio_latents = raw_batch["audio_latent"]
         elif latents_source == "zeros":
+            latent_frames = int(data_config.num_latent_t)
+            height = int(data_config.num_height)
+            width = int(data_config.num_width)
+            num_frames = int(data_config.num_frames)
+            if native_shapes:
+                bucket_id = raw_batch.get("_shape_bucket_id")
+                if not isinstance(bucket_id, str):
+                    raise ValueError(
+                        "Native-shape data-free batches require the exact-shape sampler to set _shape_bucket_id")
+                bucket = parse_video_shape_bucket_id(bucket_id)
+                width = bucket.width
+                height = bucket.height
+                num_frames = bucket.num_frames
+                latent_frames = video_latent_num_frames(num_frames)
+                if width % MINIMAX_H3_CANVAS_MULTIPLE or height % MINIMAX_H3_CANVAS_MULTIPLE:
+                    raise ValueError(f"Native pixel geometry {width}x{height} must use the H3 canvas multiple "
+                                     f"{MINIMAX_H3_CANVAS_MULTIPLE}")
+                latent_geometry = (latent_frames, height // 16, width // 16)
+                patch_size = tuple(int(value) for value in self.transformer.patch_size)
+                if any(value % patch for value, patch in zip(latent_geometry, patch_size, strict=True)):
+                    raise ValueError(
+                        f"Native latent geometry {latent_geometry} is not divisible by transformer patch {patch_size}")
             video_latents = torch.zeros(
                 1,
                 _VIDEO_LATENT_CHANNELS,
-                data_config.num_latent_t,
-                data_config.num_height // 16,
-                data_config.num_width // 16,
+                latent_frames,
+                height // 16,
+                width // 16,
             )
             audio_latents = torch.zeros(
                 1,
                 MINIMAX_H3_AUDIO_CHANNELS,
                 _AUDIO_LATENT_CHANNELS,
-                audio_latent_num_frames(data_config.num_frames),
+                audio_latent_num_frames(num_frames),
             )
         else:
             raise ValueError(f"Unknown latents_source: {latents_source!r}")
@@ -215,12 +238,11 @@ class MiniMaxH3Model(ModelBase):
             raise ValueError("audio_latent must have shape [1, 2, 32, audio_frames], "
                              f"got {tuple(audio_latents.shape)}")
 
-        native_shapes = bool(getattr(data_config, "native_shape_bucketing", False))
         if latents_source == "data" and native_shapes:
             self._validate_native_latents(raw_batch, video_latents, audio_latents)
-        else:
-            # Preserve the legacy fixed-shape contract for simulate/data-free
-            # and for data configs that have not opted into native bucketing.
+        elif not native_shapes:
+            # Preserve the legacy fixed-shape contract for configs that have
+            # not opted into exact-shape bucketing.
             if data_config.num_latent_t > 0:
                 video_latents = video_latents[:, :, :data_config.num_latent_t]
             expected_audio_frames = audio_latent_num_frames(data_config.num_frames)

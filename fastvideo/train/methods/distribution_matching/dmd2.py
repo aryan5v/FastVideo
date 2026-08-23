@@ -345,6 +345,8 @@ class DMD2Method(TrainingMethod):
                              "timestep)")
 
         _, stagger_groups = self._rollout_carry_rank_world()
+        if bool(getattr(getattr(self.training_config, "data", None), "native_shape_bucketing", False)):
+            stagger_groups = 1
         self._validate_rollout_carry_coverage(
             streams=stagger_groups * slots,
             grid_len=self._rollout_grid_length(),
@@ -1334,7 +1336,13 @@ class DMD2Method(TrainingMethod):
         """
         rank, _ = self._rollout_carry_rank_world()
         grid_len = len(step_list)
-        offset = (rank * self._rollout_carry_slot_count + slot) % grid_len
+        # Exact-shape batches must remain shape-synchronous across every rank.
+        # Rank-staggered clears would let one rank adopt the next loader bucket
+        # while its peers were still carrying the previous geometry. Keep the
+        # slot staggering, but make it rank-independent for native-shape data.
+        data_config = getattr(self.training_config, "data", None)
+        stagger_rank = 0 if bool(getattr(data_config, "native_shape_bucketing", False)) else rank
+        offset = (stagger_rank * self._rollout_carry_slot_count + slot) % grid_len
         device = state.device
         snapshot = state
         with torch.no_grad():

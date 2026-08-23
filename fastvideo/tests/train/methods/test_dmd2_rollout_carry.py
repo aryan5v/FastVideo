@@ -84,6 +84,7 @@ def _make_method(
     rollout_mode: str = "simulate",
     student: object | None = None,
     data_forcing: bool | None = None,
+    native_shape_bucketing: bool = False,
 ) -> DMD2Method:
     method = object.__new__(DMD2Method)
     config: dict = {
@@ -106,6 +107,7 @@ def _make_method(
         SimpleNamespace(
             loop=SimpleNamespace(gradient_accumulation_steps=(slots if grad_accum is None else grad_accum)),
             distributed=SimpleNamespace(sp_size=1),
+            data=SimpleNamespace(native_shape_bucketing=native_shape_bucketing),
         ),
     )
     object.__setattr__(method, "cuda_generator", torch.Generator().manual_seed(0))
@@ -227,6 +229,25 @@ def test_stagger_offsets_follow_rank_slot_formula(rank: int, slot: int, expected
     assert all(not call["grad_enabled"] for call in student.predict_calls)
     assert all(call["attn_kind"] == "vsa" for call in student.predict_calls)
     torch.testing.assert_close(snapshot, _replay_ode_walk(state, _GRID, expected_offset))
+
+
+@pytest.mark.parametrize("rank", [0, 1, 7])
+@pytest.mark.parametrize("slot", [0, 1])
+def test_native_shape_stagger_is_rank_synchronous(rank: int, slot: int) -> None:
+    method = _make_method(
+        slots=2,
+        sample_type="ode",
+        rank=rank,
+        world=8,
+        native_shape_bucketing=True,
+    )
+    step_list = method._get_denoising_step_list(torch.device("cpu"))
+    state = torch.randn(_LATENT_SHAPE, generator=torch.Generator().manual_seed(3))
+    batch = SimpleNamespace(dmd_latent_vis_dict={})
+
+    _, rung = method._staggered_start(state, batch, step_list, slot)
+
+    assert rung == slot
 
 
 # ----------------------------------------------------------------------
@@ -401,7 +422,13 @@ def test_carried_advance_state_is_detached_and_matches_ode_math() -> None:
 # ----------------------------------------------------------------------
 
 
-def _parse_only(config: dict, *, grad_accum: int = 1, streams: tuple[int, int] = (0, 1)):
+def _parse_only(
+    config: dict,
+    *,
+    grad_accum: int = 1,
+    streams: tuple[int, int] = (0, 1),
+    native_shape_bucketing: bool = False,
+):
     method = object.__new__(DMD2Method)
     object.__setattr__(method, "method_config", dict(config))
     object.__setattr__(method, "student", _CarryStudent())
@@ -411,6 +438,7 @@ def _parse_only(config: dict, *, grad_accum: int = 1, streams: tuple[int, int] =
         SimpleNamespace(
             loop=SimpleNamespace(gradient_accumulation_steps=grad_accum),
             distributed=SimpleNamespace(sp_size=1),
+            data=SimpleNamespace(native_shape_bucketing=native_shape_bucketing),
         ),
     )
     object.__setattr__(method, "_rollout_mode", method._parse_rollout_mode())
@@ -520,6 +548,20 @@ def test_coverage_guard_rejects_uncovered_rung_phases() -> None:
     DMD2Method._validate_rollout_carry_coverage(streams=2, grid_len=4, interval=2)
     # The H3 recipe (4-rung grid, interval 5) has gcd 1 and always passes.
     DMD2Method._validate_rollout_carry_coverage(streams=1, grid_len=4, interval=5)
+
+
+def test_native_shape_coverage_does_not_count_rank_staggering() -> None:
+    config = {
+        "rollout_mode": "simulate",
+        "rollout_carry": True,
+        "rollout_carry_slots": 1,
+        "rollout_sample_type": "ode",
+        "dmd_denoising_steps": _GRID,
+        "generator_update_interval": 2,
+    }
+    assert _parse_only(config, streams=(0, 2)) == (True, 1, "ode")
+    with pytest.raises(ValueError, match="cannot cover"):
+        _parse_only(config, streams=(0, 2), native_shape_bucketing=True)
 
 
 # ----------------------------------------------------------------------

@@ -460,15 +460,67 @@ def test_legacy_fixed_data_path_still_truncates_to_config(monkeypatch: pytest.Mo
     assert audio.shape == (1, 2, 32, 8)
 
 
-def test_simulate_zeros_remain_fixed_when_native_data_bucketing_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_simulate_zeros_follow_native_shape_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _tiny_training_config()
     config.data.native_shape_bucketing = True
     model = _make_model(monkeypatch, config)
 
-    video, audio = model._resolve_clean_latents({}, "zeros", torch.bfloat16, torch.device("cpu"))
+    raw = {"_shape_bucket_id": "bucket=96x64-22f"}
+    video, audio = model._resolve_clean_latents(raw, "zeros", torch.bfloat16, torch.device("cpu"))
 
-    assert video.shape == (1, 24, 2, 4, 4)
-    assert audio.shape == (1, 2, 32, 8)
+    assert video.shape == (1, 24, 7, 4, 6)
+    assert audio.shape == (1, 2, 32, 37)
+
+
+def test_native_simulate_requires_shape_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+
+    with pytest.raises(ValueError, match="data-free batches require.*_shape_bucket_id"):
+        model._resolve_clean_latents({}, "zeros", torch.bfloat16, torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    ("bucket_id", "video_shape", "audio_frames"),
+    [
+        ("bucket=1760x768-362f", (1, 24, 107, 48, 110), audio_latent_num_frames(362)),
+        ("bucket=768x1344-124f", (1, 24, 37, 84, 48), audio_latent_num_frames(124)),
+    ],
+)
+def test_native_simulate_zeros_cover_production_extremes(
+    monkeypatch: pytest.MonkeyPatch,
+    bucket_id: str,
+    video_shape: tuple[int, ...],
+    audio_frames: int,
+) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+
+    video, audio = model._resolve_clean_latents(
+        {"_shape_bucket_id": bucket_id},
+        "zeros",
+        torch.bfloat16,
+        torch.device("cpu"),
+    )
+
+    assert video.shape == video_shape
+    assert audio.shape == (1, 2, 32, audio_frames)
+
+
+def test_native_simulate_rejects_non_aligned_canvas(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _tiny_training_config()
+    config.data.native_shape_bucketing = True
+    model = _make_model(monkeypatch, config)
+
+    with pytest.raises(ValueError, match="canvas multiple 32"):
+        model._resolve_clean_latents(
+            {"_shape_bucket_id": "bucket=80x64-5f"},
+            "zeros",
+            torch.bfloat16,
+            torch.device("cpu"),
+        )
 
 
 def test_packed_add_noise_applies_modality_shifts(monkeypatch: pytest.MonkeyPatch) -> None:
