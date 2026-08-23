@@ -38,6 +38,12 @@ readonly KERNEL_PREFIX="${KERNEL_ROOT}/prefix"
 readonly FA4_OVERLAY="/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay"
 readonly FA4_CUTLASS_PACKAGES="${FA4_OVERLAY}/nvidia_cutlass_dsl/python_packages"
 readonly EXPECTED_V10_COMMIT="$1"
+readonly START_TOPOLOGY="${V10P5_START_TOPOLOGY:-auto}"
+
+if [[ "${START_TOPOLOGY}" != "auto" && "${START_TOPOLOGY}" != "sp4" ]]; then
+  echo "V10.5 GATE FAILED: V10P5_START_TOPOLOGY must be auto or sp4; got ${START_TOPOLOGY}" >&2
+  exit 2
+fi
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export SLURM_EXPORT_ENV=ALL
@@ -388,7 +394,20 @@ PY
 }
 
 selected_topology=""
-if [[ -f "${MAXSHAPE_RECEIPT}" ]]; then
+if [[ "${START_TOPOLOGY}" == "sp4" ]]; then
+  echo "READY: fresh-allocation SP4 recovery selected"
+  if [[ -f "${SP4_MAXSHAPE_RECEIPT}" ]]; then
+    validate_gate_receipt "${SP4_MAXSHAPE_RECEIPT}" "${SP4_MAXSHAPE_CONFIG}" "sp4"
+  else
+    if [[ -d "${SP4_OUTPUT_DIR}" && -n "$(find "${SP4_OUTPUT_DIR}" -mindepth 1 -print -quit)" ]]; then
+      echo "V10.5 GATE FAILED: SP4 production output exists before a capacity receipt: ${SP4_OUTPUT_DIR}" >&2
+      exit 1
+    fi
+    run_capacity_gate "sp4" "${SP4_MAXSHAPE_CONFIG}" "${SP4_MAXSHAPE_ROOT}" \
+      "${SP4_MAXSHAPE_RECEIPT}" 4 1
+  fi
+  selected_topology="sp4"
+elif [[ -f "${MAXSHAPE_RECEIPT}" ]]; then
   validate_gate_receipt "${MAXSHAPE_RECEIPT}" "${MAXSHAPE_CONFIG}" "sp1"
   selected_topology="sp1"
 elif [[ -f "${SP4_MAXSHAPE_RECEIPT}" ]]; then
