@@ -293,6 +293,17 @@ def test_data_forcing_rejects_non_bool() -> None:
         method._parse_rollout_data_forcing()
 
 
+def test_data_forcing_requires_explicit_legacy_mixed_regime_opt_in() -> None:
+    method = object.__new__(DMD2Method)
+    object.__setattr__(method, "method_config", {"rollout_data_forcing": True})
+    object.__setattr__(method, "_rollout_carry", True)
+    with pytest.raises(ValueError, match="not a FastGen recipe"):
+        method._parse_rollout_data_forcing()
+
+    method.method_config["allow_mixed_rollout_regimes"] = True
+    assert method._parse_rollout_data_forcing() is True
+
+
 def test_data_forcing_requires_t2va_schema() -> None:
     method = object.__new__(DMD2Method)
     object.__setattr__(method, "_rollout_mode", "simulate")
@@ -396,10 +407,11 @@ def test_forced_noising_per_modality_shift_on_real_h3_trio(monkeypatch: pytest.M
     assert rung in method.method_config["dmd_denoising_steps"]
 
     slices = dict(student.modality_slices())
-    base = torch.tensor([rung / 1000.0])
+    base = torch.tensor([rung / 1000.0], dtype=torch.float64)
     for name, shift in (("video", 12.0), ("audio", 3.0)):
-        sigma = shift_noise_amount(base, shift).to(torch.bfloat16)
-        expected = ((1.0 - sigma) * forced["clean"][:, slices[name]] + sigma * forced["noise"][:, slices[name]])
+        sigma = shift_noise_amount(base, shift)
+        expected = ((1.0 - sigma) * forced["clean"][:, slices[name]].to(torch.float64) +
+                    sigma * forced["noise"][:, slices[name]].to(torch.float64)).to(torch.bfloat16)
         torch.testing.assert_close(forced["noisy"][:, slices[name]], expected)
 
     # Critic phase: the forced generation feeds the critic loss; the paused

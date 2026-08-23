@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""fake_score_loss_space=x0 must equal sigma_m^2-weighted velocity MSE."""
+"""Critic regression-space coverage for DMD2."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -32,8 +32,15 @@ class _Critic:
 
     def __init__(self):
         self.scale = torch.nn.Parameter(torch.tensor(0.1))
+        self.predict_noise_calls = 0
+        self.predict_x0_calls = 0
 
     def predict_noise(self, noisy, timestep, batch, *, conditional, cfg_uncond, attn_kind):
+        self.predict_noise_calls += 1
+        return self.scale * torch.ones_like(noisy)
+
+    def predict_x0(self, noisy, timestep, batch, *, conditional, cfg_uncond, attn_kind):
+        self.predict_x0_calls += 1
         return self.scale * torch.ones_like(noisy)
 
 
@@ -61,6 +68,11 @@ def _run(space: str | None, critic: _Critic) -> torch.Tensor:
 
 def _expected(space: str | dict[str, str]) -> float:
     gen = torch.randn(1, _TOTAL, generator=torch.Generator().manual_seed(7))
+    if space == "x0":
+        pred_x0 = 0.1 * torch.ones_like(gen)
+        return sum(torch.mean((pred_x0[:, sl] - gen[:, sl])**2).item()
+                   for _, sl in _Student().modality_slices())
+
     noise = torch.randn(gen.shape, generator=torch.Generator().manual_seed(0))
     target = noise - gen
     pred = 0.1 * torch.ones_like(gen)
@@ -78,9 +90,12 @@ def test_default_is_velocity_space() -> None:
     assert loss.item() == pytest.approx(_expected("velocity"), rel=1e-5)
 
 
-def test_x0_space_weights_by_sigma_squared() -> None:
-    loss = _run("x0", _Critic())
+def test_x0_space_uses_direct_x0_regression() -> None:
+    critic = _Critic()
+    loss = _run("x0", critic)
     assert loss.item() == pytest.approx(_expected("x0"), rel=1e-4)
+    assert critic.predict_x0_calls == 1
+    assert critic.predict_noise_calls == 0
 
 
 def test_x0_space_keeps_critic_gradient() -> None:
@@ -99,12 +114,7 @@ def test_invalid_loss_space_rejected() -> None:
 
 
 def test_per_modality_space_mapping() -> None:
-    """{video: x0, audio: velocity}: only video is sigma^2-weighted.
-
-    Under one shared base timestep with unequal shifts, a global x0 space
-    suppresses the critic's audio gradient (sigma_audio << sigma_video for
-    most draws); the mapping keeps x0 weighting for video only.
-    """
+    """Legacy mixed spaces retain their one-forward compatibility path."""
     spec = {"video": "x0", "audio": "velocity"}
     loss = _run(spec, _Critic())
     assert loss.item() == pytest.approx(_expected(spec), rel=1e-4)

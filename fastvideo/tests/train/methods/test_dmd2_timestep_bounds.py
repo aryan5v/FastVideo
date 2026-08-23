@@ -42,6 +42,34 @@ def test_dmd2_score_timestep_bounds_reject_invalid_ranges(
         method._parse_score_timestep_bounds()
 
 
+@pytest.mark.parametrize("warp_max", [0.0, -0.1, 1.1])
+def test_dmd2_score_timestep_warp_max_rejects_invalid_endpoint(warp_max: float) -> None:
+    method = _method_with_ratios(0.001, 0.999)
+    lo, hi = method._parse_score_timestep_bounds()
+    object.__setattr__(method, "_score_min_timestep", lo)
+    object.__setattr__(method, "_score_max_timestep", hi)
+    method.method_config["score_timestep_warp_max"] = warp_max
+    with pytest.raises(ValueError, match="0 < max <= 1"):
+        method._parse_score_timestep_warp_max()
+
+
+def test_dmd2_score_timestep_warp_max_must_cover_upper_bound() -> None:
+    method = _method_with_ratios(0.001, 1.0)
+    lo, hi = method._parse_score_timestep_bounds()
+    object.__setattr__(method, "_score_min_timestep", lo)
+    object.__setattr__(method, "_score_max_timestep", hi)
+    method.method_config["score_timestep_warp_max"] = 0.999
+    with pytest.raises(ValueError, match="must not exceed"):
+        method._parse_score_timestep_warp_max()
+
+
+def test_dmd2_score_timestep_continuous_requires_bool() -> None:
+    method = _method_with_ratios(0.001, 0.999)
+    method.method_config["score_timestep_continuous"] = 1
+    with pytest.raises(ValueError, match="must be a bool"):
+        method._parse_score_timestep_continuous()
+
+
 def _sampler(min_ratio: float, max_ratio: float, shift: float) -> DMD2Method:
     method = _method_with_ratios(min_ratio, max_ratio)
     lo, hi = method._parse_score_timestep_bounds()

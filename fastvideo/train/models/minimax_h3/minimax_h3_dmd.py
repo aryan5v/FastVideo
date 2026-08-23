@@ -23,9 +23,10 @@ from fastvideo.train.models.minimax_h3.minimax_h3 import (
     shift_noise_amount,
 )
 
-# DMD2 uses integer score timesteps on [0, 1000]. H3 maps them to its shared
-# base noise amount before applying the modality shifts.
+# DMD2 expresses score time in timestep units on [0, 1000]. Strict FastGen
+# parity keeps that coordinate continuous and applies shifts on max_t=0.999.
 _DMD_TIMESTEP_SCALE = 1000
+_FASTGEN_MAX_T = 0.999
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +86,10 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
     sample. This adapter flattens both modality latents into one ``[1, N]``
     tensor (video's ``[1, T, 24, H, W]`` elements first, stereo audio's
     ``[1, 2, 32, Ta]`` elements after) so ``dmd2.py`` stays model-agnostic.
-    Integer method timesteps become one shared base noise amount that is
-    shifted per modality (video 12.0, audio 3.0), exactly as H3's paired
-    schedulers synchronize the two streams during fine-tuning and inference.
+    Method timesteps become one shared base noise amount that is shifted per
+    modality (video 12.0, audio 3.0). Continuous score times use FastGen's
+    ``max_t=0.999`` domain; integer rollout rungs preserve the release
+    pipeline's unit-domain grid.
 
     ``modality_slices()`` exposes the packed video/audio column ranges so
     DMD2 computes losses and normalizers per modality instead of one packed
@@ -182,12 +184,24 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         )
 
     def _noise_amounts(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Map one integer method timestep to both modality noise amounts."""
-        base = (timestep.reshape(-1)[:1].to(torch.float32) / _DMD_TIMESTEP_SCALE)
-        base = base.clamp(0.0, 1.0)
+        """Map one method timestep to both modality noise amounts in FP64."""
+        # Strict FastGen score times are continuous and live on max_t=0.999.
+        # Integer rollout rungs retain the release pipeline's unit-domain
+        # schedule so training and offline validation walk identical states.
+        warp_max = (_FASTGEN_MAX_T if timestep.is_floating_point() else 1.0)
+        base = (timestep.reshape(-1)[:1].to(torch.float64) / _DMD_TIMESTEP_SCALE)
+        base = base.clamp(0.0, warp_max)
         return (
-            shift_noise_amount(base, _VIDEO_SCHEDULER_SHIFT),
-            shift_noise_amount(base, _AUDIO_SCHEDULER_SHIFT),
+            shift_noise_amount(
+                base,
+                _VIDEO_SCHEDULER_SHIFT,
+                max_noise_amount=warp_max,
+            ),
+            shift_noise_amount(
+                base,
+                _AUDIO_SCHEDULER_SHIFT,
+                max_noise_amount=warp_max,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -280,8 +294,12 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         noise: torch.Tensor,
         sigma: torch.Tensor,
     ) -> torch.Tensor:
-        sigma = sigma.to(device=clean.device, dtype=clean.dtype)
-        return (1.0 - sigma) * clean + sigma * noise
+        original_dtype = clean.dtype
+        clean_fp64 = clean.to(torch.float64)
+        noise_fp64 = noise.to(torch.float64)
+        sigma_fp64 = sigma.to(device=clean.device, dtype=torch.float64)
+        return ((1.0 - sigma_fp64) * clean_fp64 +
+                sigma_fp64 * noise_fp64).to(original_dtype)
 
     def extract_eps(
         self,
@@ -345,10 +363,15 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         clean: torch.Tensor,
         sigma: torch.Tensor,
     ) -> torch.Tensor:
-        sigma = sigma.to(device=noisy.device, dtype=noisy.dtype)
+        original_dtype = noisy.dtype
+        noisy_fp64 = noisy.to(torch.float64)
+        clean_fp64 = clean.to(torch.float64)
+        sigma_fp64 = sigma.to(device=noisy.device, dtype=torch.float64)
         # The DMD grid never renoises from t=0, but clamp so a degenerate
         # call cannot divide by zero.
-        return (noisy - (1.0 - sigma) * clean) / sigma.clamp_min(1e-6)
+        eps = ((noisy_fp64 - (1.0 - sigma_fp64) * clean_fp64) /
+               sigma_fp64.clamp_min(1e-6))
+        return eps.to(original_dtype)
 
     def predict_noise(
         self,
@@ -419,8 +442,11 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
     ) -> torch.Tensor:
         # noisy = (1 - sigma) * clean + sigma * noise and pred approximates
         # noise - clean, so clean = noisy - sigma * pred.
-        sigma = sigma.to(device=noisy.device, dtype=noisy.dtype)
-        return noisy - sigma * pred_noise
+        original_dtype = noisy.dtype
+        noisy_fp64 = noisy.to(torch.float64)
+        pred_noise_fp64 = pred_noise.to(torch.float64)
+        sigma_fp64 = sigma.to(device=noisy.device, dtype=torch.float64)
+        return (noisy_fp64 - sigma_fp64 * pred_noise_fp64).to(original_dtype)
 
     # ------------------------------------------------------------------
     # Intermediate-latent visualization (LatentVisCallback)

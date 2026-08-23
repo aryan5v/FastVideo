@@ -99,6 +99,8 @@ def _make_method(
             config["rollout_sample_type"] = sample_type
     if data_forcing is not None:
         config["rollout_data_forcing"] = data_forcing
+        if data_forcing:
+            config["allow_mixed_rollout_regimes"] = True
     object.__setattr__(method, "method_config", config)
     object.__setattr__(method, "student", student if student is not None else _CarryStudent())
     object.__setattr__(

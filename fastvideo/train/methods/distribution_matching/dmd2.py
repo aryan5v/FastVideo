@@ -71,6 +71,8 @@ class DMD2Method(TrainingMethod):
             self._score_max_timestep,
         ) = self._parse_score_timestep_bounds()
         self._score_timestep_shift = self._parse_score_timestep_shift()
+        self._score_timestep_warp_max = self._parse_score_timestep_warp_max()
+        self._score_timestep_continuous = self._parse_score_timestep_continuous()
         self._fake_score_loss_space = self._parse_fake_score_loss_space()
 
         # Initialize preprocessors on student.
@@ -425,6 +427,21 @@ class DMD2Method(TrainingMethod):
                              "method.rollout_carry: true; without the carry, "
                              "always-forced inputs are "
                              "method.rollout_mode: data_latent")
+        if raw:
+            allow_mixed = self.method_config.get(
+                "allow_mixed_rollout_regimes",
+                False,
+            )
+            if not isinstance(allow_mixed, bool):
+                raise ValueError("method.allow_mixed_rollout_regimes must be a bool, "
+                                 f"got {type(allow_mixed).__name__}")
+            if not allow_mixed:
+                raise ValueError(
+                    "method.rollout_data_forcing mixes carried and data-latent "
+                    "rollout regimes per batch, which is not a FastGen recipe. "
+                    "Choose one global regime with rollout_mode={simulate, "
+                    "data_latent}; set allow_mixed_rollout_regimes: true only "
+                    "to reproduce the legacy v9 experiment.")
         return raw
 
     @staticmethod
@@ -766,10 +783,12 @@ class DMD2Method(TrainingMethod):
         )
 
     def _parse_score_timestep_shift(self) -> float:
-        """Resolve score-sampling density on the rectified-flow time axis.
+        """Resolve the rational warp used by score-time sampling.
 
-        ``1`` samples base timesteps uniformly. A value ``s`` samples uniformly
-        after the rational shift by drawing shifted sigma and inverting it.
+        Legacy integer sampling draws uniformly in the warped coordinate and
+        inverts it. Continuous FastGen parity draws the pre-warp coordinate
+        directly and applies this inverse warp before the model adapter adds
+        its modality-specific clock.
         """
         shift = get_optional_float(
             self.method_config,
@@ -782,18 +801,39 @@ class DMD2Method(TrainingMethod):
                              f"got {shift}")
         return shift
 
+    def _parse_score_timestep_warp_max(self) -> float:
+        """Resolve the endpoint used by the continuous rational time warp."""
+        warp_max = get_optional_float(
+            self.method_config,
+            "score_timestep_warp_max",
+            where="method.score_timestep_warp_max",
+        )
+        warp_max = 1.0 if warp_max is None else float(warp_max)
+        if not 0.0 < warp_max <= 1.0:
+            raise ValueError("method.score_timestep_warp_max must satisfy "
+                             f"0 < max <= 1, got {warp_max}")
+        max_ratio = self._score_max_timestep / float(self.student.num_train_timesteps)
+        if max_ratio > warp_max:
+            raise ValueError("method.max_timestep_ratio must not exceed "
+                             "method.score_timestep_warp_max, got "
+                             f"{max_ratio} > {warp_max}")
+        return warp_max
+
+    def _parse_score_timestep_continuous(self) -> bool:
+        """Select FastGen-style continuous score times instead of integer bins."""
+        raw = self.method_config.get("score_timestep_continuous", False)
+        if not isinstance(raw, bool):
+            raise ValueError("method.score_timestep_continuous must be a bool, "
+                             f"got {type(raw).__name__}")
+        return raw
+
     def _parse_fake_score_loss_space(self) -> dict[str, str]:
         """Resolve the critic regression space, globally or per modality.
 
-        ``velocity`` is plain velocity MSE; ``x0`` multiplies each modality's
-        velocity MSE by its realized sigma_m(t)^2 (the affine x0-space form).
-        With one shared base timestep and unequal shifts (H3: video 12,
-        audio 3), sigma_audio(t) << sigma_video(t) for most draws, so a
-        global ``x0`` space suppresses the critic's audio gradient across
-        the low half of audio's own noise axis — the critic goes blind
-        there and audio's DMD gradients degenerate. A per-modality mapping
-        such as ``{video: x0, audio: velocity}`` keeps the x0 weighting for
-        video without silencing audio.
+        ``velocity`` is plain velocity MSE. A global ``x0`` setting calls the
+        critic's x0 prediction directly, matching FastGen without estimating
+        sigma from rounded latents. Legacy mixed mappings retain the original
+        single-forward sigma-squared conversion for their x0 modalities.
         """
         raw = self.method_config.get("fake_score_loss_space", None)
         if raw is None:
@@ -825,6 +865,30 @@ class DMD2Method(TrainingMethod):
 
     def _sample_score_timestep(self, device: torch.device) -> torch.Tensor:
         shift = self._score_timestep_shift
+        num_timesteps = float(self.student.num_train_timesteps)
+        t_lo = self._score_min_timestep / num_timesteps
+        t_hi = self._score_max_timestep / num_timesteps
+
+        if getattr(self, "_score_timestep_continuous", False):
+            # FastGen draws the pre-warp coordinate continuously in float64,
+            # then applies the rational shift. This method stores the inverse
+            # shift because model adapters (H3: video 12, audio 3) apply their
+            # own modality clocks afterwards. Bounds therefore belong to U,
+            # not to the inverse-warped base time.
+            u = torch.rand(
+                [1],
+                device=device,
+                dtype=torch.float64,
+                generator=self.cuda_generator,
+            ) * (t_hi - t_lo) + t_lo
+            inverse_shift = 1.0 / shift
+            warp_max = getattr(self, "_score_timestep_warp_max", 1.0)
+            t = (u * inverse_shift * warp_max /
+                 (u * (inverse_shift - 1.0) + warp_max))
+            timestep = t * num_timesteps
+            timestep = self.student.shift_and_clamp_timestep(timestep)
+            return timestep.clamp(0.0, warp_max * num_timesteps)
+
         if shift == 1.0:
             # Draw inside the bounds directly; drawing over the full range
             # and clamping piles probability atoms onto both endpoints.
@@ -837,9 +901,6 @@ class DMD2Method(TrainingMethod):
                 generator=self.cuda_generator,
             )
         else:
-            num_timesteps = float(self.student.num_train_timesteps)
-            t_lo = self._score_min_timestep / num_timesteps
-            t_hi = self._score_max_timestep / num_timesteps
             sigma_lo = shift * t_lo / (1.0 + (shift - 1.0) * t_lo)
             sigma_hi = shift * t_hi / (1.0 + (shift - 1.0) * t_hi)
             u = torch.rand(
@@ -1469,28 +1530,58 @@ class DMD2Method(TrainingMethod):
             batch,
         )
 
-        pred_noise = self.critic.predict_noise(
-            noisy_x0,
-            fake_score_timestep,
-            batch,
-            conditional=True,
-            cfg_uncond=self._cfg_uncond,
-            attn_kind="dense",
-        )
-        if not isinstance(pred_noise, torch.Tensor):
-            raise TypeError("DMD2 critic predict_noise must return one packed tensor")
-        target = noise - generator_pred_x0
         slices = self._modality_slices(batch)
         emit_modality_metrics = slices is not None
         if slices is None:
             slices = (("packed", slice(None)), )
+        all_x0 = all(self._fake_score_space_for(name) == "x0" for name, _ in slices)
+
+        pred_x0: torch.Tensor | None = None
+        pred_noise: torch.Tensor | None = None
+        target: torch.Tensor | None = None
+        if all_x0:
+            # Match FastGen's fake_score_pred_type=x0 objective directly.
+            # Reweighting raw velocity MSE by sigma^2 is algebraically equal
+            # before rounding, but estimating sigma from BF16 x_t introduces a
+            # low-noise bias (especially for H3 audio).
+            pred_x0 = self.critic.predict_x0(
+                noisy_x0,
+                fake_score_timestep,
+                batch,
+                conditional=True,
+                cfg_uncond=self._cfg_uncond,
+                attn_kind="dense",
+            )
+        else:
+            # Retain the single-forward legacy path for mixed per-modality
+            # velocity/x0 configurations. Strict H3 parity uses global x0 and
+            # therefore always takes the direct branch above.
+            pred_noise = self.critic.predict_noise(
+                noisy_x0,
+                fake_score_timestep,
+                batch,
+                conditional=True,
+                cfg_uncond=self._cfg_uncond,
+                attn_kind="dense",
+            )
+            target = noise - generator_pred_x0
+
         flow_matching_loss = torch.zeros((), device=device, dtype=torch.float32)
         metrics: dict[str, LogScalar] = {}
         for name, modality in slices:
-            loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
-            if self._fake_score_space_for(name) == "x0":
+            if all_x0:
+                assert pred_x0 is not None
+                loss_m = torch.mean((pred_x0[:, modality].float() -
+                                     generator_pred_x0[:, modality].float())**2)
+            else:
+                assert pred_noise is not None and target is not None
+                loss_m = torch.mean((pred_noise[:, modality].float() -
+                                     target[:, modality].float())**2)
+            if not all_x0 and self._fake_score_space_for(name) == "x0":
                 # For affine rectified flow, x0 MSE is sigma_m(t)^2 times
-                # velocity MSE. Estimate sigma_m^2 from the realized tensors.
+                # velocity MSE. This compatibility path is retained only for
+                # legacy mixed-space recipes.
+                assert target is not None
                 with torch.no_grad():
                     num = torch.mean((noisy_x0[:, modality].float() - generator_pred_x0[:, modality].float())**2)
                     den = torch.mean(target[:, modality].float()**2)

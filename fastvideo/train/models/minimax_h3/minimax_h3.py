@@ -59,11 +59,20 @@ _ALLOWED_ATTENTION_BACKENDS = (
 )
 
 
-def shift_noise_amount(base_noise_amount: torch.Tensor, shift: float) -> torch.Tensor:
-    """Apply the MiniMax H3 rational shift to a unit noise amount."""
+def shift_noise_amount(
+    base_noise_amount: torch.Tensor,
+    shift: float,
+    *,
+    max_noise_amount: float = 1.0,
+) -> torch.Tensor:
+    """Apply the MiniMax H3 rational shift on ``[0, max_noise_amount]``."""
     if shift <= 0:
         raise ValueError(f"shift must be positive, got {shift}")
-    return shift * base_noise_amount / (1.0 + (shift - 1.0) * base_noise_amount)
+    if not 0.0 < max_noise_amount <= 1.0:
+        raise ValueError("max_noise_amount must satisfy 0 < max <= 1, "
+                         f"got {max_noise_amount}")
+    return (shift * base_noise_amount * max_noise_amount /
+            (base_noise_amount * (shift - 1.0) + max_noise_amount))
 
 
 class MiniMaxH3Model(ModelBase):

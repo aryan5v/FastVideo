@@ -570,11 +570,11 @@ def test_packed_predict_noise_plumbs_timesteps_and_tolerates_vsa(monkeypatch: py
     base = torch.tensor([0.757])
     torch.testing.assert_close(
         batch.timesteps,
-        1.0 - shift_noise_amount(base, 12.0),
+        1.0 - shift_noise_amount(base.double(), 12.0),
     )
     torch.testing.assert_close(
         batch.audio_timesteps,
-        1.0 - shift_noise_amount(base, 3.0),
+        1.0 - shift_noise_amount(base.double(), 3.0),
     )
     # The unit-scale transformer echoes packed rows, and the H3 wrapper
     # negates them into noise-minus-clean form.
@@ -582,11 +582,11 @@ def test_packed_predict_noise_plumbs_timesteps_and_tolerates_vsa(monkeypatch: py
 
     x0 = model.predict_x0(noisy, timestep, batch, conditional=True)
     noisy_video, noisy_audio = model.unpack_latents(noisy)
-    sigma_video = shift_noise_amount(base, 12.0).to(torch.bfloat16)
-    sigma_audio = shift_noise_amount(base, 3.0).to(torch.bfloat16)
+    sigma_video = shift_noise_amount(base.double(), 12.0)
+    sigma_audio = shift_noise_amount(base.double(), 3.0)
     expected = model.pack_latents(
-        noisy_video + sigma_video * noisy_video,
-        noisy_audio + sigma_audio * noisy_audio,
+        (noisy_video.double() + sigma_video * noisy_video.double()).to(torch.bfloat16),
+        (noisy_audio.double() + sigma_audio * noisy_audio.double()).to(torch.bfloat16),
     )
     torch.testing.assert_close(x0, expected)
 
@@ -757,9 +757,9 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     # Global batch 128 = 32 DP x accum 4; the carry owns one stream per slot.
     assert training["loop"]["gradient_accumulation_steps"] == 4
     assert method["rollout_sample_type"] == "ode"
-    # v9: latent-bearing batches train data-forced (FastGen's data-driven
-    # regime); text-only batches keep the carried walk.
+    # Historical v9 explicitly opts into its non-golden per-batch hybrid.
     assert method["rollout_data_forcing"] is True
+    assert method["allow_mixed_rollout_regimes"] is True
     assert method["generator_update_interval"] == 5
     assert method["real_score_guidance_scale"] == 1.0
     # FastGen h3_new grid: time_shift(linspace(0.999, 0, 5), 12) in base time.
@@ -767,6 +767,8 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert "warp_denoising_step" not in method
     # f_{1/2.4} == f_{5/12}: FastGen's shifted draw f_5(U) on the shift-12 clock.
     assert method["score_timestep_shift"] == 2.4
+    assert method["score_timestep_warp_max"] == 0.999
+    assert method["score_timestep_continuous"] is True
     assert method["min_timestep_ratio"] == 0.001
     assert method["max_timestep_ratio"] == 0.999
     assert method["fake_score_loss_space"] == "x0"
