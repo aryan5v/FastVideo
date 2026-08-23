@@ -26,7 +26,7 @@ from fastvideo.train.utils.config import load_run_config
 _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd2_min.yaml"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml")
-_V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml")
+_V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml")
 _V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"
 _H3_SBATCH = _REPO_ROOT / "examples/train/slurm/dmd2_32xgb200.sbatch"
 _V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
@@ -745,7 +745,7 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
 
 
 def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
-    """V10 is a fresh 32-GPU, global-batch-64, all-real-latent lineage."""
+    """V10 is a fresh 64-GPU, global-batch-64, all-real-latent lineage."""
     config = yaml.safe_load(_V10_EXPERIMENT_CONFIG.read_text())
     method = config["method"]
     training = config["training"]
@@ -765,11 +765,11 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     assert training["optimizer"]["learning_rate"] == 2.0e-6
 
     assert distributed == {
-        "num_gpus": 32,
+        "num_gpus": 64,
         "sp_size": 1,
         "tp_size": 1,
         "hsdp_replicate_dim": 1,
-        "hsdp_shard_dim": 32,
+        "hsdp_shard_dim": 64,
     }
     global_batch = (distributed["num_gpus"] // distributed["sp_size"] * data["train_batch_size"] *
                     training["loop"]["gradient_accumulation_steps"])
@@ -781,7 +781,9 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
                and path.endswith("/data") for path in data["data_path"])
 
     assert training["checkpoint"]["output_dir"].endswith("v10_dataonly_mixed_vsa64")
-    assert training["tracker"]["run_name"] == "dmd2_sp1_v10_dataonly_mixed_vsa64"
+    assert training["loop"]["gradient_accumulation_steps"] == 1
+    assert training["checkpoint"]["checkpointing_start_step"] == 100
+    assert training["tracker"]["run_name"] == "dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
     assert training["model"]["enable_torch_compile"] is False
     assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
     assert config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
@@ -801,12 +803,19 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
 
     assert "/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10" in launcher
     assert ('readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/'
-            'dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"') in launcher
+            'dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"') in launcher
     assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"' in launcher
     assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
     assert "readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345" in launcher
     assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
-            'minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"') in launcher
+            'minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"') in launcher
+    assert "readonly NUM_NODES=16" in launcher
+    assert "readonly WORLD_SIZE=64" in launcher
+    assert "readonly HSDP_REPLICATE=1" in launcher
+    assert "readonly HSDP_SHARD=64" in launcher
+    assert "readonly GRADIENT_ACCUMULATION_STEPS=1" in launcher
+    assert "readonly GLOBAL_BATCH_SIZE=64" in launcher
+    assert "readonly MIN_OUTPUT_FREE_BYTES=" in launcher
     for removed_override in ("CONFIG", "DATA_ROOT", "VALIDATION_MANIFEST", "OUTPUT_DIR"):
         assert f'${{{removed_override}:-' not in launcher
     assert 'readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"' in launcher
@@ -815,6 +824,10 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert 'actual_validation = validation["dataset_file"]' in launcher
     assert "actual_validation_max_record_num_frames" in launcher
     assert "actual_output = training[\"checkpoint\"][\"output_dir\"]" in launcher
+    assert "actual_topology != expected_topology" in launcher
+    assert "actual_global_batch_size != global_batch_size" in launcher
+    assert "kernel receipt source" in launcher
+    assert "available_bytes < MIN_OUTPUT_FREE_BYTES" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
     assert 'require_file "${source_root}/MANIFEST.json"' in launcher
@@ -823,10 +836,13 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "finalize_dataset.py" in launcher
     assert "--verify-only" in launcher
     assert "H3_V10_KERNEL_GATE=1" in launcher
+    assert "HSDP_SHARD=%q" in launcher
+    assert "--nodes=%q" in launcher
     assert 'git -C "${REPO}" status --porcelain' in launcher
     assert "This helper never calls sbatch" in launcher
 
     sbatch = _H3_SBATCH.read_text()
+    assert "HSDP_REPLICATE * HSDP_SHARD != WORLD_SIZE" in sbatch
     assert 'git -C "${REPO}" status --porcelain' in sbatch
     assert "V10 SOURCE GATE FAILED: execution checkout is dirty" in sbatch
     assert "export HOME=" not in sbatch

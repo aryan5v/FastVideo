@@ -38,6 +38,14 @@ WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 SP_SIZE="${SP_SIZE:-1}"
 HSDP_REPLICATE="${HSDP_REPLICATE:-1}"
 HSDP_SHARD="${HSDP_SHARD:-${WORLD_SIZE}}"
+if (( WORLD_SIZE % SP_SIZE != 0 )); then
+  echo "TOPOLOGY GATE FAILED: world size ${WORLD_SIZE} is not divisible by SP ${SP_SIZE}" >&2
+  exit 1
+fi
+if (( HSDP_REPLICATE * HSDP_SHARD != WORLD_SIZE )); then
+  echo "TOPOLOGY GATE FAILED: HSDP ${HSDP_REPLICATE}x${HSDP_SHARD} != world size ${WORLD_SIZE}" >&2
+  exit 1
+fi
 MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
 MASTER_PORT="${MASTER_PORT:-29501}"
 
@@ -90,6 +98,8 @@ if [ -n "${LUSTRE_HOME:-}" ]; then
 fi
 export FASTVIDEO_FA4=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM=false
 # Node-local weight cache: relaunches rebuild all three 33B roles from tmpfs
 # in seconds. PER_NODE=1 makes every tray write its own /dev/shm copy

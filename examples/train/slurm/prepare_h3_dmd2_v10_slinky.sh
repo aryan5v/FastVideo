@@ -1,5 +1,5 @@
 #!/bin/bash
-# Validate the shared v10 inputs and print the exact eight-tray Slinky submit
+# Validate the shared v10 inputs and print the exact sixteen-tray Slinky submit
 # command. This helper never calls sbatch; copy the final line deliberately
 # after every gate reports READY.
 
@@ -10,19 +10,32 @@ VENV="${VENV:-${REPO}/.venv}"
 # These four paths are one committed recipe contract. They are deliberately not
 # environment overrides: preflight must inspect exactly what the launched YAML
 # will consume and write.
-readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml"
+readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"
 readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"
 readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
 readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345
-readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_v10_dataonly_mixed_vsa64"
+readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
+readonly NUM_NODES=16
+readonly GPUS_PER_NODE=4
+readonly WORLD_SIZE=64
+readonly SP_SIZE=1
+readonly HSDP_REPLICATE=1
+readonly HSDP_SHARD=64
+readonly TRAIN_BATCH_SIZE=1
+readonly GRADIENT_ACCUMULATION_STEPS=1
+readonly GLOBAL_BATCH_SIZE=64
+readonly MIN_OUTPUT_FREE_BYTES=$((4 * 1024 * 1024 * 1024 * 1024))
 readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"
 LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
-# rack-3 is deliberate: Slinky provisions pods from the submitted eight-node
-# request, and the retired v8 allocation was on this rack. Do not submit
-# speculative warm-up jobs; override PARTITION if the operator selects rack-2.
+# rack-3 is deliberate: Slinky provisions pods from the submitted sixteen-node
+# request, and the retired v8 allocation was on this rack. This helper never
+# submits primers; use unique job names and the documented Slinky warm/race
+# procedure when the rack is cold. Override PARTITION if the operator selects
+# rack-2.
 PARTITION="${PARTITION:-hpc-rack-3}"
 LUSTRE_HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 KERNEL_PREFIX="${KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
+KERNEL_RECEIPT="${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
 FA4_OVERLAY="${FA4_OVERLAY:-/mnt/lustre/vlm-wlsaidhi/fastvideo/fa4_overlay}"
 FA4_CUTLASS_PACKAGES="${FA4_CUTLASS_PACKAGES:-${FA4_OVERLAY}/nvidia_cutlass_dsl/python_packages}"
 V10_PYTHONPATH="${KERNEL_PREFIX}:${FA4_OVERLAY}:${FA4_CUTLASS_PACKAGES}"
@@ -48,7 +61,7 @@ require_file "${VENV}/bin/python"
 require_file "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 require_file "${REPO}/scripts/train/gate_h3_v10_kernel.sh"
 require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/finalize_dataset.py"
-require_file "${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
+require_file "${KERNEL_RECEIPT}"
 require_file "${DATA_ROOT}/FROZEN_MANIFEST.json"
 require_file "${DATA_ROOT}/READY.json"
 if [[ ! -d "${FA4_OVERLAY}/flash_attn/cute" ]]; then
@@ -66,7 +79,9 @@ fi
 if [[ -x "${VENV}/bin/python" && -f "${CONFIG}" ]]; then
   if ! "${VENV}/bin/python" - \
     "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" "${VALIDATION_MAX_RECORD_NUM_FRAMES}" \
-    "${OUTPUT_DIR}" "${sources[@]}" <<'PY'
+    "${OUTPUT_DIR}" "${NUM_NODES}" "${GPUS_PER_NODE}" "${WORLD_SIZE}" \
+    "${SP_SIZE}" "${HSDP_REPLICATE}" "${HSDP_SHARD}" "${TRAIN_BATCH_SIZE}" \
+    "${GRADIENT_ACCUMULATION_STEPS}" "${GLOBAL_BATCH_SIZE}" "${sources[@]}" <<'PY'
 import pathlib
 import sys
 
@@ -77,10 +92,22 @@ data_root = pathlib.Path(sys.argv[2])
 validation_manifest = sys.argv[3]
 validation_max_record_num_frames = int(sys.argv[4])
 output_dir = sys.argv[5]
-sources = sys.argv[6:]
+num_nodes = int(sys.argv[6])
+gpus_per_node = int(sys.argv[7])
+world_size = int(sys.argv[8])
+sp_size = int(sys.argv[9])
+hsdp_replicate = int(sys.argv[10])
+hsdp_shard = int(sys.argv[11])
+train_batch_size = int(sys.argv[12])
+gradient_accumulation_steps = int(sys.argv[13])
+global_batch_size = int(sys.argv[14])
+sources = sys.argv[15:]
 document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 try:
     training = document["training"]
+    distributed = training["distributed"]
+    data = training["data"]
+    loop = training["loop"]
     actual_data_paths = training["data"]["data_path"]
     validation = document["callbacks"]["validation"]
     actual_validation = validation["dataset_file"]
@@ -99,7 +126,32 @@ if actual_validation_max_record_num_frames != validation_max_record_num_frames:
                      f"{actual_validation_max_record_num_frames!r} != {validation_max_record_num_frames}")
 if actual_output != output_dir:
     raise SystemExit(f"v10 YAML output directory {actual_output!r} != {output_dir!r}")
-print("READY: committed v10 YAML paths match the fixed preflight contract")
+if num_nodes * gpus_per_node != world_size:
+    raise SystemExit(f"preflight allocation {num_nodes}x{gpus_per_node} != world size {world_size}")
+expected_topology = {
+    "num_gpus": world_size,
+    "sp_size": sp_size,
+    "tp_size": 1,
+    "hsdp_replicate_dim": hsdp_replicate,
+    "hsdp_shard_dim": hsdp_shard,
+}
+actual_topology = {key: int(distributed[key]) for key in expected_topology}
+if actual_topology != expected_topology:
+    raise SystemExit(f"v10 YAML topology {actual_topology!r} != {expected_topology!r}")
+actual_train_batch_size = int(data["train_batch_size"])
+actual_gradient_accumulation_steps = int(loop["gradient_accumulation_steps"])
+if actual_train_batch_size != train_batch_size:
+    raise SystemExit(f"v10 YAML train batch {actual_train_batch_size} != {train_batch_size}")
+if actual_gradient_accumulation_steps != gradient_accumulation_steps:
+    raise SystemExit("v10 YAML accumulation "
+                     f"{actual_gradient_accumulation_steps} != {gradient_accumulation_steps}")
+actual_global_batch_size = (world_size // sp_size) * train_batch_size * actual_gradient_accumulation_steps
+if actual_global_batch_size != global_batch_size:
+    raise SystemExit(f"v10 effective global batch {actual_global_batch_size} != {global_batch_size}")
+if hsdp_replicate * hsdp_shard != world_size:
+    raise SystemExit(f"HSDP mesh {hsdp_replicate}x{hsdp_shard} != world size {world_size}")
+print("READY: committed v10 YAML paths/topology match the fixed 64-GPU preflight contract; "
+      f"global batch={actual_global_batch_size}")
 PY
   then
     failures=$((failures + 1))
@@ -201,6 +253,35 @@ if ! git -C "${REPO}" merge-base --is-ancestor "${REVIEWED_V10_COMMIT}" HEAD; th
   echo "NOT READY: execution commit does not contain reviewed v10 marker ${REVIEWED_V10_COMMIT}" >&2
   failures=$((failures + 1))
 fi
+if [[ -x "${VENV}/bin/python" && -f "${KERNEL_RECEIPT}" ]]; then
+  if ! "${VENV}/bin/python" - "${KERNEL_RECEIPT}" "${REPO}" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+receipt_path = pathlib.Path(sys.argv[1])
+repo = pathlib.Path(sys.argv[2])
+receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+if receipt.get("schema_version") != "fastvideo-h3-v10-kernel-v1":
+    raise SystemExit(f"NOT READY: unexpected kernel receipt schema in {receipt_path}")
+execution_commit = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+if receipt.get("source_commit") != execution_commit:
+    raise SystemExit("NOT READY: kernel receipt source "
+                     f"{receipt.get('source_commit')} != execution HEAD {execution_commit}; "
+                     "rebuild from the final commit")
+kernel_tree = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD:fastvideo-kernel"], text=True).strip()
+if receipt.get("kernel_tree") != kernel_tree:
+    raise SystemExit("NOT READY: kernel receipt tree "
+                     f"{receipt.get('kernel_tree')} != execution tree {kernel_tree}")
+print(f"READY: kernel receipt is bound to execution HEAD {execution_commit}")
+PY
+  then
+    failures=$((failures + 1))
+  fi
+fi
 if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
   echo "NOT READY: execution checkout has uncommitted or untracked files: ${REPO}" >&2
   git -C "${REPO}" status --short >&2
@@ -209,6 +290,20 @@ fi
 
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "NOT READY: fresh v10 output directory is non-empty: ${OUTPUT_DIR}" >&2
+  failures=$((failures + 1))
+fi
+output_parent="$(dirname "${OUTPUT_DIR}")"
+if [[ -d "${output_parent}" ]]; then
+  available_bytes="$(df -B1 --output=avail "${output_parent}" | tail -n 1 | tr -d ' ')"
+  if [[ ! "${available_bytes}" =~ ^[0-9]+$ ]] || (( available_bytes < MIN_OUTPUT_FREE_BYTES )); then
+    echo "NOT READY: output filesystem has ${available_bytes:-unknown} free bytes; " \
+      "v10 keep-four requires at least ${MIN_OUTPUT_FREE_BYTES} before launch" >&2
+    failures=$((failures + 1))
+  else
+    echo "READY: output filesystem has ${available_bytes} free bytes"
+  fi
+else
+  echo "NOT READY: output parent does not exist: ${output_parent}" >&2
   failures=$((failures + 1))
 fi
 
@@ -225,14 +320,16 @@ fi
 
 execution_commit="$(git -C "${REPO}" rev-parse HEAD)"
 printf -v payload \
-  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=1 HSDP_REPLICATE=1 HSDP_SHARD=32 FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
+  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=%q HSDP_REPLICATE=%q HSDP_SHARD=%q FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
   "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" "${execution_commit}" \
   "${KERNEL_PREFIX}" "${FA4_OVERLAY}" "${FA4_CUTLASS_PACKAGES}" "${V10_PYTHONPATH}" \
+  "${SP_SIZE}" "${HSDP_REPLICATE}" "${HSDP_SHARD}" \
   /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 
 printf 'READY: review, then submit exactly:\n'
-printf 'sbatch --export=NIL --chdir=%q --nodes=8 --ntasks-per-node=1 --gpus-per-node=4 --exclusive ' "${REPO}"
-printf '%q ' -p "${PARTITION}" -t 120:00:00 --requeue -J h3-dmd2-v10 \
+printf 'sbatch --export=NIL --chdir=%q --nodes=%q --ntasks-per-node=1 --gpus-per-node=%q --exclusive ' \
+  "${REPO}" "${NUM_NODES}" "${GPUS_PER_NODE}"
+printf '%q ' -p "${PARTITION}" -t 120:00:00 --requeue -J h3-dmd2-v10-64g \
   -o "${LOG_DIR}/slurm-%x-%j.out" --wrap="${payload}"
 printf '\n'

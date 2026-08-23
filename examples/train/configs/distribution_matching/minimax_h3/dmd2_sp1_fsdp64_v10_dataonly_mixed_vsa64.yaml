@@ -1,0 +1,150 @@
+# v10: data-only MiniMax-H3 DMD2 over native-shape, paired video/audio
+# latents. This is a fresh base-model/optimizer lineage: do not resume v8/v9.
+#
+# FastGen mapping (`backward_simulation: false`): each batch starts from its
+# real latent, forward-noised at a uniformly sampled non-zero rung of the
+# four-step student grid. The critic continues to fit student generations.
+# There is no data-free carry, per-batch data-forcing switch, or text-only
+# source in this recipe.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: FLASH_ATTN
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/lustre/vlm-k1kong/models/MiniMax-H3
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: FLASH_ATTN
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  rollout_mode: data_latent
+  generator_update_interval: 5
+  real_score_guidance_scale: 1.0
+  dmd_denoising_steps: [999, 749, 500, 250]
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  fake_score_loss_space: x0
+  cfg_uncond:
+    text: zero
+
+  fake_score_learning_rate: 2.0e-6
+  fake_score_betas: [0.9, 0.999]
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    # Sixteen 4-GPU Slinky trays. SP=1 makes all 64 ranks data-parallel and
+    # full-shards each 33B role across the complete world.
+    num_gpus: 64
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 64
+
+  data:
+    # Each path is a production-only subtree: the parquet loader recurses, so
+    # manifests, claims, logs, and preprocessing scratch stay in sibling dirs.
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/h3_t2av_video_nuva_50k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/h3_t2av_video_5s_768p/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/h3_t2av_video_nuva_10k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/h3_t2av_video_nuva_10k_mixed_res_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/h3_t2av_fastgen_vidprom_150k/data
+    preprocessed_data_type: t2va
+    # The mixed-shape data lane synchronizes one exact-shape bucket across all
+    # DP ranks before each micro-step. This field lands with that implementation.
+    native_shape_bucketing: true
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    # Fallback/contract values for tools that inspect the config without a row.
+    # Native-shape rows carry their own width, height, frame, and latent sizes.
+    num_latent_t: 37
+    num_height: 768
+    num_width: 1344
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 4000
+    # Global batch 64 = 64 DP x local batch 1 x accumulation 1.
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64
+    # `latest` supports requeues only within this fresh v10 namespace.
+    resume_from_checkpoint: latest
+    training_state_checkpointing_steps: 100
+    checkpointing_start_step: 100
+    checkpoints_total_limit: 4
+
+  tracker:
+    project_name: h3-dmd2-vsa
+    run_name: dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+    # Mixed-shape regional-compile parity/recompile coverage is a launch gate.
+    # Start eager; flip only after that matrix passes on the exact v10 buckets.
+    enable_torch_compile: false
+
+  dit_precision: fp32
+  vsa:
+    sparsity: 0.9
+    tile_size: 64
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  latent_vis:
+    _target_: fastvideo.train.callbacks.latent_vis.LatentVisCallback
+    every_steps: 100
+    fps: 24
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    # Frozen, disjoint 64-row sample covering every source and a spread of
+    # native resolutions/lengths. Rows contain caption, ref_video, source,
+    # sample_id, width, height, and num_frames.
+    dataset_file: /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/validation/heldout64.json
+    every_steps: 100
+    run_at_start: true
+    sampling_steps: [4]
+    guidance_scale: 1.0
+    use_record_dimensions: true
+    # Raw 15-second sources contain 362 frames, but released H3 generation is
+    # capped at the largest aligned request within 15 seconds: 345 frames.
+    max_record_num_frames: 345
+    num_videos_per_prompt: 1
+    # Raw held-out video is a logging reference, never generation conditioning.
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false

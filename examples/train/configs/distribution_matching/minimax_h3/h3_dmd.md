@@ -23,11 +23,13 @@ parity.
 
 ## Current recipe
 
-The live recipe is `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml`:
+The live recipe is `dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml`:
 all-real video/audio latents from the five frozen native-shape sources at
-global batch 64 (32 DP x accum 2), with no data-free carry. It starts a fresh
+global batch 64 (64 DP x accum 1), with no data-free carry. It starts a fresh
 base-model and optimizer lineage; never resume v8/v9 into its output. The
-full v10 contract and launch gates are below. The previous
+full v10 contract and launch gates are below. The 32-GPU v10 config is retained
+as the failed job-2960 receipt; it must not share the 64-GPU output namespace.
+The previous
 `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` remains the mixed data-forcing
 plus carry recipe; `_v8_bwdsim_vsa64` is carry-only (data-free), `_v7_vsa90`
 is the pre-parity 256-tile recipe, and `_v6` is the dense-student recipe.
@@ -219,13 +221,13 @@ H3-specific state and follow-ups before enabling it on a real run:
 - Upstream PR #1718 is unmerged (CI/review pending); re-diff against the
   merged version when it lands.
 
-## v10 data-only native-shape launch (2026-08-22)
+## v10 data-only native-shape launch (2026-08-22/23)
 
-`dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml` starts a fresh lineage over
+`dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml` starts a fresh lineage over
 the five finalized shared T2VA sources. It has no simulated/carry rollout:
 every microbatch forward-noises a real video/audio latent at a uniformly
-sampled non-zero rung of the four-step grid. Eight four-GPU trays at local
-batch 1 and accumulation 2 give global batch 64; student and critic learning
+sampled non-zero rung of the four-step grid. Sixteen four-GPU trays at local
+batch 1 and accumulation 1 give global batch 64; student and critic learning
 rates are both `2e-6`. Native-shape bucketing is mandatory. Validation uses
 only `validation/heldout64.json`, honors each record's native spatial shape,
 and logs the raw held-out video beside its generated counterpart. Raw
@@ -234,7 +236,13 @@ requests at 345 frames, the largest released `17*n+5` geometry within H3's
 15-second inference ceiling. Shorter record lengths are unchanged, and the
 full 362-frame reference remains intact for side-by-side logging.
 
-### Live launch receipt
+The 64-rank bucket sampler pads each of the 90 exact-shape buckets to a multiple
+of 64: 3,225 repeated rows over 56,832 scheduled rows (about 5.7% duplication),
+up from 1,497 repeats at 32 ranks. With accumulation 1, every optimizer step is
+one exact-shape global microbatch; it no longer combines two successive shape
+buckets as the 32-GPU/accumulation-2 recipe did.
+
+### First 32-GPU launch receipt and capacity failure
 
 Production job `2960` started at 2026-08-22 17:08:12 UTC on
 `hpc-rack-3-[2-9]`: eight Slinky trays, 32 GB200 GPUs, SP=1, and HSDP=(1,32).
@@ -250,6 +258,27 @@ were followed by the first finite student update at step 5
 (`generator_loss=0.0399398`, `grad_norm/student=0.125461`). This is a fresh
 lineage: the output namespace contained no checkpoint to resume.
 
+Job 2960 later failed at completed step 153 while backpropagating the critic on
+the second accumulated `1760x768-362f` microbatch. Full FSDP2 was active over
+all 32 ranks (HSDP `(1,32)`); the failure was activation capacity, not missing
+sharding or allocator fragmentation. Rank 0 had 173.60 GiB allocated, 2.01 GiB
+free, and failed a 3.83 GiB allocation. The launch-time config still delayed
+checkpointing until step 500, so the failed namespace has validation artifacts
+but no checkpoint.
+
+The 64-GPU recovery keeps SP=1 and expands FULL_SHARD to HSDP `(1,64)`. The
+three resident FP32 roles contain 35.05B + 33.12B + 33.12B parameters; student
+and critic (68.17B total) also own FP32 gradients and two Adam moments. Those
+sharded persistent tensors account for about 35.6 GiB/rank at shard-32 and
+17.8 GiB/rank at shard-64. Holding the failed activation/full-layer working set
+constant therefore projects about 16 GiB free after satisfying the failed
+3.83 GiB allocation. This is a useful capacity margin, but not an empirical
+proof: activations and the per-block full-parameter all-gather are unchanged.
+Before the production submit, run the exact `1760x768-362f` critic/student gate
+with both Adam states pre-seeded on the final 64-rank commit; a fresh probe with
+`resume_from_checkpoint: null` is insufficient because it omits the other
+optimizer's mature state at the relevant backward peak.
+
 The non-submitting preflight is:
 
 ```bash
@@ -259,13 +288,18 @@ bash examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh
 It targets the dedicated execution clone `FastVideo-v10`, runs the native
 data finalizer in `--verify-only` mode (including READY/manifests, parquet
 schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
-videos, requires a fresh output namespace, and prints but does not execute the
-eight-tray `sbatch` command. Rack-3 is the default Slinky demand because v8's
+videos, requires the fresh fsdp64 output namespace, and prints but does not
+execute the sixteen-tray `sbatch` command. It also binds the kernel receipt to
+the final execution commit and requires at least 4 TiB free for the keep-four
+checkpoint policy plus its transient rotation write. Rack-3 is the default
+Slinky demand
+because v8's
 retired allocation freed that lane. A cold Slinky topology can reject a direct
-eight-node request even when the backing Kubernetes pool has capacity. Follow
+sixteen-node request even when the backing Kubernetes pool has capacity. Follow
 `/home/vlm-wlsaidhi/ddnet-rl/SLURM_LAUNCH.md`: start enough one-node primer
-jobs to materialize the target topology, wait until eight are running, cancel
-only those exact primer IDs, and immediately race the real eight-node submit.
+jobs (the guide uses 26 demands for a 16-node target), wait until at least 16
+are running, cancel only those exact primer IDs, and immediately race the real
+sixteen-node submit.
 Job 2960 was accepted on the second production submit after primers 2938 and
 2944 warmed rack-3. `PARTITION=hpc-rack-2` remains an explicit operator
 override.
