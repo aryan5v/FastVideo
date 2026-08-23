@@ -1,7 +1,7 @@
 #!/bin/bash
 # Validate the shared v10 inputs and print the exact sixteen-tray Slinky submit
-# command for the committed one-allocation gated launcher. This helper never
-# calls sbatch; copy the final line deliberately after every gate reports READY.
+# command for the committed one-allocation gated launcher. This helper never calls sbatch;
+# copy the final line deliberately after every gate reports READY.
 
 set -euo pipefail
 

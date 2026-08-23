@@ -70,8 +70,7 @@ require_exact_execution_checkout() {
   local execution_commit
   execution_commit="$(git -C "${REPO}" rev-parse HEAD)"
   if [[ "${EXPECTED_V10_COMMIT}" != "${execution_commit}" ]]; then
-    echo "V10 GATED LAUNCH FAILED: requested commit ${EXPECTED_V10_COMMIT} "\
-      "!= execution HEAD ${execution_commit}" >&2
+    echo "V10 GATED LAUNCH FAILED: requested commit ${EXPECTED_V10_COMMIT} != execution HEAD ${execution_commit}" >&2
     exit 1
   fi
   if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
