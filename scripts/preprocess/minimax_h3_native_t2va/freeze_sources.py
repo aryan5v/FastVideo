@@ -30,7 +30,7 @@ from typing import Any, Iterable
 SCHEMA_VERSION = "minimax-h3-native-t2va-freeze-v1"
 VALIDATION_SCHEMA_VERSION = "minimax-h3-native-t2va-validation-v1"
 EXTENSION_SCHEMA_VERSION = "minimax-h3-native-t2va-extension-v1"
-FILTERED_DERIVATION_SCHEMA_VERSION = "minimax-h3-native-t2va-filtered-derivation-v1"
+FILTERED_DERIVATION_SCHEMA_VERSION = "minimax-h3-native-t2va-filtered-derivation-v2"
 EXPECTED_FPS = 24.0
 EXPECTED_AUDIO_SAMPLE_RATE = 32000
 
@@ -367,6 +367,58 @@ def distribution(rows: list[dict[str, Any]], field_names: tuple[str, ...]) -> di
     return dict(sorted(counts.items()))
 
 
+def filtered_validation_summary(
+    base_summary: dict[str, Any],
+    rows: list[dict[str, Any]],
+    validation_exclusions: dict[str, int],
+    *,
+    base_root: Path,
+    min_resolution_count: int,
+    excluded_resolutions: list[str],
+    excluded_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the deterministic validation receipt for a filtered derivation."""
+    retained_ids = {str(row["conditioning_id"]) for row in rows}
+    legacy_overlap_ids = [
+        str(record_id)
+        for record_id in base_summary.get("legacy_synth64_overlap_ids", [])
+        if str(record_id) in retained_ids
+    ]
+    summary = {
+        "schema_version": VALIDATION_SCHEMA_VERSION,
+        "seed": int(base_summary["seed"]),
+        "rows": len(rows),
+        "unique_conditioning_ids": len(retained_ids),
+        "source_counts": dict(sorted(collections.Counter(row["source"] for row in rows).items())),
+        "family_counts": dict(sorted(collections.Counter(row["family"] for row in rows).items())),
+        "resolution_counts": distribution(rows, ("width", "height")),
+        "frame_counts": distribution(rows, ("num_frames",)),
+        "duration_band_counts": dict(
+            sorted(collections.Counter(duration_band(row["num_frames"], row["fps"]) for row in rows).items())
+        ),
+        "training_exclusions_by_source": validation_exclusions,
+        "filter": {
+            "schema_version": FILTERED_DERIVATION_SCHEMA_VERSION,
+            "base_root": str(base_root),
+            "axis": "aggregate_frozen_resolution",
+            "comparison": "count < min_resolution_count",
+            "min_resolution_count": min_resolution_count,
+            "excluded_resolutions": excluded_resolutions,
+            "base_validation_rows": int(base_summary["rows"]),
+            "excluded_validation_rows": len(excluded_rows),
+        },
+        "note": (
+            "V3 removes validation rows at aggregate frozen resolutions below the threshold; "
+            "their conditioning IDs remain excluded from training to preserve the base holdout boundary."
+        ),
+    }
+    if "legacy_synth64_ids_path" in base_summary:
+        summary["legacy_synth64_ids_path"] = base_summary["legacy_synth64_ids_path"]
+        summary["legacy_synth64_overlap_count"] = len(legacy_overlap_ids)
+        summary["legacy_synth64_overlap_ids"] = legacy_overlap_ids
+    return summary
+
+
 def conditioning_ids_sha256(ids: Iterable[str]) -> str:
     payload = "".join(f"{record_id}\n" for record_id in sorted(ids)).encode()
     return hashlib.sha256(payload).hexdigest()
@@ -602,6 +654,19 @@ def load_filtered_derivation_receipt(
         width, height = resolution.split("x")
         if not width.isdigit() or not height.isdigit() or int(width) <= 0 or int(height) <= 0:
             raise ValueError(f"invalid excluded resolution {resolution!r}")
+    excluded_validation_ids = derivation.get("excluded_validation_conditioning_ids")
+    if (
+        not isinstance(excluded_validation_ids, list)
+        or excluded_validation_ids != sorted(set(excluded_validation_ids))
+        or any(not isinstance(record_id, str) or not record_id for record_id in excluded_validation_ids)
+    ):
+        raise ValueError("filtered derivation excluded validation IDs must be a sorted unique string list")
+    payload_path = derivation.get("validation_payload_path")
+    if (
+        not isinstance(payload_path, str)
+        or Path(payload_path).parts != ("validation", f"heldout{derivation.get('derived_validation_rows')}.json")
+    ):
+        raise ValueError("filtered derivation validation payload path does not match its row count")
     return derivation
 
 
@@ -646,18 +711,24 @@ def _verify_filtered_derivation_contract(
     if derivation.get("config_sha256") != sha256_file(root / "CONFIG.snapshot.json"):
         raise ValueError("filtered derivation config checksum does not match CONFIG.snapshot.json")
 
-    validation_artifacts = {
-        "manifest.jsonl": "validation_manifest_sha256",
-        "manifest.json": "validation_summary_sha256",
-        "heldout64.json": "heldout64_sha256",
+    base_validation_artifacts = {
+        "manifest.jsonl": "base_validation_manifest_sha256",
+        "manifest.json": "base_validation_summary_sha256",
+        "heldout64.json": "base_heldout64_sha256",
     }
-    for artifact_name, receipt_name in validation_artifacts.items():
-        base_path = base_root / "validation" / artifact_name
-        current_path = root / "validation" / artifact_name
-        _verify_sha256(base_path, derivation.get(receipt_name), f"filtered derivation base {artifact_name}")
-        _verify_sha256(current_path, derivation.get(receipt_name), f"filtered derivation {artifact_name}")
-        if current_path.read_bytes() != base_path.read_bytes():
-            raise ValueError(f"filtered derivation validation/{artifact_name} is not byte-identical to the base")
+    for artifact_name, receipt_name in base_validation_artifacts.items():
+        _verify_sha256(
+            base_root / "validation" / artifact_name,
+            derivation.get(receipt_name),
+            f"filtered derivation base {artifact_name}",
+        )
+    current_validation_artifacts = {
+        root / "validation" / "manifest.jsonl": "validation_manifest_sha256",
+        root / "validation" / "manifest.json": "validation_summary_sha256",
+        root / str(derivation["validation_payload_path"]): "validation_payload_sha256",
+    }
+    for artifact_path, receipt_name in current_validation_artifacts.items():
+        _verify_sha256(artifact_path, derivation.get(receipt_name), f"filtered derivation {artifact_path.name}")
 
     configured_names = [str(spec["name"]) for spec in config["sources"]]
     base_names = [str(summary["source"]) for summary in base_manifest["sources"]]
@@ -668,10 +739,9 @@ def _verify_filtered_derivation_contract(
     base_train_by_source: dict[str, list[dict[str, Any]]] = {}
     current_frozen_by_source: dict[str, list[dict[str, Any]]] = {}
     current_train_by_source: dict[str, list[dict[str, Any]]] = {}
-    validation_ids = {
-        str(row["conditioning_id"])
-        for _, row in iter_jsonl(root / "validation" / "manifest.jsonl")
-    }
+    base_validation = [row for _, row in iter_jsonl(base_root / "validation" / "manifest.jsonl")]
+    current_validation = [row for _, row in iter_jsonl(root / "validation" / "manifest.jsonl")]
+    validation_ids = {str(row["conditioning_id"]) for row in current_validation}
     source_summaries = {str(summary["source"]): summary for summary in root_manifest["sources"]}
     base_summaries = {str(summary["source"]): summary for summary in base_manifest["sources"]}
     for source in configured_names:
@@ -709,6 +779,19 @@ def _verify_filtered_derivation_contract(
         for row in rows
         if resolution_key(row) in excluded_set
     }
+    expected_validation = [row for row in base_validation if resolution_key(row) not in excluded_set]
+    excluded_validation = [row for row in base_validation if resolution_key(row) in excluded_set]
+    excluded_validation_ids = sorted(str(row["conditioning_id"]) for row in excluded_validation)
+    excluded_validation_keys = {
+        (str(row["source"]), str(row["conditioning_id"]))
+        for row in excluded_validation
+    }
+    if current_validation != expected_validation:
+        raise ValueError("filtered validation manifest is not exactly the base manifest minus rare resolutions")
+    if set(derivation["excluded_validation_conditioning_ids"]) != set(excluded_validation_ids):
+        raise ValueError("filtered derivation excluded validation IDs do not match the base manifest filter")
+    if int(root_manifest["validation_rows"]) != len(current_validation):
+        raise ValueError("filtered derivation validation row count does not match FROZEN_MANIFEST.json")
 
     source_receipts: dict[str, dict[str, int]] = {}
     for source in configured_names:
@@ -748,12 +831,16 @@ def _verify_filtered_derivation_contract(
 
         frozen_ids = {str(row["conditioning_id"]) for row in current_frozen_by_source[source]}
         validation_exclusions = len(frozen_ids & validation_ids)
+        base_validation_exclusions = int(base_summaries[source]["validation_exclusions"])
+        removed_validation_id_exclusions = len(frozen_ids & set(excluded_validation_ids))
         filter_exclusions = len(base_train) - len(expected_current)
         source_receipts[source] = {
             "frozen_rows": len(current_frozen_by_source[source]),
             "base_training_rows": len(base_train),
             "derived_training_rows": len(current_train),
+            "base_validation_exclusions": base_validation_exclusions,
             "validation_exclusions": validation_exclusions,
+            "removed_validation_id_exclusions": removed_validation_id_exclusions,
             "filter_exclusions": filter_exclusions,
         }
         summary = source_summaries[source]
@@ -763,6 +850,23 @@ def _verify_filtered_derivation_contract(
             raise ValueError(f"{source}: source summary derivation receipt does not match root receipt")
         if int(base_summaries[source]["frozen_rows"]) != len(current_frozen_by_source[source]):
             raise ValueError(f"{source}: base frozen row count changed in derivation")
+
+    base_validation_summary = json.loads((base_root / "validation" / "manifest.json").read_text())
+    expected_validation_summary = filtered_validation_summary(
+        base_validation_summary,
+        current_validation,
+        {source: receipt["validation_exclusions"] for source, receipt in source_receipts.items()},
+        base_root=base_root,
+        min_resolution_count=threshold,
+        excluded_resolutions=excluded_resolutions,
+        excluded_rows=excluded_validation,
+    )
+    actual_validation_summary = json.loads((root / "validation" / "manifest.json").read_text())
+    if actual_validation_summary != expected_validation_summary:
+        raise ValueError("filtered validation summary does not exactly derive from the base validation manifest")
+    validation_payload_path = root / str(derivation["validation_payload_path"])
+    if json.loads(validation_payload_path.read_text()) != heldout_payload(current_validation):
+        raise ValueError("filtered validation payload does not exactly derive from its manifest")
 
     created_utc = derivation.get("created_utc")
     if not isinstance(created_utc, str) or not created_utc:
@@ -790,9 +894,23 @@ def _verify_filtered_derivation_contract(
         "base_frozen_rows": int(base_manifest["frozen_rows"]),
         "base_training_rows": int(base_manifest["training_rows"]),
         "derived_training_rows": sum(len(rows) for rows in current_train_by_source.values()),
+        "training_holdout_policy": "preserve_base_validation_conditioning_ids",
+        "base_validation_rows": len(base_validation),
+        "derived_validation_rows": len(current_validation),
+        "excluded_validation_rows": len(excluded_validation),
+        "base_validation_conditioning_ids_sha256": conditioning_ids_sha256(
+            str(row["conditioning_id"]) for row in base_validation
+        ),
+        "validation_conditioning_ids_sha256": conditioning_ids_sha256(validation_ids),
+        "excluded_validation_conditioning_ids": excluded_validation_ids,
+        "excluded_validation_keys_sha256": conditioning_keys_sha256(excluded_validation_keys),
+        "base_validation_manifest_sha256": sha256_file(base_root / "validation" / "manifest.jsonl"),
+        "base_validation_summary_sha256": sha256_file(base_root / "validation" / "manifest.json"),
+        "base_heldout64_sha256": sha256_file(base_root / "validation" / "heldout64.json"),
         "validation_manifest_sha256": sha256_file(root / "validation" / "manifest.jsonl"),
         "validation_summary_sha256": sha256_file(root / "validation" / "manifest.json"),
-        "heldout64_sha256": sha256_file(root / "validation" / "heldout64.json"),
+        "validation_payload_path": f"validation/heldout{len(current_validation)}.json",
+        "validation_payload_sha256": sha256_file(validation_payload_path),
         "sources": source_receipts,
     }
     if derivation != expected_receipt:
@@ -845,18 +963,41 @@ def verify_existing(
     )
 
     validation_manifest_path = root / "validation" / "manifest.jsonl"
-    heldout_path = root / "validation" / "heldout64.json"
+    validation_payload_relative = (
+        str(derivation["validation_payload_path"])
+        if derivation is not None
+        else "validation/heldout64.json"
+    )
+    if derivation is not None and root_manifest.get("heldout_path") != validation_payload_relative:
+        raise ValueError("filtered root heldout_path does not match its derivation receipt")
+    heldout_path = root / validation_payload_relative
     _verify_sha256(
         validation_manifest_path,
         root_manifest.get("validation_manifest_sha256"),
         "validation manifest",
     )
-    _verify_sha256(heldout_path, root_manifest.get("heldout64_sha256"), "heldout64")
+    heldout_checksum = (
+        root_manifest.get("heldout_sha256")
+        if derivation is not None
+        else root_manifest.get("heldout64_sha256")
+    )
+    _verify_sha256(heldout_path, heldout_checksum, Path(validation_payload_relative).name)
     validation = [row for _, row in iter_jsonl(validation_manifest_path)]
     validation_by_id = _indexed_rows(validation_manifest_path, validation)
     validation_ids = set(validation_by_id)
-    if len(validation) != 64 or len(validation_ids) != 64 or int(root_manifest.get("validation_rows", -1)) != 64:
-        raise ValueError(f"validation split must have 64 unique ids, got {len(validation)}/{len(validation_ids)}")
+    expected_validation_rows = int(root_manifest.get("validation_rows", -1))
+    if derivation is None and expected_validation_rows != 64:
+        raise ValueError(f"base/extension validation split must contain 64 rows, got {expected_validation_rows}")
+    if len(validation) != expected_validation_rows or len(validation_ids) != expected_validation_rows:
+        raise ValueError(
+            f"validation split must have {expected_validation_rows} unique ids, "
+            f"got {len(validation)}/{len(validation_ids)}"
+        )
+    inherited_validation_ids = validation_ids | (
+        set(str(record_id) for record_id in derivation["excluded_validation_conditioning_ids"])
+        if derivation is not None
+        else set()
+    )
 
     config_by_name = {str(spec["name"]): spec for spec in configured_specs}
     frozen_by_source_and_id: dict[tuple[str, str], dict[str, Any]] = {}
@@ -896,12 +1037,13 @@ def verify_existing(
         if len(frozen) != int(summary["frozen_rows"]) or len(training) != int(summary["training_rows"]):
             raise ValueError(f"{source}: row-count mismatch")
         validation_ids_in_source = set(frozen_by_id) & validation_ids
+        inherited_validation_ids_in_source = set(frozen_by_id) & inherited_validation_ids
         filtered_ids = {
             record_id
             for record_id, row in frozen_by_id.items()
             if resolution_key(row) in excluded_resolutions
-        } - validation_ids_in_source
-        expected_training_ids = set(frozen_by_id) - validation_ids_in_source - filtered_ids
+        } - inherited_validation_ids_in_source
+        expected_training_ids = set(frozen_by_id) - inherited_validation_ids_in_source - filtered_ids
         if set(train_by_id) != expected_training_ids:
             if derivation is None:
                 raise ValueError(f"{source}: train.jsonl is not exactly frozen.jsonl minus validation ids")
@@ -954,6 +1096,11 @@ def verify_existing(
             raise ValueError(f"{source}: validation exclusion count mismatch")
         if derivation is not None and int(summary.get("filter_exclusions", -1)) != len(filtered_ids):
             raise ValueError(f"{source}: filtered-resolution exclusion count mismatch")
+        if (
+            derivation is not None
+            and int(summary.get("base_validation_exclusions", -1)) != len(inherited_validation_ids_in_source)
+        ):
+            raise ValueError(f"{source}: inherited base-validation exclusion count mismatch")
         validation_exclusions[source] = exclusions
         total_frozen += len(frozen)
         total_training += len(training)
@@ -974,7 +1121,7 @@ def verify_existing(
     actual_heldout = json.loads(heldout_path.read_text())
     expected_heldout = heldout_payload(validation)
     if actual_heldout != expected_heldout:
-        raise ValueError("heldout64.json does not exactly derive from the validation manifest")
+        raise ValueError(f"{heldout_path.name} does not exactly derive from the validation manifest")
     expected_links = {
         f"{row['source']}__{row['conditioning_id']}.mp4": Path(row["raw_video_path"])
         for row in validation
@@ -992,10 +1139,15 @@ def verify_existing(
     expected_validation_summary = {
         "schema_version": VALIDATION_SCHEMA_VERSION,
         "seed": int(root_manifest["seed"]),
-        "rows": 64,
-        "unique_conditioning_ids": 64,
+        "rows": expected_validation_rows,
+        "unique_conditioning_ids": expected_validation_rows,
         "source_counts": dict(sorted(collections.Counter(row["source"] for row in validation).items())),
         "family_counts": dict(sorted(collections.Counter(row["family"] for row in validation).items())),
+        "resolution_counts": distribution(validation, ("width", "height")),
+        "frame_counts": distribution(validation, ("num_frames",)),
+        "duration_band_counts": dict(
+            sorted(collections.Counter(duration_band(row["num_frames"], row["fps"]) for row in validation).items())
+        ),
         "training_exclusions_by_source": validation_exclusions,
     }
     for name, expected in expected_validation_summary.items():
@@ -1007,7 +1159,10 @@ def verify_existing(
         _verify_filtered_derivation_contract(root, root_manifest, config, derivation, seen_roots)
     seen_roots.remove(root)
     if emit_summary:
-        print(f"verified {root}: 64 unique validation ids, immutable artifacts, and raw media stats")
+        print(
+            f"verified {root}: {expected_validation_rows} unique validation ids, "
+            "immutable artifacts, and raw media stats"
+        )
     return root_manifest
 
 

@@ -94,8 +94,14 @@ V10 consumes a derived v3 snapshot that excludes an entire spatial
 resolution when the aggregate frozen corpus contains fewer than 10 videos at
 that resolution. The policy is based on frozen rows, before validation
 exclusions: it removes `576x576` (3 frozen), `640x480` (3), and `832x480`
-(1). Four of those seven rows are held out, so the byte-identical validation
-split remains intact and only three encoded training rows are excluded.
+(1). The same whole-resolution filter removes four rows from the inherited
+validation split, producing `validation/heldout60.json`, and removes three
+encoded training rows. The 60,629 frozen rows stay only as the provenance
+catalog. Training remains exactly the filtered v2 training manifest: all 64
+original held-out conditioning IDs stay excluded, including the four removed
+validation IDs whose nonrare variants occur in another NuVA source. This
+prevents those variants from being promoted into training when validation
+shrinks from 64 to 60.
 
 Create and finalize the derived snapshot on a compute tray:
 
@@ -109,9 +115,11 @@ login-shell override cannot redirect the source, destination, or threshold.
 The sbatch variables exist only for deliberate manual derivations.
 
 The job preserves v2, hardlinks every retained parquet, regenerates the exact
-worklist/done/cache receipts under v3 paths, runs the ordinary finalizer, and
-then verifies both the derivation receipt and the full finalized dataset. It
-publishes:
+worklist/done/cache receipts under v3 paths, derives the filtered validation
+manifest and media links, runs the ordinary finalizer, and then verifies both
+the derivation receipt and the full finalized dataset. The receipt anchors the
+v2 READY, FROZEN, config, and validation hashes plus every v3 validation hash.
+It publishes:
 
 ```text
 /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3
@@ -119,8 +127,10 @@ publishes:
 
 V3 contains 60,549 training rows in 87 exact shape buckets. At world size 64,
 the bucket sampler schedules 63,424 rows (991 optimizer steps) with 2,875
-padded repeats. Never edit v2 or a READY v3 in place; a policy change requires
-a new derived root.
+padded repeats. Validation contains 60 unique retained rows (28 NuVA and 32
+VidProM); the DP-64 loader repeats the first four retained rows once, so all 64
+ranks receive work without reintroducing a filtered resolution. Never edit v2
+or a READY v3 in place; a policy change requires a new derived root.
 
 ## Encode
 

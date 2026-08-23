@@ -142,10 +142,11 @@ callbacks:
   validation:
     _target_: fastvideo.train.callbacks.validation.ValidationCallback
     pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
-    # Frozen, disjoint 64-row sample covering every source and a spread of
-    # native resolutions/lengths. Rows contain caption, ref_video, source,
-    # sample_id, width, height, and num_frames.
-    dataset_file: /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/validation/heldout64.json
+    # Frozen, disjoint 60-row sample after applying v3's rare-resolution
+    # filter to the inherited held-out 64. Rows contain caption, ref_video,
+    # source, sample_id, width, height, and num_frames. DP-64 validation pads
+    # with four retained records; no rare-resolution record is reintroduced.
+    dataset_file: /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/validation/heldout60.json
     every_steps: 100
     run_at_start: true
     sampling_steps: [4]

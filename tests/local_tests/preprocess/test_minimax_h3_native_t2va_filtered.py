@@ -23,9 +23,10 @@ def load_harness_module(name: str):
     return module
 
 
-def row(record_id: str, width: int, height: int) -> dict[str, Any]:
+def row(record_id: str, width: int, height: int, source: str = "source-a") -> dict[str, Any]:
     return {
         "conditioning_id": record_id,
+        "source": source,
         "width": width,
         "height": height,
     }
@@ -47,8 +48,8 @@ def test_receipt_filters_aggregate_frozen_resolutions_strictly_below_threshold(t
     frozen = {
         "source-a": [row(f"a-keep-{index}", 10, 10) for index in range(5)]
         + [row(f"a-drop-{index}", 20, 20) for index in range(4)],
-        "source-b": [row(f"b-keep-{index}", 10, 10) for index in range(5)]
-        + [row(f"b-drop-{index}", 20, 20) for index in range(5)],
+        "source-b": [row(f"b-keep-{index}", 10, 10, "source-b") for index in range(5)]
+        + [row(f"b-drop-{index}", 20, 20, "source-b") for index in range(5)],
     }
     base_train = {
         "source-a": frozen["source-a"][1:],
@@ -59,10 +60,20 @@ def test_receipt_filters_aggregate_frozen_resolutions_strictly_below_threshold(t
         source: derive.filtered_training_rows(rows, excluded, freezer)
         for source, rows in base_train.items()
     }
+    base_validation = [frozen["source-a"][0], frozen["source-a"][-1], frozen["source-b"][0]]
+    derived_validation = [base_validation[0], base_validation[2]]
+    excluded_validation = [base_validation[1]]
     receipt = derive.derivation_receipt(
         base_root=base_root,
         output_root=output_root,
-        base_manifest={"frozen_rows": 19, "training_rows": 16},
+        base_manifest={
+            "frozen_rows": 19,
+            "training_rows": 16,
+            "sources": [
+                {"source": "source-a", "validation_exclusions": 1},
+                {"source": "source-b", "validation_exclusions": 2},
+            ],
+        },
         base_ready_sha256="a" * 64,
         base_config_sha256="b" * 64,
         config_sha256="c" * 64,
@@ -70,10 +81,17 @@ def test_receipt_filters_aggregate_frozen_resolutions_strictly_below_threshold(t
         frozen_by_source=frozen,
         base_train_by_source=base_train,
         derived_train_by_source=derived_train,
-        validation_exclusions={"source-a": 1, "source-b": 2},
-        validation_manifest_sha256="d" * 64,
-        validation_summary_sha256="e" * 64,
-        heldout64_sha256="f" * 64,
+        validation_exclusions={"source-a": 1, "source-b": 1},
+        base_validation=base_validation,
+        derived_validation=derived_validation,
+        excluded_validation=excluded_validation,
+        base_validation_manifest_sha256="d" * 64,
+        base_validation_summary_sha256="e" * 64,
+        base_heldout64_sha256="f" * 64,
+        validation_manifest_sha256="0" * 64,
+        validation_summary_sha256="1" * 64,
+        validation_payload_path="validation/heldout2.json",
+        validation_payload_sha256="2" * 64,
         created_utc="2026-08-23T00:00:00+00:00",
         freezer=freezer,
     )
@@ -83,8 +101,15 @@ def test_receipt_filters_aggregate_frozen_resolutions_strictly_below_threshold(t
     assert receipt["excluded_frozen_rows"] == 9
     assert receipt["excluded_training_rows"] == 9
     assert receipt["derived_training_rows"] == 7
+    assert receipt["base_validation_rows"] == 3
+    assert receipt["derived_validation_rows"] == 2
+    assert receipt["excluded_validation_rows"] == 1
+    assert receipt["excluded_validation_conditioning_ids"] == [base_validation[1]["conditioning_id"]]
+    assert receipt["training_holdout_policy"] == "preserve_base_validation_conditioning_ids"
     assert receipt["sources"]["source-a"]["filter_exclusions"] == 4
     assert receipt["sources"]["source-b"]["filter_exclusions"] == 5
+    assert receipt["sources"]["source-a"]["removed_validation_id_exclusions"] == 1
+    assert receipt["sources"]["source-b"]["removed_validation_id_exclusions"] == 0
 
 
 def test_derivation_receipt_file_is_sha_anchored(tmp_path: Path) -> None:
@@ -97,6 +122,9 @@ def test_derivation_receipt_file_is_sha_anchored(tmp_path: Path) -> None:
             "min_resolution_count": 10,
         },
         "excluded_resolutions": ["576x576"],
+        "excluded_validation_conditioning_ids": ["sample-rare"],
+        "derived_validation_rows": 60,
+        "validation_payload_path": "validation/heldout60.json",
     }
     receipt_path = tmp_path / "DERIVATION_RECEIPT.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")

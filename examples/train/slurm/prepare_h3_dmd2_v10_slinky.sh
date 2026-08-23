@@ -21,7 +21,9 @@ readonly EXPECTED_SHAPE_BUCKETS=87
 readonly EXPECTED_SCHEDULED_ROWS=63424
 readonly EXPECTED_PADDED_ROWS=2875
 readonly EXPECTED_STEPS_PER_EPOCH=991
-readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
+readonly EXPECTED_VALIDATION_ROWS=60
+readonly EXPECTED_VALIDATION_DP_PADDING=4
+readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout60.json"
 readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345
 readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
 readonly NUM_NODES=16
@@ -224,6 +226,7 @@ if (( failures == 0 )); then
     "${EXPECTED_PADDED_ROWS}" "${EXPECTED_STEPS_PER_EPOCH}" "${WORLD_SIZE}" \
     "${sources[@]}" <<'PY'
 import collections
+import hashlib
 import json
 import pathlib
 import pickle
@@ -240,7 +243,19 @@ expected_receipt = {
     "excluded_resolutions": ["576x576", "640x480", "832x480"],
     "excluded_frozen_rows": 7,
     "excluded_training_rows": 3,
+    "base_frozen_rows": 60629,
     "derived_training_rows": expected_rows,
+    "base_validation_rows": 64,
+    "derived_validation_rows": 60,
+    "excluded_validation_rows": 4,
+    "excluded_validation_conditioning_ids": [
+        "t2va-0020260818-000002",
+        "t2va-0020260818-000004",
+        "t2va-0020260818-000007",
+        "t2va-0020260818-000008",
+    ],
+    "training_holdout_policy": "preserve_base_validation_conditioning_ids",
+    "validation_payload_path": "validation/heldout60.json",
 }
 observed_receipt = {
     "min_resolution_count": receipt.get("filter", {}).get("min_resolution_count"),
@@ -248,6 +263,53 @@ observed_receipt = {
 }
 if observed_receipt != expected_receipt:
     raise SystemExit(f"v3 derivation receipt {observed_receipt!r} != {expected_receipt!r}")
+if receipt.get("schema_version") != "minimax-h3-native-t2va-filtered-derivation-v2":
+    raise SystemExit(f"unexpected v3 derivation schema: {receipt.get('schema_version')!r}")
+expected_source_rows = dict(zip(sources, [29052, 16728, 9980, 2884, 1905], strict=True))
+expected_current_validation_exclusions = dict(zip(sources, [12, 16, 16, 9, 16], strict=True))
+expected_base_validation_exclusions = dict(zip(sources, [12, 16, 20, 13, 16], strict=True))
+for source in sources:
+    source_receipt = receipt.get("sources", {}).get(source, {})
+    observed_source = {
+        "derived_training_rows": source_receipt.get("derived_training_rows"),
+        "validation_exclusions": source_receipt.get("validation_exclusions"),
+        "base_validation_exclusions": source_receipt.get("base_validation_exclusions"),
+    }
+    expected_source = {
+        "derived_training_rows": expected_source_rows[source],
+        "validation_exclusions": expected_current_validation_exclusions[source],
+        "base_validation_exclusions": expected_base_validation_exclusions[source],
+    }
+    if observed_source != expected_source:
+        raise SystemExit(f"v3 source receipt {source}: {observed_source!r} != {expected_source!r}")
+
+ready = json.loads((data_root / "READY.json").read_text(encoding="utf-8"))
+validation_manifest_path = data_root / "validation" / "manifest.jsonl"
+validation_payload_path = data_root / receipt["validation_payload_path"]
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+expected_validation_hashes = {
+    "validation_manifest_sha256": sha256(validation_manifest_path),
+    "validation_summary_sha256": sha256(data_root / "validation" / "manifest.json"),
+    "validation_payload_sha256": sha256(validation_payload_path),
+}
+for field, actual_sha256 in expected_validation_hashes.items():
+    if receipt.get(field) != actual_sha256 or ready.get(field) != actual_sha256:
+        raise SystemExit(
+            f"v3 {field} is not jointly anchored by DERIVATION_RECEIPT and READY: "
+            f"file={actual_sha256} receipt={receipt.get(field)} ready={ready.get(field)}"
+        )
+if ready.get("validation_payload_path") != receipt["validation_payload_path"]:
+    raise SystemExit("v3 READY validation payload path does not match the derivation receipt")
+if ready.get("training_rows") != expected_rows or ready.get("validation_rows") != 60:
+    raise SystemExit(
+        f"v3 READY row counts training/validation={ready.get('training_rows')}/{ready.get('validation_rows')} "
+        f"!= {expected_rows}/60"
+    )
 
 bucket_pattern = re.compile(r"^bucket=([1-9][0-9]*)x([1-9][0-9]*)-([1-9][0-9]*)f$")
 bucket_rows = collections.Counter()
@@ -283,8 +345,9 @@ PY
   fi
 fi
 
-# Verify the derivation policy and its byte-for-byte ancestry to v2, including
-# the whole-resolution threshold and unchanged validation split. The derived
+# Verify the derivation policy and its hash-anchored ancestry to v2, including
+# the whole-resolution threshold, filtered heldout60 split, and inherited
+# base-validation training exclusions. The derived
 # verifier invokes the ordinary finalizer internally to re-audit every v3 done
 # marker, parquet row, bucket geometry, cache tuple, source receipt, and count.
 if (( failures == 0 )); then
@@ -300,22 +363,30 @@ fi
 require_file "${VALIDATION_MANIFEST}"
 if [[ -x "${VENV}/bin/python" && -f "${VALIDATION_MANIFEST}" ]]; then
   if ! "${VENV}/bin/python" - "${VALIDATION_MANIFEST}" "${VALIDATION_MAX_RECORD_NUM_FRAMES}" \
-    "${sources[@]}" <<'PY'
+    "${EXPECTED_VALIDATION_ROWS}" "${EXPECTED_VALIDATION_DP_PADDING}" "${WORLD_SIZE}" "${sources[@]}" <<'PY'
 import json
 import pathlib
 import sys
 
 manifest = pathlib.Path(sys.argv[1])
 max_record_num_frames = int(sys.argv[2])
-required_sources = set(sys.argv[3:])
+expected_rows = int(sys.argv[3])
+expected_padding = int(sys.argv[4])
+world_size = int(sys.argv[5])
+required_sources = set(sys.argv[6:])
 document = json.loads(manifest.read_text(encoding="utf-8"))
 rows = document.get("data") if isinstance(document, dict) else document
-if not isinstance(rows, list) or len(rows) != 64:
-    raise SystemExit(f"validation manifest must contain exactly 64 data rows; got {type(rows).__name__}/{len(rows) if isinstance(rows, list) else 'n/a'}")
+if not isinstance(rows, list) or len(rows) != expected_rows:
+    raise SystemExit(
+        f"validation manifest must contain exactly {expected_rows} data rows; "
+        f"got {type(rows).__name__}/{len(rows) if isinstance(rows, list) else 'n/a'}"
+    )
 
 seen_sources = set()
 seen_refs = set()
+sample_ids = []
 capped_rows = 0
+excluded_resolutions = {"576x576", "640x480", "832x480"}
 for index, row in enumerate(rows):
     required = ("caption", "ref_video", "source", "sample_id", "width", "height", "num_frames")
     missing = [key for key in required if row.get(key) in (None, "")]
@@ -324,6 +395,8 @@ for index, row in enumerate(rows):
     width, height, frames = (int(row["width"]), int(row["height"]), int(row["num_frames"]))
     if min(width, height, frames) <= 0 or width % 8 or height % 8:
         raise SystemExit(f"validation row {index} has invalid shape {width}x{height}x{frames}f")
+    if f"{width}x{height}" in excluded_resolutions:
+        raise SystemExit(f"rare resolution leaked into filtered validation row {index}: {width}x{height}")
     requested_frames = min(frames, max_record_num_frames)
     aligned_frames = requested_frames
     while aligned_frames % 17 != 5:
@@ -341,12 +414,31 @@ for index, row in enumerate(rows):
         raise SystemExit(f"validation reference is duplicated: {ref}")
     seen_refs.add(ref)
     seen_sources.add(str(row["source"]))
+    sample_ids.append(str(row["sample_id"]))
 
+if len(set(sample_ids)) != expected_rows:
+    raise SystemExit(f"validation manifest has duplicate sample IDs: {len(set(sample_ids))}/{expected_rows}")
 missing_sources = sorted(required_sources - seen_sources)
 if missing_sources:
     raise SystemExit(f"validation manifest does not cover sources: {missing_sources}")
-print(f"READY: validation manifest has 64 unique references across {len(seen_sources)} sources; "
-      f"{capped_rows} generation requests cap at {max_record_num_frames}f")
+padding = (-len(rows)) % world_size
+if padding != expected_padding:
+    raise SystemExit(f"validation DP-{world_size} padding {padding} != {expected_padding}")
+padded_ids = sample_ids + sample_ids[:padding]
+if len(padded_ids) != world_size or padded_ids[-padding:] != sample_ids[:padding]:
+    raise SystemExit("validation DP padding does not repeat exactly the first four retained records")
+if any(record_id in {
+    "t2va-0020260818-000002",
+    "t2va-0020260818-000004",
+    "t2va-0020260818-000007",
+    "t2va-0020260818-000008",
+} for record_id in padded_ids):
+    raise SystemExit("filtered validation DP padding reintroduced an excluded conditioning ID")
+print(
+    f"READY: validation manifest has {len(rows)} unique references across {len(seen_sources)} sources; "
+    f"DP-{world_size} repeats {padding} retained records; "
+    f"{capped_rows} generation requests cap at {max_record_num_frames}f"
+)
 PY
   then
     failures=$((failures + 1))
@@ -460,7 +552,8 @@ fi
 
 # A pre-step-100 failure has no resumable training state, but it may have
 # already published the immutable step-zero inference export and all 64
-# validation videos. Accept only that exact, fully validated namespace. This
+# DP-padded validation videos (60 retained records plus four repeats). Accept
+# only that exact, fully validated namespace. This
 # makes an incident restart idempotent without deleting a good 66-GiB export
 # or accidentally resuming incompatible optimizer/RNG state.
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then

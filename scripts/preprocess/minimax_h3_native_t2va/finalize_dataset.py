@@ -503,7 +503,7 @@ def _root_ready_payload(
     created_utc: str,
 ) -> dict[str, Any]:
     sources = [str(summary["source"]) for summary in frozen["sources"]]
-    return {
+    payload = {
         "schema_version": ROOT_READY_SCHEMA_VERSION,
         "frozen_manifest_sha256": sha256_file(root / "FROZEN_MANIFEST.json"),
         "training_rows": training_rows,
@@ -514,6 +514,15 @@ def _root_ready_payload(
         "preprocessed_data_type": "t2va",
         "created_utc": created_utc,
     }
+    derivation = frozen.get("derivation")
+    if isinstance(derivation, dict):
+        payload.update({
+            "validation_payload_path": derivation["validation_payload_path"],
+            "validation_manifest_sha256": derivation["validation_manifest_sha256"],
+            "validation_summary_sha256": derivation["validation_summary_sha256"],
+            "validation_payload_sha256": derivation["validation_payload_sha256"],
+        })
+    return payload
 
 
 def validate_root_ready(root: Path, frozen: dict[str, Any], ready: dict[str, Any]) -> None:

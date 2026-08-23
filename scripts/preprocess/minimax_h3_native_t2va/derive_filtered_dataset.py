@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Derive an immutable native-H3 dataset by filtering rare resolutions.
 
-The filter is computed from aggregate frozen-row resolution counts, while the
-base frozen inventory and held-out validation artifacts remain byte-identical.
-Every retained parquet is hardlinked into a new self-contained path namespace;
-the ordinary ``finalize_dataset.py`` remains responsible for publishing READY.
+The filter is computed from aggregate frozen-row resolution counts and applied
+to both training and the inherited validation manifest. The base frozen
+inventory remains byte-identical, and every original validation conditioning
+ID remains outside training even when its selected rare-resolution row is
+removed. Every retained parquet is hardlinked into a new self-contained path
+namespace; the ordinary ``finalize_dataset.py`` publishes READY.
 """
 
 from __future__ import annotations
@@ -53,6 +55,14 @@ def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def jsonl_text(rows: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
+
+
+def validation_payload_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
 def filtered_training_rows(
     rows: list[dict[str, Any]],
     excluded_resolutions: set[str],
@@ -74,9 +84,16 @@ def derivation_receipt(
     base_train_by_source: dict[str, list[dict[str, Any]]],
     derived_train_by_source: dict[str, list[dict[str, Any]]],
     validation_exclusions: dict[str, int],
+    base_validation: list[dict[str, Any]],
+    derived_validation: list[dict[str, Any]],
+    excluded_validation: list[dict[str, Any]],
+    base_validation_manifest_sha256: str,
+    base_validation_summary_sha256: str,
+    base_heldout64_sha256: str,
     validation_manifest_sha256: str,
     validation_summary_sha256: str,
-    heldout64_sha256: str,
+    validation_payload_path: str,
+    validation_payload_sha256: str,
     created_utc: str,
     freezer: Any,
 ) -> dict[str, Any]:
@@ -99,12 +116,24 @@ def derivation_receipt(
         for row in rows
         if freezer.resolution_key(row) in excluded_set
     }
+    excluded_validation_ids = sorted(str(row["conditioning_id"]) for row in excluded_validation)
+    excluded_validation_id_set = set(excluded_validation_ids)
+    excluded_validation_keys = {
+        (str(row["source"]), str(row["conditioning_id"]))
+        for row in excluded_validation
+    }
+    base_summaries = {str(summary["source"]): summary for summary in base_manifest["sources"]}
     source_receipts = {
         source: {
             "frozen_rows": len(frozen_by_source[source]),
             "base_training_rows": len(base_train_by_source[source]),
             "derived_training_rows": len(derived_train_by_source[source]),
+            "base_validation_exclusions": int(base_summaries[source]["validation_exclusions"]),
             "validation_exclusions": int(validation_exclusions[source]),
+            "removed_validation_id_exclusions": len({
+                str(row["conditioning_id"])
+                for row in frozen_by_source[source]
+            } & excluded_validation_id_set),
             "filter_exclusions": len(base_train_by_source[source]) - len(derived_train_by_source[source]),
         }
         for source in frozen_by_source
@@ -132,25 +161,57 @@ def derivation_receipt(
         "base_frozen_rows": int(base_manifest["frozen_rows"]),
         "base_training_rows": int(base_manifest["training_rows"]),
         "derived_training_rows": sum(len(rows) for rows in derived_train_by_source.values()),
+        "training_holdout_policy": "preserve_base_validation_conditioning_ids",
+        "base_validation_rows": len(base_validation),
+        "derived_validation_rows": len(derived_validation),
+        "excluded_validation_rows": len(excluded_validation),
+        "base_validation_conditioning_ids_sha256": freezer.conditioning_ids_sha256(
+            str(row["conditioning_id"]) for row in base_validation
+        ),
+        "validation_conditioning_ids_sha256": freezer.conditioning_ids_sha256(
+            str(row["conditioning_id"]) for row in derived_validation
+        ),
+        "excluded_validation_conditioning_ids": excluded_validation_ids,
+        "excluded_validation_keys_sha256": freezer.conditioning_keys_sha256(excluded_validation_keys),
+        "base_validation_manifest_sha256": base_validation_manifest_sha256,
+        "base_validation_summary_sha256": base_validation_summary_sha256,
+        "base_heldout64_sha256": base_heldout64_sha256,
         "validation_manifest_sha256": validation_manifest_sha256,
         "validation_summary_sha256": validation_summary_sha256,
-        "heldout64_sha256": heldout64_sha256,
+        "validation_payload_path": validation_payload_path,
+        "validation_payload_sha256": validation_payload_sha256,
         "sources": source_receipts,
     }
 
 
-def copy_validation_tree(base_root: Path, stage: Path) -> None:
+def write_validation_tree(
+    base_root: Path,
+    stage: Path,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    payload_name: str,
+    freezer: Any,
+) -> None:
     base_validation = base_root / "validation"
     output_validation = stage / "validation"
     output_validation.mkdir(parents=True)
-    for name in ("manifest.jsonl", "manifest.json", "heldout64.json"):
-        shutil.copy2(base_validation / name, output_validation / name)
+    (output_validation / "manifest.jsonl").write_text(jsonl_text(rows))
+    (output_validation / "manifest.json").write_text(canonical_json(summary))
+    (output_validation / payload_name).write_text(validation_payload_text(freezer.heldout_payload(rows)))
     output_videos = output_validation / "videos"
     output_videos.mkdir()
-    for base_link in sorted((base_validation / "videos").iterdir()):
+    expected_names = {
+        f"{row['source']}__{row['conditioning_id']}.mp4"
+        for row in rows
+    }
+    base_links = {path.name: path for path in (base_validation / "videos").iterdir()}
+    for name in sorted(expected_names):
+        base_link = base_links.get(name)
+        if base_link is None:
+            raise FileNotFoundError(base_validation / "videos" / name)
         if not base_link.is_symlink():
             raise ValueError(f"{base_link}: base validation media entry is not a symlink")
-        (output_videos / base_link.name).symlink_to(os.readlink(base_link))
+        (output_videos / name).symlink_to(os.readlink(base_link))
 
 
 def hardlink_source_chunks(
@@ -276,10 +337,40 @@ def derive_dataset(
         source: filtered_training_rows(base_train_by_source[source], excluded_resolutions, freezer)
         for source in source_names
     }
+    base_validation = [
+        row
+        for _, row in freezer.iter_jsonl(base_root / "validation" / "manifest.jsonl")
+    ]
+    derived_validation = [
+        row
+        for row in base_validation
+        if freezer.resolution_key(row) not in excluded_resolutions
+    ]
+    excluded_validation = [
+        row
+        for row in base_validation
+        if freezer.resolution_key(row) in excluded_resolutions
+    ]
+    derived_validation_ids = {str(row["conditioning_id"]) for row in derived_validation}
     validation_exclusions = {
-        source: int(base_summaries[source]["validation_exclusions"])
+        source: len({str(row["conditioning_id"]) for row in frozen_by_source[source]} & derived_validation_ids)
         for source in source_names
     }
+    base_validation_summary = json.loads((base_root / "validation" / "manifest.json").read_text())
+    validation_summary = freezer.filtered_validation_summary(
+        base_validation_summary,
+        derived_validation,
+        validation_exclusions,
+        base_root=base_root,
+        min_resolution_count=min_resolution_count,
+        excluded_resolutions=sorted(excluded_resolutions),
+        excluded_rows=excluded_validation,
+    )
+    validation_manifest_text = jsonl_text(derived_validation)
+    validation_summary_text = canonical_json(validation_summary)
+    validation_payload_name = f"heldout{len(derived_validation)}.json"
+    validation_payload = freezer.heldout_payload(derived_validation)
+    derived_validation_payload_text = validation_payload_text(validation_payload)
 
     config_path = freezer.resolve_frozen_config(base_root, base_manifest)
     base_config_sha256 = freezer.sha256_file(config_path)
@@ -300,9 +391,16 @@ def derive_dataset(
         base_train_by_source=base_train_by_source,
         derived_train_by_source=derived_train_by_source,
         validation_exclusions=validation_exclusions,
-        validation_manifest_sha256=freezer.sha256_file(base_root / "validation" / "manifest.jsonl"),
-        validation_summary_sha256=freezer.sha256_file(base_root / "validation" / "manifest.json"),
-        heldout64_sha256=freezer.sha256_file(base_root / "validation" / "heldout64.json"),
+        base_validation=base_validation,
+        derived_validation=derived_validation,
+        excluded_validation=excluded_validation,
+        base_validation_manifest_sha256=freezer.sha256_file(base_root / "validation" / "manifest.jsonl"),
+        base_validation_summary_sha256=freezer.sha256_file(base_root / "validation" / "manifest.json"),
+        base_heldout64_sha256=freezer.sha256_file(base_root / "validation" / "heldout64.json"),
+        validation_manifest_sha256=text_sha256(validation_manifest_text),
+        validation_summary_sha256=text_sha256(validation_summary_text),
+        validation_payload_path=f"validation/{validation_payload_name}",
+        validation_payload_sha256=text_sha256(derived_validation_payload_text),
         created_utc=created_utc,
         freezer=freezer,
     )
@@ -311,7 +409,14 @@ def derive_dataset(
     stage = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.derive-", dir=output_root.parent))
     try:
         (stage / "CONFIG.snapshot.json").write_text(derived_config_text)
-        copy_validation_tree(base_root, stage)
+        write_validation_tree(
+            base_root,
+            stage,
+            derived_validation,
+            validation_summary,
+            validation_payload_name,
+            freezer,
+        )
         source_summaries: list[dict[str, Any]] = []
         hardlink_totals = {"hardlinked_chunks": 0, "hardlinked_rows": 0}
         for source in source_names:
@@ -354,6 +459,7 @@ def derive_dataset(
                 "artifacts_sha256",
                 "training_rows",
                 "validation_exclusions",
+                "base_validation_exclusions",
                 "filter_exclusions",
                 "extension",
                 "derivation",
@@ -363,6 +469,7 @@ def derive_dataset(
                 **{name: value for name, value in base_summaries[source].items() if name not in ignored},
                 "training_rows": len(derived_train_by_source[source]),
                 "validation_exclusions": validation_exclusions[source],
+                "base_validation_exclusions": int(base_summaries[source]["validation_exclusions"]),
                 "filter_exclusions": len(base_train_by_source[source]) - len(derived_train_by_source[source]),
                 "artifacts_sha256": artifacts_sha256,
                 "shape_counts": freezer.distribution(frozen_by_source[source], ("width", "height", "num_frames")),
@@ -384,9 +491,10 @@ def derive_dataset(
             "sources": source_summaries,
             "frozen_rows": sum(len(rows) for rows in frozen_by_source.values()),
             "training_rows": sum(len(rows) for rows in derived_train_by_source.values()),
-            "validation_rows": int(base_manifest["validation_rows"]),
+            "validation_rows": len(derived_validation),
             "validation_manifest_sha256": freezer.sha256_file(stage / "validation" / "manifest.jsonl"),
-            "heldout64_sha256": freezer.sha256_file(stage / "validation" / "heldout64.json"),
+            "heldout_path": f"validation/{validation_payload_name}",
+            "heldout_sha256": freezer.sha256_file(stage / "validation" / validation_payload_name),
             "derivation": receipt,
             "derivation_receipt_sha256": freezer.sha256_file(stage / "DERIVATION_RECEIPT.json"),
             "ready": False,

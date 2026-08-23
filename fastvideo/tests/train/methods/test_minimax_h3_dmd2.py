@@ -803,7 +803,7 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
         assert config["models"][role]["attention_backend"] == "FLASH_ATTN"
 
     validation = config["callbacks"]["validation"]
-    assert validation["dataset_file"].endswith("/validation/heldout64.json")
+    assert validation["dataset_file"].endswith("/validation/heldout60.json")
     assert validation["every_steps"] == 100
     assert validation["run_at_start"] is True
     assert validation["sampling_steps"] == [4]
@@ -821,7 +821,7 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
             'dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"') in launcher
     assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3"' in launcher
     assert 'readonly BASE_DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"' in launcher
-    assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
+    assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout60.json"' in launcher
     assert "readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345" in launcher
     assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
             'minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"') in launcher
@@ -837,6 +837,8 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "readonly EXPECTED_SCHEDULED_ROWS=63424" in launcher
     assert "readonly EXPECTED_PADDED_ROWS=2875" in launcher
     assert "readonly EXPECTED_STEPS_PER_EPOCH=991" in launcher
+    assert "readonly EXPECTED_VALIDATION_ROWS=60" in launcher
+    assert "readonly EXPECTED_VALIDATION_DP_PADDING=4" in launcher
     assert "readonly MIN_OUTPUT_FREE_BYTES=" in launcher
     for removed_override in ("CONFIG", "DATA_ROOT", "VALIDATION_MANIFEST", "OUTPUT_DIR"):
         assert f'${{{removed_override}:-' not in launcher
@@ -871,6 +873,12 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "finalize_dataset.py" in launcher
     assert "derive_filtered_dataset.py" in launcher
     assert '"excluded_resolutions": ["576x576", "640x480", "832x480"]' in launcher
+    assert '"excluded_validation_rows": 4' in launcher
+    assert '"training_holdout_policy": "preserve_base_validation_conditioning_ids"' in launcher
+    assert '"validation_payload_path": "validation/heldout60.json"' in launcher
+    assert "minimax-h3-native-t2va-filtered-derivation-v2" in launcher
+    assert '"validation_summary_sha256": sha256(data_root / "validation" / "manifest.json")' in launcher
+    assert "validation DP padding does not repeat exactly the first four retained records" in launcher
     assert "excluded resolution leaked into v3 cache" in launcher
     assert "--verify-only" in launcher
     assert "H3_V10_KERNEL_GATE=1" in launcher
