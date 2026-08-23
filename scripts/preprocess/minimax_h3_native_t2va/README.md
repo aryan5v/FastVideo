@@ -101,7 +101,9 @@ catalog. Training remains exactly the filtered v2 training manifest: all 64
 original held-out conditioning IDs stay excluded, including the four removed
 validation IDs whose nonrare variants occur in another NuVA source. This
 prevents those variants from being promoted into training when validation
-shrinks from 64 to 60.
+shrinks from 64 to 60. Accordingly, `training_exclusions_by_source` retains
+the inherited 64-ID counts; `validation_membership_by_source` records the
+intersections with the filtered 60-ID manifest.
 
 Create and finalize the derived snapshot on a compute tray:
 

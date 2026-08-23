@@ -370,7 +370,7 @@ def distribution(rows: list[dict[str, Any]], field_names: tuple[str, ...]) -> di
 def filtered_validation_summary(
     base_summary: dict[str, Any],
     rows: list[dict[str, Any]],
-    validation_exclusions: dict[str, int],
+    validation_membership_by_source: dict[str, int],
     *,
     base_root: Path,
     min_resolution_count: int,
@@ -396,7 +396,12 @@ def filtered_validation_summary(
         "duration_band_counts": dict(
             sorted(collections.Counter(duration_band(row["num_frames"], row["fps"]) for row in rows).items())
         ),
-        "training_exclusions_by_source": validation_exclusions,
+        # Training remains anchored to the complete inherited holdout-ID set,
+        # including nonrare cross-source variants of the four removed rows.
+        "training_exclusions_by_source": dict(base_summary["training_exclusions_by_source"]),
+        # This separately describes which frozen source rows still intersect
+        # the filtered 60-ID validation manifest.
+        "validation_membership_by_source": validation_membership_by_source,
         "filter": {
             "schema_version": FILTERED_DERIVATION_SCHEMA_VERSION,
             "base_root": str(base_root),
@@ -1136,6 +1141,14 @@ def verify_existing(
             raise ValueError(f"{link}: validation video link does not target frozen raw video")
 
     validation_summary = json.loads((root / "validation" / "manifest.json").read_text())
+    expected_training_exclusions = (
+        {
+            str(summary["source"]): int(summary["base_validation_exclusions"])
+            for summary in source_summaries
+        }
+        if derivation is not None
+        else validation_exclusions
+    )
     expected_validation_summary = {
         "schema_version": VALIDATION_SCHEMA_VERSION,
         "seed": int(root_manifest["seed"]),
@@ -1148,8 +1161,10 @@ def verify_existing(
         "duration_band_counts": dict(
             sorted(collections.Counter(duration_band(row["num_frames"], row["fps"]) for row in validation).items())
         ),
-        "training_exclusions_by_source": validation_exclusions,
+        "training_exclusions_by_source": expected_training_exclusions,
     }
+    if derivation is not None:
+        expected_validation_summary["validation_membership_by_source"] = validation_exclusions
     for name, expected in expected_validation_summary.items():
         if validation_summary.get(name) != expected:
             raise ValueError(f"validation/manifest.json field {name} does not match frozen rows")

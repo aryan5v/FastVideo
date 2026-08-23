@@ -11,7 +11,6 @@
 
 set -euo pipefail
 
-export HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 REPO="${REPO:-/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10}"
 VENV="${VENV:-${REPO}/.venv}"
 HARNESS="${HARNESS:-${REPO}/scripts/preprocess/minimax_h3_native_t2va}"

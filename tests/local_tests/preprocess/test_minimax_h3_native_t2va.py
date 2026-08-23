@@ -188,6 +188,9 @@ def create_frozen_tree(tmp_path: Path) -> tuple[Path, Path]:
         "unique_conditioning_ids": 64,
         "source_counts": {source: 64},
         "family_counts": {"nuva": 64},
+        "resolution_counts": {"16x16": 64},
+        "frame_counts": {"5": 64},
+        "duration_band_counts": {"05-07s": 64},
         "training_exclusions_by_source": {source: 64},
     }
     (validation_root / "manifest.json").write_text(json.dumps(validation_summary, indent=2, sort_keys=True) + "\n")

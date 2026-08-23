@@ -112,6 +112,39 @@ def test_receipt_filters_aggregate_frozen_resolutions_strictly_below_threshold(t
     assert receipt["sources"]["source-b"]["removed_validation_id_exclusions"] == 0
 
 
+def test_filtered_validation_summary_distinguishes_holdouts_from_current_membership(tmp_path: Path) -> None:
+    freezer = load_harness_module("freeze_sources")
+    retained = [
+        {
+            "conditioning_id": "kept",
+            "source": "source-a",
+            "family": "nuva",
+            "width": 768,
+            "height": 768,
+            "num_frames": 124,
+            "fps": 24.0,
+        }
+    ]
+    summary = freezer.filtered_validation_summary(
+        {
+            "seed": 7,
+            "rows": 2,
+            # Two inherited holdout IDs intersect source-a, even though only
+            # one remains in the filtered validation manifest.
+            "training_exclusions_by_source": {"source-a": 2},
+        },
+        retained,
+        {"source-a": 1},
+        base_root=tmp_path / "base",
+        min_resolution_count=10,
+        excluded_resolutions=["576x576"],
+        excluded_rows=[{"conditioning_id": "removed"}],
+    )
+
+    assert summary["training_exclusions_by_source"] == {"source-a": 2}
+    assert summary["validation_membership_by_source"] == {"source-a": 1}
+
+
 def test_derivation_receipt_file_is_sha_anchored(tmp_path: Path) -> None:
     freezer = load_harness_module("freeze_sources")
     receipt = {
