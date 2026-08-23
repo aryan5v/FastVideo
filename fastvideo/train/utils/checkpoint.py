@@ -122,8 +122,8 @@ def _find_latest_checkpoint(
         if not _CHECKPOINT_DIR_RE.match(child.name):
             continue
         if not _is_complete_training_checkpoint(
-            child,
-            require_complete_marker=require_complete_marker,
+                child,
+                require_complete_marker=require_complete_marker,
         ):
             continue
         try:
@@ -176,8 +176,8 @@ def _resolve_resume_checkpoint(
             require_complete_marker=require_complete_marker,
         )
         if latest is None:
-            has_checkpoint_dirs = out.is_dir() and any(
-                child.is_dir() and _CHECKPOINT_DIR_RE.match(child.name) for child in out.iterdir())
+            has_checkpoint_dirs = out.is_dir() and any(child.is_dir() and _CHECKPOINT_DIR_RE.match(child.name)
+                                                       for child in out.iterdir())
             if require_complete_marker and has_checkpoint_dirs:
                 raise ValueError(f"No complete resumable checkpoint found under {out}; "
                                  "refusing to start from scratch in a non-empty training namespace")
@@ -201,8 +201,8 @@ def _resolve_resume_checkpoint(
         if not (path / "dcp").is_dir():
             raise FileNotFoundError(f"Missing dcp dir under checkpoint: {path / 'dcp'}")
         if not _is_complete_training_checkpoint(
-            path,
-            require_complete_marker=require_complete_marker,
+                path,
+                require_complete_marker=require_complete_marker,
         ):
             raise ValueError(f"Checkpoint is incomplete under the configured resume policy: {path}")
         return path
@@ -685,10 +685,8 @@ class CheckpointManager:
             # marker is diagnostic debris, not one of the rolling resumable
             # checkpoints. It must not consume ``keep_last`` and displace an
             # older checkpoint that can actually be resumed.
-            if (
-                self.config.require_complete_training_checkpoint
-                and not _is_complete_training_checkpoint(child, require_complete_marker=True)
-            ):
+            if (self.config.require_complete_training_checkpoint
+                    and not _is_complete_training_checkpoint(child, require_complete_marker=True)):
                 continue
             try:
                 step = _parse_step_from_dir(child)
