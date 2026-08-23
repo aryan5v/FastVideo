@@ -97,7 +97,9 @@ training:
     # Exact production policy: compile the dense teacher/critic regions and
     # leave the VSA-H3 student eager under the loader's safety gate.
     enable_torch_compile: true
-    torch_compile_kwargs: {}
+    torch_compile_kwargs:
+      dynamic: true
+      recompile_limit: 32
 
   dit_precision: fp32
   vsa:

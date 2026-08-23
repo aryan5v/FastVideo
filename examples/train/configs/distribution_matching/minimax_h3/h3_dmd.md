@@ -311,8 +311,11 @@ bash examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh
 It targets the dedicated execution clone `FastVideo-v10`, runs the native
 data finalizer in `--verify-only` mode (including READY/manifests, parquet
 schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
-videos, requires the fresh fsdp64 output namespace, and prints but does not
-execute the sixteen-tray `sbatch` command. It also binds the kernel receipt to
+videos, and prints but does not execute the sixteen-tray `sbatch` command. It
+accepts either a fresh fsdp64 output namespace or the exact safe state left by
+a failure before step 100: no resumable/staging training checkpoint, one
+complete step-zero bf16 student export, and all 64 nonempty four-forward
+validation videos. It rejects every other nonempty namespace. It also binds the kernel receipt to
 the final execution commit and requires at least 6 TiB free for the immutable
 bf16 inference lineage plus keep-three resumable states and transient rotation
 write. Rack-2 is the selected production lane. A cold Slinky topology can reject a direct

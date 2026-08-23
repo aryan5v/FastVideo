@@ -79,6 +79,7 @@ def test_regional_compile_dispatches_grad_and_no_grad_calls(monkeypatch) -> None
 def test_regional_compile_forwards_supported_kwargs(monkeypatch) -> None:
     model = _RepeatedModel()
     calls: list[dict] = []
+    global_recompile_limit = torch._dynamo.config.recompile_limit
 
     def _fake_compile(forward, **kwargs):
         calls.append(kwargs)
@@ -88,6 +89,7 @@ def test_regional_compile_forwards_supported_kwargs(monkeypatch) -> None:
 
     _compile_model_regions(model, {
         "dynamic": False,
+        "recompile_limit": 32,
         "options": {
             "emulate_precision_casts": False,
             "max_autotune": True,
@@ -98,6 +100,7 @@ def test_regional_compile_forwards_supported_kwargs(monkeypatch) -> None:
         {
             "fullgraph": True,
             "dynamic": False,
+            "recompile_limit": 32,
             "options": {
                 "emulate_precision_casts": False,
                 "max_autotune": True,
@@ -106,12 +109,14 @@ def test_regional_compile_forwards_supported_kwargs(monkeypatch) -> None:
         {
             "fullgraph": True,
             "dynamic": False,
+            "recompile_limit": 32,
             "options": {
                 "emulate_precision_casts": False,
                 "max_autotune": True,
             },
         },
     ]
+    assert torch._dynamo.config.recompile_limit == global_recompile_limit
 
 
 def test_regional_compile_rejects_partial_graph_mode() -> None:

@@ -793,7 +793,10 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     assert checkpoint["checkpoints_total_limit"] == 3
     assert training["tracker"]["run_name"] == "dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
     assert training["model"]["enable_torch_compile"] is True
-    assert training["model"]["torch_compile_kwargs"] == {}
+    assert training["model"]["torch_compile_kwargs"] == {
+        "dynamic": True,
+        "recompile_limit": 32,
+    }
     assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
     assert config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
     for role in ("teacher", "critic"):
@@ -839,12 +842,18 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "actual_output = training[\"checkpoint\"][\"output_dir\"]" in launcher
     assert "actual_topology != expected_topology" in launcher
     assert "actual_global_batch_size != global_batch_size" in launcher
+    assert 'compile_kwargs.get("dynamic") is not True' in launcher
     assert "kernel receipt source" in launcher
     assert 'readonly MAXSHAPE_AUDIT_ROOT=' in launcher
     assert 'audit_root.glob("job-*/RESULT.json")' in launcher
     assert "fastvideo-h3-v10-maxshape-gate-v1" in launcher
     assert "no successful final-commit 64-GPU 1760x768x362 capacity receipt" in launcher
     assert "available_bytes < MIN_OUTPUT_FREE_BYTES" in launcher
+    assert "validated pre-step-100 restart namespace" in launcher
+    assert 'training_checkpoints = sorted(path.name for path in output_dir.glob("checkpoint-*")' in launcher
+    assert 'inference_entries != ["checkpoint-0"]' in launcher
+    assert 'saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]' in launcher
+    assert "checkpoint-0 shard/tensor counts differ from its index" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
     assert 'require_file "${source_root}/MANIFEST.json"' in launcher
@@ -900,7 +909,10 @@ def test_h3_dmd2_v10_maxshape_gate_matches_production_capacity_contract() -> Non
     assert training["loop"] == {"max_train_steps": 2, "gradient_accumulation_steps": 1}
     assert config["method"]["generator_update_interval"] == 2
     assert training["model"]["enable_torch_compile"] is True
-    assert training["model"]["torch_compile_kwargs"] == {}
+    assert training["model"]["torch_compile_kwargs"] == {
+        "dynamic": True,
+        "recompile_limit": 32,
+    }
     assert checkpoint["resume_from_checkpoint"] == "latest"
     assert checkpoint["save_inference_checkpoint_on_validation"] is False
     assert checkpoint["training_state_checkpointing_steps"] == 0

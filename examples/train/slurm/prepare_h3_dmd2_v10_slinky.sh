@@ -176,6 +176,10 @@ if model.get("enable_torch_compile") is not True:
 compile_kwargs = model.get("torch_compile_kwargs", {}) or {}
 if compile_kwargs.get("fullgraph", True) is not True or "mode" in compile_kwargs:
     raise SystemExit("v10 regional compile requires fullgraph=True and forbids torch_compile_kwargs.mode")
+if compile_kwargs.get("dynamic") is not True:
+    raise SystemExit("v10 native-shape regional compile requires torch_compile_kwargs.dynamic=true")
+if compile_kwargs.get("recompile_limit") != 32:
+    raise SystemExit("v10 regional compile requires the reviewed per-call recompile_limit=32")
 print("READY: committed v10 YAML paths/topology match the fixed 64-GPU preflight contract; "
       f"global batch={actual_global_batch_size}, regional compile enabled")
 PY
@@ -372,9 +376,113 @@ if [[ -n "$(git -C "${REPO}" status --porcelain)" ]]; then
   failures=$((failures + 1))
 fi
 
+# A pre-step-100 failure has no resumable training state, but it may have
+# already published the immutable step-zero inference export and all 64
+# validation videos. Accept only that exact, fully validated namespace. This
+# makes an incident restart idempotent without deleting a good 66-GiB export
+# or accidentally resuming incompatible optimizer/RNG state.
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  echo "NOT READY: fresh v10 output directory is non-empty: ${OUTPUT_DIR}" >&2
-  failures=$((failures + 1))
+  if ! "${VENV}/bin/python" - "${OUTPUT_DIR}" "${WORLD_SIZE}" <<'PY'
+import json
+import pathlib
+import sys
+
+output_dir = pathlib.Path(sys.argv[1])
+world_size = int(sys.argv[2])
+validation_names = {
+    f"validation_step_0_inference_steps_4_rank_{rank}_video_0.mp4"
+    for rank in range(world_size)
+}
+allowed_top_level = {"inference", "tracker", *validation_names}
+actual_top_level = {path.name for path in output_dir.iterdir()}
+unexpected = sorted(actual_top_level - allowed_top_level)
+missing = sorted(({"inference", *validation_names}) - actual_top_level)
+if unexpected or missing:
+    raise SystemExit(
+        "NOT READY: v10 restart output is not the exact step-zero namespace; "
+        f"unexpected={unexpected} missing={missing}"
+    )
+
+training_checkpoints = sorted(path.name for path in output_dir.glob("checkpoint-*"))
+training_staging = sorted(path.name for path in output_dir.glob(".checkpoint-*"))
+if training_checkpoints or training_staging:
+    raise SystemExit(
+        "NOT READY: step-zero restart namespace contains resumable/staging training state; "
+        f"checkpoints={training_checkpoints} staging={training_staging}"
+    )
+
+for name in validation_names:
+    video = output_dir / name
+    if not video.is_file() or video.stat().st_size <= 0:
+        raise SystemExit(f"NOT READY: missing or empty step-zero validation video: {video}")
+
+inference_root = output_dir / "inference"
+checkpoint = inference_root / "checkpoint-0"
+inference_entries = sorted(path.name for path in inference_root.iterdir())
+if inference_entries != ["checkpoint-0"]:
+    raise SystemExit(
+        "NOT READY: inference namespace must contain only checkpoint-0; "
+        f"found={inference_entries}"
+    )
+if (checkpoint / ".complete").read_text(encoding="utf-8") != "complete\n":
+    raise SystemExit(f"NOT READY: invalid inference completion marker: {checkpoint / '.complete'}")
+metadata = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
+expected_metadata = {
+    "format_version": 1,
+    "kind": "inference",
+    "step": 0,
+    "role": "student",
+    "dtype": "bfloat16",
+    "module": "transformer",
+}
+observed_metadata = {key: metadata.get(key) for key in expected_metadata}
+if observed_metadata != expected_metadata:
+    raise SystemExit(
+        "NOT READY: checkpoint-0 metadata is not the v10 student inference contract; "
+        f"observed={observed_metadata}"
+    )
+saved_config = metadata.get("config", {})
+saved_training = saved_config.get("training", {})
+saved_distributed = saved_training.get("distributed", {})
+saved_method = saved_config.get("method", {})
+if saved_training.get("checkpoint", {}).get("output_dir") != str(output_dir):
+    raise SystemExit("NOT READY: checkpoint-0 metadata belongs to a different output namespace")
+if saved_distributed != {
+    "num_gpus": 64,
+    "sp_size": 1,
+    "tp_size": 1,
+    "hsdp_replicate_dim": 1,
+    "hsdp_shard_dim": 64,
+}:
+    raise SystemExit(f"NOT READY: checkpoint-0 topology is not v10 fsdp64: {saved_distributed}")
+if saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]:
+    raise SystemExit("NOT READY: checkpoint-0 does not use the trained four-forward ladder")
+
+module_dir = checkpoint / "transformer"
+index_path = module_dir / "diffusion_pytorch_model.safetensors.index.json"
+index = json.loads(index_path.read_text(encoding="utf-8"))
+weight_map = index.get("weight_map")
+if not isinstance(weight_map, dict) or not weight_map:
+    raise SystemExit(f"NOT READY: checkpoint-0 has an invalid shard index: {index_path}")
+expected_shards = {filename for filename in weight_map.values()}
+actual_shards = {path.name for path in module_dir.glob("*.safetensors") if path.is_file()}
+if expected_shards != actual_shards or any((module_dir / name).stat().st_size <= 0 for name in expected_shards):
+    raise SystemExit(
+        "NOT READY: checkpoint-0 shard set differs from its index; "
+        f"missing={sorted(expected_shards - actual_shards)} extra={sorted(actual_shards - expected_shards)}"
+    )
+if metadata.get("shard_count") != len(expected_shards) or metadata.get("tensor_count") != len(weight_map):
+    raise SystemExit("NOT READY: checkpoint-0 shard/tensor counts differ from its index")
+print(
+    "READY: validated pre-step-100 restart namespace: no training state, "
+    "complete step-zero bf16 student export, and 64 four-forward validation videos"
+)
+PY
+  then
+    failures=$((failures + 1))
+  fi
+else
+  echo "READY: fresh v10 output namespace"
 fi
 output_parent="$(dirname "${OUTPUT_DIR}")"
 if [[ -d "${output_parent}" ]]; then

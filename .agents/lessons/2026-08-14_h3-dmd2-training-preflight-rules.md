@@ -29,3 +29,11 @@ The durable operational checks are:
   commit from inside the submitted job.
 - Give changed recipes a fresh output directory so `latest` cannot load an
   incompatible training state.
+- Native-shape training must compile repeated dense regions with
+  `torch_compile_kwargs.dynamic: true`. Static regional graphs specialize on
+  packed sequence length and RoPE shape; with shared teacher/critic block code
+  and FSDP grad/materialization variants, PyTorch's default eight-entry Dynamo
+  cache can fail a healthy run after several new buckets. Set a bounded
+  per-`torch.compile` recompile allowance in the recipe rather than mutating
+  the process-global Dynamo setting, and gate more distinct calls than the
+  configured limit before launch.
