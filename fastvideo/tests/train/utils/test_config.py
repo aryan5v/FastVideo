@@ -75,6 +75,9 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
     assert t.loop.gradient_accumulation_steps == 1
 
     assert t.checkpoint.output_dir == ""
+    assert t.checkpoint.save_inference_checkpoint_on_validation is False
+    assert t.checkpoint.inference_checkpoint_role == "student"
+    assert t.checkpoint.inference_checkpoint_dtype == "bfloat16"
     assert t.checkpoint.checkpoints_total_limit == 0
 
     assert t.tracker.trackers == []
@@ -129,6 +132,9 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
         },
         "checkpoint": {
             "output_dir": "/out",
+            "save_inference_checkpoint_on_validation": True,
+            "inference_checkpoint_role": "student",
+            "inference_checkpoint_dtype": "float16",
             "training_state_checkpointing_steps": 50,
             "checkpoints_total_limit": 3,
         },
@@ -175,6 +181,9 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.loop.gradient_accumulation_steps == 4
 
     assert t.checkpoint.output_dir == "/out"
+    assert t.checkpoint.save_inference_checkpoint_on_validation is True
+    assert t.checkpoint.inference_checkpoint_role == "student"
+    assert t.checkpoint.inference_checkpoint_dtype == "float16"
     assert t.checkpoint.checkpoints_total_limit == 3
 
     assert t.tracker.trackers == ["wandb"]
@@ -205,6 +214,32 @@ def test_invalid_vsa_tile_size_raises(tmp_path: Path) -> None:
     data = _minimal_yaml()
     data["training"] = {"vsa": {"tile_size": 128}}
     with pytest.raises(ValueError, match="training.vsa.tile_size must be 64 or 256"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_validation_inference_checkpoint_flag_requires_bool(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"save_inference_checkpoint_on_validation": 1}}
+    with pytest.raises(ValueError, match="save_inference_checkpoint_on_validation"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_enabled_inference_checkpoint_requires_role(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {
+        "checkpoint": {
+            "save_inference_checkpoint_on_validation": True,
+            "inference_checkpoint_role": "",
+        }
+    }
+    with pytest.raises(ValueError, match="inference_checkpoint_role"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_invalid_inference_checkpoint_dtype_raises(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"inference_checkpoint_dtype": "fp8"}}
+    with pytest.raises(ValueError, match="inference_checkpoint_dtype"):
         load_run_config(_write_yaml(tmp_path, data))
 
 

@@ -279,6 +279,17 @@ with both Adam states pre-seeded on the final 64-rank commit; a fresh probe with
 `resume_from_checkpoint: null` is insufficient because it omits the other
 optimizer's mature state at the relevant backward peak.
 
+Checkpointing now separates the two products that the modular trainer had
+previously coupled. At every scheduled validation (step zero and then every
+100 steps) it retains a pipeline-loadable bf16 student export under
+`inference/checkpoint-<step>`; these form the unlimited, immutable inference
+lineage. The step-100 start gate applies only to full FSDP
+optimizer/scheduler/dataloader/RNG state under `checkpoint-<step>`, where only
+the newest three are retained. At 4000 steps, 41 H3 student exports use about
+2.6 TiB and three measured ~741 GiB training states use about 2.2 TiB.
+Write-before-rotate peak is about 5.6 TiB, so preflight requires at least 6 TiB
+free.
+
 The non-submitting preflight is:
 
 ```bash
@@ -290,19 +301,17 @@ data finalizer in `--verify-only` mode (including READY/manifests, parquet
 schema/hash/buckets, and exact map-style cache), checks all 64 held-out raw
 videos, requires the fresh fsdp64 output namespace, and prints but does not
 execute the sixteen-tray `sbatch` command. It also binds the kernel receipt to
-the final execution commit and requires at least 4 TiB free for the keep-four
-checkpoint policy plus its transient rotation write. Rack-3 is the default
-Slinky demand
-because v8's
-retired allocation freed that lane. A cold Slinky topology can reject a direct
+the final execution commit and requires at least 6 TiB free for the immutable
+bf16 inference lineage plus keep-three resumable states and transient rotation
+write. Rack-2 is the selected production lane. A cold Slinky topology can reject a direct
 sixteen-node request even when the backing Kubernetes pool has capacity. Follow
 `/home/vlm-wlsaidhi/ddnet-rl/SLURM_LAUNCH.md`: start enough one-node primer
 jobs (the guide uses 26 demands for a 16-node target), wait until at least 16
 are running, cancel only those exact primer IDs, and immediately race the real
 sixteen-node submit.
 Job 2960 was accepted on the second production submit after primers 2938 and
-2944 warmed rack-3. `PARTITION=hpc-rack-2` remains an explicit operator
-override.
+2944 warmed rack-3. `PARTITION=hpc-rack-3` remains an explicit operator
+fallback.
 The sbatch keeps `HOME` untouched on Slinky workers: `LUSTRE_HOME` seeds
 dedicated HF/W&B/NETRC paths, while compiler caches use a job-scoped node-local
 root under `/tmp`.
@@ -341,22 +350,25 @@ Triton-64 forward and dQ/dK/dV to FP32 dense attention across activation scales,
 checks sm_100a against its reference, and proves the production H3 no-grad call
 used sm_100a by making fallback to Triton fatal.
 
-Audit of `integration/h3-vsa-fullgraph-all-20260822`: packed-varlen FA4 commit
-`99cd355a2` is the only additional initial-training optimization (teacher
-no-grad forwards; critic grad calls retain the established route). Kernel
-custom-op commit `658c56d00` and regional graph commits `9432a87ee` /
-`37927079f` are needed only for compiled sparse inference. Since v10 launches
-with compile disabled until mixed-shape parity/recompile coverage exists, do
-not import that inference stack wholesale.
+Audit of `integration/h3-vsa-fullgraph-all-20260822`: packed-varlen FA4 is
+already carried by the v10 lineage as `9901ec342` (teacher no-grad forwards;
+critic grad calls retain the established route). Kernel custom-op commit
+`658c56d00` and regional graph commits `9432a87ee` / `37927079f` are for
+compiled sparse inference and do not establish VSA training-backward parity,
+so that inference stack is not imported into v10.
 
-The initial v10 launch deliberately remains eager. The earlier fixed-shape,
-8-GPU compile A/B accidentally exercised SDPA rather than v10's FA4 routes and
-showed a reproducible `-24.7%` first-step critic total-grad-norm shift despite
-near-equal loss. V10 adds 90 exact media buckets plus variable valid prompt
-lengths, while the regional compiler has no measured dynamic-shape/recompile
-envelope for that distribution. Qualify compile separately from a healthy v10
-checkpoint with per-layer gradient parity and a full second-sweep zero-new-
-compilation gate; do not turn it on as a launch-time MFU assumption.
+V10 enables the supported #1718 regional-training port (`863e87342` plus its
+AC/cache/attention-policy fixes). The loader applies `fullgraph=True` and
+`emulate_precision_casts=True` to all 52 repeated blocks of each dense
+teacher/critic; its explicit safety policy logs that the VSA-H3 student stays
+eager. This is not an all-three-role compile claim. The earlier fixed-shape,
+8-GPU A/B measured roughly 4.7%/6.6% critic/student step improvement but used
+SDPA rather than the production FA4 route and observed a `-24.7%` first-step
+critic grad-norm difference at `+0.064%` loss. The rack-2 recovery must verify
+FA4 selection, 52 compiled regions per dense role, the VSA eager fallback,
+finite first critic/student updates, and max-shape memory before it is treated
+as healthy; mixed-shape recompiles remain an observed launch metric rather
+than an assumed MFU gain.
 
 ## Verification
 

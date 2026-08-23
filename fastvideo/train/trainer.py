@@ -170,6 +170,12 @@ class Trainer:
                     # LRs and scheduler base_lrs; re-apply the YAML's values.
                     method.apply_configured_lrs()
                     logger.info("reset_lr_on_resume: re-applied configured learning rates at step %s", start_step)
+        initial_validation_scheduled = self.callbacks.will_run_validation(iteration=start_step)
+        if checkpoint_manager is not None:
+            checkpoint_manager.maybe_save_inference(
+                start_step,
+                validation_scheduled=initial_validation_scheduled,
+            )
         self.callbacks.on_validation_begin(
             method,
             iteration=start_step,
@@ -273,7 +279,14 @@ class Trainer:
                 iteration=step,
             )
 
+            validation_scheduled = self.callbacks.will_run_validation(iteration=step)
             if checkpoint_manager is not None:
+                # The deployable checkpoint is preserved first and corresponds
+                # exactly to the model this validation event will evaluate.
+                checkpoint_manager.maybe_save_inference(
+                    step,
+                    validation_scheduled=validation_scheduled,
+                )
                 checkpoint_manager.maybe_save(step)
 
             self.callbacks.on_validation_begin(

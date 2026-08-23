@@ -144,8 +144,11 @@ training:
 
   checkpoint:
     output_dir: outputs/my_run
+    save_inference_checkpoint_on_validation: true
+    inference_checkpoint_role: student        # explicit deployable role
+    inference_checkpoint_dtype: bfloat16
     training_state_checkpointing_steps: 1000  # 0 = disabled
-    checkpoints_total_limit: 3                # 0 = keep all
+    checkpoints_total_limit: 3                # resumable states only; 0 = keep all
 
   tracker:
     project_name: my_project
@@ -175,6 +178,21 @@ training:
 ```
 
 The repeat count duplicates that dataset's parquet file list before shuffling/sampling, so the example above trains with roughly twice as much `multi3d_games` exposure as `zeldam2-clean`. Paths are just suggested locations; use any local path that contains a FastVideo preprocessed parquet dataset.
+
+Inference and resume checkpoints are separate products. Enabling validation
+exports writes an immutable, pipeline-loadable model directory under
+`<output_dir>/inference/checkpoint-<step>/`; these checkpoints contain the
+explicit role's inference weights and are never rotated. Full optimizer,
+scheduler, dataloader, callback, and RNG state is written under
+`<output_dir>/checkpoint-<step>/` at
+`training_state_checkpointing_steps`; `checkpoints_total_limit` rotates only
+those resumable directories. `checkpointing_start_step` and the final-save
+policy apply only to resumable state. With
+`save_inference_checkpoint_on_validation: true`, the exact model for every
+scheduled validation (including step zero when `run_at_start` is enabled) is
+saved before validation; inference retention is unlimited. Custom validation
+callbacks must override `Callback.will_run_validation()` so the trainer can
+identify their validation events before dispatch.
 
 See [Training Trackers](trackers.md) to configure Weights & Biases or SwanLab,
 including SwanLab installation and authentication.

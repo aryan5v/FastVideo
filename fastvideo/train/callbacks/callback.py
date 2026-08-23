@@ -71,6 +71,11 @@ class Callback:
     ) -> None:
         pass
 
+    def will_run_validation(self, iteration: int = 0) -> bool:
+        """Return whether this callback will validate at ``iteration``."""
+        del iteration
+        return False
+
     def on_validation_end(
         self,
         method: TrainingMethod,
@@ -177,3 +182,7 @@ class CallbackDict:
                 fn(*args, **kwargs)
 
         return _dispatch
+
+    def will_run_validation(self, iteration: int = 0) -> bool:
+        """Return whether any configured callback schedules validation now."""
+        return any(cb.will_run_validation(iteration) for cb in self._callbacks.values())

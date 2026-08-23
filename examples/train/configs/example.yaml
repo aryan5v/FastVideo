@@ -121,8 +121,11 @@ training:
   checkpoint:
     output_dir: outputs/my_run        # default: ""
     resume_from_checkpoint: ""        # default: "" (or use --resume-from-checkpoint CLI)
+    save_inference_checkpoint_on_validation: false # saves every validation event; unlimited retention
+    inference_checkpoint_role: student   # default: student; EMA is never selected implicitly
+    inference_checkpoint_dtype: bfloat16 # bfloat16, float16, or float32
     training_state_checkpointing_steps: 1000  # default: 0 (disabled)
-    checkpoints_total_limit: 3        # default: 0 (keep all)
+    checkpoints_total_limit: 3        # default: 0; applies only to resumable state
 
   # --- training.tracker [TYPED] -> TrackerConfig ---
   tracker:

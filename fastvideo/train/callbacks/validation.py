@@ -346,15 +346,19 @@ class ValidationCallback(Callback):
         iteration: int = 0,
     ) -> None:
         """Run the optional step-zero baseline and each scheduled validation event."""
-        if self.every_steps <= 0:
-            return
-        # Step zero measures the checkpoint before the first optimizer update.
-        if iteration == 0 and not self.run_at_start:
-            return
-        if iteration % self.every_steps != 0:
+        if not self.will_run_validation(iteration):
             return
 
         self._run_validation(method, iteration)
+
+    def will_run_validation(self, iteration: int = 0) -> bool:
+        """Return whether this callback schedules validation at ``iteration``."""
+        if self.every_steps <= 0:
+            return False
+        # Step zero measures the checkpoint before the first optimizer update.
+        if iteration == 0 and not self.run_at_start:
+            return False
+        return iteration % self.every_steps == 0
 
     # ----------------------------------------------------------
     # Core validation logic

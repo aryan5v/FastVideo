@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -185,11 +187,17 @@ class _CallbackStateWrapper:
 
 @dataclass(slots=True)
 class CheckpointConfig:
+    # Full distributed state used to resume training.
     save_steps: int
     keep_last: int
     # Suppress periodic saves before this step (early checkpoints of a long
     # run are rarely useful and cost ~100 GiB each). 0 disables the gate.
     start_step: int = 0
+    # Deployable model-only checkpoints are written for every validation event
+    # and are never removed by ``keep_last``.
+    save_inference_on_validation: bool = False
+    inference_role: str = "student"
+    inference_dtype: str = "bfloat16"
 
 
 class CheckpointManager:
@@ -213,9 +221,18 @@ class CheckpointManager:
         self.dataloader = dataloader
         self.output_dir = str(output_dir)
         self.config = config
+        save_inference = bool(config.save_inference_on_validation)
+        inference_role = str(config.inference_role or "")
+        if save_inference and (not inference_role or "." in inference_role):
+            raise ValueError("inference_role must be a non-empty DCP key segment when inference saving is enabled")
+        if save_inference and str(config.inference_dtype) not in {"bfloat16", "float16", "float32"}:
+            raise ValueError("inference_dtype must be bfloat16, float16, or float32")
         self._callbacks = callbacks
         self._raw_config = raw_config
+        # Training-state and inference checkpoints have independent policies
+        # and deduplication.
         self._last_saved_step: int | None = None
+        self._last_inference_saved_step: int | None = None
 
     def _build_states(self) -> dict[str, Any]:
         states: dict[str, Any] = self.method.checkpoint_state()
@@ -236,23 +253,35 @@ class CheckpointManager:
     def _dcp_dir(self, step: int) -> Path:
         return self._checkpoint_dir(step) / "dcp"
 
+    def _inference_checkpoint_dir(self, step: int) -> Path:
+        return Path(self.output_dir) / "inference" / f"checkpoint-{step}"
+
+    def _inference_staging_dir(self, step: int) -> Path:
+        return Path(self.output_dir) / ".inference-staging" / f"checkpoint-{step}"
+
     def maybe_save(self, step: int) -> None:
-        save_steps = int(self.config.save_steps or 0)
-        if save_steps <= 0:
-            return
         if step < int(self.config.start_step or 0):
             return
-        if step % save_steps != 0:
+
+        save_steps = int(self.config.save_steps or 0)
+        if save_steps > 0 and step % save_steps == 0 and self._last_saved_step != step:
+            self.save(step)
+
+    def maybe_save_inference(self, step: int, *, validation_scheduled: bool) -> None:
+        """Save the model evaluated by one scheduled validation event.
+
+        This event-driven policy includes step-zero validation and deliberately
+        ignores the start gate and cadence used for resumable training state.
+        """
+        if not validation_scheduled or not bool(self.config.save_inference_on_validation):
             return
-        if self._last_saved_step == step:
+        if self._last_inference_saved_step == step:
             return
-        self.save(step)
+        self.save_inference(step)
 
     def save_final(self, step: int) -> None:
-        save_steps = int(self.config.save_steps or 0)
-        if save_steps <= 0:
-            return
-        self.save(step)
+        if int(self.config.save_steps or 0) > 0 and self._last_saved_step != step:
+            self.save(step)
 
     def save(self, step: int) -> None:
         checkpoint_dir = self._checkpoint_dir(step)
@@ -262,7 +291,7 @@ class CheckpointManager:
         states = self._build_states()
         if _rank() == 0:
             logger.info(
-                "Saving checkpoint to %s",
+                "Saving resumable training checkpoint to %s",
                 checkpoint_dir,
             )
             self._write_metadata(checkpoint_dir, step)
@@ -280,6 +309,134 @@ class CheckpointManager:
         self._last_saved_step = step
 
         self._cleanup_old_checkpoints()
+
+    def save_inference(self, step: int) -> None:
+        """Save one deployable inference checkpoint for the configured role.
+
+        DCP is used only as a temporary, distributed staging format so FSDP2
+        ranks never gather the full fp32 model into one process. Rank zero then
+        streams bounded tensor groups into a bf16/fp16/fp32 modular model
+        directory and publishes it atomically.
+        """
+        role = str(self.config.inference_role or "student")
+        modules = self.method.inference_checkpoint_modules(role)
+        base_model_path = self.method.inference_checkpoint_base_model_path(role)
+        checkpoint_dir = self._inference_checkpoint_dir(step)
+
+        already_complete: bool | None = None
+        existing_error: str | None = None
+        if _rank() == 0:
+            try:
+                from fastvideo.train.utils.inference_checkpoint import (
+                    validate_complete_inference_checkpoint, )
+
+                already_complete = (validate_complete_inference_checkpoint(checkpoint_dir, step=step) is not None)
+            except Exception as error:
+                existing_error = f"{type(error).__name__}: {error}"
+        if dist.is_available() and dist.is_initialized():
+            complete_payload: list[Any] = [already_complete, existing_error]
+            dist.broadcast_object_list(complete_payload, src=0)
+            already_complete = bool(complete_payload[0])
+            existing_error = complete_payload[1]
+        if existing_error is not None:
+            raise RuntimeError(f"Existing inference checkpoint failed validation at step {step}: {existing_error}")
+        if already_complete:
+            if _rank() == 0:
+                logger.info("Inference checkpoint already complete at %s; skipping", checkpoint_dir)
+            self._last_inference_saved_step = step
+            return
+
+        staging_dir = self._inference_staging_dir(step)
+        dcp_dir = staging_dir / "dcp"
+        export_status_path = staging_dir / "export-status.json"
+        if _rank() == 0:
+            # A prior failed save is never a valid source: DCP writes
+            # ``.metadata`` last, and the exporter publishes independently.
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            os.makedirs(dcp_dir, exist_ok=True)
+        _barrier()
+
+        states = {f"roles.{role}.{module_name}": _FullModelState(module) for module_name, module in modules.items()}
+        if not states:
+            raise ValueError(f"Inference checkpoint role {role!r} exposes no modules")
+
+        # Saving weights must not perturb the training trajectory. The regular
+        # resumable checkpoint intentionally snapshots its post-save RNG state;
+        # this model-only staging save instead restores the pre-save state.
+        torch_rng = torch.get_rng_state()
+        python_rng = random.getstate()
+        numpy_rng = np.random.get_state()
+        cuda_rng = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
+        generator = getattr(self.method, "cuda_generator", None)
+        generator_rng = generator.get_state() if generator is not None else None
+        try:
+            if _rank() == 0:
+                logger.info("Staging inference role %s with DCP at %s", role, dcp_dir)
+            dcp.save(states, checkpoint_id=str(dcp_dir))
+            _barrier()
+        finally:
+            torch.set_rng_state(torch_rng)
+            random.setstate(python_rng)
+            np.random.set_state(numpy_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state(cuda_rng)
+            if generator is not None and generator_rng is not None:
+                generator.set_state(generator_rng)
+
+        export_error: str | None = None
+        if _rank() == 0:
+            try:
+                from fastvideo.train.utils.inference_checkpoint import (
+                    export_inference_checkpoint, )
+
+                export_inference_checkpoint(
+                    dcp_dir=dcp_dir,
+                    output_dir=checkpoint_dir,
+                    base_model_path=base_model_path,
+                    role=role,
+                    modules=modules,
+                    dtype=str(self.config.inference_dtype),
+                    step=step,
+                    raw_config=self._raw_config,
+                )
+            except Exception as error:  # propagate the rank-zero failure collectively
+                logger.exception("Inference checkpoint export failed at step %s", step)
+                export_error = f"{type(error).__name__}: {error}"
+            status_tmp = export_status_path.with_suffix(".tmp")
+            status_tmp.write_text(
+                json.dumps({"complete": export_error is None, "error": export_error}) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(status_tmp, export_status_path)
+        else:
+            # Do not enter a collective while rank zero performs a multi-minute
+            # CPU/Lustre export: an outstanding NCCL operation can trip the
+            # process-group watchdog. The atomically published shared-FS result
+            # gives every rank the same terminal outcome before any barrier.
+            last_log = time.monotonic()
+            while not export_status_path.is_file():
+                time.sleep(2.0)
+                now = time.monotonic()
+                if now - last_log >= 60.0:
+                    logger.info("Waiting for rank-zero inference export at step %s", step)
+                    last_log = now
+            try:
+                status = json.loads(export_status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"Invalid inference export status at step {step}: {export_status_path}") from error
+            if status.get("complete") is not True:
+                export_error = str(status.get("error") or "rank-zero export failed without an error message")
+        if export_error is not None:
+            raise RuntimeError(f"Inference checkpoint export failed at step {step}: {export_error}")
+
+        _barrier()
+        if _rank() == 0:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            staging_root = staging_dir.parent
+            with contextlib.suppress(OSError):
+                staging_root.rmdir()
+        _barrier()
+        self._last_inference_saved_step = step
 
     def _write_metadata(
         self,

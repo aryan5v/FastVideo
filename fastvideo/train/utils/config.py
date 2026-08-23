@@ -386,6 +386,22 @@ def _build_training_config(
     if vsa_tile_size not in (64, 256):
         raise ValueError(f"training.vsa.tile_size must be 64 or 256, got {vsa_tile_size!r}")
 
+    save_inference_checkpoint_on_validation = require_bool(
+        ck,
+        "save_inference_checkpoint_on_validation",
+        default=False,
+        where="training.checkpoint.save_inference_checkpoint_on_validation",
+    )
+    inference_checkpoint_role = str(ck.get("inference_checkpoint_role", "student") or "").strip()
+    if save_inference_checkpoint_on_validation and not inference_checkpoint_role:
+        raise ValueError("training.checkpoint.inference_checkpoint_role must be non-empty "
+                         "when validation inference checkpointing is enabled")
+    inference_checkpoint_dtype = str(ck.get("inference_checkpoint_dtype", "bfloat16") or "bfloat16").strip().lower()
+    if inference_checkpoint_dtype not in {"bfloat16", "float16", "float32"}:
+        raise ValueError("training.checkpoint.inference_checkpoint_dtype must be one of "
+                         "['bfloat16', 'float16', 'float32'], got "
+                         f"{inference_checkpoint_dtype!r}")
+
     return TrainingConfig(
         distributed=DistributedConfig(
             num_gpus=num_gpus,
@@ -425,6 +441,9 @@ def _build_training_config(
         checkpoint=CheckpointConfig(
             output_dir=str(ck.get("output_dir", "") or ""),
             resume_from_checkpoint=str(ck.get("resume_from_checkpoint", "") or ""),
+            save_inference_checkpoint_on_validation=save_inference_checkpoint_on_validation,
+            inference_checkpoint_role=inference_checkpoint_role or "student",
+            inference_checkpoint_dtype=inference_checkpoint_dtype,
             training_state_checkpointing_steps=int(ck.get("training_state_checkpointing_steps", 0) or 0),
             checkpoints_total_limit=int(ck.get("checkpoints_total_limit", 0) or 0),
             checkpointing_start_step=int(ck.get("checkpointing_start_step", 0) or 0),

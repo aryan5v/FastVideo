@@ -95,9 +95,15 @@ training:
     output_dir: /mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64
     # `latest` supports requeues only within this fresh v10 namespace.
     resume_from_checkpoint: latest
+    # Keep the deployable bf16 student at every validation event, including
+    # step zero, with no inference retention limit. Full
+    # optimizer/dataloader/RNG state is much larger and rolls independently.
+    save_inference_checkpoint_on_validation: true
+    inference_checkpoint_role: student
+    inference_checkpoint_dtype: bfloat16
     training_state_checkpointing_steps: 100
     checkpointing_start_step: 100
-    checkpoints_total_limit: 4
+    checkpoints_total_limit: 3
 
   tracker:
     project_name: h3-dmd2-vsa
@@ -106,9 +112,12 @@ training:
   model:
     precondition_outputs: false
     enable_gradient_checkpointing_type: full
-    # Mixed-shape regional-compile parity/recompile coverage is a launch gate.
-    # Start eager; flip only after that matrix passes on the exact v10 buckets.
-    enable_torch_compile: false
+    # The #1718 modular port compiles the 52 repeated blocks of each dense
+    # teacher/critic role with fullgraph + precision emulation. The loader's
+    # safety policy deliberately leaves the VSA-H3 student eager until sparse
+    # training backward has its own fullgraph parity gate.
+    enable_torch_compile: true
+    torch_compile_kwargs: {}
 
   dit_precision: fp32
   vsa:

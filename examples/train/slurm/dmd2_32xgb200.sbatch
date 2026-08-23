@@ -186,7 +186,10 @@ if [ "${GATE_TEST}" = "1" ]; then
       fastvideo/tests/attention/test_flash_attn_h3_packed_varlen.py \
       fastvideo/tests/dataset/test_exact_shape_bucket_sampler.py \
       fastvideo/tests/train/callbacks/test_latent_vis_shape_context.py \
-      fastvideo/tests/train/callbacks/test_validation.py
+      fastvideo/tests/train/callbacks/test_validation.py \
+      fastvideo/tests/train/utils/test_checkpoint.py \
+      fastvideo/tests/train/utils/test_config.py \
+      fastvideo/tests/train/utils/test_inference_checkpoint.py
   "; then
     echo 'LAUNCH GATE FAILED — aborting before training.'
     exit 1
@@ -200,6 +203,9 @@ fi
 srun --kill-on-bad-exit=1 --ntasks-per-node=1 bash -c "
   set -euo pipefail
   export NODE_RANK=\${SLURM_NODEID}
+  if [ "\${H3_V10_COMPILE_LOGS:-0}" = "1" ] && [ "\${SLURM_NODEID}" = "0" ]; then
+    export TORCH_LOGS="recompiles,graph_breaks"
+  fi
   # One log dir per node — parallel tee writers on one NFS file garble it.
   export LOG_DIR=examples/train/logs/\${SLURM_JOB_ID}-node\${SLURM_NODEID}
   source '${VENV}/bin/activate'

@@ -106,6 +106,9 @@ def run_training_from_config(
         save_steps=int(tc.checkpoint.training_state_checkpointing_steps or 0),
         keep_last=int(tc.checkpoint.checkpoints_total_limit or 0),
         start_step=int(tc.checkpoint.checkpointing_start_step or 0),
+        save_inference_on_validation=bool(tc.checkpoint.save_inference_checkpoint_on_validation),
+        inference_role=str(tc.checkpoint.inference_checkpoint_role or "student"),
+        inference_dtype=str(tc.checkpoint.inference_checkpoint_dtype or "bfloat16"),
     )
 
     checkpoint_manager = CheckpointManager(

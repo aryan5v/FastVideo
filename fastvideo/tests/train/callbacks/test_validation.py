@@ -237,6 +237,7 @@ class TestOnValidationBegin:
 
     def test_skipped_when_every_steps_zero(self) -> None:
         cb = _make_recording(every_steps=0)
+        assert cb.will_run_validation(0) is False
         cb.on_validation_begin(method=None, iteration=0)
         cb.on_validation_begin(method=None, iteration=1000)
         assert cb.run_calls == []
@@ -249,6 +250,8 @@ class TestOnValidationBegin:
 
     def test_runs_on_match(self) -> None:
         cb = _make_recording(every_steps=50)
+        assert cb.will_run_validation(50) is True
+        assert cb.will_run_validation(51) is False
         cb.on_validation_begin(method=None, iteration=50)
         cb.on_validation_begin(method=None, iteration=100)
         assert cb.run_calls == [50, 100]
@@ -274,6 +277,8 @@ class TestOnValidationBegin:
         cb.on_validation_begin(method=None, iteration=0)
         cb.on_validation_begin(method=None, iteration=20)
         assert cb.run_calls == [20]
+        assert cb.will_run_validation(0) is False
+        assert cb.will_run_validation(20) is True
 
 
 class TestH3ValidationContract:

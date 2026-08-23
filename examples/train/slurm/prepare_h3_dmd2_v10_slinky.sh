@@ -24,15 +24,15 @@ readonly HSDP_SHARD=64
 readonly TRAIN_BATCH_SIZE=1
 readonly GRADIENT_ACCUMULATION_STEPS=1
 readonly GLOBAL_BATCH_SIZE=64
-readonly MIN_OUTPUT_FREE_BYTES=$((4 * 1024 * 1024 * 1024 * 1024))
+readonly MIN_OUTPUT_FREE_BYTES=$((6 * 1024 * 1024 * 1024 * 1024))
 readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"
 LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
-# rack-3 is deliberate: Slinky provisions pods from the submitted sixteen-node
-# request, and the retired v8 allocation was on this rack. This helper never
+# rack-2 is the selected v10 recovery lane. Slinky provisions pods from the
+# submitted sixteen-node request. This helper never
 # submits primers; use unique job names and the documented Slinky warm/race
 # procedure when the rack is cold. Override PARTITION if the operator selects
-# rack-2.
-PARTITION="${PARTITION:-hpc-rack-3}"
+# rack-3.
+PARTITION="${PARTITION:-hpc-rack-2}"
 LUSTRE_HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 KERNEL_PREFIX="${KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
 KERNEL_RECEIPT="${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
@@ -108,11 +108,13 @@ try:
     distributed = training["distributed"]
     data = training["data"]
     loop = training["loop"]
+    model = training["model"]
     actual_data_paths = training["data"]["data_path"]
     validation = document["callbacks"]["validation"]
     actual_validation = validation["dataset_file"]
     actual_validation_max_record_num_frames = validation["max_record_num_frames"]
     actual_output = training["checkpoint"]["output_dir"]
+    checkpoint = training["checkpoint"]
 except (KeyError, TypeError) as error:
     raise SystemExit(f"v10 YAML is missing a required launch path: {error}") from error
 
@@ -126,6 +128,20 @@ if actual_validation_max_record_num_frames != validation_max_record_num_frames:
                      f"{actual_validation_max_record_num_frames!r} != {validation_max_record_num_frames}")
 if actual_output != output_dir:
     raise SystemExit(f"v10 YAML output directory {actual_output!r} != {output_dir!r}")
+expected_checkpoint = {
+    "save_inference_checkpoint_on_validation": True,
+    "inference_checkpoint_role": "student",
+    "inference_checkpoint_dtype": "bfloat16",
+    "training_state_checkpointing_steps": 100,
+    "checkpointing_start_step": 100,
+    "checkpoints_total_limit": 3,
+}
+actual_checkpoint = {key: checkpoint.get(key) for key in expected_checkpoint}
+if actual_checkpoint != expected_checkpoint:
+    raise SystemExit(f"v10 checkpoint policy {actual_checkpoint!r} != {expected_checkpoint!r}")
+if int(validation.get("every_steps", 0)) != 100 or validation.get("run_at_start") is not True:
+    raise SystemExit("v10 validation must run at step zero and every 100 steps so each event receives an "
+                     "unlimited-retention inference checkpoint")
 if num_nodes * gpus_per_node != world_size:
     raise SystemExit(f"preflight allocation {num_nodes}x{gpus_per_node} != world size {world_size}")
 expected_topology = {
@@ -150,8 +166,13 @@ if actual_global_batch_size != global_batch_size:
     raise SystemExit(f"v10 effective global batch {actual_global_batch_size} != {global_batch_size}")
 if hsdp_replicate * hsdp_shard != world_size:
     raise SystemExit(f"HSDP mesh {hsdp_replicate}x{hsdp_shard} != world size {world_size}")
+if model.get("enable_torch_compile") is not True:
+    raise SystemExit("v10 must enable the #1718 modular regional-compile path")
+compile_kwargs = model.get("torch_compile_kwargs", {}) or {}
+if compile_kwargs.get("fullgraph", True) is not True or "mode" in compile_kwargs:
+    raise SystemExit("v10 regional compile requires fullgraph=True and forbids torch_compile_kwargs.mode")
 print("READY: committed v10 YAML paths/topology match the fixed 64-GPU preflight contract; "
-      f"global batch={actual_global_batch_size}")
+      f"global batch={actual_global_batch_size}, regional compile enabled")
 PY
   then
     failures=$((failures + 1))
@@ -297,7 +318,7 @@ if [[ -d "${output_parent}" ]]; then
   available_bytes="$(df -B1 --output=avail "${output_parent}" | tail -n 1 | tr -d ' ')"
   if [[ ! "${available_bytes}" =~ ^[0-9]+$ ]] || (( available_bytes < MIN_OUTPUT_FREE_BYTES )); then
     echo "NOT READY: output filesystem has ${available_bytes:-unknown} free bytes; " \
-      "v10 keep-four requires at least ${MIN_OUTPUT_FREE_BYTES} before launch" >&2
+      "v10 checkpoint policy requires at least ${MIN_OUTPUT_FREE_BYTES} before launch" >&2
     failures=$((failures + 1))
   else
     echo "READY: output filesystem has ${available_bytes} free bytes"
@@ -320,7 +341,7 @@ fi
 
 execution_commit="$(git -C "${REPO}" rev-parse HEAD)"
 printf -v payload \
-  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=%q HSDP_REPLICATE=%q HSDP_SHARD=%q FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
+  'export REPO=%q VENV=%q CONFIG=%q LUSTRE_HOME=%q EXPECTED_V10_COMMIT=%q H3_V10_KERNEL_PREFIX=%q H3_V10_FA4_OVERLAY=%q H3_V10_CUTLASS_PACKAGES=%q PYTHONPATH=%q SP_SIZE=%q HSDP_REPLICATE=%q HSDP_SHARD=%q FASTVIDEO_VSA_SM100A=1 H3_V10_KERNEL_GATE=1 H3_V10_COMPILE_LOGS=1 PATH=%q SLURM_EXPORT_ENV=ALL; exec bash %q' \
   "${REPO}" "${VENV}" "${CONFIG}" "${LUSTRE_HOME}" "${execution_commit}" \
   "${KERNEL_PREFIX}" "${FA4_OVERLAY}" "${FA4_CUTLASS_PACKAGES}" "${V10_PYTHONPATH}" \
   "${SP_SIZE}" "${HSDP_REPLICATE}" "${HSDP_SHARD}" \

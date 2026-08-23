@@ -60,7 +60,14 @@ class TrainingLoopConfig:
 class CheckpointConfig:
     output_dir: str = ""
     resume_from_checkpoint: str = ""
+    # Deployable, model-only checkpoints are saved for every scheduled
+    # validation event and are independent from rolling resumable state.
+    save_inference_checkpoint_on_validation: bool = False
+    inference_checkpoint_role: str = "student"
+    inference_checkpoint_dtype: str = "bfloat16"
     training_state_checkpointing_steps: int = 0
+    # Applies only to resumable ``checkpoint-<step>`` directories. Inference
+    # checkpoints are retained as the run's immutable model lineage.
     checkpoints_total_limit: int = 0
     checkpointing_start_step: int = 0
     # DCP checkpoints restore optimizer param-group LRs and scheduler

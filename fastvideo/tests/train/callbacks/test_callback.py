@@ -96,6 +96,7 @@ class TestCallbackBase:
         assert (cb.on_training_step_end(method=None, loss_dict={}) is None)
         assert cb.on_before_optimizer_step(method=None) is None
         assert cb.on_validation_begin(method=None) is None
+        assert cb.will_run_validation() is False
         assert cb.on_validation_end(method=None) is None
         assert cb.on_train_end(method=None) is None
 
