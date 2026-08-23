@@ -13,7 +13,14 @@ VENV="${VENV:-${REPO}/.venv}"
 readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"
 readonly MAXSHAPE_CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml"
 readonly MAXSHAPE_AUDIT_ROOT="/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/v10_maxshape_64g/audit"
-readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"
+readonly BASE_DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"
+readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3"
+readonly MIN_RESOLUTION_COUNT=10
+readonly EXPECTED_TRAINING_ROWS=60549
+readonly EXPECTED_SHAPE_BUCKETS=87
+readonly EXPECTED_SCHEDULED_ROWS=63424
+readonly EXPECTED_PADDED_ROWS=2875
+readonly EXPECTED_STEPS_PER_EPOCH=991
 readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
 readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345
 readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
@@ -29,12 +36,12 @@ readonly GLOBAL_BATCH_SIZE=64
 readonly MIN_OUTPUT_FREE_BYTES=$((6 * 1024 * 1024 * 1024 * 1024))
 readonly REVIEWED_V10_COMMIT="7635a5295b027000a00f6d70789c5cb5886218c3"
 LOG_DIR="${LOG_DIR:-/mnt/lustre/vlm-wlsaidhi/fastvideo/logs}"
-# rack-2 is the selected v10 recovery lane. Slinky provisions pods from the
+# rack-3 is the selected v10 recovery lane. Slinky provisions pods from the
 # submitted sixteen-node request. This helper never
 # submits primers; use unique job names and the documented Slinky warm/race
-# procedure when the rack is cold. Override PARTITION if the operator selects
-# rack-3.
-PARTITION="${PARTITION:-hpc-rack-2}"
+# procedure when the rack is cold. Override PARTITION only if the operator
+# explicitly selects another rack.
+PARTITION="${PARTITION:-hpc-rack-3}"
 LUSTRE_HOME="${LUSTRE_HOME:-/mnt/lustre/vlm-wlsaidhi}"
 KERNEL_PREFIX="${KERNEL_PREFIX:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/prefix}"
 KERNEL_RECEIPT="${KERNEL_PREFIX}/FASTVIDEO_KERNEL_V10_RECEIPT.json"
@@ -64,9 +71,13 @@ require_file "${VENV}/bin/python"
 require_file "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 require_file "${REPO}/scripts/train/gate_h3_v10_kernel.sh"
 require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/finalize_dataset.py"
+require_file "${REPO}/scripts/preprocess/minimax_h3_native_t2va/derive_filtered_dataset.py"
 require_file "${KERNEL_RECEIPT}"
 require_file "${DATA_ROOT}/FROZEN_MANIFEST.json"
+require_file "${DATA_ROOT}/DERIVATION_RECEIPT.json"
 require_file "${DATA_ROOT}/READY.json"
+require_file "${BASE_DATA_ROOT}/FROZEN_MANIFEST.json"
+require_file "${BASE_DATA_ROOT}/READY.json"
 if [[ ! -d "${FA4_OVERLAY}/flash_attn/cute" ]]; then
   echo "NOT READY: missing FA4 CuTe package under ${FA4_OVERLAY}" >&2
   failures=$((failures + 1))
@@ -203,14 +214,85 @@ for source in "${sources[@]}"; do
   fi
 done
 
-# The finalizer is the authoritative immutable-data verifier. It re-audits
-# every done marker/parquet row, bucket geometry, schema/hash, the exact
-# map-style cache tuple, source MANIFEST/READY receipts, and aggregate count.
+# Pin the exact filtered corpus and the world-64 sampler arithmetic. The
+# finalizer verifies row contents; this lightweight check verifies the launch
+# recipe will see exactly the intended retained buckets and padding envelope.
+if (( failures == 0 )); then
+  if ! "${VENV}/bin/python" - \
+    "${DATA_ROOT}" "${MIN_RESOLUTION_COUNT}" "${EXPECTED_TRAINING_ROWS}" \
+    "${EXPECTED_SHAPE_BUCKETS}" "${EXPECTED_SCHEDULED_ROWS}" \
+    "${EXPECTED_PADDED_ROWS}" "${EXPECTED_STEPS_PER_EPOCH}" "${WORLD_SIZE}" \
+    "${sources[@]}" <<'PY'
+import collections
+import json
+import pathlib
+import pickle
+import re
+import sys
+
+data_root = pathlib.Path(sys.argv[1])
+threshold, expected_rows, expected_buckets, expected_scheduled = map(int, sys.argv[2:6])
+expected_padding, expected_steps, world_size = map(int, sys.argv[6:9])
+sources = sys.argv[9:]
+receipt = json.loads((data_root / "DERIVATION_RECEIPT.json").read_text(encoding="utf-8"))
+expected_receipt = {
+    "min_resolution_count": threshold,
+    "excluded_resolutions": ["576x576", "640x480", "832x480"],
+    "excluded_frozen_rows": 7,
+    "excluded_training_rows": 3,
+    "derived_training_rows": expected_rows,
+}
+observed_receipt = {
+    "min_resolution_count": receipt.get("filter", {}).get("min_resolution_count"),
+    **{key: receipt.get(key) for key in expected_receipt if key != "min_resolution_count"},
+}
+if observed_receipt != expected_receipt:
+    raise SystemExit(f"v3 derivation receipt {observed_receipt!r} != {expected_receipt!r}")
+
+bucket_pattern = re.compile(r"^bucket=([1-9][0-9]*)x([1-9][0-9]*)-([1-9][0-9]*)f$")
+bucket_rows = collections.Counter()
+for source in sources:
+    cache_path = data_root / source / "data" / "map_style_cache" / "file_info.pkl"
+    with cache_path.open("rb") as handle:
+        paths, lengths = pickle.load(handle)
+    if len(paths) != len(lengths):
+        raise SystemExit(f"corrupt map-style cache: {cache_path}")
+    for path, length in zip(paths, lengths, strict=True):
+        match = bucket_pattern.fullmatch(pathlib.Path(path).parent.name)
+        if match is None:
+            raise SystemExit(f"invalid bucket path in {cache_path}: {path}")
+        width, height, _frames = match.groups()
+        if f"{width}x{height}" in expected_receipt["excluded_resolutions"]:
+            raise SystemExit(f"excluded resolution leaked into v3 cache: {path}")
+        bucket_rows[pathlib.Path(path).parent.name] += int(length)
+
+rows = sum(bucket_rows.values())
+scheduled = sum(((count + world_size - 1) // world_size) * world_size for count in bucket_rows.values())
+padding = scheduled - rows
+observed = (rows, len(bucket_rows), scheduled, padding, scheduled // world_size)
+expected = (expected_rows, expected_buckets, expected_scheduled, expected_padding, expected_steps)
+if observed != expected:
+    raise SystemExit(f"v3 sampler contract {observed} != {expected}")
+print(
+    f"READY: filtered v3 has {rows} rows in {len(bucket_rows)} buckets; "
+    f"world-{world_size} schedules {scheduled} rows/{expected_steps} steps with {padding} repeats"
+)
+PY
+  then
+    failures=$((failures + 1))
+  fi
+fi
+
+# Verify the derivation policy and its byte-for-byte ancestry to v2, including
+# the whole-resolution threshold and unchanged validation split. The derived
+# verifier invokes the ordinary finalizer internally to re-audit every v3 done
+# marker, parquet row, bucket geometry, cache tuple, source receipt, and count.
 if (( failures == 0 )); then
   if ! "${VENV}/bin/python" \
-    "${REPO}/scripts/preprocess/minimax_h3_native_t2va/finalize_dataset.py" \
-    --root "${DATA_ROOT}" --verify-only; then
-    echo "NOT READY: finalized dataset verification failed" >&2
+    "${REPO}/scripts/preprocess/minimax_h3_native_t2va/derive_filtered_dataset.py" \
+    --base-root "${BASE_DATA_ROOT}" --output-root "${DATA_ROOT}" \
+    --min-resolution-count "${MIN_RESOLUTION_COUNT}" --verify-only; then
+    echo "NOT READY: filtered v3 derivation verification failed" >&2
     failures=$((failures + 1))
   fi
 fi
@@ -382,13 +464,26 @@ fi
 # makes an incident restart idempotent without deleting a good 66-GiB export
 # or accidentally resuming incompatible optimizer/RNG state.
 if [[ -d "${OUTPUT_DIR}" && -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  if ! "${VENV}/bin/python" - "${OUTPUT_DIR}" "${WORLD_SIZE}" <<'PY'
+  if ! "${VENV}/bin/python" - \
+    "${OUTPUT_DIR}" "${WORLD_SIZE}" "${CONFIG}" "${DATA_ROOT}" "${VALIDATION_MANIFEST}" <<'PY'
 import json
 import pathlib
 import sys
 
+import yaml
+
 output_dir = pathlib.Path(sys.argv[1])
 world_size = int(sys.argv[2])
+config_path = pathlib.Path(sys.argv[3])
+data_root = pathlib.Path(sys.argv[4])
+validation_manifest = sys.argv[5]
+current_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+expected_data_paths = current_config["training"]["data"]["data_path"]
+expected_validation_manifest = current_config["callbacks"]["validation"]["dataset_file"]
+if any(not str(path).startswith(f"{data_root}/") for path in expected_data_paths):
+    raise SystemExit("NOT READY: current v10 config data paths are outside the filtered v3 root")
+if expected_validation_manifest != validation_manifest:
+    raise SystemExit("NOT READY: current v10 validation path differs from the fixed v3 launch contract")
 validation_names = {
     f"validation_step_0_inference_steps_4_rank_{rank}_video_0.mp4"
     for rank in range(world_size)
@@ -445,6 +540,14 @@ saved_config = metadata.get("config", {})
 saved_training = saved_config.get("training", {})
 saved_distributed = saved_training.get("distributed", {})
 saved_method = saved_config.get("method", {})
+saved_data_paths = saved_training.get("data", {}).get("data_path")
+saved_validation_manifest = saved_config.get("callbacks", {}).get("validation", {}).get("dataset_file")
+if saved_data_paths != expected_data_paths or saved_validation_manifest != expected_validation_manifest:
+    raise SystemExit(
+        "NOT READY: checkpoint-0 belongs to a different data/validation recipe; "
+        f"saved_data={saved_data_paths!r} expected_data={expected_data_paths!r} "
+        f"saved_validation={saved_validation_manifest!r} expected_validation={expected_validation_manifest!r}"
+    )
 if saved_training.get("checkpoint", {}).get("output_dir") != str(output_dir):
     raise SystemExit("NOT READY: checkpoint-0 metadata belongs to a different output namespace")
 if saved_distributed != {
@@ -474,7 +577,7 @@ if expected_shards != actual_shards or any((module_dir / name).stat().st_size <=
 if metadata.get("shard_count") != len(expected_shards) or metadata.get("tensor_count") != len(weight_map):
     raise SystemExit("NOT READY: checkpoint-0 shard/tensor counts differ from its index")
 print(
-    "READY: validated pre-step-100 restart namespace: no training state, "
+    "READY: validated same-recipe pre-step-100 restart namespace: no training state, "
     "complete step-zero bf16 student export, and 64 four-forward validation videos"
 )
 PY

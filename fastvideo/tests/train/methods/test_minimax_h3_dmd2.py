@@ -779,7 +779,7 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     assert data["preprocessed_data_type"] == "t2va"
     assert data["native_shape_bucketing"] is True
     assert len(data["data_path"]) == 5
-    assert all(path.startswith("/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/")
+    assert all(path.startswith("/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/")
                and path.endswith("/data") for path in data["data_path"])
 
     checkpoint = training["checkpoint"]
@@ -819,7 +819,8 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10" in launcher
     assert ('readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/'
             'dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"') in launcher
-    assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"' in launcher
+    assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3"' in launcher
+    assert 'readonly BASE_DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"' in launcher
     assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
     assert "readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345" in launcher
     assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
@@ -830,6 +831,12 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "readonly HSDP_SHARD=64" in launcher
     assert "readonly GRADIENT_ACCUMULATION_STEPS=1" in launcher
     assert "readonly GLOBAL_BATCH_SIZE=64" in launcher
+    assert 'PARTITION="${PARTITION:-hpc-rack-3}"' in launcher
+    assert "readonly EXPECTED_TRAINING_ROWS=60549" in launcher
+    assert "readonly EXPECTED_SHAPE_BUCKETS=87" in launcher
+    assert "readonly EXPECTED_SCHEDULED_ROWS=63424" in launcher
+    assert "readonly EXPECTED_PADDED_ROWS=2875" in launcher
+    assert "readonly EXPECTED_STEPS_PER_EPOCH=991" in launcher
     assert "readonly MIN_OUTPUT_FREE_BYTES=" in launcher
     for removed_override in ("CONFIG", "DATA_ROOT", "VALIDATION_MANIFEST", "OUTPUT_DIR"):
         assert f'${{{removed_override}:-' not in launcher
@@ -849,17 +856,22 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "fastvideo-h3-v10-maxshape-gate-v1" in launcher
     assert "no successful final-commit 64-GPU 1760x768x362 capacity receipt" in launcher
     assert "available_bytes < MIN_OUTPUT_FREE_BYTES" in launcher
-    assert "validated pre-step-100 restart namespace" in launcher
+    assert "validated same-recipe pre-step-100 restart namespace" in launcher
     assert 'training_checkpoints = sorted(path.name for path in output_dir.glob("checkpoint-*")' in launcher
     assert 'inference_entries != ["checkpoint-0"]' in launcher
     assert 'saved_method.get("dmd_denoising_steps") != [999, 749, 500, 250]' in launcher
+    assert "checkpoint-0 belongs to a different data/validation recipe" in launcher
     assert "checkpoint-0 shard/tensor counts differ from its index" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
+    assert 'require_file "${DATA_ROOT}/DERIVATION_RECEIPT.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
     assert 'require_file "${source_root}/MANIFEST.json"' in launcher
     assert 'require_file "${source_root}/MANIFEST_rows.jsonl"' in launcher
     assert 'require_file "${source_root}/data/map_style_cache/file_info.pkl"' in launcher
     assert "finalize_dataset.py" in launcher
+    assert "derive_filtered_dataset.py" in launcher
+    assert '"excluded_resolutions": ["576x576", "640x480", "832x480"]' in launcher
+    assert "excluded resolution leaked into v3 cache" in launcher
     assert "--verify-only" in launcher
     assert "H3_V10_KERNEL_GATE=1" in launcher
     assert "HSDP_SHARD=%q" in launcher
@@ -920,6 +932,8 @@ def test_h3_dmd2_v10_maxshape_gate_matches_production_capacity_contract() -> Non
 
     runner = _V10_MAXSHAPE_RUNNER.read_text()
     assert '"${SLURM_JOB_NUM_NODES:-0}" != "16"' in runner
+    assert "/v10_mixed_native_v3/" in runner
+    assert "/v10_mixed_native_v2/" not in runner
     assert '"${staged}" -ef "${source}"' in runner
     assert "all_64_gpus_sampled" in runner
     assert "critic_grad_finite_positive" in runner

@@ -51,7 +51,7 @@ training:
     hsdp_shard_dim: 64
 
   data:
-    # The gate runbook stages hardlinks to all finalized 1760x768-362f v2
+    # The gate runbook stages hardlinks to finalized 1760x768-362f v3
     # parquets under this isolated root.
     data_path: /mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/v10_maxshape_64g/data
     preprocessed_data_type: t2va

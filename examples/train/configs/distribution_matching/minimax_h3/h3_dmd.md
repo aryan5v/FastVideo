@@ -224,7 +224,12 @@ H3-specific state and follow-ups before enabling it on a real run:
 ## v10 data-only native-shape launch (2026-08-22/23)
 
 `dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml` starts a fresh lineage over
-the five finalized shared T2VA sources. It has no simulated/carry rollout:
+the five finalized shared T2VA sources in the immutable
+`v10_mixed_native_v3` snapshot. V3 filters whole spatial resolutions with
+fewer than 10 frozen videos (`576x576`, `640x480`, and `832x480`) while
+preserving v2 and the byte-identical held-out 64. Four of the seven rare
+frozen videos are held out, so the filter removes three training rows. The
+recipe has no simulated/carry rollout:
 every microbatch forward-noises a real video/audio latent at a uniformly
 sampled non-zero rung of the four-step grid. Sixteen four-GPU trays at local
 batch 1 and accumulation 1 give global batch 64; student and critic learning
@@ -236,9 +241,11 @@ requests at 345 frames, the largest released `17*n+5` geometry within H3's
 15-second inference ceiling. Shorter record lengths are unchanged, and the
 full 362-frame reference remains intact for side-by-side logging.
 
-The 64-rank bucket sampler pads each of the 90 exact-shape buckets to a multiple
-of 64: 3,225 repeated rows over 56,832 scheduled rows (about 5.7% duplication),
-up from 1,497 repeats at 32 ranks. With accumulation 1, every optimizer step is
+The 64-rank bucket sampler pads each of the 87 retained exact-shape buckets to
+a multiple of 64: 2,875 repeated rows over 63,424 scheduled rows (4.533%
+duplication), or 991 optimizer steps per sampler epoch. Relative to finalized
+v2, removing the three singleton training buckets eliminates 189 padded
+repeats and three global steps. With accumulation 1, every optimizer step is
 one exact-shape global microbatch; it no longer combines two successive shape
 buckets as the 32-GPU/accumulation-2 recipe did.
 

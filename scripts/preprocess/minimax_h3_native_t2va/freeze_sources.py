@@ -30,6 +30,7 @@ from typing import Any, Iterable
 SCHEMA_VERSION = "minimax-h3-native-t2va-freeze-v1"
 VALIDATION_SCHEMA_VERSION = "minimax-h3-native-t2va-validation-v1"
 EXTENSION_SCHEMA_VERSION = "minimax-h3-native-t2va-extension-v1"
+FILTERED_DERIVATION_SCHEMA_VERSION = "minimax-h3-native-t2va-filtered-derivation-v1"
 EXPECTED_FPS = 24.0
 EXPECTED_AUDIO_SAMPLE_RATE = 32000
 
@@ -304,6 +305,19 @@ def build_worklist(rows: list[dict[str, Any]], chunk_size: int) -> dict[str, Any
     }
 
 
+def worklist_chunk_signature(chunk: dict[str, Any]) -> tuple[int, int, int, tuple[str, ...]]:
+    shape = chunk["shape"]
+    ids = tuple(str(record_id) for record_id in chunk["conditioning_ids"])
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"{chunk.get('chunk_id')}: duplicate conditioning id")
+    return (
+        int(shape["width"]),
+        int(shape["height"]),
+        int(shape["num_frames"]),
+        ids,
+    )
+
+
 def validation_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": VALIDATION_SCHEMA_VERSION,
@@ -356,6 +370,23 @@ def distribution(rows: list[dict[str, Any]], field_names: tuple[str, ...]) -> di
 def conditioning_ids_sha256(ids: Iterable[str]) -> str:
     payload = "".join(f"{record_id}\n" for record_id in sorted(ids)).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def conditioning_keys_sha256(keys: Iterable[tuple[str, str]]) -> str:
+    """Hash source-qualified IDs so intentional cross-source IDs stay distinct."""
+    payload = "".join(f"{source}\t{record_id}\n" for source, record_id in sorted(keys)).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def resolution_key(row: dict[str, Any]) -> str:
+    return f"{int(row['width'])}x{int(row['height'])}"
+
+
+def aggregate_resolution_counts(rows_by_source: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    counts: collections.Counter[str] = collections.Counter()
+    for rows in rows_by_source.values():
+        counts.update(resolution_key(row) for row in rows)
+    return dict(sorted(counts.items()))
 
 
 def load_frozen_rows(root: Path, source: str) -> list[dict[str, Any]]:
@@ -535,6 +566,239 @@ def _verify_extension_contract(
             raise ValueError(f"extension receipt {total_name} does not match its source totals")
 
 
+def load_filtered_derivation_receipt(
+    root: Path,
+    root_manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    derivation = root_manifest.get("derivation")
+    if derivation is None:
+        return None
+    if root_manifest.get("extension") is not None:
+        raise ValueError("a frozen root cannot be both an extension and a filtered derivation")
+    if not isinstance(derivation, dict) or derivation.get("schema_version") != FILTERED_DERIVATION_SCHEMA_VERSION:
+        raise ValueError("invalid filtered derivation receipt")
+    receipt_path = root / "DERIVATION_RECEIPT.json"
+    _verify_sha256(
+        receipt_path,
+        root_manifest.get("derivation_receipt_sha256"),
+        "filtered derivation receipt",
+    )
+    if json.loads(receipt_path.read_text()) != derivation:
+        raise ValueError("DERIVATION_RECEIPT.json does not match FROZEN_MANIFEST.json")
+    rule = derivation.get("filter")
+    if not isinstance(rule, dict) or rule.get("axis") != "aggregate_frozen_resolution":
+        raise ValueError("filtered derivation must use the aggregate frozen-resolution axis")
+    if rule.get("comparison") != "count < min_resolution_count":
+        raise ValueError("filtered derivation comparison is not the supported strict threshold")
+    threshold = rule.get("min_resolution_count")
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold <= 0:
+        raise ValueError("filtered derivation min_resolution_count must be a positive integer")
+    excluded = derivation.get("excluded_resolutions")
+    if not isinstance(excluded, list) or excluded != sorted(set(excluded)):
+        raise ValueError("filtered derivation excluded_resolutions must be a sorted unique list")
+    for resolution in excluded:
+        if not isinstance(resolution, str) or resolution.count("x") != 1:
+            raise ValueError(f"invalid excluded resolution {resolution!r}")
+        width, height = resolution.split("x")
+        if not width.isdigit() or not height.isdigit() or int(width) <= 0 or int(height) <= 0:
+            raise ValueError(f"invalid excluded resolution {resolution!r}")
+    return derivation
+
+
+def _verify_filtered_derivation_contract(
+    root: Path,
+    root_manifest: dict[str, Any],
+    config: dict[str, Any],
+    derivation: dict[str, Any],
+    seen_roots: set[Path],
+) -> None:
+    base_root = Path(str(derivation.get("base_root", ""))).resolve()
+    if base_root == root:
+        raise ValueError("filtered derivation base root cannot equal output root")
+    if Path(str(derivation.get("output_root", ""))).resolve() != root:
+        raise ValueError("filtered derivation output_root does not match the frozen root")
+
+    base_manifest = verify_existing(base_root, emit_summary=False, _seen_roots=seen_roots)
+    base_frozen_sha256 = sha256_file(base_root / "FROZEN_MANIFEST.json")
+    _verify_sha256(
+        base_root / "FROZEN_MANIFEST.json",
+        derivation.get("base_frozen_manifest_sha256"),
+        "filtered derivation base frozen manifest",
+    )
+    _verify_sha256(
+        base_root / "READY.json",
+        derivation.get("base_ready_sha256"),
+        "filtered derivation base READY",
+    )
+    base_ready = json.loads((base_root / "READY.json").read_text())
+    if (
+        base_ready.get("schema_version") != "minimax-h3-native-t2va-ready-v1"
+        or base_ready.get("frozen_manifest_sha256") != base_frozen_sha256
+        or int(base_ready.get("training_rows", -1)) != int(base_manifest["training_rows"])
+    ):
+        raise ValueError("filtered derivation base READY does not match its frozen manifest")
+
+    base_config_path = resolve_frozen_config(base_root, base_manifest)
+    base_config = json.loads(base_config_path.read_text())
+    extension_compatible_config(base_config, config)
+    if derivation.get("base_config_sha256") != sha256_file(base_config_path):
+        raise ValueError("filtered derivation base config checksum does not match its frozen config")
+    if derivation.get("config_sha256") != sha256_file(root / "CONFIG.snapshot.json"):
+        raise ValueError("filtered derivation config checksum does not match CONFIG.snapshot.json")
+
+    validation_artifacts = {
+        "manifest.jsonl": "validation_manifest_sha256",
+        "manifest.json": "validation_summary_sha256",
+        "heldout64.json": "heldout64_sha256",
+    }
+    for artifact_name, receipt_name in validation_artifacts.items():
+        base_path = base_root / "validation" / artifact_name
+        current_path = root / "validation" / artifact_name
+        _verify_sha256(base_path, derivation.get(receipt_name), f"filtered derivation base {artifact_name}")
+        _verify_sha256(current_path, derivation.get(receipt_name), f"filtered derivation {artifact_name}")
+        if current_path.read_bytes() != base_path.read_bytes():
+            raise ValueError(f"filtered derivation validation/{artifact_name} is not byte-identical to the base")
+
+    configured_names = [str(spec["name"]) for spec in config["sources"]]
+    base_names = [str(summary["source"]) for summary in base_manifest["sources"]]
+    if configured_names != base_names:
+        raise ValueError("filtered derivation source order does not match the base")
+
+    base_frozen_by_source: dict[str, list[dict[str, Any]]] = {}
+    base_train_by_source: dict[str, list[dict[str, Any]]] = {}
+    current_frozen_by_source: dict[str, list[dict[str, Any]]] = {}
+    current_train_by_source: dict[str, list[dict[str, Any]]] = {}
+    validation_ids = {
+        str(row["conditioning_id"])
+        for _, row in iter_jsonl(root / "validation" / "manifest.jsonl")
+    }
+    source_summaries = {str(summary["source"]): summary for summary in root_manifest["sources"]}
+    base_summaries = {str(summary["source"]): summary for summary in base_manifest["sources"]}
+    for source in configured_names:
+        base_source = base_root / source
+        current_source = root / source
+        for relative in ("media/frozen.jsonl", "prompts/source.jsonl"):
+            base_path = base_source / relative
+            current_path = current_source / relative
+            if current_path.read_bytes() != base_path.read_bytes():
+                raise ValueError(f"{source}/{relative} is not byte-identical to the filtered derivation base")
+        base_frozen_by_source[source] = load_frozen_rows(base_root, source)
+        base_train_by_source[source] = [row for _, row in iter_jsonl(base_source / "media" / "train.jsonl")]
+        current_frozen_by_source[source] = load_frozen_rows(root, source)
+        current_train_by_source[source] = [row for _, row in iter_jsonl(current_source / "media" / "train.jsonl")]
+        if current_frozen_by_source[source] != base_frozen_by_source[source]:
+            raise ValueError(f"{source}: filtered derivation changed frozen row content")
+
+    frozen_resolution_counts = aggregate_resolution_counts(current_frozen_by_source)
+    threshold = int(derivation["filter"]["min_resolution_count"])
+    excluded_resolutions = sorted(
+        resolution
+        for resolution, count in frozen_resolution_counts.items()
+        if count < threshold
+    )
+    excluded_set = set(excluded_resolutions)
+    excluded_frozen_keys = {
+        (source, str(row["conditioning_id"]))
+        for source, rows in current_frozen_by_source.items()
+        for row in rows
+        if resolution_key(row) in excluded_set
+    }
+    excluded_training_keys = {
+        (source, str(row["conditioning_id"]))
+        for source, rows in base_train_by_source.items()
+        for row in rows
+        if resolution_key(row) in excluded_set
+    }
+
+    source_receipts: dict[str, dict[str, int]] = {}
+    for source in configured_names:
+        base_train = _indexed_rows(base_root / source / "media" / "train.jsonl", base_train_by_source[source])
+        current_train = _indexed_rows(root / source / "media" / "train.jsonl", current_train_by_source[source])
+        expected_current = {
+            record_id: row
+            for record_id, row in base_train.items()
+            if resolution_key(row) not in excluded_set
+        }
+        if current_train != expected_current:
+            raise ValueError(f"{source}: derived train rows are not exactly the filtered base training rows")
+
+        base_worklist = json.loads((base_root / source / "work" / "worklist.json").read_text())
+        current_worklist = json.loads((root / source / "work" / "worklist.json").read_text())
+        base_chunks: dict[tuple[int, int, int, tuple[str, ...]], dict[str, Any]] = {}
+        for chunk in base_worklist["chunks"]:
+            signature = worklist_chunk_signature(chunk)
+            if signature in base_chunks:
+                raise ValueError(f"{source}: base worklist has duplicate chunk signature")
+            base_chunks[signature] = chunk
+        for current_chunk in current_worklist["chunks"]:
+            signature = worklist_chunk_signature(current_chunk)
+            base_chunk = base_chunks.get(signature)
+            if base_chunk is None:
+                raise ValueError(f"{source}: retained worklist chunk has no exact base chunk")
+            base_done_path = base_root / source / "done" / f"{base_chunk['chunk_id']}.json"
+            current_done_path = root / source / "done" / f"{current_chunk['chunk_id']}.json"
+            base_done = json.loads(base_done_path.read_text())
+            current_done = json.loads(current_done_path.read_text())
+            base_parquet = Path(str(base_done.get("parquet", ""))).resolve()
+            current_parquet = Path(str(current_done.get("parquet", ""))).resolve()
+            if not base_parquet.is_file() or not current_parquet.is_file():
+                raise FileNotFoundError(f"missing base/derived parquet for {source}/{current_chunk['chunk_id']}")
+            if not os.path.samefile(base_parquet, current_parquet):
+                raise ValueError(f"{current_parquet}: retained parquet is not hardlinked to {base_parquet}")
+
+        frozen_ids = {str(row["conditioning_id"]) for row in current_frozen_by_source[source]}
+        validation_exclusions = len(frozen_ids & validation_ids)
+        filter_exclusions = len(base_train) - len(expected_current)
+        source_receipts[source] = {
+            "frozen_rows": len(current_frozen_by_source[source]),
+            "base_training_rows": len(base_train),
+            "derived_training_rows": len(current_train),
+            "validation_exclusions": validation_exclusions,
+            "filter_exclusions": filter_exclusions,
+        }
+        summary = source_summaries[source]
+        if int(summary.get("filter_exclusions", -1)) != filter_exclusions:
+            raise ValueError(f"{source}: source summary filter_exclusions does not match derivation")
+        if summary.get("derivation") != source_receipts[source]:
+            raise ValueError(f"{source}: source summary derivation receipt does not match root receipt")
+        if int(base_summaries[source]["frozen_rows"]) != len(current_frozen_by_source[source]):
+            raise ValueError(f"{source}: base frozen row count changed in derivation")
+
+    created_utc = derivation.get("created_utc")
+    if not isinstance(created_utc, str) or not created_utc:
+        raise ValueError("filtered derivation receipt has no creation timestamp")
+    expected_receipt = {
+        "schema_version": FILTERED_DERIVATION_SCHEMA_VERSION,
+        "created_utc": created_utc,
+        "base_root": str(base_root),
+        "output_root": str(root),
+        "base_ready_sha256": sha256_file(base_root / "READY.json"),
+        "base_frozen_manifest_sha256": base_frozen_sha256,
+        "base_config_sha256": sha256_file(base_config_path),
+        "config_sha256": sha256_file(root / "CONFIG.snapshot.json"),
+        "filter": {
+            "axis": "aggregate_frozen_resolution",
+            "comparison": "count < min_resolution_count",
+            "min_resolution_count": threshold,
+        },
+        "frozen_resolution_counts": frozen_resolution_counts,
+        "excluded_resolutions": excluded_resolutions,
+        "excluded_frozen_rows": len(excluded_frozen_keys),
+        "excluded_frozen_keys_sha256": conditioning_keys_sha256(excluded_frozen_keys),
+        "excluded_training_rows": len(excluded_training_keys),
+        "excluded_training_keys_sha256": conditioning_keys_sha256(excluded_training_keys),
+        "base_frozen_rows": int(base_manifest["frozen_rows"]),
+        "base_training_rows": int(base_manifest["training_rows"]),
+        "derived_training_rows": sum(len(rows) for rows in current_train_by_source.values()),
+        "validation_manifest_sha256": sha256_file(root / "validation" / "manifest.jsonl"),
+        "validation_summary_sha256": sha256_file(root / "validation" / "manifest.json"),
+        "heldout64_sha256": sha256_file(root / "validation" / "heldout64.json"),
+        "sources": source_receipts,
+    }
+    if derivation != expected_receipt:
+        raise ValueError("filtered derivation receipt does not exactly match the base, rule, and derived rows")
+
+
 def verify_existing(
     root: Path,
     *,
@@ -573,6 +837,12 @@ def verify_existing(
         raise ValueError(f"frozen manifest sources {source_names} != config sources {configured_names}")
     if int(root_manifest.get("seed", -1)) != int(config["snapshot_seed"]):
         raise ValueError("frozen manifest seed does not match frozen config")
+    derivation = load_filtered_derivation_receipt(root, root_manifest)
+    excluded_resolutions = (
+        set(str(value) for value in derivation["excluded_resolutions"])
+        if derivation is not None
+        else set()
+    )
 
     validation_manifest_path = root / "validation" / "manifest.jsonl"
     heldout_path = root / "validation" / "heldout64.json"
@@ -625,9 +895,19 @@ def verify_existing(
         train_by_id = _indexed_rows(train_path, training)
         if len(frozen) != int(summary["frozen_rows"]) or len(training) != int(summary["training_rows"]):
             raise ValueError(f"{source}: row-count mismatch")
-        expected_training_ids = set(frozen_by_id) - validation_ids
+        validation_ids_in_source = set(frozen_by_id) & validation_ids
+        filtered_ids = {
+            record_id
+            for record_id, row in frozen_by_id.items()
+            if resolution_key(row) in excluded_resolutions
+        } - validation_ids_in_source
+        expected_training_ids = set(frozen_by_id) - validation_ids_in_source - filtered_ids
         if set(train_by_id) != expected_training_ids:
-            raise ValueError(f"{source}: train.jsonl is not exactly frozen.jsonl minus validation ids")
+            if derivation is None:
+                raise ValueError(f"{source}: train.jsonl is not exactly frozen.jsonl minus validation ids")
+            raise ValueError(
+                f"{source}: train.jsonl is not exactly frozen.jsonl minus validation ids and filtered resolutions"
+            )
         if any(train_by_id[record_id] != frozen_by_id[record_id] for record_id in train_by_id):
             raise ValueError(f"{source}: train.jsonl rows differ from their frozen rows")
 
@@ -669,9 +949,11 @@ def verify_existing(
             raise ValueError(f"{source}: worklist does not exactly derive from train.jsonl")
         if summary.get("shape_counts") != distribution(frozen, ("width", "height", "num_frames")):
             raise ValueError(f"{source}: frozen shape counts do not match frozen.jsonl")
-        exclusions = len(frozen) - len(training)
+        exclusions = len(validation_ids_in_source)
         if int(summary["validation_exclusions"]) != exclusions:
             raise ValueError(f"{source}: validation exclusion count mismatch")
+        if derivation is not None and int(summary.get("filter_exclusions", -1)) != len(filtered_ids):
+            raise ValueError(f"{source}: filtered-resolution exclusion count mismatch")
         validation_exclusions[source] = exclusions
         total_frozen += len(frozen)
         total_training += len(training)
@@ -721,6 +1003,8 @@ def verify_existing(
             raise ValueError(f"validation/manifest.json field {name} does not match frozen rows")
 
     _verify_extension_contract(root, root_manifest, config, seen_roots)
+    if derivation is not None:
+        _verify_filtered_derivation_contract(root, root_manifest, config, derivation, seen_roots)
     seen_roots.remove(root)
     if emit_summary:
         print(f"verified {root}: 64 unique validation ids, immutable artifacts, and raw media stats")

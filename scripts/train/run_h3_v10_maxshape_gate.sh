@@ -43,12 +43,12 @@ fi
 
 bucket="${GATE_DATA}/bucket=1760x768-362f"
 sources=(
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_10k_720_mixed_len/data/bucket=1760x768-362f/c00343.parquet
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00936.parquet
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00937.parquet
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00938.parquet
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00939.parquet
-  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00940.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_720_mixed_len/data/bucket=1760x768-362f/c00343.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00936.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00937.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00938.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00939.parquet
+  /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data/bucket=1760x768-362f/c00940.parquet
 )
 for source in "${sources[@]}"; do
   staged="${bucket}/$(basename "${source}")"

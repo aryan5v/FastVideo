@@ -59,11 +59,11 @@ training:
     # Each path is a production-only subtree: the parquet loader recurses, so
     # manifests, claims, logs, and preprocessing scratch stay in sibling dirs.
     data_path:
-      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_50k_720_mixed_len/data
-      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_5s_768p/data
-      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_10k_720_mixed_len/data
-      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_video_nuva_10k_mixed_res_len/data
-      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/h3_t2av_fastgen_vidprom_150k/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_5s_768p/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_mixed_res_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_fastgen_vidprom_150k/data
     preprocessed_data_type: t2va
     # The mixed-shape data lane synchronizes one exact-shape bucket across all
     # DP ranks before each micro-step. This field lands with that implementation.
@@ -116,7 +116,7 @@ training:
     # teacher/critic role with fullgraph + precision emulation. The loader's
     # safety policy deliberately leaves the VSA-H3 student eager until sparse
     # training backward has its own fullgraph parity gate. Dynamic shapes are
-    # mandatory here: this corpus spans 90 exact shape buckets, while static
+    # mandatory here: this filtered corpus spans 87 exact shape buckets, while static
     # regional graphs exhaust Dynamo's per-code-object variant cache.
     enable_torch_compile: true
     torch_compile_kwargs:
@@ -145,7 +145,7 @@ callbacks:
     # Frozen, disjoint 64-row sample covering every source and a spread of
     # native resolutions/lengths. Rows contain caption, ref_video, source,
     # sample_id, width, height, and num_frames.
-    dataset_file: /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/validation/heldout64.json
+    dataset_file: /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/validation/heldout64.json
     every_steps: 100
     run_at_start: true
     sampling_steps: [4]

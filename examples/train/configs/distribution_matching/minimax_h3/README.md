@@ -18,7 +18,7 @@ Slurm launcher is
 
 | File | Purpose |
 |---|---|
-| `dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml` | **Launch candidate.** Data-only FastGen regime over five native-shape T2VA sources, global batch 64 on 64 GPUs with full-world FSDP, regional compile for dense roles, and an eager VSA student. |
+| `dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml` | **Launch candidate.** Data-only FastGen regime over five native-shape T2VA sources after filtering resolutions represented by fewer than 10 frozen videos, global batch 64 on 64 GPUs with full-world FSDP, regional compile for dense roles, and an eager VSA student. |
 | `dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml` | Two-step, 64-GPU critic/student capacity gate over the isolated `1760x768-362f` bucket; not a training lineage. |
 | `dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml` | Historical 32-GPU job-2960 recipe; failed on the `1760x768-362f` critic backward and must not reuse the fsdp64 output namespace. |
 | `dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml` | Previous v8 + per-batch data-forcing experiment over mixed prompt/latent data, batch 128 (accum 4). |
