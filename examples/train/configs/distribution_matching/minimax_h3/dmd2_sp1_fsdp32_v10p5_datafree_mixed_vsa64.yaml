@@ -35,6 +35,8 @@ method:
   min_timestep_ratio: 0.001
   max_timestep_ratio: 0.999
   score_timestep_shift: 2.4
+  score_timestep_warp_max: 0.999
+  score_timestep_continuous: true
   fake_score_loss_space: x0
   cfg_uncond:
     text: zero
