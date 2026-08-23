@@ -302,6 +302,41 @@ FA4, the eager VSA student, and the Triton-64 gradient route. Production
 preflight accepts only a successful receipt bound to the current execution
 commit and gate-config hash.
 
+### 64-GPU rack-2 production receipt
+
+Production job `3452` was accepted at 2026-08-23 10:26:46 UTC on
+`hpc-rack-2-[1-16]`: sixteen four-GPU trays, SP=1, and HSDP `(1,64)`. It runs
+internal branch `h3-dmd-v10-dataonly-mixed` at exact source SHA
+`ad101dc2572961fb2f592265eda361eabc58c573`. The same allocation completed its
+gates and handed off to production at 11:29 UTC. Production W&B run `v7h0damm`
+is under project `wlsaidhi/h3-dmd2-vsa`.
+
+The kernel gate passed all three Triton-backward scale cases, the sm_100a
+reference route, and the odd H3 sm_100a route (`max_abs_diff=0.007812`). The
+grouped-FSDP distributed gate and the 253-test checkpoint/launcher suite also
+passed. The exact `1760x768-362f` max-shape gate completed critic step 1 and
+student step 2 with finite values (`fake_score_loss=0.0`,
+`generator_loss=0.00835`, `grad_norm/critic=0.15158`, and
+`grad_norm/student=0.02062`). Both dense roles reported 52 compiled regions
+and FA4; the VSA student remained eager and its gradient path used Triton-64.
+All 64 GPUs were sampled. The observed external peak was 188,727 of 189,471
+MiB, leaving 744 MiB of sampled headroom. The commit/config-bound receipt is
+`/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/v10_maxshape_64g/audit/job-3452/RESULT.json`.
+
+The full preflight then verified all frozen/parquet/cache/hash contracts for
+60,549 training rows in 87 buckets, the 63,424-row world-64 schedule (991 steps
+and 2,875 repeats), the heldout60 plus four-record DP-padding contract, the
+bound kernel receipt, a fresh output namespace, and 8.31 TB free. Step zero
+published the complete 14-shard bf16 student export at
+`inference/checkpoint-0` and produced 64/64 contiguous, nonempty validation
+outputs using the trained four-forward ladder `[999, 749, 500, 250]`.
+
+The first production critic update was finite at step 1
+(`fake_score_loss=0.06183681265`, `grad_norm/critic=1.2347464561`); critic
+steps 2--4 were finite as well. The first observed production student update
+was finite at step 5 (`generator_loss=0.00364596257`,
+`grad_norm/student=0.07490910590`).
+
 Checkpointing now separates the two products that the modular trainer had
 previously coupled. At every scheduled validation (step zero and then every
 100 steps) it retains a pipeline-loadable bf16 student export under
@@ -317,7 +352,8 @@ The committed one-allocation launcher is submitted as an explicit Bash file,
 with the reviewed execution commit as its only positional argument:
 
 ```bash
-sbatch --export=NIL scripts/train/run_h3_v10_gated.sh <40-character-execution-commit>
+sbatch --partition=hpc-rack-2 --export=NIL \
+  scripts/train/run_h3_v10_gated.sh <40-character-execution-commit>
 ```
 
 The script starts with Slurm requeue disabled, rejects a queued job if the
@@ -347,16 +383,16 @@ which is a conservative hygiene layer around the runtime's safe `latest`
 fallback. The preflight also binds
 the kernel receipt to the final execution commit and requires at least 6 TiB
 free for the immutable bf16 inference lineage plus keep-three resumable states
-and transient rotation write. Rack-3 is the selected production lane. A cold
-Slinky topology can reject a direct sixteen-node request even when the backing
-Kubernetes pool has capacity. Follow
+and transient rotation write. Rack-2 is the selected production lane for this
+lineage; do not warm or submit rack-3. A cold Slinky topology can reject a
+direct sixteen-node request even when the backing Kubernetes pool has
+capacity. Follow
 `/home/vlm-wlsaidhi/ddnet-rl/SLURM_LAUNCH.md`: start enough one-node primer
-jobs (the guide uses 26 demands for a 16-node target), wait until at least 16
-are running, cancel only those exact primer IDs, and immediately race the real
-sixteen-node submit.
-Job 2960 was accepted on the second production submit after primers 2938 and
-2944 warmed rack-3. `PARTITION=hpc-rack-3` remains an explicit operator
-fallback.
+jobs, wait until at least 16 are running, cancel only those exact primer IDs,
+and immediately race the real sixteen-node rack-2 submit. For job `3452`, 16
+of primer jobs `3432`--`3451` were running before those exact jobs were
+canceled and the production request was submitted with
+`--partition=hpc-rack-2`.
 The sbatch keeps `HOME` untouched on Slinky workers: `LUSTRE_HOME` seeds
 dedicated HF/W&B/NETRC paths, while compiler caches use a job-scoped node-local
 root under `/tmp`.
@@ -409,11 +445,11 @@ teacher/critic; its explicit safety policy logs that the VSA-H3 student stays
 eager. This is not an all-three-role compile claim. The earlier fixed-shape,
 8-GPU A/B measured roughly 4.7%/6.6% critic/student step improvement but used
 SDPA rather than the production FA4 route and observed a `-24.7%` first-step
-critic grad-norm difference at `+0.064%` loss. The rack-2 recovery must verify
-FA4 selection, 52 compiled regions per dense role, the VSA eager fallback,
-finite first critic/student updates, and max-shape memory before it is treated
-as healthy; mixed-shape recompiles remain an observed launch metric rather
-than an assumed MFU gain.
+critic grad-norm difference at `+0.064%` loss. Rack-2 job `3452` verified FA4
+selection, 52 compiled regions per dense role, the VSA eager fallback, finite
+max-shape and mixed-data critic/student updates, and max-shape memory.
+Mixed-shape recompiles remain an observed launch metric rather than an assumed
+MFU gain.
 
 ## Verification
 

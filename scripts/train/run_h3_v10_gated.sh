@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --time=120:00:00
-#SBATCH --partition=hpc-rack-3
+#SBATCH --partition=hpc-rack-2
 #SBATCH --no-requeue
 #SBATCH --output=/mnt/lustre/vlm-wlsaidhi/fastvideo/logs/slurm-%x-%j.out
 
