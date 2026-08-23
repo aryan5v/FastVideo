@@ -96,7 +96,7 @@ training:
     # `latest` supports requeues only within this fresh v10 namespace.
     resume_from_checkpoint: latest
     training_state_checkpointing_steps: 100
-    checkpointing_start_step: 500
+    checkpointing_start_step: 100
     checkpoints_total_limit: 4
 
   tracker:
