@@ -387,6 +387,7 @@ def create_seed_trees(tmp_path: Path) -> tuple[object, Path, Path, str, dict]:
     receipt_rows = {
         frozen_row["conditioning_id"]: {
             **frozen_row,
+            "bucket": "480x832-294f",
             "parquet": str(base_parquet),
             "parquet_sha256": parquet_sha256,
         }
