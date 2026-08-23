@@ -9,8 +9,8 @@
 #SBATCH --no-requeue
 #SBATCH --output=/mnt/lustre/vlm-wlsaidhi/fastvideo/logs/slurm-%x-%j.out
 
-# One-allocation V10.5 launch: immutable recipe audit, exact max-shape
-# critic/student capacity gate, then requeueable production.
+# V10.5 launch: immutable recipe audit, an exact max-shape critic/student
+# capacity gate for one topology, then requeueable production.
 
 set -euo pipefail
 
@@ -431,10 +431,9 @@ else
     selected_topology="sp1"
   elif grep -RqsE "CUDA out of memory|OutOfMemoryError|out of memory" \
       "${MAXSHAPE_ROOT}/train_logs/${SLURM_JOB_ID}-node"*; then
-    echo "V10.5 SP1 max-shape OOM confirmed; switching this allocation to SP=4"
-    run_capacity_gate "sp4" "${SP4_MAXSHAPE_CONFIG}" "${SP4_MAXSHAPE_ROOT}" \
-      "${SP4_MAXSHAPE_RECEIPT}" 4 0
-    selected_topology="sp4"
+    echo "V10.5 SP1 max-shape OOM confirmed; this CUDA allocation cannot be reused safely" >&2
+    echo "Relaunch a clean allocation with V10P5_START_TOPOLOGY=sp4" >&2
+    exit 75
   else
     echo "V10.5 SP1 gate failed without an OOM signature; refusing an automatic topology change" >&2
     exit "${sp1_rc}"
