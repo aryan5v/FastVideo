@@ -354,6 +354,7 @@ def _build_forcing_trio(monkeypatch: pytest.MonkeyPatch, *, interval: int) -> DM
     config.method["rollout_carry_slots"] = 1
     config.method["rollout_sample_type"] = "ode"
     config.method["rollout_data_forcing"] = True
+    config.method["allow_mixed_rollout_regimes"] = True
     student = _make_model(monkeypatch, config.training, scale=1.0)
     teacher = _make_model(monkeypatch, config.training, trainable=False, scale=0.5)
     critic = _make_model(monkeypatch, config.training, scale=0.25)
