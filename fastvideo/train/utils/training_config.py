@@ -66,6 +66,9 @@ class CheckpointConfig:
     inference_checkpoint_role: str = "student"
     inference_checkpoint_dtype: str = "bfloat16"
     training_state_checkpointing_steps: int = 0
+    # Opt in to resumable checkpoints published only after DCP state and every
+    # rank's RNG snapshot are complete. False keeps legacy checkpoints usable.
+    require_complete_training_checkpoint: bool = False
     # Applies only to resumable ``checkpoint-<step>`` directories. Inference
     # checkpoints are retained as the run's immutable model lineage.
     checkpoints_total_limit: int = 0

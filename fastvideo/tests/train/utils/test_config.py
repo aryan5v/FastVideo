@@ -78,6 +78,7 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
     assert t.checkpoint.save_inference_checkpoint_on_validation is False
     assert t.checkpoint.inference_checkpoint_role == "student"
     assert t.checkpoint.inference_checkpoint_dtype == "bfloat16"
+    assert t.checkpoint.require_complete_training_checkpoint is False
     assert t.checkpoint.checkpoints_total_limit == 0
 
     assert t.tracker.trackers == []
@@ -136,6 +137,7 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
             "inference_checkpoint_role": "student",
             "inference_checkpoint_dtype": "float16",
             "training_state_checkpointing_steps": 50,
+            "require_complete_training_checkpoint": True,
             "checkpoints_total_limit": 3,
         },
         "tracker": {
@@ -184,6 +186,7 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.checkpoint.save_inference_checkpoint_on_validation is True
     assert t.checkpoint.inference_checkpoint_role == "student"
     assert t.checkpoint.inference_checkpoint_dtype == "float16"
+    assert t.checkpoint.require_complete_training_checkpoint is True
     assert t.checkpoint.checkpoints_total_limit == 3
 
     assert t.tracker.trackers == ["wandb"]
@@ -221,6 +224,13 @@ def test_validation_inference_checkpoint_flag_requires_bool(tmp_path: Path) -> N
     data = _minimal_yaml()
     data["training"] = {"checkpoint": {"save_inference_checkpoint_on_validation": 1}}
     with pytest.raises(ValueError, match="save_inference_checkpoint_on_validation"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_training_checkpoint_completion_flag_requires_bool(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"require_complete_training_checkpoint": 1}}
+    with pytest.raises(ValueError, match="require_complete_training_checkpoint"):
         load_run_config(_write_yaml(tmp_path, data))
 
 

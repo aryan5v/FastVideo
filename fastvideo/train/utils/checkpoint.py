@@ -29,6 +29,8 @@ from fastvideo.logger import init_logger
 logger = init_logger(__name__)
 
 _CHECKPOINT_DIR_RE = re.compile(r"^checkpoint-(\d+)$")
+_TRAINING_CHECKPOINT_COMPLETE_MARKER = ".complete"
+_RANK_RNG_STATE_RE = re.compile(r"^rng_state_rank(\d+)\.pt$")
 
 
 def _is_stateful(obj: Any) -> bool:
@@ -54,7 +56,62 @@ def _parse_step_from_dir(checkpoint_dir: Path) -> int:
     return int(match.group(1))
 
 
-def _find_latest_checkpoint(output_dir: Path) -> Path | None:
+def _saved_checkpoint_world_size(metadata: dict[str, Any]) -> int | None:
+    try:
+        world_size = metadata["config"]["training"]["distributed"]["num_gpus"]
+    except (KeyError, TypeError):
+        return None
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size <= 0:
+        return None
+    return world_size
+
+
+def _is_complete_training_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    require_complete_marker: bool,
+) -> bool:
+    """Return whether ``checkpoint_dir`` is safe to select for resume.
+
+    ``dcp/.metadata`` is the historical completion contract. Strict callers
+    additionally require the marker published after every rank has written its
+    RNG snapshot. Keeping strictness opt-in preserves compatibility with
+    checkpoints created before the stronger marker existed.
+    """
+    dcp_metadata = checkpoint_dir / "dcp" / ".metadata"
+    if not dcp_metadata.is_file():
+        return False
+    if not require_complete_marker:
+        return True
+
+    try:
+        step = _parse_step_from_dir(checkpoint_dir)
+        marker = (checkpoint_dir / _TRAINING_CHECKPOINT_COMPLETE_MARKER).read_text(encoding="utf-8")
+        metadata = json.loads((checkpoint_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    if not isinstance(metadata, dict) or marker != "complete\n" or metadata.get("step") != step:
+        return False
+
+    world_size = _saved_checkpoint_world_size(metadata)
+    if world_size is None:
+        return False
+    expected_rng_names = {f"rng_state_rank{rank}.pt" for rank in range(world_size)}
+    try:
+        actual_rng_paths = list(checkpoint_dir.glob("rng_state_rank*.pt"))
+        actual_rng_names = {path.name for path in actual_rng_paths if _RANK_RNG_STATE_RE.match(path.name)}
+        rng_files_complete = all(path.is_file() and path.stat().st_size > 0 for path in actual_rng_paths)
+    except OSError:
+        return False
+    return (actual_rng_names == expected_rng_names and len(actual_rng_paths) == len(expected_rng_names)
+            and rng_files_complete)
+
+
+def _find_latest_checkpoint(
+    output_dir: Path,
+    *,
+    require_complete_marker: bool = False,
+) -> Path | None:
     if not output_dir.exists():
         return None
 
@@ -64,10 +121,10 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
             continue
         if not _CHECKPOINT_DIR_RE.match(child.name):
             continue
-        # dcp.save writes .metadata last — its presence is the completion
-        # marker. A checkpoint dir from a crashed save (e.g. ENOSPC mid-write)
-        # has dcp/ but no .metadata; resuming from it would fail at boot.
-        if not (child / "dcp" / ".metadata").is_file():
+        if not _is_complete_training_checkpoint(
+            child,
+            require_complete_marker=require_complete_marker,
+        ):
             continue
         try:
             step = _parse_step_from_dir(child)
@@ -81,7 +138,27 @@ def _find_latest_checkpoint(output_dir: Path) -> Path | None:
     return candidates[-1][1]
 
 
-def _resolve_resume_checkpoint(resume_from_checkpoint: str, *, output_dir: str) -> Path | None:
+def _publish_training_checkpoint_complete(checkpoint_dir: Path) -> None:
+    """Atomically publish the marker that makes a training checkpoint visible."""
+    marker = checkpoint_dir / _TRAINING_CHECKPOINT_COMPLETE_MARKER
+    temporary = checkpoint_dir / f"{_TRAINING_CHECKPOINT_COMPLETE_MARKER}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write("complete\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, marker)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _resolve_resume_checkpoint(
+    resume_from_checkpoint: str,
+    *,
+    output_dir: str,
+    require_complete_marker: bool = False,
+) -> Path | None:
     """Resolve a user-provided resume path to a concrete checkpoint dir.
 
     Accepted values:
@@ -94,8 +171,16 @@ def _resolve_resume_checkpoint(resume_from_checkpoint: str, *, output_dir: str) 
 
     if str(resume_from_checkpoint).strip().lower() == "latest":
         out = Path(os.path.expanduser(str(output_dir))).resolve()
-        latest = _find_latest_checkpoint(out)
+        latest = _find_latest_checkpoint(
+            out,
+            require_complete_marker=require_complete_marker,
+        )
         if latest is None:
+            has_checkpoint_dirs = out.is_dir() and any(
+                child.is_dir() and _CHECKPOINT_DIR_RE.match(child.name) for child in out.iterdir())
+            if require_complete_marker and has_checkpoint_dirs:
+                raise ValueError(f"No complete resumable checkpoint found under {out}; "
+                                 "refusing to start from scratch in a non-empty training namespace")
             logger.info(
                 "resume_from_checkpoint='latest' but no "
                 "checkpoints found under %s; starting from "
@@ -115,10 +200,18 @@ def _resolve_resume_checkpoint(resume_from_checkpoint: str, *, output_dir: str) 
     if path.is_dir() and _CHECKPOINT_DIR_RE.match(path.name):
         if not (path / "dcp").is_dir():
             raise FileNotFoundError(f"Missing dcp dir under checkpoint: {path / 'dcp'}")
+        if not _is_complete_training_checkpoint(
+            path,
+            require_complete_marker=require_complete_marker,
+        ):
+            raise ValueError(f"Checkpoint is incomplete under the configured resume policy: {path}")
         return path
 
     # Treat as output_dir -> pick latest.
-    latest = _find_latest_checkpoint(path)
+    latest = _find_latest_checkpoint(
+        path,
+        require_complete_marker=require_complete_marker,
+    )
     if latest is not None:
         return latest
 
@@ -198,6 +291,9 @@ class CheckpointConfig:
     save_inference_on_validation: bool = False
     inference_role: str = "student"
     inference_dtype: str = "bfloat16"
+    # Require the post-RNG completion marker when resolving resumable state.
+    # False preserves checkpoints written before that marker was introduced.
+    require_complete_training_checkpoint: bool = False
 
 
 class CheckpointManager:
@@ -227,6 +323,11 @@ class CheckpointManager:
             raise ValueError("inference_role must be a non-empty DCP key segment when inference saving is enabled")
         if save_inference and str(config.inference_dtype) not in {"bfloat16", "float16", "float32"}:
             raise ValueError("inference_dtype must be bfloat16, float16, or float32")
+        if config.require_complete_training_checkpoint:
+            metadata = {"config": raw_config}
+            if _saved_checkpoint_world_size(metadata) is None:
+                raise ValueError("require_complete_training_checkpoint needs a positive "
+                                 "training.distributed.num_gpus value in the saved raw config")
         self._callbacks = callbacks
         self._raw_config = raw_config
         # Training-state and inference checkpoints have independent policies
@@ -288,6 +389,14 @@ class CheckpointManager:
         dcp_dir = self._dcp_dir(step)
         os.makedirs(dcp_dir, exist_ok=True)
 
+        # A retry may target a directory whose previous DCP save completed but
+        # whose RNG snapshots did not. Remove the publication marker before
+        # overwriting any state so strict readers can never select stale data.
+        if _rank() == 0:
+            with contextlib.suppress(FileNotFoundError):
+                (checkpoint_dir / _TRAINING_CHECKPOINT_COMPLETE_MARKER).unlink()
+        _barrier()
+
         states = self._build_states()
         if _rank() == 0:
             logger.info(
@@ -304,6 +413,10 @@ class CheckpointManager:
         # advance the RNG between when DCP captures it and
         # when the save completes.
         self._save_rng_snapshot(checkpoint_dir)
+        _barrier()
+
+        if _rank() == 0:
+            _publish_training_checkpoint_complete(checkpoint_dir)
         _barrier()
 
         self._last_saved_step = step
@@ -496,6 +609,7 @@ class CheckpointManager:
         resolved = _resolve_resume_checkpoint(
             checkpoint_path,
             output_dir=self.output_dir,
+            require_complete_marker=self.config.require_complete_training_checkpoint,
         )
         if resolved is None:
             return
@@ -538,6 +652,7 @@ class CheckpointManager:
         resolved = _resolve_resume_checkpoint(
             resume_from_checkpoint,
             output_dir=self.output_dir,
+            require_complete_marker=self.config.require_complete_training_checkpoint,
         )
         if resolved is None:
             return None

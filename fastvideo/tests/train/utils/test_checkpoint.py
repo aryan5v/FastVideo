@@ -9,6 +9,7 @@ distributed collectives and CUDA RNG snapshots require a GPU runner.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import pytest
 import torch
 
+import fastvideo.train.utils.checkpoint as checkpoint_module
 import fastvideo.train.utils.inference_checkpoint as inference_checkpoint
 from fastvideo.train.methods.base import TrainingMethod
 from fastvideo.train.utils.checkpoint import (
@@ -23,6 +25,7 @@ from fastvideo.train.utils.checkpoint import (
     CheckpointManager,
     _FullModelState,
     _find_latest_checkpoint,
+    _is_complete_training_checkpoint,
     _is_stateful,
     _parse_step_from_dir,
     _resolve_resume_checkpoint,
@@ -53,6 +56,30 @@ def _make_checkpoint_dir(
         if with_metadata:
             (ckpt_dir / "dcp" / ".metadata").touch()
     return ckpt_dir
+
+
+def _publish_fake_training_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    step: int,
+    world_size: int = 1,
+) -> None:
+    (checkpoint_dir / "metadata.json").write_text(
+        json.dumps({
+            "step": step,
+            "config": {
+                "training": {
+                    "distributed": {
+                        "num_gpus": world_size,
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    for rank in range(world_size):
+        (checkpoint_dir / f"rng_state_rank{rank}.pt").write_bytes(b"rng")
+    (checkpoint_dir / ".complete").write_text("complete\n", encoding="utf-8")
 
 
 def _make_manager(
@@ -187,6 +214,45 @@ def test_find_latest_returns_largest_step(tmp_path: Path) -> None:
     assert latest.name == "checkpoint-200"
 
 
+def test_find_latest_default_preserves_legacy_dcp_completion_contract(tmp_path: Path) -> None:
+    legacy = _make_checkpoint_dir(tmp_path, 10)
+
+    assert not (legacy / ".complete").exists()
+    assert _find_latest_checkpoint(tmp_path) == legacy
+
+
+def test_find_latest_strict_skips_unpublished_newer_checkpoint(tmp_path: Path) -> None:
+    older = _make_checkpoint_dir(tmp_path, 5)
+    _publish_fake_training_checkpoint(older, step=5, world_size=2)
+    newer = _make_checkpoint_dir(tmp_path, 10)
+    _publish_fake_training_checkpoint(newer, step=10, world_size=2)
+    (newer / ".complete").unlink()
+
+    latest = _find_latest_checkpoint(tmp_path, require_complete_marker=True)
+
+    assert latest == older
+
+
+@pytest.mark.parametrize("defect", ["marker", "metadata_step", "missing_rng", "extra_rng"])
+def test_strict_training_checkpoint_requires_complete_publication(
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    checkpoint = _make_checkpoint_dir(tmp_path, 10)
+    _publish_fake_training_checkpoint(checkpoint, step=10, world_size=2)
+    if defect == "marker":
+        (checkpoint / ".complete").write_text("incomplete\n", encoding="utf-8")
+    elif defect == "metadata_step":
+        _publish_fake_training_checkpoint(checkpoint, step=9, world_size=2)
+    elif defect == "missing_rng":
+        (checkpoint / "rng_state_rank1.pt").unlink()
+    else:
+        (checkpoint / "rng_state_rank2.pt").write_bytes(b"stale")
+
+    assert not _is_complete_training_checkpoint(checkpoint, require_complete_marker=True)
+    assert _find_latest_checkpoint(tmp_path, require_complete_marker=True) is None
+
+
 def test_find_latest_skips_dirs_without_dcp_subdir(tmp_path: Path) -> None:
     # checkpoint-10 is "corrupted" — has no dcp/ subdir, must be skipped.
     _make_checkpoint_dir(tmp_path, 10, with_dcp=False)
@@ -233,6 +299,28 @@ def test_resolve_latest_returns_latest_checkpoint(tmp_path: Path) -> None:
     resolved = _resolve_resume_checkpoint("latest", output_dir=str(tmp_path))
     assert resolved is not None
     assert resolved.name == "checkpoint-30"
+
+
+def test_resolve_explicit_strict_checkpoint_rejects_missing_marker(tmp_path: Path) -> None:
+    checkpoint = _make_checkpoint_dir(tmp_path, 42)
+
+    with pytest.raises(ValueError, match="incomplete"):
+        _resolve_resume_checkpoint(
+            str(checkpoint),
+            output_dir=str(tmp_path),
+            require_complete_marker=True,
+        )
+
+
+def test_resolve_latest_strict_refuses_fresh_start_over_incomplete_state(tmp_path: Path) -> None:
+    _make_checkpoint_dir(tmp_path, 42)
+
+    with pytest.raises(ValueError, match="refusing to start from scratch"):
+        _resolve_resume_checkpoint(
+            "latest",
+            output_dir=str(tmp_path),
+            require_complete_marker=True,
+        )
 
 
 def test_resolve_explicit_checkpoint_dir(tmp_path: Path) -> None:
@@ -311,6 +399,79 @@ def test_write_metadata_includes_raw_config(tmp_path: Path) -> None:
     loaded = CheckpointManager.load_metadata(ckpt_dir)
     assert loaded["step"] == 7
     assert loaded["config"] == raw
+
+
+def test_strict_manager_requires_world_size_in_saved_config(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="num_gpus"):
+        CheckpointManager(
+            method=None,
+            dataloader=None,
+            output_dir=str(tmp_path),
+            config=CheckpointConfig(
+                save_steps=1,
+                keep_last=1,
+                require_complete_training_checkpoint=True,
+            ),
+            raw_config={},
+        )
+
+
+def test_save_publishes_training_complete_after_rng_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_config = {"training": {"distributed": {"num_gpus": 1}}}
+    method = SimpleNamespace(checkpoint_state=lambda: {})
+    manager = CheckpointManager(
+        method=method,
+        dataloader=None,
+        output_dir=str(tmp_path),
+        config=CheckpointConfig(
+            save_steps=1,
+            keep_last=0,
+            require_complete_training_checkpoint=True,
+        ),
+        raw_config=raw_config,
+    )
+    checkpoint = tmp_path / "checkpoint-10"
+    checkpoint.mkdir()
+    marker = checkpoint / ".complete"
+    marker.write_text("complete\n", encoding="utf-8")
+    events: list[str] = []
+
+    def fake_dcp_save(states: dict[str, Any], *, checkpoint_id: str) -> None:
+        assert states == {}
+        assert not marker.exists()
+        events.append("dcp")
+        dcp_dir = Path(checkpoint_id)
+        dcp_dir.mkdir(parents=True, exist_ok=True)
+        (dcp_dir / ".metadata").touch()
+
+    def fake_rng_save(checkpoint_dir: Path) -> None:
+        assert not marker.exists()
+        events.append("rng")
+        (checkpoint_dir / "rng_state_rank0.pt").write_bytes(b"rng")
+
+    def fake_barrier() -> None:
+        events.append("barrier")
+
+    publish = checkpoint_module._publish_training_checkpoint_complete
+
+    def record_publish(checkpoint_dir: Path) -> None:
+        assert events[-1] == "barrier"
+        events.append("publish")
+        publish(checkpoint_dir)
+
+    monkeypatch.setattr(checkpoint_module.dcp, "save", fake_dcp_save)
+    monkeypatch.setattr(checkpoint_module, "_barrier", fake_barrier)
+    monkeypatch.setattr(checkpoint_module, "_publish_training_checkpoint_complete", record_publish)
+    monkeypatch.setattr(manager, "_save_rng_snapshot", fake_rng_save)
+
+    manager.save(10)
+
+    assert events == ["barrier", "dcp", "barrier", "rng", "barrier", "publish", "barrier"]
+    assert marker.read_text(encoding="utf-8") == "complete\n"
+    assert _is_complete_training_checkpoint(checkpoint, require_complete_marker=True)
 
 
 def test_load_metadata_raises_on_missing_file(tmp_path: Path) -> None:

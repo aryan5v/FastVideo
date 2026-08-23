@@ -109,6 +109,7 @@ def run_training_from_config(
         save_inference_on_validation=bool(tc.checkpoint.save_inference_checkpoint_on_validation),
         inference_role=str(tc.checkpoint.inference_checkpoint_role or "student"),
         inference_dtype=str(tc.checkpoint.inference_checkpoint_dtype or "bfloat16"),
+        require_complete_training_checkpoint=bool(tc.checkpoint.require_complete_training_checkpoint),
     )
 
     checkpoint_manager = CheckpointManager(

@@ -401,6 +401,12 @@ def _build_training_config(
         raise ValueError("training.checkpoint.inference_checkpoint_dtype must be one of "
                          "['bfloat16', 'float16', 'float32'], got "
                          f"{inference_checkpoint_dtype!r}")
+    require_complete_training_checkpoint = require_bool(
+        ck,
+        "require_complete_training_checkpoint",
+        default=False,
+        where="training.checkpoint.require_complete_training_checkpoint",
+    )
 
     return TrainingConfig(
         distributed=DistributedConfig(
@@ -445,6 +451,7 @@ def _build_training_config(
             inference_checkpoint_role=inference_checkpoint_role or "student",
             inference_checkpoint_dtype=inference_checkpoint_dtype,
             training_state_checkpointing_steps=int(ck.get("training_state_checkpointing_steps", 0) or 0),
+            require_complete_training_checkpoint=require_complete_training_checkpoint,
             checkpoints_total_limit=int(ck.get("checkpoints_total_limit", 0) or 0),
             checkpointing_start_step=int(ck.get("checkpointing_start_step", 0) or 0),
             reset_lr_on_resume=bool(ck.get("reset_lr_on_resume", False)),
