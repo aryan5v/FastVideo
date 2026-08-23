@@ -16,6 +16,8 @@ TOOLCHAIN_ROOT="${TOOLCHAIN_ROOT:-/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/sm
 # binary beside the Lustre-resident build artifacts so the default rebuild is
 # compute-safe; callers may still override this for another cluster.
 UV="${UV:-${KERNEL_ROOT}/tools/uv}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-${KERNEL_ROOT}/uv-cache}"
+export UV_CACHE_DIR
 
 CUDA_VIEW="${TOOLCHAIN_ROOT}/cuda_view"
 HOST_TOOLCHAIN="${TOOLCHAIN_ROOT}/hosttc"
@@ -59,7 +61,7 @@ fi
 git -C "${REPO}" submodule update --init --recursive \
   fastvideo-kernel/include/cutlass fastvideo-kernel/include/tk
 
-mkdir -p "${KERNEL_ROOT}/wheels" "${KERNEL_ROOT}/logs"
+mkdir -p "${KERNEL_ROOT}/wheels" "${KERNEL_ROOT}/logs" "${UV_CACHE_DIR}"
 source_commit="$(git -C "${REPO}" rev-parse HEAD)"
 kernel_tree="$(git -C "${REPO}" rev-parse HEAD:fastvideo-kernel)"
 build_dir="$(mktemp -d "${KERNEL_ROOT}/build.XXXXXX")"

@@ -262,6 +262,7 @@ if [[ "${receipt_commit}" != "${EXPECTED_V10_COMMIT}" ]]; then
   echo "=== building exact V10.5 kernel prefix ==="
   srun --nodes=1 --ntasks=1 -w "$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)" \
     env REPO="${REPO}" VENV="${VENV}" KERNEL_ROOT="${KERNEL_ROOT}" \
+    UV_CACHE_DIR="${KERNEL_ROOT}/uv-cache" \
     UV=/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel/tools/uv \
     bash "${REPO}/scripts/train/rebuild_h3_v10_kernel.sh"
 fi
