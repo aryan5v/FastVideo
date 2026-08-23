@@ -27,8 +27,10 @@ _FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "minimax_h3_dmd
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_nuva_v9_dataforce_vsa64.yaml")
 _V10_EXPERIMENT_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml")
+_V10_MAXSHAPE_CONFIG = (_REPO_ROOT / "examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml")
 _V10_PREPARE_LAUNCHER = _REPO_ROOT / "examples/train/slurm/prepare_h3_dmd2_v10_slinky.sh"
 _H3_SBATCH = _REPO_ROOT / "examples/train/slurm/dmd2_32xgb200.sbatch"
+_V10_MAXSHAPE_RUNNER = _REPO_ROOT / "scripts/train/run_h3_v10_maxshape_gate.sh"
 _V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
 _V10_KERNEL_REBUILD = _REPO_ROOT / "scripts/train/rebuild_h3_v10_kernel.sh"
 _V10_KERNEL_RECEIPT_HELPER = _REPO_ROOT / "scripts/train/h3_v10_kernel_receipt.py"
@@ -777,14 +779,21 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
     assert data["preprocessed_data_type"] == "t2va"
     assert data["native_shape_bucketing"] is True
     assert len(data["data_path"]) == 5
-    assert all(path.startswith("/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1/")
+    assert all(path.startswith("/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2/")
                and path.endswith("/data") for path in data["data_path"])
 
-    assert training["checkpoint"]["output_dir"].endswith("v10_dataonly_mixed_vsa64")
+    checkpoint = training["checkpoint"]
+    assert checkpoint["output_dir"].endswith("v10_dataonly_mixed_vsa64")
     assert training["loop"]["gradient_accumulation_steps"] == 1
-    assert training["checkpoint"]["checkpointing_start_step"] == 100
+    assert checkpoint["save_inference_checkpoint_on_validation"] is True
+    assert checkpoint["inference_checkpoint_role"] == "student"
+    assert checkpoint["inference_checkpoint_dtype"] == "bfloat16"
+    assert checkpoint["training_state_checkpointing_steps"] == 100
+    assert checkpoint["checkpointing_start_step"] == 100
+    assert checkpoint["checkpoints_total_limit"] == 3
     assert training["tracker"]["run_name"] == "dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
-    assert training["model"]["enable_torch_compile"] is False
+    assert training["model"]["enable_torch_compile"] is True
+    assert training["model"]["torch_compile_kwargs"] == {}
     assert training["vsa"] == {"sparsity": 0.9, "tile_size": 64}
     assert config["models"]["student"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
     for role in ("teacher", "critic"):
@@ -792,6 +801,9 @@ def test_h3_dmd2_v10_config_pins_data_only_native_shape_recipe() -> None:
 
     validation = config["callbacks"]["validation"]
     assert validation["dataset_file"].endswith("/validation/heldout64.json")
+    assert validation["every_steps"] == 100
+    assert validation["run_at_start"] is True
+    assert validation["sampling_steps"] == [4]
     assert validation["use_record_dimensions"] is True
     assert validation["max_record_num_frames"] == 345
     assert validation["use_validation_media_conditioning"] is False
@@ -804,7 +816,7 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "/mnt/lustre/vlm-wlsaidhi/fastvideo/FastVideo-v10" in launcher
     assert ('readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/'
             'dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"') in launcher
-    assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"' in launcher
+    assert 'readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"' in launcher
     assert 'readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"' in launcher
     assert "readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345" in launcher
     assert ('readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/'
@@ -823,10 +835,15 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
     assert "actual_data_paths = training[\"data\"][\"data_path\"]" in launcher
     assert 'actual_validation = validation["dataset_file"]' in launcher
     assert "actual_validation_max_record_num_frames" in launcher
+    assert 'validation.get("sampling_steps") != [4]' in launcher
     assert "actual_output = training[\"checkpoint\"][\"output_dir\"]" in launcher
     assert "actual_topology != expected_topology" in launcher
     assert "actual_global_batch_size != global_batch_size" in launcher
     assert "kernel receipt source" in launcher
+    assert 'readonly MAXSHAPE_AUDIT_ROOT=' in launcher
+    assert 'audit_root.glob("job-*/RESULT.json")' in launcher
+    assert "fastvideo-h3-v10-maxshape-gate-v1" in launcher
+    assert "no successful final-commit 64-GPU 1760x768x362 capacity receipt" in launcher
     assert "available_bytes < MIN_OUTPUT_FREE_BYTES" in launcher
     assert 'require_file "${DATA_ROOT}/READY.json"' in launcher
     assert 'require_file "${source_root}/READY.json"' in launcher
@@ -864,6 +881,44 @@ def test_h3_dmd2_v10_prepare_launcher_pins_finalized_data_and_execution_clone() 
         assert f"export {runtime_variable}=" in sbatch
 
 
+def test_h3_dmd2_v10_maxshape_gate_matches_production_capacity_contract() -> None:
+    config = yaml.safe_load(_V10_MAXSHAPE_CONFIG.read_text())
+    training = config["training"]
+    distributed = training["distributed"]
+    checkpoint = training["checkpoint"]
+
+    assert distributed == {
+        "num_gpus": 64,
+        "sp_size": 1,
+        "tp_size": 1,
+        "hsdp_replicate_dim": 1,
+        "hsdp_shard_dim": 64,
+    }
+    assert training["data"]["data_path"].endswith("/v10_maxshape_64g/data")
+    assert training["data"]["native_shape_bucketing"] is True
+    assert training["data"]["train_batch_size"] == 1
+    assert training["loop"] == {"max_train_steps": 2, "gradient_accumulation_steps": 1}
+    assert config["method"]["generator_update_interval"] == 2
+    assert training["model"]["enable_torch_compile"] is True
+    assert training["model"]["torch_compile_kwargs"] == {}
+    assert checkpoint["resume_from_checkpoint"] == "latest"
+    assert checkpoint["save_inference_checkpoint_on_validation"] is False
+    assert checkpoint["training_state_checkpointing_steps"] == 0
+    assert "validation" not in config.get("callbacks", {})
+
+    runner = _V10_MAXSHAPE_RUNNER.read_text()
+    assert '"${SLURM_JOB_NUM_NODES:-0}" != "16"' in runner
+    assert '"${staged}" -ef "${source}"' in runner
+    assert "all_64_gpus_sampled" in runner
+    assert "critic_grad_finite_positive" in runner
+    assert "student_grad_finite_positive" in runner
+    assert "dense_teacher_and_critic_compiled" in runner
+    assert "vsa_grad_used_triton64" in runner
+
+    sbatch = _H3_SBATCH.read_text()
+    assert 'TRAIN_LOG_ROOT="${H3_V10_TRAIN_LOG_ROOT:-${REPO}/examples/train/logs}"' in sbatch
+
+
 def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None:
     launcher = _V10_PREPARE_LAUNCHER.read_text()
     sbatch = _H3_SBATCH.read_text()
@@ -887,6 +942,8 @@ def test_h3_dmd2_v10_kernel_gate_pins_import_order_and_real_gpu_checks() -> None
     assert 'observed_wheel_sha256 != receipt.get("wheel_sha256")' in gate
     assert 'observed_prefix_tree_sha256 != receipt.get("installed_prefix_tree_sha256")' in gate
     assert '"installed_prefix_tree_sha256": installed_prefix_tree_sha256' in rebuild
+    assert 'UV="${UV:-${KERNEL_ROOT}/tools/uv}"' in rebuild
+    assert "/home/vlm-wlsaidhi/.local/bin/uv" not in rebuild
     assert '"__pycache__" not in relative.parts' in receipt_helper
     assert 'path.suffix != ".pyc"' in receipt_helper
     assert "907f2100e" in rebuild and "56d4a6074" in rebuild

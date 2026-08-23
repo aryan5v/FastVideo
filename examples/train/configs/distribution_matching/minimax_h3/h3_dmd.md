@@ -279,6 +279,18 @@ with both Adam states pre-seeded on the final 64-rank commit; a fresh probe with
 `resume_from_checkpoint: null` is insufficient because it omits the other
 optimizer's mature state at the relevant backward peak.
 
+The committed gate recipe is
+`dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml`; run it inside a sixteen-tray
+allocation through `scripts/train/run_h3_v10_maxshape_gate.sh`. Its isolated
+data root contains hardlinks to the six finalized v2 parquets in that exact
+bucket, so the probe cannot create a map-style cache in the frozen production
+roots. The runner exercises critic step 1 and student step 2, samples all 64
+GPUs, and writes `vsa_gate/v10_maxshape_64g/audit/job-<job>/RESULT.json` only
+after checking finite gradients, the two dense 52-region compile receipts,
+FA4, the eager VSA student, and the Triton-64 gradient route. Production
+preflight accepts only a successful receipt bound to the current execution
+commit and gate-config hash.
+
 Checkpointing now separates the two products that the modular trainer had
 previously coupled. At every scheduled validation (step zero and then every
 100 steps) it retains a pipeline-loadable bf16 student export under

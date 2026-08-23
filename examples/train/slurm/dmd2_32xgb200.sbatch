@@ -26,6 +26,9 @@ set -euo pipefail
 REPO="${REPO:-/mnt/FastVideo}"
 VENV="${VENV:-${REPO}/.venv}"
 CONFIG="${CONFIG:-${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp40_vidprom_v6.yaml}"
+# Capacity gates can keep persistent logs beside their isolated outputs. The
+# production/default path remains unchanged when this opt-in is unset.
+TRAIN_LOG_ROOT="${H3_V10_TRAIN_LOG_ROOT:-${REPO}/examples/train/logs}"
 
 # ── topology derived from the allocation ─────────────────────────────────
 NNODES="${SLURM_JOB_NUM_NODES}"
@@ -121,6 +124,7 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
 export NNODES MASTER_ADDR MASTER_PORT
 export NUM_GPUS="${GPUS_PER_NODE}"
+export TRAIN_LOG_ROOT
 
 # V10-only hardware gate. Generic launches are unchanged when the opt-in is
 # unset. The new kernel prefix must precede the FA4 overlay because that
@@ -158,7 +162,7 @@ if [ "${BOOT_TIMEOUT_MIN}" -gt 0 ]; then
     # Either sentinel proves the boot is alive: the lustre load path logs
     # "Loading weights took"; the warm /dev/shm cache path skips it, so also
     # accept visible training progress (job 2373 was killed at step 2).
-    if ! grep -qsE "Loading weights took|Steps: " "${REPO}/examples/train/logs/${SLURM_JOB_ID}-node0"/*.log; then
+    if ! grep -qsE "Loading weights took|Steps: " "${TRAIN_LOG_ROOT}/${SLURM_JOB_ID}-node0"/*.log; then
       echo "BOOT WATCHDOG: no weight loading after ${BOOT_TIMEOUT_MIN} min — aborting job ${SLURM_JOB_ID}"
       scancel "${SLURM_JOB_ID}"
     fi
@@ -207,7 +211,7 @@ srun --kill-on-bad-exit=1 --ntasks-per-node=1 bash -c "
     export TORCH_LOGS="recompiles,graph_breaks"
   fi
   # One log dir per node — parallel tee writers on one NFS file garble it.
-  export LOG_DIR=examples/train/logs/\${SLURM_JOB_ID}-node\${SLURM_NODEID}
+  export LOG_DIR='${TRAIN_LOG_ROOT}'/\${SLURM_JOB_ID}-node\${SLURM_NODEID}
   source '${VENV}/bin/activate'
   cd '${REPO}'
   bash examples/train/run.sh '${CONFIG}' \

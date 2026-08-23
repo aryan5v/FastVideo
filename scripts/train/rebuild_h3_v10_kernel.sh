@@ -12,7 +12,10 @@ VENV="${VENV:-${REPO}/.venv}"
 KERNEL_ROOT="${KERNEL_ROOT:-/mnt/lustre/vlm-wlsaidhi/fastvideo/v10_kernel}"
 KERNEL_PREFIX="${KERNEL_PREFIX:-${KERNEL_ROOT}/prefix}"
 TOOLCHAIN_ROOT="${TOOLCHAIN_ROOT:-/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/sm100a_fix}"
-UV="${UV:-/home/vlm-wlsaidhi/.local/bin/uv}"
+# Slinky workers do not mount the login-node /home. Keep the standalone uv
+# binary beside the Lustre-resident build artifacts so the default rebuild is
+# compute-safe; callers may still override this for another cluster.
+UV="${UV:-${KERNEL_ROOT}/tools/uv}"
 
 CUDA_VIEW="${TOOLCHAIN_ROOT}/cuda_view"
 HOST_TOOLCHAIN="${TOOLCHAIN_ROOT}/hosttc"

@@ -11,7 +11,9 @@ VENV="${VENV:-${REPO}/.venv}"
 # environment overrides: preflight must inspect exactly what the launched YAML
 # will consume and write.
 readonly CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64.yaml"
-readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v1"
+readonly MAXSHAPE_CONFIG="${REPO}/examples/train/configs/distribution_matching/minimax_h3/dmd2_sp1_fsdp64_v10_maxshape_gate_vsa64.yaml"
+readonly MAXSHAPE_AUDIT_ROOT="/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/v10_maxshape_64g/audit"
+readonly DATA_ROOT="/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2"
 readonly VALIDATION_MANIFEST="${DATA_ROOT}/validation/heldout64.json"
 readonly VALIDATION_MAX_RECORD_NUM_FRAMES=345
 readonly OUTPUT_DIR="/mnt/lustre/vlm-wlsaidhi/fastvideo/outputs/minimax_h3_dmd2_sp1_fsdp64_v10_dataonly_mixed_vsa64"
@@ -57,6 +59,7 @@ require_file() {
 }
 
 require_file "${CONFIG}"
+require_file "${MAXSHAPE_CONFIG}"
 require_file "${VENV}/bin/python"
 require_file "${REPO}/examples/train/slurm/dmd2_32xgb200.sbatch"
 require_file "${REPO}/scripts/train/gate_h3_v10_kernel.sh"
@@ -142,6 +145,8 @@ if actual_checkpoint != expected_checkpoint:
 if int(validation.get("every_steps", 0)) != 100 or validation.get("run_at_start") is not True:
     raise SystemExit("v10 validation must run at step zero and every 100 steps so each event receives an "
                      "unlimited-retention inference checkpoint")
+if validation.get("sampling_steps") != [4]:
+    raise SystemExit(f"v10 validation must use the exact four-forward schedule; got {validation.get('sampling_steps')!r}")
 if num_nodes * gpus_per_node != world_size:
     raise SystemExit(f"preflight allocation {num_nodes}x{gpus_per_node} != world size {world_size}")
 expected_topology = {
@@ -298,6 +303,64 @@ if receipt.get("kernel_tree") != kernel_tree:
     raise SystemExit("NOT READY: kernel receipt tree "
                      f"{receipt.get('kernel_tree')} != execution tree {kernel_tree}")
 print(f"READY: kernel receipt is bound to execution HEAD {execution_commit}")
+PY
+  then
+    failures=$((failures + 1))
+  fi
+fi
+
+# Production is allowed only after the final execution commit has completed
+# the exact 64-rank, largest-shape critic/student capacity gate. Receipts from
+# older commits or a modified gate YAML are deliberately ignored.
+if [[ -x "${VENV}/bin/python" && -f "${MAXSHAPE_CONFIG}" ]]; then
+  if ! "${VENV}/bin/python" - "${MAXSHAPE_AUDIT_ROOT}" "${MAXSHAPE_CONFIG}" "${REPO}" <<'PY'
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+audit_root = pathlib.Path(sys.argv[1])
+config = pathlib.Path(sys.argv[2])
+repo = pathlib.Path(sys.argv[3])
+execution_commit = subprocess.check_output(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+config_sha256 = hashlib.sha256(config.read_bytes()).hexdigest()
+matches = []
+for result_path in sorted(audit_root.glob("job-*/RESULT.json")):
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    checks = result.get("checks", {})
+    if (
+        result.get("schema_version") == "fastvideo-h3-v10-maxshape-gate-v1"
+        and result.get("success") is True
+        and checks
+        and all(value is True for value in checks.values())
+        and result.get("execution_commit") == execution_commit
+        and result.get("config") == str(config)
+        and result.get("config_sha256") == config_sha256
+        and result.get("shape") == {
+            "width": 1760,
+            "height": 768,
+            "num_frames": 362,
+            "video_latent_shape": [24, 107, 48, 110],
+        }
+        and result.get("steps") == {"critic": 1, "student": 2}
+    ):
+        matches.append((result_path, result))
+if not matches:
+    raise SystemExit(
+        "NOT READY: no successful final-commit 64-GPU 1760x768x362 capacity receipt under "
+        f"{audit_root} for {execution_commit}"
+    )
+path, result = matches[-1]
+observed = result.get("observed_gpu_memory", {})
+print(
+    f"READY: max-shape capacity gate {path} passed on job {result.get('job_id')} with "
+    f"observed external peak {observed.get('max_used_mib')} MiB"
+)
 PY
   then
     failures=$((failures + 1))
