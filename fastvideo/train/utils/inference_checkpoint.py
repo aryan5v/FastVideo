@@ -35,9 +35,7 @@ from torch.distributed.checkpoint import FileSystemReader
 
 DEFAULT_MAX_SHARD_SIZE_BYTES = 5 * 1024**3
 _FORMAT_VERSION = 1
-_ALLOWED_NATIVE_EXTRA_KEYS = (
-    re.compile(r"(?:^|\.)attn\.to_gate_compress\.weight$"),
-)
+_ALLOWED_NATIVE_EXTRA_KEYS = (re.compile(r"(?:^|\.)attn\.to_gate_compress\.weight$"), )
 
 
 class InferenceCheckpointExportError(RuntimeError):
@@ -183,11 +181,10 @@ def validate_complete_inference_checkpoint(path: Path, *, step: int) -> Path | N
     index_metadata = index.get("metadata")
     index_total_size = index_metadata.get("total_size") if isinstance(index_metadata, dict) else None
     if (not isinstance(logical_shard_sizes, list) or len(logical_shard_sizes) != len(expected_shards)
-            or any(not isinstance(size, int) or size < 0 for size in logical_shard_sizes)
-            or not isinstance(max_shard_size, int) or max_shard_size <= 0
-            or any(size > max_shard_size for size in logical_shard_sizes)
-            or not isinstance(total_size, int) or total_size != sum(logical_shard_sizes)
-            or index_total_size != total_size):
+            or any(not isinstance(size, int) or size < 0
+                   for size in logical_shard_sizes) or not isinstance(max_shard_size, int) or max_shard_size <= 0
+            or any(size > max_shard_size for size in logical_shard_sizes) or not isinstance(total_size, int)
+            or total_size != sum(logical_shard_sizes) or index_total_size != total_size):
         raise InferenceCheckpointExportError(
             f"Inference checkpoint logical shard sizes are inconsistent: {metadata_path}")
     recorded_shard_sizes = metadata.get("shard_file_sizes")
@@ -246,7 +243,7 @@ def _component_tensor_shapes(module_dir: Path) -> dict[str, tuple[int, ...]]:
     for path in files:
         try:
             with safe_open(str(path), framework="pt", device="cpu") as handle:
-                for key in handle.keys():
+                for key in handle:
                     if key in shapes:
                         raise InferenceCheckpointExportError(f"Duplicate base transformer tensor key {key!r}")
                     shapes[key] = tuple(int(dim) for dim in handle.get_slice(key).get_shape())

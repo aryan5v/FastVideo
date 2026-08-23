@@ -404,7 +404,10 @@ class CheckpointManager:
                 export_error = f"{type(error).__name__}: {error}"
             status_tmp = export_status_path.with_suffix(".tmp")
             status_tmp.write_text(
-                json.dumps({"complete": export_error is None, "error": export_error}) + "\n",
+                json.dumps({
+                    "complete": export_error is None,
+                    "error": export_error
+                }) + "\n",
                 encoding="utf-8",
             )
             os.replace(status_tmp, export_status_path)
