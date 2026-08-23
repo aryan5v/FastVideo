@@ -188,6 +188,7 @@ if [ "${GATE_TEST}" = "1" ]; then
       fastvideo/tests/train/methods/test_minimax_h3_dmd2.py \
       fastvideo/tests/attention/test_vsa_h3_metadata.py \
       fastvideo/tests/attention/test_flash_attn_h3_packed_varlen.py \
+      fastvideo/tests/dataset/test_parquet_dataset_map_style.py \
       fastvideo/tests/dataset/test_exact_shape_bucket_sampler.py \
       fastvideo/tests/train/callbacks/test_latent_vis_shape_context.py \
       fastvideo/tests/train/callbacks/test_validation.py \
