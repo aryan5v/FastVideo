@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--text-tokens", type=int, default=40)
     parser.add_argument("--audio-seconds", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=2)
     return parser.parse_args()
 
 
@@ -119,28 +121,45 @@ def _rel_l2(a, b) -> float:
     return float(mx.sqrt(mx.sum((a - b) ** 2)) / mx.sqrt(mx.sum(b**2)))
 
 
-def _denoise(dit: MLXMiniMaxH3DiT, layout, video_rows, audio_rows, text_rows, *, with_grad: bool = False):
-    """4-step ladder denoise (ascending t, data-ward). Returns final x0 rows."""
+def _prepare_cache(dit: MLXMiniMaxH3DiT):
+    """The FastH3 runtime: precompute all AdaLN tables for the ladder, free the
+    ~13B of AdaLN projection weights, and serve steps from the cache."""
     import mlx.core as mx
+
+    from fastvideo.mlx_runtime.minimax_h3 import build_row_timesteps
 
     video_t_list = _ladder_timesteps(MINIMAX_H3_VIDEO_SHIFT)
     audio_t_list = _ladder_timesteps(MINIMAX_H3_AUDIO_SHIFT)
+    union = np.unique(np.concatenate([video_t_list, audio_t_list, [1.0]]))
+    cache = dit.precompute_adaln(union, drop_weights=True)
+    mx.eval()
+    return cache, video_t_list, audio_t_list
+
+
+def _denoise(dit: MLXMiniMaxH3DiT, layout, video_rows, audio_rows, text_rows,
+             cache, video_t_list, audio_t_list):
+    """4-step ladder denoise served from the AdaLN cache (data-ward). Final x0 rows."""
+    import mlx.core as mx
+
+    from fastvideo.mlx_runtime.minimax_h3 import build_row_timesteps
+
     g = mx.random.key(0)
     x_v = mx.random.normal(video_rows.shape, key=g)
     x_a = mx.random.normal(audio_rows.shape, key=g)
-    ctx = mx.no_grad() if not with_grad else mx.nullcontext()
-    with ctx:
-        for i, (t_v, t_a) in enumerate(zip(video_t_list, audio_t_list)):
-            v_vo, v_ao = _forward(dit, layout, x_v, x_a, text_rows, float(t_v), float(t_a))
-            x0_v = x_v + (1.0 - t_v) * v_vo
-            x0_a = x_a + (1.0 - t_a) * v_ao
-            if i < len(video_t_list) - 1:
-                t_vn = video_t_list[i + 1]
-                t_an = audio_t_list[i + 1]
-                n_v = mx.random.normal(x_v.shape, key=g)
-                n_a = mx.random.normal(x_a.shape, key=g)
-                x_v = t_vn * x0_v + (1.0 - t_vn) * n_v
-                x_a = t_an * x0_a + (1.0 - t_an) * n_a
+    for i, (t_v, t_a) in enumerate(zip(video_t_list, audio_t_list)):
+        unique, inverse = build_row_timesteps(layout, float(t_v), float(t_a), 1.0, 1.0)
+        v_vo, v_ao = dit.forward_with_cache(
+            x_v, x_a, text_rows, layout=layout,
+            step_timesteps=unique, row_timestep_inverse=inverse)
+        x0_v = x_v + (1.0 - t_v) * v_vo
+        x0_a = x_a + (1.0 - t_a) * v_ao
+        if i < len(video_t_list) - 1:
+            t_vn = video_t_list[i + 1]
+            t_an = audio_t_list[i + 1]
+            n_v = mx.random.normal(x_v.shape, key=g)
+            n_a = mx.random.normal(x_a.shape, key=g)
+            x_v = t_vn * x0_v + (1.0 - t_vn) * n_v
+            x_a = t_an * x0_a + (1.0 - t_an) * n_a
     mx.eval(x0_v, x0_a)
     return x0_v, x0_a
 
@@ -161,6 +180,8 @@ def main() -> None:
     mid_t_a = float(_ladder_timesteps(MINIMAX_H3_AUDIO_SHIFT)[2])
 
     report: dict[str, dict] = {}
+    warmups = getattr(args, "warmups", 1)
+    repeats = getattr(args, "repeats", 2)
     for fmt in formats:
         spec = None if fmt == "bf16" else MLXQuantizationSpec.from_name(fmt)
         if spec is not None:
@@ -174,9 +195,8 @@ def main() -> None:
         )
         load_s = time.perf_counter() - t0
         mx.eval()
-        active_gb = float(mx.get_active_memory()) / 1e9
 
-        # reconstruction vs bf16 at the mid ladder point
+        # reconstruction vs bf16 at the mid ladder point (faithful path, one shot)
         out_v, out_a = _forward(dit, layout, video_rows, audio_rows, text_rows, mid_t_v, mid_t_a)
         mx.eval(out_v, out_a)
         if fmt == "bf16":
@@ -184,29 +204,35 @@ def main() -> None:
         assert reference is not None
         rel_err = (_rel_l2(out_v, reference[0]) + _rel_l2(out_a, reference[1])) / 2.0
 
-        # 4-step ladder runtime (2 warm + 3 measured)
-        for _ in range(2):
-            _denoise(dit, layout, video_rows, audio_rows, text_rows)
+        # FastH3 runtime: AdaLN cache (drops ~40% of params) — the shipped path.
+        cache, video_t_list, audio_t_list = _prepare_cache(dit)
+        active_gb = float(mx.get_active_memory()) / 1e9
+
+        # 4-step ladder runtime through the cache (fewer warms: disk-loaded, CPU-side)
+        for _ in range(warmups):
+            _denoise(dit, layout, video_rows, audio_rows, text_rows, cache, video_t_list, audio_t_list)
         samples = []
-        for _ in range(3):
+        for _ in range(repeats):
             t0 = time.perf_counter()
-            _denoise(dit, layout, video_rows, audio_rows, text_rows)
+            _denoise(dit, layout, video_rows, audio_rows, text_rows, cache, video_t_list, audio_t_list)
             samples.append((time.perf_counter() - t0) / 4.0)
         per_step_ms = float(np.median(samples)) * 1000.0
 
         report[fmt] = {
             "load_s": round(load_s, 1),
-            "active_gb": round(active_gb, 2),
+            "resident_gb_after_adaln_cache": round(active_gb, 2),
             "bits_per_param": BITS_PER_PARAM[fmt],
+            "adaln_params_freed": "yes",
             "rel_l2_vs_bf16": float(rel_err),
-            "per_step_ms": round(per_step_ms, 2),
+            "per_step_ms_cached": round(per_step_ms, 2),
         }
         print(json.dumps(report[fmt], indent=2), flush=True)
 
         if args.latents_out and fmt != "bf16":
             out_dir = Path(args.latents_out)
             out_dir.mkdir(parents=True, exist_ok=True)
-            x0_v, x0_a = _denoise(dit, layout, video_rows, audio_rows, text_rows)
+            x0_v, x0_a = _denoise(dit, layout, video_rows, audio_rows, text_rows,
+                                cache, video_t_list, audio_t_list)
             np.savez(
                 out_dir / f"latents_{fmt}.npz",
                 video_rows=np.asarray(x0_v),
