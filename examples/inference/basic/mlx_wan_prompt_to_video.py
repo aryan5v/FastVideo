@@ -621,17 +621,24 @@ def main() -> None:
 
     config_path = model_root / "transformer/config.json"
     checkpoint_path = model_root / "transformer/diffusion_pytorch_model.safetensors"
-    config = json.loads(config_path.read_text())
-    # A pre-quantized MLX DiT can be paired with a lightweight asset root for
-    # UMT5/TAEHV.  In that case the model root is *not* the architecture
-    # authority: use the checkpoint's embedded transformer config for the
-    # sampler guard and latent geometry.
+    # With --mlx-checkpoint the embedded transformer config in mlx_dit.json is
+    # the authority; transformer/config.json may be absent from a QAD asset
+    # root (FastMetal repos ship only the quantized DiT, not the fp16 one).
+    config = None
+    if config_path.is_file():
+        config = json.loads(config_path.read_text())
     dit_config = config
     if args.mlx_checkpoint is not None:
         mlx_config_path = Path(args.mlx_checkpoint) / "mlx_dit.json"
         if mlx_config_path.is_file():
             mlx_checkpoint_config = json.loads(mlx_config_path.read_text())
             dit_config = mlx_checkpoint_config.get("config", mlx_checkpoint_config)
+    if dit_config is None:
+        raise SystemExit(
+            "No transformer config found: provide --mlx-checkpoint with mlx_dit.json "
+            "(a pre-quantized FastMetal checkpoint) or point --model-root at a "
+            "full Diffusers model directory with transformer/config.json."
+        )
     if int(dit_config.get("in_channels", 0)) == 48 and int(dit_config.get("out_channels", 0)) == 48:
         raise SystemExit(
             "Wan2.2-TI2V-5B uses 48-channel, per-token timestep conditioning. "
