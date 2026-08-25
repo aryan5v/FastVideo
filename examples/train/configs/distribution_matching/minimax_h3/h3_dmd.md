@@ -39,6 +39,24 @@ over latent-bearing data only. The method rejects accidental hybrid routing.
 `_v7_vsa90` is the pre-parity 256-tile recipe, and `_v6` is the dense-student
 recipe.
 
+### V12 dense-FA4 ablation (2026-08-25)
+
+`dmd2_sp4_fsdp32_v12_datafree_mixed_dense_fa4.yaml` starts a fresh lineage
+from the base MiniMax-H3 checkpoint. It preserves V10.5's data-free carried
+rollout, native-shape prompt roots, SP=4/32-GPU topology, global batch 64,
+LR `2e-6`, checkpoint policy, and four-step validation. The intended
+ablation is the student's attention backend: all three roles request
+`FLASH_ATTN`, `FASTVIDEO_FA4=1` selects dense FA4, and VSA sparsity is
+explicitly zero for training and validation telemetry.
+
+Two comparison qualifications are intentional. V12 uses the post-V10.5
+FastGen correctness alignment (continuous FP64 shifted score times and the
+direct-x0/FP64 method fixes), so historical job 3544 versus V12 is not a
+strict one-variable quality comparison. Regional compile also remains
+enabled: job 3544's VSA student was skipped as non-traceable, while the V12
+FA4 student is compile-eligible. That induced compile-coverage change belongs
+in runtime comparisons; it does not change the requested quality ablation.
+
 ### Gold-standard refresh (2026-08-21)
 
 The golden checkout is `/home/vlm-wlsaidhi/fastgen_23/fastgen`, branch
