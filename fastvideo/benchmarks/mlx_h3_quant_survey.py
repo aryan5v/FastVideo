@@ -57,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-root", required=True,
                         help="local snapshot of FastVideo-Minimax-FastH3-Preview-v0.2 (diffusers layout)")
+    parser.add_argument("--mlx-checkpoints", default="",
+                        help="load pre-converted MLX checkpoints from <dir>/<format>/ instead of re-reading "
+                             "the diffusers files (fast; produced by scripts/fasth3/convert_h3_preview.py)")
     parser.add_argument("--formats", default=" ".join(FORMATS), help="space-separated subset of " + " ".join(FORMATS))
     parser.add_argument("--latents-out", default="", help="dump denoised latents per format here")
     parser.add_argument("--height", type=int, default=480)
@@ -188,11 +191,16 @@ def main() -> None:
             ensure_quantization_supported(spec)
         print(f"\n=== loading {fmt} ===", flush=True)
         t0 = time.perf_counter()
-        dit = mlx_h3_dit_from_diffusers_safetensors(
-            Path(args.model_root) / "transformer",
-            quantization=spec,
-            dtype="fp16",
-        )
+        if args.mlx_checkpoints:
+            from fastvideo.mlx_runtime.minimax_h3 import load_mlx_h3_checkpoint
+
+            dit = load_mlx_h3_checkpoint(Path(args.mlx_checkpoints) / fmt)
+        else:
+            dit = mlx_h3_dit_from_diffusers_safetensors(
+                Path(args.model_root) / "transformer",
+                quantization=spec,
+                dtype="fp16",
+            )
         load_s = time.perf_counter() - t0
         mx.eval()
 
