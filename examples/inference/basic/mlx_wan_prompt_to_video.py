@@ -3,6 +3,11 @@
 This is the supported source-tree entrypoint for the FastWan-QAD-INT8-1.3B
 Apple release:
 
+FastMetal-QAD Hugging Face repos ship ``mlx_dit.json`` + ``mlx_dit.safetensors``,
+not a Diffusers ``transformer/`` tree. Do not copy ``transformer/config.json``
+from Wan2.1 or other checkpoints; point ``--mlx-checkpoint`` at the FastMetal
+directory and the example reads the DiT config from ``mlx_dit.json``.
+
 - Hugging Face/torch encodes the prompt with UMT5 (bf16 by default: fp32
   exponent range without fp16 overflow risk, at fp16 memory cost).
 - MLX runs the FastWan DiT denoising loop (INT8 by default, compiled with
@@ -635,9 +640,11 @@ def main() -> None:
             dit_config = mlx_checkpoint_config.get("config", mlx_checkpoint_config)
     if dit_config is None:
         raise SystemExit(
-            "No transformer config found: provide --mlx-checkpoint with mlx_dit.json "
-            "(a pre-quantized FastMetal checkpoint) or point --model-root at a "
-            "full Diffusers model directory with transformer/config.json."
+            "FastMetal-QAD checkpoints intentionally omit transformer/ — the DiT "
+            "config lives in mlx_dit.json. Pass --model-root / --mlx-checkpoint at "
+            "the downloaded FastVideo/FastMetal-1.3B-QAD directory, or point "
+            "--model-root at a full Diffusers model directory that includes "
+            "transformer/config.json."
         )
     if int(dit_config.get("in_channels", 0)) == 48 and int(dit_config.get("out_channels", 0)) == 48:
         raise SystemExit(
