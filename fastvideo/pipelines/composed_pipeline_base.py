@@ -23,6 +23,7 @@ from fastvideo.fastvideo_args import FastVideoArgs, TrainingArgs
 from fastvideo.hooks.activation_trace import attach_activation_trace, detach_activation_trace
 from fastvideo.logger import init_logger
 from fastvideo.profiler import get_or_create_profiler
+from fastvideo.optimization import optimization_profile
 from fastvideo.models.loader.component_loader import PipelineComponentLoader
 from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 from fastvideo.pipelines.stages import PipelineStage
@@ -85,6 +86,7 @@ class ComposedPipelineBase(ABC):
         self._stages: list[PipelineStage] = []
         self._stage_name_mapping: dict[str, PipelineStage] = {}
         self._trace_mgr = None
+        self._optimization_profile_calls = 0
 
         if required_config_modules is not None:
             self._required_config_modules = required_config_modules
@@ -536,11 +538,16 @@ class ComposedPipelineBase(ABC):
         if not self.post_init_called:
             self.post_init()
 
-        # Execute each stage
+        # Execute each stage. Optimization profiling is requested by the
+        # parent launcher but collected here because CUDA work lives in this
+        # worker process.
         logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
-        # logger.info("Batch: %s", batch)
-        for stage in self.stages:
-            batch = stage(batch, fastvideo_args)
+        call_index = self._optimization_profile_calls
+        self._optimization_profile_calls += 1
+        with optimization_profile(call_index):
+            # logger.info("Batch: %s", batch)
+            for stage in self.stages:
+                batch = stage(batch, fastvideo_args)
 
         # Return the output
         return batch

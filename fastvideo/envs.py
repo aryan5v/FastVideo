@@ -41,6 +41,11 @@ if TYPE_CHECKING:
     FASTVIDEO_TORCH_PROFILER_WITH_STACK: bool = False
     FASTVIDEO_TORCH_PROFILER_WITH_FLOPS: bool = False
     FASTVIDEO_TORCH_PROFILE_REGIONS: str = ""
+    FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT: str = ""
+    FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS: int = 0
+    FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID: str = "unknown-workload"
+    FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID: str = "unknown-model"
+    FASTVIDEO_OPTIMIZATION_PROFILE_TASK: str = "video_generation"
     FASTVIDEO_TRACE_ACTIVATIONS: bool = False
     FASTVIDEO_TRACE_LAYERS: str = ""
     FASTVIDEO_TRACE_STATS: str = "abs_mean,sum"
@@ -315,6 +320,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Defaults to 2 if not set.
     "FASTVIDEO_TORCH_PROFILE_REGIONS":
     lambda: os.getenv("FASTVIDEO_TORCH_PROFILE_REGIONS", ""),
+
+    # Metadata-only optimization discovery profile written inside the GPU
+    # worker. The launcher selects one post-warmup pipeline call.
+    "FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_OUTPUT", ""),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS":
+    lambda: int(os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_SKIP_RUNS", "0")),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_WORKLOAD_ID", "unknown-workload"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_MODEL_ID", "unknown-model"),
+    "FASTVIDEO_OPTIMIZATION_PROFILE_TASK":
+    lambda: os.getenv("FASTVIDEO_OPTIMIZATION_PROFILE_TASK", "video_generation"),
 
     # Enable activation trace hooks if set.
     "FASTVIDEO_TRACE_ACTIVATIONS":
