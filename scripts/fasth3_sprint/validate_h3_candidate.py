@@ -45,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transformer", type=Path, required=True)
     parser.add_argument("--expected-source-kind", choices=("dense", "vsa"), required=True)
     parser.add_argument("--expected-layers", type=int, default=20)
-    parser.add_argument("--min-parameters", type=int, default=14_000_000_000)
-    parser.add_argument("--max-parameters", type=int, default=15_000_000_000)
+    parser.add_argument("--min-parameters", type=int, default=13_700_000_000)
+    parser.add_argument("--max-parameters", type=int, default=13_900_000_000)
     return parser.parse_args()
 
 

@@ -17,7 +17,7 @@ targets:
    primary sparse CUDA release. Treat dense FP4 attention as a separate stretch
    path.
 
-The primary deliverable is a roughly 14.5B-parameter, two-call T2VA student that
+The primary deliverable is a 13.8B-parameter (14B release tier), two-call T2VA student that
 preserves synchronized video and stereo audio. The release must include quality,
 latency, memory, and exact-format evidence. A smaller file without a measured
 generation improvement does not complete the mission.
@@ -192,14 +192,15 @@ The short sprint uses depth pruning and retains all tensor widths. Width pruning
 would require reshaping nearly every projection and needs a longer recovery
 run.
 
-The local parameter inventory produced these estimates. Verify them against the
-downloaded checkpoint before publishing them:
+The downloaded Dense V1 checkpoint index was inventoried tensor by tensor on
+2026-08-29. These are exact transformer parameter counts; they replace the
+pre-download estimates:
 
 | Candidate | Main blocks | Estimated parameters | Relative DiT work per call |
 |---|---:|---:|---:|
-| Teacher | 50 | 35,049,751,296 | 1.00 |
-| Primary student | 20 | 14,526,541,056 | about 0.40 |
-| Quality fallback | 24 | 17,262,969,088 | about 0.48 |
+| Teacher | 50 | 33,122,992,896 | 1.00 |
+| Primary student | 20 | 13,755,837,696 | about 0.40 |
+| Quality fallback | 24 | 16,338,125,056 | about 0.48 |
 
 The primary student keeps:
 
