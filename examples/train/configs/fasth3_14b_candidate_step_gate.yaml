@@ -1,0 +1,75 @@
+# FastH3 20-block finite optimizer/checkpoint gate. The SLURM launcher
+# overrides the candidate root, exact attention backend, run name, and output.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/checkpoints/h18-candidates/dense-activation
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+
+method:
+  _target_: fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+    pin_cpu_memory: true
+
+  data:
+    data_path: /mnt/nfs/vlm-aryan/fasth3-33b-20260806/data/h3_corpus
+    preprocessed_data_type: t2va
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 20260829
+    num_latent_t: 37
+    num_height: 512
+    num_width: 896
+    # The released corpus carries 200 audio latents: 120 / 24 fps * 40 Hz.
+    num_frames: 120
+
+  optimizer:
+    learning_rate: 1.0e-5
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 1
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/h18-step-gates/dense-activation
+    training_state_checkpointing_steps: 1
+    checkpoints_total_limit: 2
+    resume_from_checkpoint: ""
+
+  tracker:
+    trackers: [wandb]
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: h18-step-gate-dense-activation
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+
+  vsa:
+    sparsity: 0.0
+    tile_size: 64
+    cache_tile_buf: false
+
+  dit_precision: bf16
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+
+pipeline: {}
+

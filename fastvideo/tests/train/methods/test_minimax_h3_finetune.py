@@ -333,6 +333,22 @@ def test_h3_experiment_config_resolves_64_gpu_mesh_and_global_batch() -> None:
     assert training["tracker"]["run_name"] == "minimax_h3_t2va_crush_smol_single_sample_overfit"
 
 
+def test_h3_candidate_step_gate_uses_16_gpu_sharding_and_persistent_receipts() -> None:
+    gate_path = _REPO_ROOT / "examples/train/configs/fasth3_14b_candidate_step_gate.yaml"
+    config = yaml.safe_load(gate_path.read_text())
+    training = config["training"]
+    distributed = training["distributed"]
+    assert distributed["num_gpus"] == 16
+    assert distributed["sp_size"] == 4
+    assert distributed["hsdp_replicate_dim"] * distributed["hsdp_shard_dim"] == 16
+    assert 56 % distributed["sp_size"] == 0
+    assert training["data"]["preprocessed_data_type"] == "t2va"
+    assert training["data"]["num_frames"] == 120
+    assert training["checkpoint"]["training_state_checkpointing_steps"] == 1
+    assert training["tracker"]["trackers"] == ["wandb"]
+    assert training["loop"]["max_train_steps"] == 1
+
+
 def test_h3_experiment_data_repeat_supplies_every_sp_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
