@@ -7,6 +7,11 @@ set -euo pipefail
 : "${DENSE_UNIFORM_JOB_ID:?DENSE_UNIFORM_JOB_ID is required}"
 : "${VSA_ACTIVATION_JOB_ID:?VSA_ACTIVATION_JOB_ID is required}"
 : "${VSA_UNIFORM_JOB_ID:?VSA_UNIFORM_JOB_ID is required}"
+GATE_NODES="${GATE_NODES:-4}"
+if ! [[ "${GATE_NODES}" =~ ^[1-8]$ ]]; then
+  echo "GATE_NODES must be an integer from 1 through 8" >&2
+  exit 2
+fi
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
 LOG_DIR="${SPRINT_ROOT}/logs/slurm"
@@ -23,7 +28,7 @@ submit_gate() {
   fi
   sbatch --parsable --export=NIL \
     "${dependency_args[@]}" \
-    --partition=all --nodes=4 --ntasks=4 --ntasks-per-node=1 --gres=gpu:4 \
+    --partition=all --nodes="${GATE_NODES}" --ntasks="${GATE_NODES}" --ntasks-per-node=1 --gres=gpu:4 \
     --exclusive --time=02:00:00 \
     --job-name="h3-${gate_stage}-${source_kind}-${map_strategy}" \
     --output="${LOG_DIR}/h3-${gate_stage}-${source_kind}-${map_strategy}-%j.out" \
