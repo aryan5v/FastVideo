@@ -12,6 +12,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from scripts.checkpoint_conversion.prune_minimax_h3_blocks import INDEX_NAME, prune_transformer
+from scripts.fasth3_sprint.validate_h3_candidate import validate_candidate
 
 
 def _write_source(root: Path) -> Path:
@@ -86,6 +87,18 @@ def test_pruning_reindexes_selected_blocks_and_keeps_shared_tensors(tmp_path: Pa
     assert manifest["kept_tensor_count"] == 4
     assert manifest["dropped_tensor_count"] == 2
     assert len(manifest["block_map_sha256"]) == 64
+
+    receipt = validate_candidate(
+        destination,
+        expected_source_kind="dense",
+        expected_layers=2,
+        min_parameters=4,
+        max_parameters=4,
+    )
+    assert receipt["valid"] is True
+    assert receipt["parameter_count"] == 4
+    assert receipt["vsa_gate_count"] == 0
+    assert (destination / "candidate_validation_receipt.json").is_file()
 
 
 @pytest.mark.parametrize("block_map", [(0, 0), (0, 4), (3, 1)])

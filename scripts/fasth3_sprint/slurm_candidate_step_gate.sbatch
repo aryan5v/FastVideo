@@ -59,6 +59,11 @@ LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}" "${SPRINT_ROOT}/caches/triton/${RUN_ID}"
 test -s "${CANDIDATE_ROOT}/transformer/block_map_manifest.json"
 test -s "${CANDIDATE_ROOT}/model_index.json" -o -s "${CANDIDATE_ROOT}/modular_model_index.json"
+/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+  "${REPO_ROOT}/scripts/fasth3_sprint/validate_h3_candidate.py" \
+  --transformer "${CANDIDATE_ROOT}/transformer" \
+  --expected-source-kind "${SOURCE_KIND}" \
+  > "${LOG_DIR}/candidate-validation.json"
 if [[ "${GATE_STAGE}" == "resume" ]]; then
   test -d "${OUTPUT_ROOT}/checkpoint-1/dcp"
 fi
@@ -109,4 +114,3 @@ srun \
       --training.vsa.sparsity "${VSA_SPARSITY}" \
       ${RESUME_ARGS}
   '
-
