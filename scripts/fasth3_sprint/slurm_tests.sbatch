@@ -11,7 +11,7 @@ set -euo pipefail
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
-RESULT_DIR="${SPRINT_ROOT}/eval/h0-training-contract"
+RESULT_DIR="${RESULT_DIR:-${SPRINT_ROOT}/eval/h0-training-contract}"
 PRECOMMIT_SITE="${SPRINT_ROOT}/tools/precommit-site"
 mkdir -p "${RESULT_DIR}" "${PRECOMMIT_SITE}"
 
@@ -37,12 +37,16 @@ srun \
       fastvideo/train/utils/training_config.py \
       scripts/checkpoint_conversion/prune_minimax_h3_blocks.py \
       scripts/fasth3_sprint/run_baseline_matrix.py \
+      scripts/fasth3_sprint/score_minimax_h3_blocks.py \
+      scripts/fasth3_sprint/aggregate_minimax_h3_block_scores.py \
+      scripts/fasth3_sprint/build_multishot_calibration_supplement.py \
       | tee '${RESULT_DIR}/pre_commit.log'
     /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m pytest -q \
       fastvideo/tests/train/methods/test_minimax_h3_finetune.py \
       fastvideo/tests/train/utils/test_config.py \
       fastvideo/tests/transformers/test_minimax_h3_block_map_config.py \
       fastvideo/tests/transformers/test_minimax_h3_block_pruning.py \
+      fastvideo/tests/transformers/test_minimax_h3_block_scoring.py \
       | tee '${RESULT_DIR}/pytest.log'
     date -Is > '${RESULT_DIR}/completed_at.txt'
     git rev-parse HEAD > '${RESULT_DIR}/base_commit.txt'
