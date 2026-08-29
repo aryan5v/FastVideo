@@ -8,6 +8,10 @@
 #SBATCH --time=02:00:00
 
 set -euo pipefail
+# Jobs are intentionally submitted with --export=NIL so login-node state
+# cannot leak into training. Re-enable propagation only for variables that
+# this batch script validates and exports below.
+export SLURM_EXPORT_ENV=ALL
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
 : "${SOURCE_KIND:?SOURCE_KIND is required}"
@@ -59,11 +63,22 @@ LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}" "${SPRINT_ROOT}/caches/triton/${RUN_ID}"
 test -s "${CANDIDATE_ROOT}/transformer/block_map_manifest.json"
 test -s "${CANDIDATE_ROOT}/model_index.json" -o -s "${CANDIDATE_ROOT}/modular_model_index.json"
-/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
-  "${REPO_ROOT}/scripts/fasth3_sprint/validate_h3_candidate.py" \
-  --transformer "${CANDIDATE_ROOT}/transformer" \
-  --expected-source-kind "${SOURCE_KIND}" \
-  > "${LOG_DIR}/candidate-validation.json"
+srun \
+  --export=ALL \
+  --nodes=1 \
+  --ntasks=1 \
+  --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+  --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+  --container-workdir="${REPO_ROOT}" \
+  bash -lc "
+    set -euo pipefail
+    export PYTHONPATH='${REPO_ROOT}:${SPRINT_ROOT}/python-packages'
+    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+      scripts/fasth3_sprint/validate_h3_candidate.py \
+      --transformer '${CANDIDATE_ROOT}/transformer' \
+      --expected-source-kind '${SOURCE_KIND}' \
+      > '${LOG_DIR}/candidate-validation.json'
+  "
 if [[ "${GATE_STAGE}" == "resume" ]]; then
   test -d "${OUTPUT_ROOT}/checkpoint-1/dcp"
 fi
@@ -75,6 +90,7 @@ export REPO_ROOT CONFIG_PATH CANDIDATE_ROOT OUTPUT_ROOT RUN_ID LOG_DIR
 export ATTENTION_BACKEND VSA_SPARSITY MAX_STEPS RESUME_ARGS SPRINT_ROOT
 
 srun \
+  --export=ALL \
   --nodes="${SLURM_JOB_NUM_NODES}" \
   --ntasks="${SLURM_JOB_NUM_NODES}" \
   --ntasks-per-node=1 \
