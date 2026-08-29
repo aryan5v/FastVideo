@@ -87,6 +87,7 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
 
     assert t.dit_precision == "fp32"
     assert t.vsa_sparsity == 0.0
+    assert t.vsa_tile_size == 64
     assert t.pipeline_config is None
 
 
@@ -135,7 +136,8 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
             "run_name": "myrun",
         },
         "vsa": {
-            "sparsity": 0.5
+            "sparsity": 0.5,
+            "tile_size": 256,
         },
         "model": {
             "weighting_scheme": "logit_normal",
@@ -173,6 +175,7 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.tracker.project_name == "myproj"
 
     assert t.vsa_sparsity == pytest.approx(0.5)
+    assert t.vsa_tile_size == 256
     assert t.model.weighting_scheme == "logit_normal"
     assert t.model.precondition_outputs is True
     assert t.dit_precision == "bf16"

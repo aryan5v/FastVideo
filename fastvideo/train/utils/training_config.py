@@ -98,3 +98,7 @@ class TrainingConfig:
     pipeline_config: PipelineConfig | None = None
     model_path: str = ""
     dit_precision: str = "fp32"
+    # MiniMax H3 VSA uses the native 64-token Triton forward/backward path
+    # during training. Inference may route no-grad forwards to SM100a while
+    # preserving the same logical mask.
+    vsa_tile_size: int = 64

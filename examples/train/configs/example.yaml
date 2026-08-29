@@ -133,6 +133,8 @@ training:
   # --- training.vsa [TYPED] -> VSAConfig ---
   vsa:
     sparsity: 0.0                     # default: 0.0 (0.0 = disabled)
+    tile_size: 64                     # MiniMax H3 training requires 64; enables native
+                                      # Triton forward/backward without a backend fallback.
     cache_tile_buf: false             # default: false. Reuse the per-step padded
                                       # VSA tile buffer across attention layers.
                                       # Off by default to avoid the activation-

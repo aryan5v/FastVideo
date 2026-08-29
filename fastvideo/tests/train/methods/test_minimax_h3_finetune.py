@@ -21,7 +21,7 @@ from fastvideo.dataset.parquet_dataset_map_style import (
 )
 from fastvideo.models.dits.minimax_h3 import MiniMaxH3RotaryPosEmbed, MiniMaxH3Transformer3DModel
 from fastvideo.pipelines import TrainingBatch
-from fastvideo.train.methods.fine_tuning.finetune import _compute_finetune_loss_map
+from fastvideo.train.methods.fine_tuning.finetune import FineTuneMethod, _compute_finetune_loss_map
 from fastvideo.train.models.minimax_h3 import MiniMaxH3Model
 from fastvideo.train.models.minimax_h3.minimax_h3 import shift_noise_amount
 from fastvideo.train.utils.config import load_run_config
@@ -190,6 +190,7 @@ def test_h3_plugin_prepares_and_restores_joint_latent_shapes(monkeypatch: pytest
     )
     model.transformer = _IdentityJointTransformer()
     model.sp_group = None
+    model._attn_kind = "dense"
     raw_batch = {
         "vae_latent": torch.zeros(1, 24, 2, 4, 4),
         "audio_latent": torch.zeros(1, 2, 32, 8),
@@ -217,6 +218,58 @@ def test_h3_plugin_prepares_and_restores_joint_latent_shapes(monkeypatch: pytest
     )
     torch.testing.assert_close(prediction[1], -batch.audio_noisy_model_input)
     assert batch.minimax_h3_layout.sequence_length == 26
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("TORCH_SDPA", "dense"),
+        ("VIDEO_SPARSE_ATTN", "vsa"),
+        ("VIDEO_SPARSE_ATTN_H3", "vsa"),
+    ],
+)
+def test_h3_training_method_resolves_attention_kind(backend: str, expected: str) -> None:
+    """Ensure the H3-specific sparse backend is never mislabeled dense."""
+    method = FineTuneMethod.__new__(FineTuneMethod)
+    method.student = SimpleNamespace(attention_backend_name=backend)
+
+    assert method._infer_attn_kind() == expected
+
+
+def test_h3_attention_kind_refuses_backend_fallback() -> None:
+    """A dense/VSA request mismatch must fail instead of silently routing."""
+    model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    model._attn_kind = "vsa"
+
+    model._require_attn_kind("vsa")
+    with pytest.raises(ValueError, match="refusing an attention-backend fallback"):
+        model._require_attn_kind("dense")
+
+
+def test_h3_joint_x0_uses_independent_modality_timesteps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Video and audio clean-state estimates must use their own H3 shifts."""
+    model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    video = torch.full((1, 1, 1, 1, 1), 10.0)
+    audio = torch.full((1, 2, 1, 1), 20.0)
+    video_flow = torch.full_like(video, 2.0)
+    audio_flow = torch.full_like(audio, 4.0)
+
+    monkeypatch.setattr(
+        model,
+        "predict_joint_noise",
+        lambda *_args, **_kwargs: (video_flow, audio_flow),
+    )
+    video_x0, audio_x0 = model.predict_joint_x0(
+        video,
+        audio,
+        torch.tensor([0.75]),
+        torch.tensor([0.25]),
+        TrainingBatch(),
+        conditional=True,
+    )
+
+    torch.testing.assert_close(video_x0, torch.full_like(video, 9.5))
+    torch.testing.assert_close(audio_x0, torch.full_like(audio, 17.0))
 
 
 def test_h3_validation_prompts_match_crush_smol_recipe() -> None:

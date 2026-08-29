@@ -38,6 +38,8 @@ _VIDEO_SCHEDULER_SHIFT = 12.0
 _AUDIO_SCHEDULER_SHIFT = 3.0
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
+_DENSE_ATTENTION = AttentionBackendEnum.TORCH_SDPA
+_VSA_ATTENTION = AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
 
 
 def shift_noise_amount(base_noise_amount: torch.Tensor, shift: float) -> torch.Tensor:
@@ -68,10 +70,10 @@ class MiniMaxH3Model(ModelBase):
             trainable=trainable,
             attention_backend=attention_backend,
         )
-        # PyTorch scaled dot product attention (SDPA) provides dense attention
-        # without adding another attention-kernel dependency to H3 training.
-        if self.attention_backend != AttentionBackendEnum.TORCH_SDPA:
-            raise ValueError("MiniMaxH3Model requires the TORCH_SDPA attention backend")
+        if self.attention_backend not in {_DENSE_ATTENTION, _VSA_ATTENTION}:
+            raise ValueError("MiniMaxH3Model attention_backend must be TORCH_SDPA or VIDEO_SPARSE_ATTN_H3, "
+                             f"got {self.attention_backend_name!r}")
+        self._attn_kind: Literal["dense", "vsa"] = ("vsa" if self.attention_backend == _VSA_ATTENTION else "dense")
         if training_config.pipeline_config is None:
             raise ValueError("MiniMaxH3Model requires a resolved MiniMax H3 pipeline config")
         # Packed row indices describe one text-video-audio document without a
@@ -105,6 +107,10 @@ class MiniMaxH3Model(ModelBase):
         self.validator: Any = None
         self.start_step = 0
         self.sp_group: Any = None
+        self._vsa_metadata_builder: Any = None
+        if self._attn_kind == "vsa":
+            from fastvideo.attention.backends.video_sparse_attn_h3 import MiniMaxH3VSAMetadataBuilder
+            self._vsa_metadata_builder = MiniMaxH3VSAMetadataBuilder()
 
     def _load_transformer(
         self,
@@ -293,8 +299,36 @@ class MiniMaxH3Model(ModelBase):
         training_batch.audio_timesteps = 1.0 - audio_noise_amount
         training_batch.minimax_h3_layout = layout
         training_batch.attn_metadata = None
-        training_batch.attn_metadata_vsa = None
+        training_batch.attn_metadata_vsa = self._build_vsa_metadata(layout, device)
         return training_batch
+
+    def _build_vsa_metadata(self, layout: MiniMaxH3PackedLayout, device: torch.device) -> Any:
+        if getattr(self, "_attn_kind", "dense") != "vsa":
+            return None
+        if self._vsa_metadata_builder is None:
+            raise RuntimeError("MiniMax H3 VSA training has no metadata builder")
+        tile_size = int(self.training_config.vsa_tile_size)
+        if tile_size != 64:
+            raise ValueError(f"MiniMax H3 VSA training requires the 64-token forward/backward path, got {tile_size}")
+        sparsity = float(self.training_config.vsa_sparsity)
+        if not 0.0 <= sparsity < 1.0:
+            raise ValueError(f"MiniMax H3 VSA sparsity must be in [0, 1), got {sparsity}")
+        patch_size = tuple(int(value) for value in self.transformer.patch_size)
+        prefix_segments = (
+            int(layout.text_indices.numel()),
+            int(layout.num_condition_video_rows),
+            int(layout.audio_indices.numel()),
+        )
+        return self._vsa_metadata_builder.build(
+            current_timestep=0,
+            raw_latent_shape=(layout.num_video_latent_frames, layout.latent_height, layout.latent_width),
+            patch_size=patch_size,
+            VSA_sparsity=sparsity,
+            prefix_segments=prefix_segments,
+            device=device,
+            exempt=True,
+            tile_size=tile_size,
+        )
 
     def add_noise(
         self,
@@ -318,43 +352,74 @@ class MiniMaxH3Model(ModelBase):
         cfg_uncond: dict[str, Any] | None = None,
         attn_kind: Literal["dense", "vsa"] = "dense",
     ) -> NoisePrediction:
-        """Pack modality timesteps and convert H3 outputs to noise-minus-clean."""
-        del timestep
+        """Predict the synchronized video/audio flows prepared on ``batch``."""
+        if batch.audio_noisy_model_input is None or batch.audio_timesteps is None:
+            raise RuntimeError("prepare_batch() must set audio noisy input and timestep")
+        return self.predict_joint_noise(
+            noisy_latents,
+            batch.audio_noisy_model_input,
+            timestep,
+            batch.audio_timesteps,
+            batch,
+            conditional=conditional,
+            cfg_uncond=cfg_uncond,
+            attn_kind=attn_kind,
+        )
+
+    def _require_attn_kind(self, attn_kind: Literal["dense", "vsa"]) -> None:
+        resolved = getattr(self, "_attn_kind", "dense")
+        if attn_kind != resolved:
+            raise ValueError(f"MiniMaxH3Model loaded {resolved} attention but the method requested "
+                             f"{attn_kind}; refusing an attention-backend fallback")
+
+    def predict_joint_noise(
+        self,
+        noisy_video: torch.Tensor,
+        noisy_audio: torch.Tensor,
+        video_timestep: torch.Tensor,
+        audio_timestep: torch.Tensor,
+        batch: TrainingBatch,
+        *,
+        conditional: bool,
+        cfg_uncond: dict[str, Any] | None = None,
+        attn_kind: Literal["dense", "vsa"] = "dense",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack arbitrary joint states and return noise-minus-clean flows."""
         if not conditional or cfg_uncond is not None:
             raise ValueError("MiniMaxH3Model predicts one conditional T2VA sample")
-        if attn_kind != "dense":
-            raise ValueError("MiniMaxH3Model supports dense attention for training")
+        self._require_attn_kind(attn_kind)
         layout = batch.minimax_h3_layout
         if not isinstance(layout, MiniMaxH3PackedLayout):
             raise RuntimeError("prepare_batch() must set TrainingBatch.minimax_h3_layout")
-        if batch.audio_noisy_model_input is None or batch.encoder_hidden_states is None:
-            raise RuntimeError("prepare_batch() must set audio and text transformer inputs")
-        if batch.timesteps is None or batch.audio_timesteps is None:
-            raise RuntimeError("prepare_batch() must set video and audio timesteps")
+        if batch.encoder_hidden_states is None:
+            raise RuntimeError("prepare_batch() must set text transformer inputs")
+        if video_timestep.numel() != 1 or audio_timestep.numel() != 1:
+            raise ValueError("MiniMax H3 joint prediction requires one video and one audio timestep")
 
         dtype = torch.bfloat16
         device = self.device
-        video_bcthw = noisy_latents.permute(0, 2, 1, 3, 4).to(dtype)
+        video_bcthw = noisy_video.permute(0, 2, 1, 3, 4).to(dtype)
         # Match H3 checkpoint token order: video rows flatten
         # (C, patch_t, patch_h, patch_w), while audio rows flatten stereo
         # channel, time, and latent feature dimensions in that order.
         video_rows = patchify_video_latents(video_bcthw, self.transformer.patch_size)
-        audio_latents = batch.audio_noisy_model_input.to(dtype)
+        audio_latents = noisy_audio.to(dtype)
         num_audio_latents = audio_latents.shape[-1]
         audio_rows = audio_latents.permute(0, 1, 3, 2).reshape(-1, _AUDIO_LATENT_CHANNELS)
         unique_timesteps, timestep_indices = build_row_timesteps(
             layout,
-            video_timestep=float(batch.timesteps[0]),
-            audio_timestep=float(batch.audio_timesteps[0]),
-            condition_video_timestep=float(batch.timesteps[0]),
-            condition_audio_timestep=float(batch.audio_timesteps[0]),
+            video_timestep=float(video_timestep[0]),
+            audio_timestep=float(audio_timestep[0]),
+            condition_video_timestep=float(video_timestep[0]),
+            condition_audio_timestep=float(audio_timestep[0]),
         )
         unique_timesteps = unique_timesteps.to(device)
         timestep_indices = timestep_indices.to(device)
 
+        attn_metadata = batch.attn_metadata_vsa if attn_kind == "vsa" else batch.attn_metadata
         with torch.autocast(device.type, dtype=dtype), set_forward_context(
                 current_timestep=unique_timesteps,
-                attn_metadata=None,
+                attn_metadata=attn_metadata,
         ):
             video_velocity, audio_velocity = self.transformer(
                 hidden_states=video_rows[None],
@@ -380,6 +445,37 @@ class MiniMaxH3Model(ModelBase):
         ).permute(0, 2, 1, 3, 4)
         audio_prediction = unpack_audio_tokens(audio_velocity[0], num_audio_latents)[None]
         return -video_prediction, -audio_prediction
+
+    def predict_joint_x0(
+        self,
+        noisy_video: torch.Tensor,
+        noisy_audio: torch.Tensor,
+        video_timestep: torch.Tensor,
+        audio_timestep: torch.Tensor,
+        batch: TrainingBatch,
+        *,
+        conditional: bool,
+        cfg_uncond: dict[str, Any] | None = None,
+        attn_kind: Literal["dense", "vsa"] = "dense",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert joint noise-minus-clean predictions to clean latent states."""
+        video_flow, audio_flow = self.predict_joint_noise(
+            noisy_video,
+            noisy_audio,
+            video_timestep,
+            audio_timestep,
+            batch,
+            conditional=conditional,
+            cfg_uncond=cfg_uncond,
+            attn_kind=attn_kind,
+        )
+        video_sigma = 1.0 - video_timestep.to(device=noisy_video.device, dtype=noisy_video.dtype)
+        audio_sigma = 1.0 - audio_timestep.to(device=noisy_audio.device, dtype=noisy_audio.dtype)
+        while video_sigma.ndim < noisy_video.ndim:
+            video_sigma = video_sigma.unsqueeze(-1)
+        while audio_sigma.ndim < noisy_audio.ndim:
+            audio_sigma = audio_sigma.unsqueeze(-1)
+        return noisy_video - video_sigma * video_flow, noisy_audio - audio_sigma * audio_flow
 
     def backward(
         self,
