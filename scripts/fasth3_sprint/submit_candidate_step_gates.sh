@@ -17,13 +17,27 @@ submit_gate() {
   local map_strategy="$2"
   local gate_stage="$3"
   local dependency="$4"
+  local dependency_args=()
+  if [[ "${dependency}" != "READY" ]]; then
+    dependency_args=(--dependency="afterok:${dependency}" --kill-on-invalid-dep=yes)
+  fi
   sbatch --parsable --export=NIL \
-    --dependency="afterok:${dependency}" --kill-on-invalid-dep=yes \
+    "${dependency_args[@]}" \
     --partition=all --nodes=4 --ntasks=4 --ntasks-per-node=1 --gres=gpu:4 \
     --exclusive --time=02:00:00 \
     --job-name="h3-${gate_stage}-${source_kind}-${map_strategy}" \
     --output="${LOG_DIR}/h3-${gate_stage}-${source_kind}-${map_strategy}-%j.out" \
     --wrap="/usr/bin/env SPRINT_ROOT='${SPRINT_ROOT}' SOURCE_KIND='${source_kind}' MAP_STRATEGY='${map_strategy}' GATE_STAGE='${gate_stage}' /bin/bash '${REPO_ROOT}/scripts/fasth3_sprint/slurm_candidate_step_gate.sbatch'"
+}
+
+append_dependency() {
+  local current="$1"
+  local extra="$2"
+  if [[ "${extra}" == "READY" ]]; then
+    printf '%s\n' "${current}"
+  else
+    printf '%s:%s\n' "${current}" "${extra}"
+  fi
 }
 
 # Round 1: two Dense candidates, 32 GPUs total.
@@ -37,8 +51,8 @@ dense_uniform_resume="$(submit_gate dense uniform resume "${dense_fresh_barrier}
 dense_resume_barrier="${dense_activation_resume}:${dense_uniform_resume}"
 
 # Round 3: two exact-backend VSA candidates, after Dense resume receipts exist.
-vsa_activation_fresh="$(submit_gate vsa activation fresh "${dense_resume_barrier}:${VSA_ACTIVATION_JOB_ID}")"
-vsa_uniform_fresh="$(submit_gate vsa uniform fresh "${dense_resume_barrier}:${VSA_UNIFORM_JOB_ID}")"
+vsa_activation_fresh="$(submit_gate vsa activation fresh "$(append_dependency "${dense_resume_barrier}" "${VSA_ACTIVATION_JOB_ID}")")"
+vsa_uniform_fresh="$(submit_gate vsa uniform fresh "$(append_dependency "${dense_resume_barrier}" "${VSA_UNIFORM_JOB_ID}")")"
 vsa_fresh_barrier="${vsa_activation_fresh}:${vsa_uniform_fresh}"
 
 # Round 4: resume both VSA checkpoints for their second finite step.
@@ -49,4 +63,3 @@ printf 'dense_fresh_jobs=%s %s\n' "${dense_activation_fresh}" "${dense_uniform_f
 printf 'dense_resume_jobs=%s %s\n' "${dense_activation_resume}" "${dense_uniform_resume}"
 printf 'vsa_fresh_jobs=%s %s\n' "${vsa_activation_fresh}" "${vsa_uniform_fresh}"
 printf 'vsa_resume_jobs=%s %s\n' "${vsa_activation_resume}" "${vsa_uniform_resume}"
-
