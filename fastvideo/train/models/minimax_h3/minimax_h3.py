@@ -141,10 +141,21 @@ class MiniMaxH3Model(ModelBase):
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
         """Load precomputed text embeddings and paired video-audio latents."""
+        from fastvideo.dataset.minimax_h3_artifact_dataset import (build_minimax_h3_artifact_dataloader,
+                                                                   is_minimax_h3_artifact_path)
         from fastvideo.dataset.dataloader.schema import pyarrow_schema_t2va
         from fastvideo.train.utils.dataloader import build_parquet_t2v_train_dataloader
 
         self.sp_group = get_sp_group()
+        if is_minimax_h3_artifact_path(training_config.data.data_path):
+            _dataset, self.dataloader = build_minimax_h3_artifact_dataloader(
+                training_config.data.data_path,
+                batch_size=int(training_config.data.train_batch_size),
+                num_data_workers=int(training_config.data.dataloader_num_workers),
+                seed=int(training_config.data.seed or 0),
+            )
+            self.start_step = 0
+            return
         text_config = training_config.pipeline_config.text_encoder_configs[0]  # type: ignore[union-attr]
         self.dataloader = build_parquet_t2v_train_dataloader(
             training_config.data,
