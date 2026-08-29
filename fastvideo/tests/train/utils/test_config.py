@@ -76,6 +76,8 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
 
     assert t.checkpoint.output_dir == ""
     assert t.checkpoint.checkpoints_total_limit == 0
+    assert t.checkpoint.preserve_every_steps == 0
+    assert t.checkpoint.preserve_steps == []
 
     assert t.tracker.trackers == []
     assert t.tracker.project_name == "fastvideo"
@@ -129,6 +131,8 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
             "output_dir": "/out",
             "training_state_checkpointing_steps": 50,
             "checkpoints_total_limit": 3,
+            "preserve_every_steps": 100,
+            "preserve_steps": [250, 400],
         },
         "tracker": {
             "trackers": ["wandb"],
@@ -170,6 +174,8 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
 
     assert t.checkpoint.output_dir == "/out"
     assert t.checkpoint.checkpoints_total_limit == 3
+    assert t.checkpoint.preserve_every_steps == 100
+    assert t.checkpoint.preserve_steps == [250, 400]
 
     assert t.tracker.trackers == ["wandb"]
     assert t.tracker.project_name == "myproj"

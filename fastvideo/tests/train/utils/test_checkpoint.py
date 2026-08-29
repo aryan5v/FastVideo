@@ -10,6 +10,7 @@ GPU runner and will be tested in later phases.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,12 @@ import pytest
 from fastvideo.train.utils.checkpoint import (
     CheckpointConfig,
     CheckpointManager,
+    PRESERVATION_RECEIPT,
     _find_latest_checkpoint,
     _is_stateful,
     _parse_step_from_dir,
     _resolve_resume_checkpoint,
+    preserve_checkpoint,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,8 @@ def _make_manager(
     *,
     save_steps: int = 0,
     keep_last: int = 0,
+    preserve_every_steps: int = 0,
+    preserve_steps: tuple[int, ...] = (),
     raw_config: dict[str, Any] | None = None,
 ) -> CheckpointManager:
     """Build a minimal ``CheckpointManager`` for tests that don't touch DCP."""
@@ -55,7 +60,12 @@ def _make_manager(
         method=None,
         dataloader=None,
         output_dir=str(tmp_path),
-        config=CheckpointConfig(save_steps=save_steps, keep_last=keep_last),
+        config=CheckpointConfig(
+            save_steps=save_steps,
+            keep_last=keep_last,
+            preserve_every_steps=preserve_every_steps,
+            preserve_steps=preserve_steps,
+        ),
         raw_config=raw_config,
     )
 
@@ -302,6 +312,33 @@ def test_cleanup_skips_non_checkpoint_dirs(tmp_path: Path) -> None:
     mgr._cleanup_old_checkpoints()
     remaining = sorted(p.name for p in tmp_path.iterdir())
     assert remaining == ["checkpoint-3", "logs", "wandb"]
+
+
+def test_cleanup_never_deletes_preserved_mid_run_checkpoint(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path, keep_last=2)
+    for step in (100, 200, 300, 400, 500):
+        checkpoint = _make_checkpoint_dir(tmp_path, step)
+        (checkpoint / "metadata.json").write_text(json.dumps({"step": step}))
+    preserve_checkpoint(tmp_path / "checkpoint-200", reason="best locked validation", metrics={"score": 0.9})
+    mgr._cleanup_old_checkpoints()
+    remaining = sorted(p.name for p in tmp_path.iterdir())
+    assert remaining == ["checkpoint-200", "checkpoint-400", "checkpoint-500"]
+    receipt = json.loads((tmp_path / "checkpoint-200" / PRESERVATION_RECEIPT).read_text())
+    assert receipt["reason"] == "best locked validation"
+    assert receipt["metrics"] == {"score": 0.9}
+
+
+def test_preservation_policy_covers_periodic_and_explicit_steps(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path, preserve_every_steps=100, preserve_steps=(250, ))
+    assert mgr._should_preserve(100)
+    assert mgr._should_preserve(250)
+    assert not mgr._should_preserve(251)
+
+
+def test_preserve_checkpoint_rejects_incomplete_checkpoint(tmp_path: Path) -> None:
+    checkpoint = _make_checkpoint_dir(tmp_path, 100, with_dcp=False)
+    with pytest.raises(FileNotFoundError, match="incomplete checkpoint"):
+        preserve_checkpoint(checkpoint, reason="would be unsafe")
 
 
 # ---------------------------------------------------------------------------

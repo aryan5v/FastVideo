@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shutil
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from fastvideo.logger import init_logger
 logger = init_logger(__name__)
 
 _CHECKPOINT_DIR_RE = re.compile(r"^checkpoint-(\d+)$")
+PRESERVATION_RECEIPT = "preservation.json"
 
 
 def _is_stateful(obj: Any) -> bool:
@@ -184,6 +186,43 @@ class _CallbackStateWrapper:
 class CheckpointConfig:
     save_steps: int
     keep_last: int
+    preserve_every_steps: int = 0
+    preserve_steps: tuple[int, ...] = ()
+
+
+def preserve_checkpoint(
+    checkpoint_dir: str | Path,
+    *,
+    reason: str,
+    metrics: dict[str, float] | None = None,
+) -> Path:
+    """Atomically pin a complete checkpoint outside rolling retention.
+
+    A quality evaluator can call this as soon as a checkpoint wins a locked
+    comparison. The marker lives inside the immutable checkpoint directory,
+    so later training processes using ``keep_last`` cannot delete it.
+    """
+    path = Path(checkpoint_dir).resolve()
+    if not _CHECKPOINT_DIR_RE.match(path.name):
+        raise ValueError(f"Expected checkpoint-<step> directory, got {path}")
+    if not (path / "dcp").is_dir() or not (path / "metadata.json").is_file():
+        raise FileNotFoundError(f"Cannot preserve incomplete checkpoint: {path}")
+    if not str(reason).strip():
+        raise ValueError("Checkpoint preservation requires a non-empty reason")
+    step = _parse_step_from_dir(path)
+    receipt = {
+        "format_version": 1,
+        "checkpoint": str(path),
+        "step": step,
+        "reason": str(reason).strip(),
+        "metrics": dict(sorted((metrics or {}).items())),
+        "preserved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt_path = path / PRESERVATION_RECEIPT
+    temporary = path / f".{PRESERVATION_RECEIPT}.tmp-{os.getpid()}"
+    temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, receipt_path)
+    return receipt_path
 
 
 class CheckpointManager:
@@ -269,9 +308,22 @@ class CheckpointManager:
         self._save_rng_snapshot(checkpoint_dir)
         _barrier()
 
+        if _rank() == 0 and self._should_preserve(step):
+            preserve_checkpoint(
+                checkpoint_dir,
+                reason="configured validation or milestone checkpoint",
+            )
+            logger.info("Preserved checkpoint outside rolling retention: %s", checkpoint_dir)
+        _barrier()
+
         self._last_saved_step = step
 
         self._cleanup_old_checkpoints()
+
+    def _should_preserve(self, step: int) -> bool:
+        preserve_every = int(self.config.preserve_every_steps or 0)
+        explicit = {int(value) for value in self.config.preserve_steps}
+        return step in explicit or (preserve_every > 0 and step % preserve_every == 0)
 
     def _write_metadata(
         self,
@@ -405,7 +457,8 @@ class CheckpointManager:
             candidates.append((step, child))
 
         candidates.sort(key=lambda x: x[0])
-        to_delete = candidates[:-keep_last] if len(candidates) > keep_last else []
+        rolling = [(step, path) for step, path in candidates if not (path / PRESERVATION_RECEIPT).is_file()]
+        to_delete = rolling[:-keep_last] if len(rolling) > keep_last else []
         for step, path in to_delete:
             logger.info("Removing old checkpoint (keep_last=%s): %s", keep_last, path)
             shutil.rmtree(path, ignore_errors=True)

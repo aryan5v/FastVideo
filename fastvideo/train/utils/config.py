@@ -422,6 +422,8 @@ def _build_training_config(
             resume_from_checkpoint=str(ck.get("resume_from_checkpoint", "") or ""),
             training_state_checkpointing_steps=int(ck.get("training_state_checkpointing_steps", 0) or 0),
             checkpoints_total_limit=int(ck.get("checkpoints_total_limit", 0) or 0),
+            preserve_every_steps=int(ck.get("preserve_every_steps", 0) or 0),
+            preserve_steps=[int(step) for step in (ck.get("preserve_steps", []) or [])],
         ),
         tracker=TrackerConfig(
             trackers=list(tr.get("trackers", []) or []),

@@ -58,6 +58,11 @@ class CheckpointConfig:
     resume_from_checkpoint: str = ""
     training_state_checkpointing_steps: int = 0
     checkpoints_total_limit: int = 0
+    # Preserved checkpoints never participate in rolling last-N deletion.
+    # Long quality runs use this to retain every validation milestone until
+    # locked evaluation has selected the release checkpoint.
+    preserve_every_steps: int = 0
+    preserve_steps: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
