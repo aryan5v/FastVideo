@@ -44,6 +44,12 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
     attention_head_dim: int = 128
     hidden_size: int = 5376
     num_layers: int = 50
+    # A pruned student stores local blocks densely as ``0..num_layers-1``.
+    # ``block_map[local_index]`` records which source block supplied that
+    # local block.  Both fields are checkpoint metadata: they do not change
+    # weight names or skip blocks during a forward pass.
+    source_num_layers: int | None = None
+    block_map: tuple[int, ...] | list[int] | None = None
     num_refiner_layers: int = 2
     ffn_dim: int = 14336
     in_channels: int = 24
@@ -62,6 +68,29 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.num_layers <= 0:
+            raise ValueError(f"MiniMax H3 num_layers must be positive, got {self.num_layers}.")
+        if self.source_num_layers is not None and self.source_num_layers <= 0:
+            raise ValueError(f"MiniMax H3 source_num_layers must be positive when set, got {self.source_num_layers}.")
+        if self.block_map is None:
+            if self.source_num_layers not in (None, self.num_layers):
+                raise ValueError("A pruned MiniMax H3 config must define block_map when "
+                                 f"source_num_layers={self.source_num_layers} and num_layers={self.num_layers}.")
+        else:
+            if self.source_num_layers is None:
+                raise ValueError("MiniMax H3 block_map requires source_num_layers.")
+            if any(not isinstance(index, int) or isinstance(index, bool) for index in self.block_map):
+                raise ValueError(f"MiniMax H3 block_map must contain only integer indices, got {self.block_map}.")
+            block_map = tuple(self.block_map)
+            if len(block_map) != self.num_layers:
+                raise ValueError("MiniMax H3 block_map length must equal num_layers; "
+                                 f"got {len(block_map)} and {self.num_layers}.")
+            if any(left >= right for left, right in zip(block_map, block_map[1:], strict=False)):
+                raise ValueError(f"MiniMax H3 block_map must be strictly increasing, got {block_map}.")
+            if block_map[0] < 0 or block_map[-1] >= self.source_num_layers:
+                raise ValueError("MiniMax H3 block_map indices must be in "
+                                 f"[0, {self.source_num_layers}), got {block_map}.")
+            self.block_map = block_map
         if len(self.patch_size) != 3:
             raise ValueError(f"MiniMax H3 patch_size must have three axes, got {self.patch_size}.")
         self.patch_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
@@ -74,6 +103,12 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
         if rotary_dim > self.attention_head_dim or rotary_dim % 2:
             raise ValueError(f"MiniMax H3 rotary width must be even and no larger than the head width; got "
                              f"rotary_dim={rotary_dim}, attention_head_dim={self.attention_head_dim}.")
+
+    def source_block_indices(self) -> tuple[int, ...]:
+        """Return the source provenance for every densely stored local block."""
+        if self.block_map is not None:
+            return tuple(self.block_map)
+        return tuple(range(self.num_layers))
 
 
 @dataclass
