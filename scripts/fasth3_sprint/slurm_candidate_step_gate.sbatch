@@ -114,7 +114,8 @@ srun \
     export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}/node-${SLURM_PROCID}"
     mkdir -p "${TRITON_CACHE_DIR}"
     echo "$(date -Is) job=${SLURM_JOB_ID} node_rank=${SLURM_PROCID} commit=$(git -C "${REPO_ROOT}" rev-parse HEAD) backend=${ATTENTION_BACKEND} stage=${RUN_ID}"
-    exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/torchrun \
+    exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+      -m torch.distributed.run \
       --nnodes "${SLURM_JOB_NUM_NODES}" \
       --nproc_per_node 4 \
       --node_rank "${SLURM_PROCID}" \
