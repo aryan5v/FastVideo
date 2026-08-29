@@ -10,6 +10,10 @@ models:
 
 method:
   _target_: fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod
+  normalize_multimodal_losses: true
+  modality_energy_floor: 1.0e-3
+  video_loss_weight: 1.0
+  audio_loss_weight: 1.0
 
 training:
   distributed:
@@ -72,4 +76,3 @@ callbacks:
     max_grad_norm: 1.0
 
 pipeline: {}
-

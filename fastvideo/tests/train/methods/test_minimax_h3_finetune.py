@@ -94,6 +94,40 @@ def test_multimodal_finetune_loss_weights_modalities_equally() -> None:
     assert losses["finetune_loss"] is losses["total_loss"]
 
 
+def test_multimodal_finetune_loss_normalizes_each_target_energy() -> None:
+    """Verify that a high-energy modality cannot hide the other branch."""
+    clean_video = torch.zeros(1, 1, 1, 1, 1)
+    video_target = torch.full_like(clean_video, 2.0)
+    video_prediction = torch.full_like(clean_video, 4.0)
+    clean_audio = torch.zeros(1, 2, 1, 1)
+    audio_target = torch.full_like(clean_audio, 0.5)
+    audio_prediction = torch.full_like(clean_audio, 1.0)
+    batch = TrainingBatch(
+        audio_latents=clean_audio,
+        audio_noisy_model_input=torch.zeros_like(clean_audio),
+        audio_noise=audio_target,
+        audio_sigmas=torch.ones(1, 1, 1, 1),
+    )
+
+    losses = _compute_finetune_loss_map(
+        (video_prediction, audio_prediction),
+        clean_video,
+        torch.zeros_like(clean_video),
+        video_target,
+        torch.ones(1, 1, 1, 1, 1),
+        batch,
+        precondition_outputs=False,
+        normalize_multimodal_losses=True,
+        modality_energy_floor=0.1,
+    )
+
+    torch.testing.assert_close(losses["video_target_energy"], torch.tensor(4.0))
+    torch.testing.assert_close(losses["audio_target_energy"], torch.tensor(0.25))
+    torch.testing.assert_close(losses["normalized_video_finetune_loss"], torch.tensor(1.0))
+    torch.testing.assert_close(losses["normalized_audio_finetune_loss"], torch.tensor(1.0))
+    torch.testing.assert_close(losses["total_loss"], torch.tensor(2.0))
+
+
 def test_single_tensor_finetune_loss_preserves_video_contract() -> None:
     """Verify that video-only model plugins retain their loss keys and target."""
     clean_video = torch.zeros(1, 1, 1, 1, 1)

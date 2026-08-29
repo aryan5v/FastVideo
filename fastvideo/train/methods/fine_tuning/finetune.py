@@ -23,6 +23,10 @@ def _compute_finetune_loss_map(
     training_batch: Any,
     *,
     precondition_outputs: bool,
+    normalize_multimodal_losses: bool = False,
+    modality_energy_floor: float = 1.0e-3,
+    video_loss_weight: float = 1.0,
+    audio_loss_weight: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """Compute supervised flow-matching losses for one or two modalities.
 
@@ -68,19 +72,37 @@ def _compute_finetune_loss_map(
     if precondition_outputs:
         predicted_clean_video = noisy_video_latents - video_prediction * video_sigmas
         predicted_clean_audio = noisy_audio_latents - audio_prediction * audio_sigmas
-        video_loss = F.mse_loss(predicted_clean_video.float(), clean_video_latents.float())
-        audio_loss = F.mse_loss(predicted_clean_audio.float(), clean_audio_latents.float())
+        video_target = clean_video_latents
+        audio_target = clean_audio_latents
+        video_loss = F.mse_loss(predicted_clean_video.float(), video_target.float())
+        audio_loss = F.mse_loss(predicted_clean_audio.float(), audio_target.float())
     else:
         video_target = video_noise - clean_video_latents
         audio_target = audio_noise - clean_audio_latents
         video_loss = F.mse_loss(video_prediction.float(), video_target.float())
         audio_loss = F.mse_loss(audio_prediction.float(), audio_target.float())
-    total_loss = video_loss + audio_loss
+    if modality_energy_floor <= 0.0:
+        raise ValueError("modality_energy_floor must be > 0")
+    if video_loss_weight < 0.0 or audio_loss_weight < 0.0:
+        raise ValueError("modality loss weights must be non-negative")
+
+    video_target_energy = video_target.float().square().mean().detach().clamp_min(modality_energy_floor)
+    audio_target_energy = audio_target.float().square().mean().detach().clamp_min(modality_energy_floor)
+    normalized_video_loss = video_loss / video_target_energy
+    normalized_audio_loss = audio_loss / audio_target_energy
+    if normalize_multimodal_losses:
+        total_loss = video_loss_weight * normalized_video_loss + audio_loss_weight * normalized_audio_loss
+    else:
+        total_loss = video_loss_weight * video_loss + audio_loss_weight * audio_loss
     return {
         "total_loss": total_loss,
         "finetune_loss": total_loss,
         "video_finetune_loss": video_loss,
         "audio_finetune_loss": audio_loss,
+        "normalized_video_finetune_loss": normalized_video_loss,
+        "normalized_audio_finetune_loss": normalized_audio_loss,
+        "video_target_energy": video_target_energy,
+        "audio_target_energy": audio_target_energy,
     }
 
 
@@ -101,6 +123,10 @@ class FineTuneMethod(TrainingMethod):
             raise ValueError("FineTuneMethod requires student to be "
                              "trainable")
         self._attn_kind: Literal["dense", "vsa"] = (self._infer_attn_kind())
+        self._normalize_multimodal_losses = bool(self.method_config.get("normalize_multimodal_losses", False))
+        self._modality_energy_floor = float(self.method_config.get("modality_energy_floor", 1.0e-3))
+        self._video_loss_weight = float(self.method_config.get("video_loss_weight", 1.0))
+        self._audio_loss_weight = float(self.method_config.get("audio_loss_weight", 1.0))
 
         # Initialize preprocessors on student.
         self.student.init_preprocessors(self.training_config)
@@ -175,6 +201,10 @@ class FineTuneMethod(TrainingMethod):
             sigmas,
             training_batch,
             precondition_outputs=bool(self.training_config.model.precondition_outputs),
+            normalize_multimodal_losses=self._normalize_multimodal_losses,
+            modality_energy_floor=self._modality_energy_floor,
+            video_loss_weight=self._video_loss_weight,
+            audio_loss_weight=self._audio_loss_weight,
         )
 
         attn_metadata = training_batch.attn_metadata_vsa if self._attn_kind == "vsa" else training_batch.attn_metadata
