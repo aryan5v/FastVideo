@@ -16,12 +16,12 @@ case "${SOURCE_KIND}" in
   dense)
     MODEL_ID="FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
     SOURCE_REVISION="f624f08c6c279ab43534c003e556fc5b295b6558"
-    SOURCE_ROOT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/${SOURCE_REVISION}/transformer"
+    SOURCE_MODEL_ROOT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/${SOURCE_REVISION}"
     ;;
   vsa)
     MODEL_ID="FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
     SOURCE_REVISION="b65818d41939b5085451074fe8ca8b799f8d4921"
-    SOURCE_ROOT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree/snapshots/${SOURCE_REVISION}/transformer"
+    SOURCE_MODEL_ROOT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree/snapshots/${SOURCE_REVISION}"
     ;;
   *)
     echo "SOURCE_KIND must be dense or vsa, got ${SOURCE_KIND}" >&2
@@ -37,6 +37,7 @@ case "${MAP_STRATEGY}" in
 esac
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
+SOURCE_ROOT="${SOURCE_MODEL_ROOT}/transformer"
 MAP_PATH="${SPRINT_ROOT}/manifests/h6-block-score/${MAP_STRATEGY}_20_block_map.json"
 OUTPUT_ROOT="${SPRINT_ROOT}/checkpoints/h18-candidates/${SOURCE_KIND}-${MAP_STRATEGY}"
 OUTPUT_TRANSFORMER="${OUTPUT_ROOT}/transformer"
@@ -69,3 +70,18 @@ srun \
       --wandb-run-id '${RUN_ID}'
   "
 
+# The trainer resolves pipeline and auxiliary components from one model root.
+# Keep the newly materialized transformer local and point all immutable V1
+# components at their persistent Hugging Face snapshot without duplicating
+# hundreds of gigabytes.
+for component in "${SOURCE_MODEL_ROOT}"/*; do
+  name="$(basename "${component}")"
+  if [[ "${name}" == "transformer" ]]; then
+    continue
+  fi
+  if [[ -e "${OUTPUT_ROOT}/${name}" || -L "${OUTPUT_ROOT}/${name}" ]]; then
+    echo "refusing to overwrite candidate component ${OUTPUT_ROOT}/${name}" >&2
+    exit 3
+  fi
+  ln -s "${component}" "${OUTPUT_ROOT}/${name}"
+done
