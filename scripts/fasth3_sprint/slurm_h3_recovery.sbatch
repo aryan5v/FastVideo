@@ -116,7 +116,10 @@ elif [[ "${RUN_MODE}" == "long" && "${TARGET_STEPS}" != "200" ]]; then
   test -d "${OUTPUT_ROOT}/checkpoint-${previous}/dcp"
 fi
 if [[ "${RUN_MODE}" == "long" ]]; then
-  RECOVERY_GATE_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/${SOURCE_KIND}-${MAP_STRATEGY}"
+  # The activation candidate is the backend-specific recovery canary. Every
+  # map-specific candidate already passed its own optimizer/resume gate; the
+  # recovery method path varies by Dense versus VSA, not by block indices.
+  RECOVERY_GATE_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/${SOURCE_KIND}-activation"
   test -s "${RECOVERY_GATE_ROOT}/checkpoint-2/metadata.json"
   test -d "${RECOVERY_GATE_ROOT}/checkpoint-2/dcp"
 fi
