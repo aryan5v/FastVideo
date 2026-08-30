@@ -38,6 +38,13 @@ DTYPE_BYTES = {
     "I64": 8,
     "F64": 8,
 }
+PARAMETER_RANGES = {
+    # Dense keeps the shared modules plus 20 of the original 50 blocks.
+    "dense": (13_700_000_000, 13_900_000_000),
+    # VSA-H3 additionally retains one learned compression-gate projection per
+    # selected block, making the sparse release tier roughly 14.5B.
+    "vsa": (14_400_000_000, 14_650_000_000),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transformer", type=Path, required=True)
     parser.add_argument("--expected-source-kind", choices=("dense", "vsa"), required=True)
     parser.add_argument("--expected-layers", type=int, default=20)
-    parser.add_argument("--min-parameters", type=int, default=13_700_000_000)
-    parser.add_argument("--max-parameters", type=int, default=13_900_000_000)
+    parser.add_argument("--min-parameters", type=int)
+    parser.add_argument("--max-parameters", type=int)
     return parser.parse_args()
 
 
@@ -178,12 +185,13 @@ def validate_candidate(
 
 def main() -> None:
     args = parse_args()
+    default_minimum, default_maximum = PARAMETER_RANGES[args.expected_source_kind]
     receipt = validate_candidate(
         args.transformer,
         expected_source_kind=args.expected_source_kind,
         expected_layers=args.expected_layers,
-        min_parameters=args.min_parameters,
-        max_parameters=args.max_parameters,
+        min_parameters=args.min_parameters if args.min_parameters is not None else default_minimum,
+        max_parameters=args.max_parameters if args.max_parameters is not None else default_maximum,
     )
     print(json.dumps(receipt, indent=2, sort_keys=True))
 

@@ -12,7 +12,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from scripts.checkpoint_conversion.prune_minimax_h3_blocks import INDEX_NAME, prune_transformer
-from scripts.fasth3_sprint.validate_h3_candidate import validate_candidate
+from scripts.fasth3_sprint.validate_h3_candidate import PARAMETER_RANGES, validate_candidate
 
 
 def _write_source(root: Path) -> Path:
@@ -99,6 +99,15 @@ def test_pruning_reindexes_selected_blocks_and_keeps_shared_tensors(tmp_path: Pa
     assert receipt["parameter_count"] == 4
     assert receipt["vsa_gate_count"] == 0
     assert (destination / "candidate_validation_receipt.json").is_file()
+
+
+def test_release_parameter_ranges_distinguish_dense_and_vsa_candidates() -> None:
+    dense_minimum, dense_maximum = PARAMETER_RANGES["dense"]
+    vsa_minimum, vsa_maximum = PARAMETER_RANGES["vsa"]
+
+    assert dense_minimum <= 13_755_837_696 <= dense_maximum
+    assert vsa_minimum <= 14_526_541_056 <= vsa_maximum
+    assert 14_526_541_056 > dense_maximum
 
 
 @pytest.mark.parametrize("block_map", [(0, 0), (0, 4), (3, 1)])
