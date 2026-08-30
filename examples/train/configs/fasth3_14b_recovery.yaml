@@ -1,0 +1,90 @@
+# FastH3 20-block four-call BF16 recovery. The SLURM launcher overrides the
+# candidate, student attention backend, GPU topology, target step, and output.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/checkpoints/h18-candidates/dense-activation
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: TORCH_SDPA
+
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.minimax_h3_recovery.MiniMaxH3RecoveryMethod
+  modality_energy_floor: 1.0e-3
+  denoising_weight: 1.0
+  teacher_velocity_weight: 1.0
+  feature_weight: 0.01
+  feature_local_block_indices: [4, 9, 14, 19]
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+    pin_cpu_memory: true
+
+  data:
+    data_path: /mnt/nfs/vlm-aryan/fasth3-33b-20260806/data/h3_corpus
+    preprocessed_data_type: t2va
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 20260829
+    num_latent_t: 37
+    num_height: 512
+    num_width: 896
+    num_frames: 120
+
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 200
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/h36-recovery/dense-activation
+    training_state_checkpointing_steps: 100
+    checkpoints_total_limit: 2
+    preserve_every_steps: 100
+    preserve_steps: [200, 400, 600, 800, 1000]
+    resume_from_checkpoint: ""
+
+  tracker:
+    trackers: [wandb]
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: h36-recovery-dense-activation-step200
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+
+  vsa:
+    sparsity: 0.0
+    tile_size: 64
+    cache_tile_buf: false
+
+  dit_precision: bf16
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  ema:
+    _target_: fastvideo.train.callbacks.ema.EMACallback
+    decay: 0.9999
+    start_iter: 0
+
+pipeline: {}
