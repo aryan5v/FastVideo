@@ -86,13 +86,13 @@ fi
 mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 export MASTER_ADDR="${nodes[0]}"
 export MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
-WORLD_SIZE="$((SLURM_JOB_NUM_NODES * 4))"
-if (( WORLD_SIZE % 4 != 0 )); then
+FASTH3_TOTAL_GPUS="$((SLURM_JOB_NUM_NODES * 4))"
+if (( FASTH3_TOTAL_GPUS % 4 != 0 )); then
   echo "MiniMax H3 finite gate world size must be divisible by SP=4" >&2
   exit 4
 fi
 export REPO_ROOT CONFIG_PATH CANDIDATE_ROOT OUTPUT_ROOT RUN_ID LOG_DIR
-export ATTENTION_BACKEND VSA_SPARSITY MAX_STEPS RESUME_ARGS SPRINT_ROOT WORLD_SIZE
+export ATTENTION_BACKEND VSA_SPARSITY MAX_STEPS RESUME_ARGS SPRINT_ROOT FASTH3_TOTAL_GPUS
 
 srun \
   --export=ALL \
@@ -118,7 +118,7 @@ srun \
     export TORCH_NCCL_ENABLE_MONITORING=0
     export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}/node-${SLURM_PROCID}"
     mkdir -p "${TRITON_CACHE_DIR}"
-    echo "$(date -Is) job=${SLURM_JOB_ID} node_rank=${SLURM_PROCID} commit=$(git -C "${REPO_ROOT}" rev-parse HEAD) backend=${ATTENTION_BACKEND} stage=${RUN_ID}"
+    echo "$(date -Is) job=${SLURM_JOB_ID} node_rank=${SLURM_PROCID} total_gpus=${FASTH3_TOTAL_GPUS} commit=$(git -C "${REPO_ROOT}" rev-parse HEAD) backend=${ATTENTION_BACKEND} stage=${RUN_ID}"
     exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
       -m torch.distributed.run \
       --nnodes "${SLURM_JOB_NUM_NODES}" \
@@ -130,9 +130,9 @@ srun \
       --config "${CONFIG_PATH}" \
       --models.student.init_from "${CANDIDATE_ROOT}" \
       --models.student.attention_backend "${ATTENTION_BACKEND}" \
-      --training.distributed.num_gpus "${WORLD_SIZE}" \
+      --training.distributed.num_gpus "${FASTH3_TOTAL_GPUS}" \
       --training.distributed.hsdp_replicate_dim 1 \
-      --training.distributed.hsdp_shard_dim "${WORLD_SIZE}" \
+      --training.distributed.hsdp_shard_dim "${FASTH3_TOTAL_GPUS}" \
       --training.loop.max_train_steps "${MAX_STEPS}" \
       --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
       --training.tracker.run_name "${RUN_ID}" \
