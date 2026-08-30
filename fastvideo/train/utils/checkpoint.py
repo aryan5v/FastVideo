@@ -283,6 +283,11 @@ class CheckpointManager:
         save_steps = int(self.config.save_steps or 0)
         if save_steps <= 0:
             return
+        # The final step is commonly also a scheduled interval. Avoid
+        # rewriting the same multi-gigabyte DCP checkpoint after maybe_save()
+        # has already completed it.
+        if self._last_saved_step == step:
+            return
         self.save(step)
 
     def save(self, step: int) -> None:
