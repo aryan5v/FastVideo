@@ -72,3 +72,15 @@ def test_recovery_config_locks_teacher_losses_and_checkpoint_retention() -> None
     assert config["training"]["checkpoint"]["training_state_checkpointing_steps"] == 100
     assert config["training"]["checkpoint"]["preserve_every_steps"] == 100
     assert config["callbacks"]["ema"]["decay"] == 0.9999
+
+
+def test_recovery_launcher_requires_method_gate_before_long_run() -> None:
+    launcher = (_REPO_ROOT / "scripts/fasth3_sprint/slurm_h3_recovery.sbatch").read_text()
+
+    assert 'RUN_MODE="${RUN_MODE:-long}"' in launcher
+    assert 'finite recovery TARGET_STEPS must be 1 or 2' in launcher
+    assert 'Finite FastH3 recovery gate requires exactly 4 GPUs' in launcher
+    assert 'RECOVERY_GATE_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/' in launcher
+    assert 'test -s "${RECOVERY_GATE_ROOT}/checkpoint-2/metadata.json"' in launcher
+    assert 'Long FastH3 recovery requires 16 through 32 GPUs' in launcher
+    assert '--training.checkpoint.training_state_checkpointing_steps 1' in launcher
