@@ -25,13 +25,15 @@ def test_load_transformer_scopes_attention_backend(monkeypatch, tmp_path) -> Non
     captured: list[tuple[AttentionBackendEnum | None, str | None]] = []
 
     monkeypatch.setattr(moduleloader, "maybe_download_model", lambda path: str(tmp_path))
-    monkeypatch.setattr(
-        moduleloader,
-        "verify_model_config_and_directory",
-        lambda path: {"transformer": ("diffusers", "FakeTransformer", {
+    verified: list[tuple[str, list[str]]] = []
+
+    def _verify(path, *, required_component_dirs):
+        verified.append((path, required_component_dirs))
+        return {"transformer": ("diffusers", "FakeTransformer", {
             "subfolder": "transformer"
-        })},
-    )
+        })}
+
+    monkeypatch.setattr(moduleloader, "verify_model_config_and_directory", _verify)
 
     def _fake_load_module(**kwargs):
         del kwargs
@@ -53,6 +55,7 @@ def test_load_transformer_scopes_attention_backend(monkeypatch, tmp_path) -> Non
     )
 
     assert isinstance(result, torch.nn.Module)
+    assert verified == [(str(tmp_path), ["transformer"])]
     assert captured == [(AttentionBackendEnum.ATTN_QAT_TRAIN, "transformer")]
     assert _active_component_attention_backend_scope() is None
 
@@ -69,7 +72,7 @@ def test_load_transformer_restores_backend_when_loading_fails(
     monkeypatch.setattr(
         moduleloader,
         "verify_model_config_and_directory",
-        lambda path: {"transformer": ("diffusers", "FakeTransformer")},
+        lambda path, *, required_component_dirs: {"transformer": ("diffusers", "FakeTransformer")},
     )
 
     def _raise_during_load(**kwargs):
