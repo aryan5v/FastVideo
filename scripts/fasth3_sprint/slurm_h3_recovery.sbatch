@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=h3-bf16-recovery
 #SBATCH --partition=all
-#SBATCH --nodes=4
-#SBATCH --ntasks=4
+#SBATCH --nodes=3
+#SBATCH --ntasks=3
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --time=24:00:00
@@ -133,8 +133,8 @@ if [[ "${RUN_MODE}" == "finite" ]]; then
     echo "Finite FastH3 recovery gate requires exactly 4 GPUs" >&2
     exit 4
   fi
-elif (( FASTH3_TOTAL_GPUS < 16 || FASTH3_TOTAL_GPUS > 32 || FASTH3_TOTAL_GPUS % 4 != 0 )); then
-  echo "Long FastH3 recovery requires 16 through 32 GPUs and SP=4 divisibility" >&2
+elif (( FASTH3_TOTAL_GPUS < 12 || FASTH3_TOTAL_GPUS > 32 || FASTH3_TOTAL_GPUS % 4 != 0 )); then
+  echo "Long FastH3 recovery requires 12 through 32 GPUs and SP=4 divisibility" >&2
   exit 4
 fi
 export REPO_ROOT CONFIG_PATH CANDIDATE_ROOT OUTPUT_ROOT RUN_ID LOG_DIR SPRINT_ROOT
