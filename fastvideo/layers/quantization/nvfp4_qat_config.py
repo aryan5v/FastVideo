@@ -54,10 +54,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_FP4_LAYERS = (
     "ffn.fc_in",
     "ffn.fc_out",
+    # MiniMax H3 names its SwiGLU branch ``ff`` rather than ``ffn``.
+    ".ff.fc_in",
+    ".ff.fc_out",
     "to_q",
     "to_k",
     "to_v",
     "to_out",
+    # Learned VSA-H3 compression branch.  This must follow the same linear
+    # quantization contract as Q/K/V/output on the NVIDIA release artifact.
+    "to_gate_compress",
     # Kandinsky5
     "self_attention.out_layer",
     "cross_attention.out_layer",

@@ -17,7 +17,9 @@ import torch.nn as nn
 
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.quantization.nvfp4_qat_train_config import (
-    NVFP4QATTrainConfig, )
+    NVFP4QATTrainConfig,
+    NVFP4QATTrainQuantizeMethod,
+)
 from fastvideo.models.loader.fsdp_load import _maybe_quantize_model
 
 
@@ -68,3 +70,32 @@ def test_no_receipt_without_qat_train_layers() -> None:
     with _capture_logger("fastvideo.models.loader.fsdp_load") as records:
         _maybe_quantize_model(model)
     assert not any("NVFP4 QAT" in r.getMessage() for r in records)
+
+
+def test_h3_attention_ffn_and_vsa_gate_use_nvfp4_qat() -> None:
+    config = NVFP4QATTrainConfig()
+    targeted = (
+        "minimax_h3.transformer_blocks.0.attn.to_q",
+        "minimax_h3.transformer_blocks.0.attn.to_k",
+        "minimax_h3.transformer_blocks.0.attn.to_v",
+        "minimax_h3.transformer_blocks.0.attn.to_out",
+        "minimax_h3.transformer_blocks.0.attn.to_gate_compress",
+        "minimax_h3.transformer_blocks.0.ff.fc_in",
+        "minimax_h3.transformer_blocks.0.ff.fc_out",
+    )
+    for prefix in targeted:
+        linear = ReplicatedLinear(16, 16, quant_config=config, prefix=prefix)
+        assert isinstance(linear.quant_method, NVFP4QATTrainQuantizeMethod), prefix
+
+
+def test_h3_sensitive_projections_remain_unquantized() -> None:
+    config = NVFP4QATTrainConfig()
+    for prefix in (
+        "minimax_h3.proj_in",
+        "minimax_h3.audio_proj_in",
+        "minimax_h3.transformer_blocks.0.adaln_proj.linear",
+        "minimax_h3.proj_out",
+        "minimax_h3.audio_proj_out",
+    ):
+        linear = ReplicatedLinear(16, 16, quant_config=config, prefix=prefix)
+        assert not isinstance(linear.quant_method, NVFP4QATTrainQuantizeMethod), prefix
