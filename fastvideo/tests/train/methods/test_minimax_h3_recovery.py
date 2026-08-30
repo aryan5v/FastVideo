@@ -82,5 +82,5 @@ def test_recovery_launcher_requires_method_gate_before_long_run() -> None:
     assert 'Finite FastH3 recovery gate requires exactly 4 GPUs' in launcher
     assert 'RECOVERY_GATE_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/${SOURCE_KIND}-activation"' in launcher
     assert 'test -s "${RECOVERY_GATE_ROOT}/checkpoint-2/metadata.json"' in launcher
-    assert 'Long FastH3 recovery requires 12 through 32 GPUs' in launcher
+    assert 'Long FastH3 recovery requires 16 through 32 GPUs' in launcher
     assert '--training.checkpoint.training_state_checkpointing_steps 1' in launcher
