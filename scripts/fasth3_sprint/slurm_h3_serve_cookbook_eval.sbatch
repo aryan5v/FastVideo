@@ -35,7 +35,7 @@ srun \
     export WANDB_MODE=online
     export WANDB_DIR=${LOG_ROOT}
     export WANDB_CACHE_DIR=${EVAL_ROOT}/caches/wandb
-    export PYTHONPATH=${PR_REPO}:/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/python-packages
+    export PYTHONPATH=${EVAL_ROOT}/python-packages:${PR_REPO}:/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/python-packages
     export PYTHONDONTWRITEBYTECODE=1
     export TOKENIZERS_PARALLELISM=false
     export TRITON_CACHE_DIR=${EVAL_ROOT}/caches/triton/${RUN_ID}
@@ -52,6 +52,15 @@ srun \
     export FASTVIDEO_VAE_PARALLEL_DECODE=1
     export FASTVIDEO_VAE_PARALLEL_DECODE_STRATEGY=gather
     mkdir -p \"\${TRITON_CACHE_DIR}\"
+
+    if ! /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -c 'import openai; assert openai.__version__ == \"3.6.0\"'; then
+      /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m pip install \
+        --disable-pip-version-check \
+        --target ${EVAL_ROOT}/python-packages \
+        'openai==3.6.0'
+    fi
+    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -c \
+      'import openai; print(\"openai_sdk_version=\" + openai.__version__)' | tee ${LOG_ROOT}/openai-sdk.txt
 
     nvidia-smi -L | tee ${LOG_ROOT}/nvidia-smi-L.txt
     nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version --format=csv,noheader | tee ${LOG_ROOT}/hardware.csv
