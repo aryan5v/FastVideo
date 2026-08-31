@@ -1,0 +1,42 @@
+[
+  {
+    "id": "480_cyberpunk_vending_city",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 41001,
+    "prompt": "(S1) A macro cinematic shot pushes through the glass of an old vending machine and reveals a tiny living cyberpunk city built between glowing soda cans. Miniature trains weave through neon towers while warm rain beads race down the glass. Layered electrical hum, tiny rail clatter, distant synth bass, realistic reflections, intricate scale, one continuous camera move."
+  },
+  {
+    "id": "480_mars_saxophone",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 41002,
+    "prompt": "(S1) At blue twilight on Mars, an astronaut stands beside a solar rover and plays a short soulful phrase on a polished brass saxophone. Fine red dust drifts through the rover lights as the camera slowly orbits. The visible finger movements and breathing match the melody, rich saxophone with a subtle helmet-radio texture, low Martian wind, cinematic realism."
+  },
+  {
+    "id": "480_bioluminescent_sky_whale",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 41003,
+    "prompt": "(S1) A vast bioluminescent whale glides silently through storm clouds above a dark desert highway at night. A lone vintage car slows as blue light ripples across the sand and the whale rolls overhead, trailing sparkling mist. Deep resonant whale call, soft thunder, tires on asphalt, dreamlike scale, coherent lighting, slow wide camera pan."
+  },
+  {
+    "id": "480_paper_dragon_workshop",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 41004,
+    "prompt": "(S1) Handcrafted stop-motion scene inside a cluttered bookbinder's workshop. A folded red paper dragon wakes on the desk, shakes loose scraps of gold foil, flaps across open sketchbooks, and sneezes one tiny puff of glowing paper flame. Crisp paper rustles synchronized to each movement, wooden clock ticking, playful orchestral pluck, tactile handmade textures."
+  },
+  {
+    "id": "480_glacier_fpv_chase",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 41005,
+    "prompt": "(S1) High-speed FPV flight enters a translucent blue glacier cave, banking between narrow ice pillars and skimming over a rushing underground river before bursting into bright Arctic daylight. Smooth physically plausible motion, ice particles passing the lens, rising wind rush, sharp water echoes, one distant ice crack, no cuts, exhilarating cinematic detail."
+  }
+]

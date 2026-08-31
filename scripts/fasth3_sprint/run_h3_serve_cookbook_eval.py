@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--expected-cases", type=int, default=10)
     parser.add_argument("--generation-timeout", type=float, default=3600)
     parser.add_argument("--wandb-project", default="fasth3-serve-cookbook-eval")
     return parser.parse_args()
@@ -134,8 +135,8 @@ def main() -> None:
     receipts = args.output_root / "receipts"
     receipts.mkdir(exist_ok=True)
     cases = json.loads(args.prompts.read_text())
-    if len(cases) != 10:
-        raise ValueError(f"Expected exactly ten prompt cases, got {len(cases)}")
+    if len(cases) != args.expected_cases:
+        raise ValueError(f"Expected exactly {args.expected_cases} prompt cases, got {len(cases)}")
 
     started_at = time.time()
     health, readiness_wait_s = wait_for_server(args.base_url)
@@ -284,7 +285,8 @@ def main() -> None:
             wandb.log(metrics, step=index)
             print(
                 f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
-                f"completed={index + 1}/10 case={case['id']} job={job_id} wall_s={wall_s:.2f} artifact={output}",
+                f"completed={index + 1}/{len(cases)} case={case['id']} job={job_id} "
+                f"wall_s={wall_s:.2f} artifact={output}",
                 flush=True,
             )
     finally:

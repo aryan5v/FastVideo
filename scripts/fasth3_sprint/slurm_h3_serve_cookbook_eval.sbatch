@@ -14,6 +14,8 @@ set -euo pipefail
 : "${RUN_ID:?RUN_ID is required}"
 
 HARNESS_ROOT="${EVAL_ROOT}/harness"
+: "${PROMPTS_FILE:=${HARNESS_ROOT}/h3_serve_eval_prompts.json}"
+: "${EXPECTED_CASES:=10}"
 LOG_ROOT="${EVAL_ROOT}/logs/${RUN_ID}"
 OUTPUT_ROOT="${EVAL_ROOT}/runs/${RUN_ID}"
 mkdir -p "${LOG_ROOT}" "${OUTPUT_ROOT}" "${EVAL_ROOT}/caches/triton" "${EVAL_ROOT}/caches/wandb" "${EVAL_ROOT}/exports"
@@ -94,15 +96,16 @@ srun \
       ${HARNESS_ROOT}/run_h3_serve_cookbook_eval.py \
       --base-url http://127.0.0.1:8000 \
       --model fasth3-v1 \
-      --prompts ${HARNESS_ROOT}/h3_serve_eval_prompts.json \
+      --prompts ${PROMPTS_FILE} \
       --output-root ${OUTPUT_ROOT} \
       --model-id FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree \
       --model-revision b65818d41939b5085451074fe8ca8b799f8d4921 \
       --source-commit ${PR_COMMIT} \
-      --run-id ${RUN_ID}
+      --run-id ${RUN_ID} \
+      --expected-cases ${EXPECTED_CASES}
 
-    test \"\$(find ${OUTPUT_ROOT}/videos -type f -name '*.mp4' | wc -l)\" -eq 10
+    test \"\$(find ${OUTPUT_ROOT}/videos -type f -name '*.mp4' | wc -l)\" -eq ${EXPECTED_CASES}
     find ${OUTPUT_ROOT} -type f -print0 | sort -z | xargs -0 sha256sum > ${OUTPUT_ROOT}/SHA256SUMS
     tar -C ${OUTPUT_ROOT} -czf ${EVAL_ROOT}/exports/${RUN_ID}-metadata.tar.gz receipts summary.json SHA256SUMS
-    echo \"\$(date -Is) complete videos=10 summary=${OUTPUT_ROOT}/summary.json\"
+    echo \"\$(date -Is) complete videos=${EXPECTED_CASES} summary=${OUTPUT_ROOT}/summary.json\"
   "
