@@ -78,11 +78,17 @@ srun \
     }
     trap cleanup EXIT
 
-    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/fastvideo serve \
+    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m fastvideo.entrypoints.cli.main serve \
       --config ${HARNESS_ROOT}/openai_fasth3_v1_eval.yaml \
       > ${LOG_ROOT}/server.log 2>&1 &
     server_pid=\$!
     echo \"\$(date -Is) server_pid=\${server_pid}\"
+    sleep 10
+    if ! kill -0 \"\${server_pid}\" 2>/dev/null; then
+      echo \"Server process exited before becoming ready\" >&2
+      tail -n 200 ${LOG_ROOT}/server.log >&2 || true
+      exit 1
+    fi
 
     /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
       ${HARNESS_ROOT}/run_h3_serve_cookbook_eval.py \
