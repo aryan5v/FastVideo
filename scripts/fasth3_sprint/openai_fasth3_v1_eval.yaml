@@ -1,0 +1,49 @@
+# PR 1798 FastH3 server profile pinned to the released v1 VSA checkpoint.
+generator:
+  model_path: FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
+  revision: b65818d41939b5085451074fe8ca8b799f8d4921
+  engine:
+    num_gpus: 4
+    use_fsdp_inference: false
+    parallelism:
+      tp_size: 1
+      sp_size: 4
+    offload:
+      dit: false
+      dit_layerwise: false
+      text_encoder: true
+      image_encoder: true
+      vae: true
+      pin_cpu_memory: true
+    compile:
+      enabled: false
+      vae_enabled: false
+  pipeline:
+    workload_type: t2v
+    experimental:
+      attention_backend: VIDEO_SPARSE_ATTN_H3
+      VSA_sparsity: 0.9
+      VSA_tile_size: 64
+      inference_torch_compile: false
+      vae_parallel_decode: true
+      vae_parallel_decode_strategy: gather
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  output_dir: /mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831/server-artifacts
+  served_model_name: fasth3-v1
+
+default_request:
+  negative_prompt: ""
+  sampling:
+    height: 768
+    width: 1344
+    num_frames: 124
+    fps: 24
+    num_inference_steps: 5
+    guidance_scale: 1.0
+    batch_cfg: false
+    seed: 1000
+  output:
+    return_frames: false

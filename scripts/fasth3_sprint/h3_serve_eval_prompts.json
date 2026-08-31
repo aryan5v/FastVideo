@@ -1,0 +1,82 @@
+[
+  {
+    "id": "480_dialogue_cafe",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 31001,
+    "prompt": "(S1) Medium close-up in a quiet sunlit cafe. A ceramic artist in a blue apron turns toward the camera, smiles naturally, and says <d>[English] Every cup begins with a little patience.</d> Steam curls from a mug in the foreground. Gentle room tone, faint porcelain clinks, natural lip movement, locked camera, realistic daylight."
+  },
+  {
+    "id": "480_nature_rain",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 31002,
+    "prompt": "(S1) Macro cinematic view of summer rain striking broad green leaves beside a forest creek. Droplets bounce and roll toward the lens while the camera slowly slides left. Layered rainfall, soft flowing water, distant birds, no music, physically natural motion, shallow depth of field."
+  },
+  {
+    "id": "480_music_drums",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 31003,
+    "prompt": "(S1) A street percussionist performs a short syncopated rhythm on three hand drums beneath warm market lights at dusk. The camera makes a smooth half-circle around the performer as nearby listeners clap on the final beat. Clear drum transients, matching hand impacts, light crowd ambience, energetic but realistic movement."
+  },
+  {
+    "id": "480_action_bicycle",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 31004,
+    "prompt": "(S1) Low tracking shot beside a cyclist riding quickly over a wooden bridge through a misty pine forest at sunrise. Tires cross individual planks with rhythmic bumps, jacket fabric moves in the wind, and the rider rings the bicycle bell once while passing the camera. Crisp wheel noise, one synchronized bell, no dialogue."
+  },
+  {
+    "id": "480_product_soda",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 31005,
+    "prompt": "(S1) Studio product shot of a chilled glass bottle of sparkling citrus soda on wet black stone. The cap pops open, a brief mist escapes, and golden liquid pours into a clear glass with rising bubbles. Precise cap pop, fizz, liquid pour, premium controlled lighting, slow push-in, no text or logos."
+  },
+  {
+    "id": "768_dialogue_news",
+    "resolution": "native_768p",
+    "width": 1344,
+    "height": 768,
+    "seed": 31701,
+    "prompt": "(S1) Wide-to-medium cinematic shot inside a small coastal weather station during a storm. A focused meteorologist points to the rain outside and says <d>[English] The center of the storm will pass before sunrise.</d> Window reflections flicker with distant lightning. Intelligible speech, synchronized lips, rain against glass, low thunder after the flash, stable camera move."
+  },
+  {
+    "id": "768_wildlife_fox",
+    "resolution": "native_768p",
+    "width": 1344,
+    "height": 768,
+    "seed": 31702,
+    "prompt": "(S1) A red fox runs through fresh powder snow at blue hour, weaving between birch trees as the camera follows smoothly at ground level. Snow sprays from each paw and settles behind it. Detailed fur, consistent anatomy, crunching footsteps aligned to contact, soft winter wind, distant owl, no music."
+  },
+  {
+    "id": "768_concert_cello",
+    "resolution": "native_768p",
+    "width": 1344,
+    "height": 768,
+    "seed": 31703,
+    "prompt": "(S1) Intimate concert hall close-up of a cellist playing one expressive descending phrase under a single warm spotlight. The bow changes direction visibly with the musical phrasing while the camera slowly pulls back to reveal the quiet audience. Rich solo cello, believable bow synchronization, subtle hall reverb, no applause until the final note."
+  },
+  {
+    "id": "768_city_train",
+    "resolution": "native_768p",
+    "width": 1344,
+    "height": 768,
+    "seed": 31704,
+    "prompt": "(S1) Nighttime elevated train arrives at a rain-soaked neon city platform. The camera pans with the front carriage, brakes hiss, doors slide open, and waiting commuters step forward beneath rippling reflections. Synchronized rail rumble, brake squeal and door chime, coherent crowd motion, cinematic realism, no dialogue."
+  },
+  {
+    "id": "768_kitchen_chef",
+    "resolution": "native_768p",
+    "width": 1344,
+    "height": 768,
+    "seed": 31705,
+    "prompt": "(S1) Overhead-to-eye-level continuous shot in a bright professional kitchen. A chef tosses vegetables in a hot steel pan, catches them cleanly, plates the dish, then looks up and says <d>[English] Keep the heat high and the timing simple.</d> Sharp sizzle, utensil taps, synchronized speech, realistic food motion, smooth gimbal movement."
+  }
+]
