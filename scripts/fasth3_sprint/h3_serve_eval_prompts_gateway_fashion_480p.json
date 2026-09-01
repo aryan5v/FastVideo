@@ -1,0 +1,18 @@
+[
+  {
+    "id": "480_cosmic_gateway_astronaut",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 42001,
+    "prompt": "Five-second 16:9 photoreal science-fiction shot. An astronaut stands tiny on a rain-black volcanic plain before a colossal circular cosmic gateway that fills the sky. Start ultra-wide and push forward rapidly at ground level. Blue-white lightning crawls around the ring, mist races toward its pitch-black center, and the wet ground mirrors every flash. At four seconds the gateway ignites into a star tunnel and pulls dust toward it while the astronaut braces. Huge scale, high-contrast anamorphic cinema, restrained lens flare, detailed suit and natural motion. Audio: deep sub-bass pulse, distant metallic resonance, wind and gravel, then one massive warp impact. No text, subtitles, logos, cuts, or extra people."
+  },
+  {
+    "id": "480_desert_highway_fashion",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 42002,
+    "prompt": "Five-second 16:9 premium fashion film on an empty desert highway at golden hour. A stylish woman in a flowing cobalt coat stands beside a silver 1970s sports car and lifts a structured black travel bag from the open rear hatch before turning into the wind. Use one smooth low tracking shot that arcs from the chrome wheel to her face and the bag. Fabric and hair move naturally, heat haze shimmers above the road, long shadows and warm film halation, restrained 35 mm grain, cool confident performance. Audio: dry desert wind, soft engine idle, leather handle creak, coat fabric, and a minimal two-note bass motif. No text, subtitles, logos, extra people, cuts, or warped car geometry."
+  }
+]
