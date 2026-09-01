@@ -3,6 +3,7 @@
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
+PARTITION="${PARTITION:-all}"
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
 LOG_ROOT="${SPRINT_ROOT}/logs/slurm"
@@ -22,7 +23,7 @@ submit_recovery() {
     dependency_args=(--dependency="afterok:${dependency}" --kill-on-invalid-dep=yes)
   fi
   sbatch --parsable --export=NIL \
-    --partition=all \
+    --partition="${PARTITION}" \
     --nodes=3 \
     --ntasks=3 \
     --ntasks-per-node=1 \
@@ -37,4 +38,5 @@ submit_recovery() {
 dense_job="$(submit_recovery dense "")"
 vsa_job="$(submit_recovery vsa "${dense_job}")"
 
-printf 'dense_job=%s\nvsa_job=%s\norder=dense-afterok-vsa\n' "${dense_job}" "${vsa_job}"
+printf 'dense_job=%s\nvsa_job=%s\norder=dense-afterok-vsa\npartition=%s\n' \
+  "${dense_job}" "${vsa_job}" "${PARTITION}"
