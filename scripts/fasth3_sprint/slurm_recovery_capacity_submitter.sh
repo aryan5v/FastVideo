@@ -11,12 +11,28 @@ LOCK_PATH="${SPRINT_ROOT}/logs/slurm/recovery-12gpu-submit.lock"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-900}"
 POLL_SECONDS="${POLL_SECONDS:-15}"
 START_SECONDS="$(date +%s)"
+QUEUE_USER="${USER:-${SLURM_JOB_USER:-$(id -un)}}"
+READY_RECEIPT="${READY_RECEIPT:-}"
 
 mkdir -p "${SPRINT_ROOT}/logs/slurm"
 
 already_queued() {
-  squeue -u "${USER}" -h -n h3-rec-long-dense-activation-s200-12g \
+  squeue -u "${QUEUE_USER}" -h -n h3-rec-long-dense-activation-s200-12g \
     -o '%i' | grep -q '[0-9]'
+}
+
+receipt_ready() {
+  if [[ -z "${READY_RECEIPT}" ]]; then
+    return 0
+  fi
+  [[ -s "${READY_RECEIPT}" ]] || return 1
+  python3 - "${READY_RECEIPT}" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if receipt.get("remaining_missing_count") == 0 else 1)
+PY
 }
 
 while (( "$(date +%s)" - START_SECONDS < MAX_WAIT_SECONDS )); do
@@ -26,8 +42,8 @@ while (( "$(date +%s)" - START_SECONDS < MAX_WAIT_SECONDS )); do
   fi
 
   registered_nodes="$(sinfo -N -h -p all -o '%N' | sort -u | wc -l | tr -d ' ')"
-  echo "$(date -Is) registered_nodes=${registered_nodes} waiting_for=3"
-  if (( registered_nodes >= 3 )); then
+  echo "$(date -Is) registered_nodes=${registered_nodes} waiting_for=3 receipt_ready=$(receipt_ready && echo yes || echo no)"
+  if (( registered_nodes >= 3 )) && receipt_ready; then
     exec 9>"${LOCK_PATH}"
     if flock -n 9; then
       if already_queued; then
