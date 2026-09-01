@@ -8,11 +8,11 @@
 
 set -euo pipefail
 
-: "${EVAL_ROOT:?EVAL_ROOT is required}"
-: "${MAIN_REPO:?MAIN_REPO is required}"
-: "${SOURCE_COMMIT:?SOURCE_COMMIT is required}"
-: "${HARNESS_ROOT:?HARNESS_ROOT is required}"
-: "${PAIR_ID:?PAIR_ID is required}"
+EVAL_ROOT="${EVAL_ROOT:-/mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831}"
+MAIN_REPO="${MAIN_REPO:-${EVAL_ROOT}/repo-main-3d8ac9d1}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-3d8ac9d14bd697a89ede8f170cbfbca012a9edcc}"
+HARNESS_ROOT="${HARNESS_ROOT:-${EVAL_ROOT}/harness}"
+PAIR_ID="${PAIR_ID:-${1:?PAIR_ID argument is required when PAIR_ID is unset}}"
 
 LOG_ROOT="${EVAL_ROOT}/logs/${PAIR_ID}"
 mkdir -p "${LOG_ROOT}" "${EVAL_ROOT}/caches/triton" "${EVAL_ROOT}/caches/wandb" \
