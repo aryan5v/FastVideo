@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--video-decode-backend", choices=("h3-vae", "taeh3"), default="h3-vae")
     parser.add_argument("--expected-cases", type=int, default=10)
     parser.add_argument("--generation-timeout", type=float, default=3600)
     parser.add_argument("--wandb-project", default="fasth3-serve-cookbook-eval")
@@ -171,6 +172,7 @@ def main() -> None:
             "grid_points": 5,
             "transformer_forwards": 4,
             "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+            "video_decode_backend": args.video_decode_backend,
             "vsa_sparsity": 0.9,
             "persistent_output": str(args.output_root),
         },
@@ -182,6 +184,7 @@ def main() -> None:
         "model_id": args.model_id,
         "model_revision": args.model_revision,
         "served_model": args.model,
+        "video_decode_backend": args.video_decode_backend,
         "slurm_job_id": __import__("os").environ.get("SLURM_JOB_ID"),
         "slurm_nodes": __import__("os").environ.get("SLURM_JOB_NODELIST"),
         "started_at_unix": started_at,
@@ -250,6 +253,7 @@ def main() -> None:
             record = {
                 "index": index,
                 "case": case,
+                "is_warmup": case.get("role") == "warmup",
                 "job_id": job_id,
                 "status": job["status"],
                 "submit_latency_s": submit_latency_s,
@@ -277,11 +281,14 @@ def main() -> None:
                 "clip/download_latency_s": download_latency_s,
                 "clip/bytes": output.stat().st_size,
                 "clip/media_contract_pass": int(media["stream_contract_pass"]),
+                "clip/is_warmup": int(case.get("role") == "warmup"),
             }
             if job.get("inference_time_s") is not None:
                 metrics["clip/server_inference_time_s"] = float(job["inference_time_s"])
             if job.get("peak_memory_mb") is not None:
                 metrics["clip/server_peak_memory_mb"] = float(job["peak_memory_mb"])
+            for stage, duration in (job.get("stage_durations") or {}).items():
+                metrics[f"clip/stage/{stage}_s"] = float(duration)
             wandb.log(metrics, step=index)
             print(
                 f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
