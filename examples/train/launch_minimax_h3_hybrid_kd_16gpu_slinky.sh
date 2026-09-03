@@ -32,28 +32,27 @@ sbatch \
   --time=24:00:00 \
   --exclusive \
   --chdir="${WORKTREE_ROOT}" \
-  --container-image="${IMAGE}" \
-  --container-mounts=/mnt/lustre:/mnt/lustre \
   --output="${RESULT_DIR}/slurm/%x_%j.out" \
   --error="${RESULT_DIR}/slurm/%x_%j.err" \
   : \
   --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
-  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --chdir="${WORKTREE_ROOT}" \
   : \
   --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
-  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --chdir="${WORKTREE_ROOT}" \
   : \
   --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
-  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre <<'SBATCH_SCRIPT'
+  --chdir="${WORKTREE_ROOT}" <<'SBATCH_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
 PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
+IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-3da750ded0ec.sqsh
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_16gpu.yaml
 RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit
 DATA_DIR=${WORKTREE_ROOT}/data/crush-smol
@@ -81,20 +80,30 @@ if [[ -e data/models/MiniMax-H3 && ! -L data/models/MiniMax-H3 ]]; then
 fi
 ln -sfn "${PREVIEW_ROOT}" data/models/MiniMax-H3
 if [[ ! -f "${PARQUET}" ]]; then
-  hf download wlsaidhi/crush-smol-merged \
-    --repo-type dataset \
-    --revision 1a850a74e92d5ac3daa273ea658ec60e92fbaf4e \
-    --local-dir "${DATA_DIR}"
-  torchrun --standalone --nnodes=1 --nproc-per-node=1 \
-    -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit
+  srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
+    --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+    bash -c "
+      cd '${WORKTREE_ROOT}'
+      hf download wlsaidhi/crush-smol-merged \
+        --repo-type dataset \
+        --revision 1a850a74e92d5ac3daa273ea658ec60e92fbaf4e \
+        --local-dir '${DATA_DIR}'
+      torchrun --standalone --nnodes=1 --nproc-per-node=1 \
+        -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit
+    "
 fi
-python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
+srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
+  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
 # Heterogeneous group zero is exactly one node, so its nodelist is already a
 # concrete rendezvous hostname. The training container does not ship scontrol.
 export MASTER_ADDR=${SLURM_JOB_NODELIST_HET_GROUP_0}
 export MASTER_PORT=29541
-launch_training_node() {
+export CONFIG_FILE
+srun --het-group=0-3 \
+  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  bash -c '
   export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
   exec torchrun \
     --nnodes 4 \
@@ -104,21 +113,22 @@ launch_training_node() {
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     fastvideo/train/entrypoint/train.py \
     --config "${CONFIG_FILE}"
-}
-export -f launch_training_node
-srun --het-group=0-3 bash -c launch_training_node
+'
 
 mkdir -p "${CONVERTED}"
 for entry in "${PREVIEW_ROOT}"/*; do
   [[ "$(basename "${entry}")" == transformer ]] && continue
   [[ -e "${CONVERTED}/$(basename "${entry}")" ]] || ln -s "${entry}" "${CONVERTED}/$(basename "${entry}")"
 done
-python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
+srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
+  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
   --base "${PREVIEW_ROOT}/transformer" \
   --hybrid "${EXPLODED}" \
   --dst "${CONVERTED}/transformer"
 
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
+  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
   python examples/inference/basic/basic_fasth3.py \
   --model-path "${CONVERTED}" \
   --no-vsa \
