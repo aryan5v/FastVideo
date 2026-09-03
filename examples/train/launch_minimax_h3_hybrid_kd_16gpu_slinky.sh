@@ -82,6 +82,7 @@ ln -sfn "${PREVIEW_ROOT}" data/models/MiniMax-H3
 if [[ ! -f "${PARQUET}" ]]; then
   srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
     --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+    --container-workdir="${WORKTREE_ROOT}" \
     bash -c "
       cd '${WORKTREE_ROOT}'
       hf download wlsaidhi/crush-smol-merged \
@@ -94,6 +95,7 @@ if [[ ! -f "${PARQUET}" ]]; then
 fi
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --container-workdir="${WORKTREE_ROOT}" \
   /opt/venv/bin/python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
 # Heterogeneous group zero is exactly one node, so its nodelist is already a
@@ -103,6 +105,7 @@ export MASTER_PORT=29541
 export CONFIG_FILE
 srun --het-group=0-3 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --container-workdir="${WORKTREE_ROOT}" \
   bash -c '
   export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
   exec torchrun \
@@ -122,6 +125,7 @@ for entry in "${PREVIEW_ROOT}"/*; do
 done
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --container-workdir="${WORKTREE_ROOT}" \
   /opt/venv/bin/python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
   --base "${PREVIEW_ROOT}/transformer" \
   --hybrid "${EXPLODED}" \
@@ -129,6 +133,7 @@ srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
 
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --container-workdir="${WORKTREE_ROOT}" \
   /opt/venv/bin/python examples/inference/basic/basic_fasth3.py \
   --model-path "${CONVERTED}" \
   --no-vsa \
