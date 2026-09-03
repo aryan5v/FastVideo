@@ -5,7 +5,7 @@ set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
+PREVIEW_ROOT=/mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
 IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-3da750ded0ec.sqsh
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_16gpu.yaml
 RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit
@@ -51,7 +51,7 @@ set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
+PREVIEW_ROOT=/mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
 IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-3da750ded0ec.sqsh
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_16gpu.yaml
 RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit
