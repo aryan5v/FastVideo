@@ -43,12 +43,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=1.0,
         help="adapter strength; 0 zeros its weights but keeps its backend, and 1 applies its published scale",
     )
-    parser.add_argument(
-        "--vsa",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="select VSA explicitly; by default it is inferred from the adapter's compression-gate payload",
-    )
+    parser.set_defaults(vsa=None)
     args = basic_fasth3.validate_args(parser, parser.parse_args(argv))
     if not math.isfinite(args.lora_strength):
         parser.error("--lora-strength must be finite")

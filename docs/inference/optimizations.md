@@ -14,6 +14,7 @@ This page describes the various options for speeding up generation times in Fast
 - Optimized Attention Backends
 
   - [Flash Attention](#flash-attention)
+  - [Hybrid MiniMax H3](#hybrid-minimax-h3-window-softmax--linear-far-branch)
   - [Sliding Tile Attention (Archived)](#sliding-tile-attention-archived)
   - [Sage Attention](#sage-attention)
   - [Sage Attention 3](#sage-attention-3)
@@ -112,6 +113,35 @@ grad-enabled calls, and NVFP4 on their established paths. It does not apply to
 the Preview checkpoint's sparse VSA blocks. Packed-varlen changes floating-point
 reduction order relative to fixed-length FA4, so treat it as a speed/quality
 evaluation option rather than an exact-parity mode.
+
+### Hybrid MiniMax H3 (window softmax + linear far branch)
+
+This sits **on top of** FastH3 that already shipped: packed layout, QKV / RoPE /
+`to_out`, Sol-Engine fusions, FP8, sequence parallel, and the MLX T2VA runtime.
+A converted hybrid transformer (`hybrid_attention: true` in
+`transformer/config.json`) replaces only the attention body: chunk-aligned
+window softmax plus a bidirectional linear scan over the frames the window does
+not see. Dense and VSA FastH3 checkpoints are unchanged. Maintainer notes
+(reuse list, pitfalls) live in
+`fastvideo/models/dits/minimax_h3_hybrid/AGENTS.md`.
+
+Convert an exploded VDN-H3 artifact onto a dense H3 `transformer/` directory:
+
+```bash
+python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
+  --base /path/to/MiniMax-H3/transformer \
+  --hybrid /path/to/vdn-minimax-h3/ckpts/stage-dmd-step-250 \
+  --dst /path/to/FastH3-Hybrid/transformer
+```
+
+Then run with `--no-vsa`. Two sequence-parallel ranks split softmax vs linear
+automatically (`hybrid_branch_parallel`). On Apple Silicon the MLX runtime
+selects the same algorithm when the DiT weights include the linear branch.
+
+This is not a copy of an external fused stack. Tensorwise FP8 on `to_q/k/v`,
+`to_out`, `to_out_linear`, `beta_proj`, `softmax_gate`, and `output_gate` is
+the existing FastVideo FP8 path. The KDA `alpha` linears stay fp32. Pass
+`--fp8` on `basic_fasth3.py` to try it.
 
 ### FP4 Flash Attention 4 (Blackwell only)
 
@@ -288,7 +318,9 @@ before enabling them.
 Quantizes DiT linear layers (attention projections and FFN) to FP8 e4m3.
 
 On GPUs older than sm89, the FP8 matmul falls back to a bf16 dequant path
-automatically.
+automatically. Hybrid MiniMax H3 also tags `to_out_linear`, `beta_proj`,
+`softmax_gate`, and `output_gate`; the KDA `alpha` down/up projections stay
+fp32. Pass `--fp8` on `examples/inference/basic/basic_fasth3.py` to try it.
 
 ### Requirements
 

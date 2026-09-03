@@ -106,6 +106,14 @@ class ModelBase(ABC):
     def on_train_start(self) -> None:  # noqa: B027
         """Called once before the training loop begins."""
 
+    def trainable_parameters(self) -> list[torch.nn.Parameter]:
+        """Return the parameters owned by this role's optimizer.
+
+        Model plugins with a partial-training policy can override this hook;
+        the default preserves the existing requires-grad contract.
+        """
+        return [parameter for parameter in self.transformer.parameters() if parameter.requires_grad]
+
     def decode_latents(
         self,
         latents_b_t_c_h_w: torch.Tensor,

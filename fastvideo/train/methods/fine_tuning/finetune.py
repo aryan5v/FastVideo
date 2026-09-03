@@ -242,7 +242,9 @@ class FineTuneMethod(TrainingMethod):
 
         student_betas = tc.optimizer.betas
         student_sched = str(tc.optimizer.lr_scheduler)
-        student_params = [p for p in self.student.transformer.parameters() if p.requires_grad]
+        student_params = self.student.trainable_parameters()
+        if not student_params:
+            raise ValueError("FineTuneMethod requires at least one trainable student parameter")
         (
             self._student_optimizer,
             self._student_lr_scheduler,

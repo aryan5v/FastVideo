@@ -75,6 +75,24 @@ def build_tiny_h3_config() -> MiniMaxH3Config:
     return MiniMaxH3Config(arch_config=MiniMaxH3ArchConfig(**TINY_ARCH))
 
 
+def build_tiny_hybrid_config(**overrides) -> MiniMaxH3Config:
+    """Tiny H3 with hybrid attention enabled. Extra kwargs override arch fields."""
+    fields = dict(TINY_ARCH)
+    fields.update(
+        hybrid_attention=True,
+        hybrid_enable_softmax_gate=False,
+        hybrid_enable_text_state=False,
+        hybrid_short_conv_targets=(),
+        hybrid_branch_parallel=False,
+        hybrid_window_radius=1,
+        hybrid_window_chunk=5,
+        hybrid_anchor_frames="both",
+        hybrid_delta_rule="vdn_solve",
+    )
+    fields.update(overrides)
+    return MiniMaxH3Config(arch_config=MiniMaxH3ArchConfig(**fields))
+
+
 def build_hf_config(config: MiniMaxH3Config) -> dict[str, object]:
     arch = config.arch_config
     return {
@@ -96,6 +114,12 @@ def build_hf_config(config: MiniMaxH3Config) -> dict[str, object]:
         "norm_eps": arch.norm_eps,
         "qk_norm_eps": arch.qk_norm_eps,
         "final_norm_eps": arch.final_norm_eps,
+        "hybrid_attention": bool(getattr(arch, "hybrid_attention", False)),
+        "hybrid_window_radius": int(getattr(arch, "hybrid_window_radius", 1)),
+        "hybrid_window_chunk": int(getattr(arch, "hybrid_window_chunk", 5)),
+        "hybrid_anchor_frames": str(getattr(arch, "hybrid_anchor_frames", "both")),
+        "hybrid_delta_rule": str(getattr(arch, "hybrid_delta_rule", "vdn_solve")),
+        "hybrid_enable_text_state": bool(getattr(arch, "hybrid_enable_text_state", True)),
     }
 
 
@@ -114,13 +138,35 @@ def initialize_model_parameters(model: torch.nn.Module) -> None:
             torch.nn.init.xavier_uniform_(param)
 
 
-def build_torch_model() -> MiniMaxH3Transformer3DModel:
-    config = build_tiny_h3_config()
+def build_torch_model(config: MiniMaxH3Config | None = None) -> MiniMaxH3Transformer3DModel:
+    config = config or build_tiny_h3_config()
     model = MiniMaxH3Transformer3DModel(config=config, hf_config=build_hf_config(config))
     model = model.to(device="cpu", dtype=torch.float32)
     initialize_model_parameters(model)
     model.eval()
     return model
+
+
+def torch_hybrid_layout(layout):
+    """Numpy MLX packed layout -> HybridSequenceLayout used by the torch DiT."""
+    from fastvideo.models.dits.minimax_h3_hybrid.layout import hybrid_layout_from_packed
+    from fastvideo.pipelines.basic.minimax_h3.packing import MiniMaxH3PackedLayout
+
+    packed = MiniMaxH3PackedLayout(
+        sequence_length=layout.sequence_length,
+        position_ids=torch.from_numpy(layout.position_ids),
+        token_tags=torch.from_numpy(layout.token_tags),
+        video_indices=torch.from_numpy(layout.video_indices),
+        audio_indices=torch.from_numpy(layout.audio_indices),
+        text_indices=torch.from_numpy(layout.text_indices),
+        num_condition_video_rows=layout.num_condition_video_rows,
+        num_condition_audio_rows=layout.num_condition_audio_rows,
+        num_video_latent_frames=layout.num_video_latent_frames,
+        latent_height=layout.latent_height,
+        latent_width=layout.latent_width,
+        num_audio_latents=layout.num_audio_latents,
+    )
+    return hybrid_layout_from_packed(packed, tuple(TINY_ARCH["patch_size"]))
 
 
 def build_layout():
@@ -227,12 +273,15 @@ def mlx_dit_from_torch_model(
 
 
 def torch_reference_output(model, torch_inputs) -> tuple[np.ndarray, np.ndarray]:
+    kwargs = dict(torch_inputs)
+    if getattr(model, "hybrid_attention_enabled", False) and "hybrid_layout" not in kwargs:
+        raise ValueError("hybrid tiny H3 forwards need hybrid_layout in torch_inputs.")
     with torch.no_grad(), set_forward_context(
             current_timestep=0,
             attn_metadata=None,
             forward_batch=ForwardBatch(data_type="dummy"),
     ):
-        video_output, audio_output = model(**torch_inputs)
+        video_output, audio_output = model(**kwargs)
     return video_output[0].float().numpy(), audio_output[0].float().numpy()
 
 
@@ -250,6 +299,7 @@ def mlx_output(dit: MLXMiniMaxH3DiT, layout, mlx_inputs) -> tuple[np.ndarray, np
         video_indices=mx.array(layout.video_indices),
         audio_indices=mx.array(layout.audio_indices),
         text_indices=mx.array(layout.text_indices),
+        layout=layout,
     )
     mx.eval(video_output, audio_output)
     return np.asarray(video_output), np.asarray(audio_output)

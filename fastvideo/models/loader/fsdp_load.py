@@ -606,6 +606,20 @@ def load_model_from_full_model_state_dict(
                 )
                 continue
 
+            # A model family may publish backend-specific tensors in the same
+            # checkpoint. For example, MiniMax H3 Preview-v1 carries VSA
+            # compression gates which are deliberately absent when the dense
+            # hybrid student is instantiated. Keep this opt-in and
+            # model-scoped so strict loading catches every unrelated mapping
+            # mistake.
+            allowed_unexpected = getattr(model, "_allowed_unexpected_checkpoint_patterns", ())
+            if any(pattern in target_param_name for pattern in allowed_unexpected):
+                logger.warning(
+                    "Skipping backend-specific checkpoint key absent from model: %s",
+                    target_param_name,
+                )
+                continue
+
             # For non-strict loads, treat this as an "unexpected key" and skip it
             # (mirrors torch.nn.Module.load_state_dict(strict=False)).
             if not strict:
@@ -673,11 +687,18 @@ def load_model_from_full_model_state_dict(
             logger.info("Parameters absent from the checkpoint and supplied by the LoRA adapter: %d (%s)",
                         len(from_adapter), _summarize_param_names(from_adapter))
         if zero_init:
-            logger.warning("Found unloaded parameters in meta state dict, zero-initializing: %d (%s)", len(zero_init),
+            logger.warning("Found unloaded parameters in meta state dict: %d (%s); using model-specific "
+                           "initialization where available and zeros otherwise", len(zero_init),
                            _summarize_param_names(zero_init))
 
     # List of allowed parameter name patterns
-    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress", "proj_l"]  # Can be extended as needed
+    ALLOWED_NEW_PARAM_PATTERNS = [
+        "gate_compress",
+        "proj_l",
+        "linear_attention",
+        "to_out_linear",
+        "softmax_gate",
+    ]
     for new_param_name in unused_keys:
         # An adapter that ships the parameter outright both supplies the value and
         # authorizes it: the allowlist exists to catch a checkpoint silently missing a
@@ -708,19 +729,25 @@ def load_model_from_full_model_state_dict(
                 )
                 if cpu_offload:
                     sharded_tensor = sharded_tensor.cpu()
-        elif not hasattr(meta_sharded_param, "device_mesh"):
-            # Initialize with zeros
-            sharded_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
         else:
-            # Initialize with zeros and distribute
-            full_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
-            sharded_tensor = distribute_tensor(
-                full_tensor,
-                meta_sharded_param.device_mesh,
-                meta_sharded_param.placements,
-            )
-            if cpu_offload:
-                sharded_tensor = sharded_tensor.cpu()
+            initializer = getattr(model, "initialize_missing_parameter", None)
+            full_tensor = (initializer(new_param_name, meta_sharded_param.shape, device, target_dtype)
+                           if callable(initializer) else None)
+            if full_tensor is None:
+                full_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
+            if tuple(full_tensor.shape) != tuple(meta_sharded_param.shape):
+                raise ValueError(f"Missing-parameter initializer returned shape {tuple(full_tensor.shape)} for "
+                                 f"{new_param_name}, expected {tuple(meta_sharded_param.shape)}")
+            if not hasattr(meta_sharded_param, "device_mesh"):
+                sharded_tensor = full_tensor
+            else:
+                sharded_tensor = distribute_tensor(
+                    full_tensor,
+                    meta_sharded_param.device_mesh,
+                    meta_sharded_param.placements,
+                )
+                if cpu_offload:
+                    sharded_tensor = sharded_tensor.cpu()
         sharded_sd[new_param_name] = nn.Parameter(sharded_tensor)
 
     if dense_lora_patch is not None:

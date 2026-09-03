@@ -113,6 +113,45 @@ def test_skipped_source_entry_is_popped_before_continue(monkeypatch, skipped_nam
     assert captured["sd"] == {}
 
 
+def test_model_scoped_backend_key_is_skipped_under_strict_loading(monkeypatch) -> None:
+    captured = _capture_state_dict(monkeypatch)
+    model = _TinyModel()
+    model._allowed_unexpected_checkpoint_patterns = (".attn.to_gate_compress.", )
+    sources = {
+        **_source_tensors(),
+        "transformer_blocks.0.attn.to_gate_compress.weight": torch.ones(8, 8),
+    }
+
+    load_model_from_full_model_state_dict(
+        model,
+        iter(sources.items()),
+        torch.device("cpu"),
+        torch.bfloat16,
+        strict=True,
+        param_names_mapping=_identity_mapping,
+        training_mode=False,
+    )
+
+    assert captured["sd"] == {}
+
+
+def test_model_scoped_backend_key_does_not_hide_other_strict_mismatches() -> None:
+    model = _TinyModel()
+    model._allowed_unexpected_checkpoint_patterns = (".attn.to_gate_compress.", )
+    sources = {**_source_tensors(), "unexpected.weight": torch.ones(8, 8)}
+
+    with pytest.raises(ValueError, match="unexpected.weight"):
+        load_model_from_full_model_state_dict(
+            model,
+            iter(sources.items()),
+            torch.device("cpu"),
+            torch.bfloat16,
+            strict=True,
+            param_names_mapping=_identity_mapping,
+            training_mode=False,
+        )
+
+
 def test_source_tensors_become_collectable(monkeypatch) -> None:
     """The reason the drain matters: the tensors have to actually go."""
     captured = _capture_state_dict(monkeypatch)
@@ -161,3 +200,30 @@ def test_weights_still_land_in_the_model() -> None:
     for name, value in expected.items():
         assert loaded[name].dtype == torch.bfloat16
         assert loaded[name][0, 0].item() == value
+
+
+def test_model_specific_initializer_materializes_allowed_missing_parameter() -> None:
+    class ModelWithHybridParameter(_TinyModel):
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear_attention = nn.Linear(8, 8, bias=False)
+
+        def initialize_missing_parameter(self, name, shape, device, dtype):
+            if name == "linear_attention.weight":
+                return torch.full(shape, 3.0, device=device, dtype=dtype)
+            return None
+
+    model = ModelWithHybridParameter()
+    load_model_from_full_model_state_dict(
+        model,
+        iter(list(_source_tensors().items())),
+        torch.device("cpu"),
+        torch.bfloat16,
+        strict=False,
+        param_names_mapping=_identity_mapping,
+        training_mode=False,
+    )
+
+    assert model.linear_attention.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(model.linear_attention.weight, torch.full((8, 8), 3.0, dtype=torch.bfloat16))

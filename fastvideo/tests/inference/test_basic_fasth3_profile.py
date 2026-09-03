@@ -57,6 +57,8 @@ def test_default_all_profile_matches_fastest_contract(tmp_path):
     assert config.engine.offload.pin_cpu_memory is True
     assert config.engine.compile.enabled is False
     assert config.engine.compile.vae_enabled is True
+    assert args.fp8 is False
+    assert config.engine.quantization is None
     assert config.pipeline.experimental == {
         "attention_backend": "VIDEO_SPARSE_ATTN_H3",
         "VSA_sparsity": 0.9,
@@ -96,6 +98,15 @@ def test_fast_profile_supports_measured_durations_without_separate_scripts(tmp_p
     assert args.ulysses_a2a == "off"
     assert config.pipeline.experimental["inference_torch_compile"] is True
     assert request.sampling.num_frames == num_frames
+
+
+def test_fp8_sets_typed_transformer_quant():
+    args = _args("--fp8")
+    config = fasth3.build_generator_config(args)
+    assert args.fp8 is True
+    assert config.engine.quantization is not None
+    assert config.engine.quantization.transformer_quant == "FP8"
+    assert fasth3.build_generator_config(_args()).engine.quantization is None
 
 
 def test_compile_mode_requires_regional_compile_opt_out(capsys):

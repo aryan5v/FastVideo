@@ -304,6 +304,13 @@ def test_cleanup_skips_non_checkpoint_dirs(tmp_path: Path) -> None:
     assert remaining == ["checkpoint-3", "logs", "wandb"]
 
 
+def test_cleanup_reserves_space_for_replacement(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path, keep_last=1)
+    _make_checkpoint_dir(tmp_path, 160)
+    mgr._cleanup_old_checkpoints(reserve_slots=1)
+    assert list(tmp_path.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # G. maybe_save gating logic
 # ---------------------------------------------------------------------------
@@ -353,3 +360,11 @@ def test_maybe_save_triggers_on_each_interval(tmp_path: Path) -> None:
     for step in range(1, 41):
         mgr.maybe_save(step=step)
     assert calls == [10, 20, 30, 40]
+
+
+def test_save_final_dedupes_last_periodic_checkpoint(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path, save_steps=10)
+    calls = _record_save_calls(mgr)
+    mgr.maybe_save(step=20)
+    mgr.save_final(step=20)
+    assert calls == [20]

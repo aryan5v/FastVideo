@@ -36,6 +36,12 @@ _FP8_SUFFIXES = (
     "to_k",
     "to_v",
     "to_out",
+    "to_out_linear",
+    # Hybrid MiniMax H3 extras. Keep `linear_attention.alpha` off this list:
+    # FrameKDAAlpha runs those two linears in fp32 on purpose.
+    "beta_proj",
+    "softmax_gate",
+    "output_gate",
     # Kandinsky5
     "self_attention.out_layer",
     "cross_attention.out_layer",

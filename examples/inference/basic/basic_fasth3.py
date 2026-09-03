@@ -7,6 +7,12 @@ grid (exactly four DiT forwards), trained VSA policy, Blackwell sparse kernel,
 regional fullgraph DiT compile, compiled/parallel video VAE, and inference-only
 H3 fusions. One compile warmup is excluded before three measured requests.
 
+Converted hybrid MiniMax H3 checkpoints (window softmax + linear far branch)
+auto-enable from ``transformer/config.json``. Pass ``--no-vsa`` for those;
+two GPUs split the softmax and linear branches when sequence parallel size is 2.
+``--fp8`` tags the existing FastVideo FP8 path onto the DiT linears, including
+hybrid ``to_out_linear``, ``beta_proj``, and gates (KDA ``alpha`` stays fp32).
+
 Both regional compile and the default fusions can change floating-point
 operation order, so ``all`` is a report-only performance profile.
 ``--profile strict`` disables the H3 fusions but preserves regional compile;
@@ -34,6 +40,7 @@ from fastvideo.api import (
     OutputConfig,
     ParallelismConfig,
     PipelineSelection,
+    QuantizationConfig,
     SamplingConfig,
 )
 
@@ -83,6 +90,10 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
                         default="sm100a",
                         help="tile-64 sparse kernel; sm100a is the measured GB200 route and requires a compatible "
                         "fastvideo-kernel build")
+    parser.add_argument("--vsa",
+                        action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="use the checkpoint's VSA policy; pass --no-vsa for dense or converted hybrid H3")
     parser.add_argument("--fa4",
                         action=argparse.BooleanOptionalAction,
                         default=True,
@@ -124,6 +135,10 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
                         default=None,
                         help='whole-DiT torch.compile mode, e.g. "reduce-overhead"; requires '
                         "--no-inference-torch-compile")
+    parser.add_argument("--fp8",
+                        action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="quantize tagged DiT linears with transformer_quant=FP8; hybrid KDA alpha stays fp32")
     return parser
 
 
@@ -259,6 +274,7 @@ def build_generator_config(args: argparse.Namespace) -> GeneratorConfig:
                 mode=args.compile_mode,
                 vae_enabled=args.compile_vae,
             ),
+            quantization=QuantizationConfig(transformer_quant="FP8") if args.fp8 else None,
         ),
     )
 
@@ -315,6 +331,8 @@ def run(args: argparse.Namespace) -> list[float]:
           f"Denoising contract override: {args.steps} sigma points = {args.steps - 1} DiT forwards")
     print("Profile environment: " + " ".join(f"{key}={value if value is not None else '<unset>'}"
                                                   for key, value in environment.items()))
+    if args.fp8:
+        print("FP8: engine.quantization.transformer_quant=FP8 (hybrid KDA alpha stays fp32)")
 
     generator = VideoGenerator.from_config(build_generator_config(args))
     measured_wall_times: list[float] = []

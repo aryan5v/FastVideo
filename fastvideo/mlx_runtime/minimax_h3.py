@@ -104,6 +104,8 @@ _QUANTIZABLE_SUFFIXES = (
     "attn.to_k.weight",
     "attn.to_v.weight",
     "attn.to_out.0.weight",
+    "attn.to_out.weight",
+    "attn.to_out_linear.weight",
     "ff.net.0.proj.weight",
     "ff.net.2.weight",
 )
@@ -473,28 +475,65 @@ def apply_h3_rotary(x, cos, sin):
     return mx.concatenate([out.astype(x.dtype), x_pass], axis=-1)
 
 
-def _attention(weights: dict[str, Any], x, cos, sin, *, num_heads: int, head_dim: int, eps: float, use_rope: bool):
+def _attention(
+    weights: dict[str, Any],
+    x,
+    cos,
+    sin,
+    *,
+    num_heads: int,
+    head_dim: int,
+    eps: float,
+    use_rope: bool,
+    layout=None,
+    patch_size: tuple[int, int, int] | None = None,
+    hybrid_config: dict[str, Any] | None = None,
+):
     """H3 attention: bias-free qkv, per-head qk RMSNorm, partial RoPE."""
     import mlx.core as mx
 
     seq_len = x.shape[0]
-    q = linear(x, weights["attn.to_q.weight"]).reshape(seq_len, num_heads, head_dim)
-    k = linear(x, weights["attn.to_k.weight"]).reshape(seq_len, num_heads, head_dim)
-    v = linear(x, weights["attn.to_v.weight"]).reshape(seq_len, num_heads, head_dim)
-    q = rms_norm(q, weights["attn.norm_q.weight"], eps=eps)
-    k = rms_norm(k, weights["attn.norm_k.weight"], eps=eps)
+    q_raw = linear(x, weights["attn.to_q.weight"]).reshape(seq_len, num_heads, head_dim)
+    k_raw = linear(x, weights["attn.to_k.weight"]).reshape(seq_len, num_heads, head_dim)
+    v_raw = linear(x, weights["attn.to_v.weight"]).reshape(seq_len, num_heads, head_dim)
+    q = rms_norm(q_raw, weights["attn.norm_q.weight"], eps=eps)
+    k = rms_norm(k_raw, weights["attn.norm_k.weight"], eps=eps)
     if use_rope:
         q = apply_h3_rotary(q, cos, sin)
         k = apply_h3_rotary(k, cos, sin)
+    if layout is not None and patch_size is not None:
+        from fastvideo.mlx_runtime.minimax_h3_hybrid import hybrid_attention, is_hybrid_block
+        if is_hybrid_block(weights):
+            cfg = hybrid_config or {}
+            return hybrid_attention(
+                weights,
+                x,
+                q,
+                k,
+                v_raw,
+                q_raw,
+                k_raw,
+                v_raw,
+                layout,
+                patch_size,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                window_radius=int(cfg.get("hybrid_window_radius", 1)),
+                window_chunk=int(cfg.get("hybrid_window_chunk", 5)),
+                anchor_frames=str(cfg.get("hybrid_anchor_frames", "both")),
+                delta_rule=str(cfg.get("hybrid_delta_rule", "vdn_solve")),
+                enable_text_state=bool(cfg.get("hybrid_enable_text_state", True)),
+            )
     # contiguous() guards against MLX fused-SDPA mis-computation on strided views.
     attended = mx.fast.scaled_dot_product_attention(
         mx.contiguous(q.transpose(1, 0, 2))[None],
         mx.contiguous(k.transpose(1, 0, 2))[None],
-        mx.contiguous(v.transpose(1, 0, 2))[None],
+        mx.contiguous(v_raw.transpose(1, 0, 2))[None],
         scale=head_dim**-0.5,
     )[0].transpose(1, 0, 2)
     attended = mx.contiguous(attended.reshape(seq_len, num_heads * head_dim))
-    return linear(attended, weights["attn.to_out.0.weight"])
+    to_out_key = "attn.to_out.weight" if "attn.to_out.weight" in weights else "attn.to_out.0.weight"
+    return linear(attended, weights[to_out_key])
 
 
 def _feed_forward(weights: dict[str, Any], x):
@@ -532,6 +571,9 @@ def _transformer_block(
     head_dim: int,
     norm_eps: float,
     qk_norm_eps: float,
+    layout=None,
+    patch_size: tuple[int, int, int] | None = None,
+    hybrid_config: dict[str, Any] | None = None,
 ):
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = tables
 
@@ -547,6 +589,9 @@ def _transformer_block(
         head_dim=head_dim,
         eps=qk_norm_eps,
         use_rope=True,
+        layout=layout,
+        patch_size=patch_size,
+        hybrid_config=hybrid_config,
     )
     hidden_states = residual + gate_msa[adaln_indices] * attn_output
 
@@ -727,6 +772,7 @@ class MLXMiniMaxH3DiT:
         video_indices,
         audio_indices,
         text_indices,
+        layout=None,
     ):
         """Faithful port of the torch forward (batch-1, rows already patchified).
 
@@ -734,6 +780,9 @@ class MLXMiniMaxH3DiT:
         projects *all* packed rows through both heads and then selects; this
         selects first and projects only the relevant rows — row-wise
         identical math at a fraction of the cost.
+
+        ``layout`` is the packed geometry used by hybrid attention. Dense
+        checkpoints ignore it.
         """
         import mlx.core as mx
 
@@ -773,6 +822,9 @@ class MLXMiniMaxH3DiT:
                 head_dim=self.head_dim,
                 norm_eps=self.norm_eps,
                 qk_norm_eps=self.qk_norm_eps,
+                layout=layout,
+                patch_size=self.patch_size,
+                hybrid_config=self.config,
             )
             mx.eval(packed)  # per-block sync: see forward_with_cache note
 
@@ -860,6 +912,9 @@ class MLXMiniMaxH3DiT:
                 head_dim=self.head_dim,
                 norm_eps=self.norm_eps,
                 qk_norm_eps=self.qk_norm_eps,
+                layout=layout,
+                patch_size=self.patch_size,
+                hybrid_config=self.config,
             )
             mx.eval(packed)
 

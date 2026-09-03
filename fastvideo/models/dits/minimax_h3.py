@@ -14,7 +14,7 @@ from fastvideo import envs
 from fastvideo.attention import DistributedAttention
 from fastvideo.attention.layer import DistributedAttention_VSA
 from fastvideo.attention.selector import get_attn_backend
-from fastvideo.configs.models.dits.minimax_h3 import MiniMaxH3Config
+from fastvideo.configs.models.dits.minimax_h3 import MiniMaxH3ArchConfig, MiniMaxH3Config
 from fastvideo.distributed.communication_op import (
     sequence_model_parallel_all_gather_with_unpad,
     sequence_model_parallel_shard,
@@ -33,6 +33,7 @@ from fastvideo.models.dits.minimax_h3_fusions import (
     fused_rmsnorm_modulate,
     minimax_h3_swiglu,
 )
+from fastvideo.models.dits.minimax_h3_hybrid import HybridAttention, HybridSequenceLayout
 from fastvideo.platforms import AttentionBackendEnum
 from fastvideo.profiler import nvtx_range
 from fastvideo.utils import get_compute_dtype
@@ -68,6 +69,22 @@ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
     hitting the strict wrappers' hard RuntimeError mid-forward.
     """
     return HAVE_TRITON and tensor.is_cuda and not torch.is_grad_enabled()
+
+
+def _hybrid_attention_config(arch: MiniMaxH3ArchConfig) -> dict[str, Any] | None:
+    """Keyword args for HybridAttention, or None when the dense/VSA path stays."""
+    if not getattr(arch, "hybrid_attention", False):
+        return None
+    return {
+        "window_radius": arch.hybrid_window_radius,
+        "window_chunk": arch.hybrid_window_chunk,
+        "anchor_frames": arch.hybrid_anchor_frames,
+        "delta_rule": arch.hybrid_delta_rule,
+        "enable_softmax_gate": arch.hybrid_enable_softmax_gate,
+        "enable_text_state": arch.hybrid_enable_text_state,
+        "short_conv_targets": tuple(arch.hybrid_short_conv_targets),
+        "branch_parallel": arch.hybrid_branch_parallel,
+    }
 
 
 class MiniMaxH3RotaryPosEmbed(nn.Module):
@@ -145,6 +162,7 @@ class MiniMaxH3Attention(nn.Module):
         prefix: str,
         fuse_qknorm_rope: bool = False,
         fa4_packed_varlen: bool = False,
+        hybrid_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -211,6 +229,24 @@ class MiniMaxH3Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.to_gate_compress",
             )
+        self.hybrid: HybridAttention | None = None
+        if hybrid_config:
+            hybrid = HybridAttention(
+                hidden_size=hidden_size,
+                num_heads=num_attention_heads,
+                head_dim=attention_head_dim,
+                quant_config=quant_config,
+                prefix=prefix,
+                **hybrid_config,
+            )
+            # Converted checkpoints and FP8 suffixes use sibling names
+            # (``attn.to_out_linear``), not ``attn.hybrid.*``. Register those
+            # modules here and keep HybridAttention off the state-dict tree.
+            self.linear_attention = hybrid.linear_attention
+            self.to_out_linear = hybrid.to_out_linear
+            if hybrid.softmax_gate is not None:
+                self.softmax_gate = hybrid.softmax_gate
+            object.__setattr__(self, "hybrid", hybrid)
 
     def _gate_active(self) -> bool:
         """True when the compression gate can contribute.
@@ -266,38 +302,68 @@ class MiniMaxH3Attention(nn.Module):
         hidden_states_rotary = hidden_states_rotary * cos + hidden_states_rotated * sin
         return torch.cat((hidden_states_rotary, hidden_states_pass), dim=-1).contiguous()
 
-    def forward(
+    def _norm_and_rope(
         self,
-        hidden_states: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
-        original_seq_len: int,
-    ) -> torch.Tensor:
-        query, _ = self.to_q(hidden_states)
-        key, _ = self.to_k(hidden_states)
-        value, _ = self.to_v(hidden_states)
-        query = query.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
-        key = key.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
-        value = value.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if (self.fuse_qknorm_rope and rotary_emb is not None and _can_run_minimax_h3_fusion(query)):
             cos, sin = rotary_emb
             cos = cos.to(query.dtype)
             sin = sin.to(query.dtype)
             query = fused_qknorm_rope(query, self.norm_q.weight, cos, sin, self.norm_q.eps)
             key = fused_qknorm_rope(key, self.norm_k.weight, cos, sin, self.norm_k.eps)
-        else:
-            query = self.norm_q(query)
-            key = self.norm_k(key)
-            if rotary_emb is not None:
-                query = self._apply_rotary_emb(query, rotary_emb)
-                key = self._apply_rotary_emb(key, rotary_emb)
+            return query, key
+        query = self.norm_q(query)
+        key = self.norm_k(key)
+        if rotary_emb is not None:
+            query = self._apply_rotary_emb(query, rotary_emb)
+            key = self._apply_rotary_emb(key, rotary_emb)
+        return query, key
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
+        original_seq_len: int,
+        hybrid_layout: HybridSequenceLayout | None = None,
+    ) -> torch.Tensor:
+        if self.hybrid is not None:
+            if hybrid_layout is None:
+                raise ValueError("MiniMax H3 hybrid attention requires a packed HybridSequenceLayout.")
+            return self.hybrid(
+                self,
+                hidden_states,
+                rotary_emb,
+                original_seq_len,
+                hybrid_layout,
+                self._norm_and_rope,
+            )
+        query, _ = self.to_q(hidden_states)
+        key, _ = self.to_k(hidden_states)
+        value, _ = self.to_v(hidden_states)
+        query = query.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+        key = key.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+        value = value.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+        query, key = self._norm_and_rope(query, key, rotary_emb)
 
         # H3 rotates only 96/128 channels, which the generic `freqs_cis`
         # branch cannot express. Apply it above, then pass no RoPE here.
         extra_attention_kwargs = {}
         if self.to_gate_compress is not None and self._gate_active():
             gate_compress, _ = self.to_gate_compress(hidden_states)
-            extra_attention_kwargs["gate_compress"] = gate_compress.unflatten(
-                -1, (self.num_attention_heads, self.attention_head_dim))
+            gate_compress = gate_compress.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+            # MiniMax-H3 boundary projections intentionally remain FP32, so
+            # residual/AdaLN promotion can leave QKVG in FP32 even under
+            # autocast. The VSA kernels are selected for the attention
+            # module's declared compute dtype (BF16 in training) and the
+            # tile-64 Triton dot requires Q/K/V to match it exactly.
+            vsa_dtype = self.distributed_attention.dtype
+            query = query.to(vsa_dtype)
+            key = key.to(vsa_dtype)
+            value = value.to(vsa_dtype)
+            extra_attention_kwargs["gate_compress"] = gate_compress.to(vsa_dtype)
         hidden_states, _ = self.distributed_attention(
             query,
             key,
@@ -475,6 +541,7 @@ class MiniMaxH3TransformerBlock(nn.Module):
         fuse_qknorm_rope: bool = False,
         fuse_swiglu: bool = False,
         fa4_packed_varlen: bool = False,
+        hybrid_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, eps=norm_eps)
@@ -488,6 +555,7 @@ class MiniMaxH3TransformerBlock(nn.Module):
             prefix=f"{prefix}.attn",
             fuse_qknorm_rope=fuse_qknorm_rope,
             fa4_packed_varlen=fa4_packed_varlen,
+            hybrid_config=hybrid_config,
         )
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = MiniMaxH3FeedForward(
@@ -513,6 +581,7 @@ class MiniMaxH3TransformerBlock(nn.Module):
         adaln_indices: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         original_seq_len: int,
+        hybrid_layout: HybridSequenceLayout | None = None,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             t.to(hidden_states.dtype) for t in self.adaln_proj(temb))
@@ -531,7 +600,7 @@ class MiniMaxH3TransformerBlock(nn.Module):
             norm_hidden_states = self.norm1(hidden_states)
             norm_hidden_states = norm_hidden_states * (
                 1.0 + scale_msa.index_select(0, adaln_indices)) + shift_msa.index_select(0, adaln_indices)
-        attention_output = self.attn(norm_hidden_states, rotary_emb, original_seq_len)
+        attention_output = self.attn(norm_hidden_states, rotary_emb, original_seq_len, hybrid_layout)
         if use_modulate_fusion:
             hidden_states, norm_hidden_states = fused_residual_gate_rmsnorm_modulate(
                 hidden_states,
@@ -553,6 +622,10 @@ class MiniMaxH3TransformerBlock(nn.Module):
 
 
 class MiniMaxH3Transformer3DModel(BaseDiT):
+    # Preview-v1 VSA snapshots include one learned compression gate per
+    # attention block. Dense/hybrid construction intentionally omits those
+    # VSA-only modules, while VSA construction still creates and loads them.
+    _allowed_unexpected_checkpoint_patterns = (".attn.to_gate_compress.", )
     """Joint H3 Transformer over one padless text/audio/video document.
 
     The layout builder validates semantic rows before denoising. Sequence-
@@ -690,6 +763,8 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             config.quant_config,
             prefix=f"{config.prefix}.token_refiner",
         )
+        hybrid_config = _hybrid_attention_config(arch)
+        self.hybrid_attention_enabled = hybrid_config is not None
         self.transformer_blocks = nn.ModuleList([
             MiniMaxH3TransformerBlock(
                 arch.hidden_size,
@@ -707,6 +782,7 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                 fuse_qknorm_rope="qknorm_rope" in self.enabled_fusions,
                 fuse_swiglu="swiglu" in self.enabled_fusions,
                 fa4_packed_varlen=envs.FASTVIDEO_MINIMAX_H3_FA4_PACKED_VARLEN,
+                hybrid_config=hybrid_config,
             ) for index in range(arch.num_layers)
         ])
         self.norm_out = MiniMaxH3AdaLayerNormOut(
@@ -811,6 +887,19 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                                  (2 * arch.rope_freq_dim)))
             self.rope._buffers["inv_freq"] = inv_freq
 
+    def initialize_missing_parameter(
+        self,
+        name: str,
+        shape: torch.Size | tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        """Initialize checkpoint-missing hybrid tensors without dead branches."""
+        if not self.hybrid_attention_enabled:
+            return None
+        from fastvideo.models.dits.minimax_h3_hybrid.linear import initialize_hybrid_parameter
+        return initialize_hybrid_parameter(name, shape, device, dtype)
+
     def _rotary_for(self, position_ids: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """cos/sin depend only on positions; the denoising stage holds one
         position_ids tensor for the whole loop, so cache per layout and
@@ -866,6 +955,7 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
+        hybrid_layout: HybridSequenceLayout | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict video and audio velocities from one caller-defined packed layout."""
         if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
@@ -877,8 +967,8 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             raise ValueError("hidden_states row count must match video_indices.")
         if audio_hidden_states.shape[1] != audio_indices.numel():
             raise ValueError("audio_hidden_states row count must match audio_indices.")
-        if encoder_hidden_states.shape[1] != text_indices.numel():
-            raise ValueError("encoder_hidden_states row count must match text_indices.")
+        if self.hybrid_attention_enabled and hybrid_layout is None:
+            raise ValueError("MiniMax H3 hybrid attention is enabled; pass hybrid_layout from the packed H3 layout.")
 
         video_embeds, _ = self.proj_in(hidden_states.to(self.proj_in.weight.dtype))
         audio_embeds, _ = self.audio_proj_in(audio_hidden_states.to(self.audio_proj_in.weight.dtype))
@@ -920,6 +1010,7 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                     adaln_indices,
                     rotary_emb,
                     original_seq_len,
+                    hybrid_layout,
                 )
 
         packed_hidden_states = self.norm_out(
