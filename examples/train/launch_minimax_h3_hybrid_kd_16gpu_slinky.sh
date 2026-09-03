@@ -17,11 +17,14 @@ SECRET_FILE=/mnt/lustre/vlm-aryan/.secrets/wandb_api_key
 
 mkdir -p "${RESULT_DIR}/slurm"
 
+# Slinky's topology plugin exposes one allocatable node per topology block to
+# a conventional homogeneous request. Four co-scheduled one-node components
+# form one heterogeneous allocation and let one srun span all 16 GPUs.
 sbatch \
   --job-name=fasth3-hybrid-kd-16g \
   --partition=all \
-  --nodes=4 \
-  --ntasks=4 \
+  --nodes=1 \
+  --ntasks=1 \
   --ntasks-per-node=1 \
   --gres=gpu:4 \
   --cpus-per-task=120 \
@@ -32,7 +35,19 @@ sbatch \
   --container-image="${IMAGE}" \
   --container-mounts=/mnt/lustre:/mnt/lustre \
   --output="${RESULT_DIR}/slurm/%x_%j.out" \
-  --error="${RESULT_DIR}/slurm/%x_%j.err" <<'SBATCH_SCRIPT'
+  --error="${RESULT_DIR}/slurm/%x_%j.err" \
+  : \
+  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
+  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  : \
+  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
+  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  : \
+  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
+  --chdir="${WORKTREE_ROOT}" --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre <<'SBATCH_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
@@ -73,13 +88,13 @@ if [[ ! -f "${PARQUET}" ]]; then
 fi
 python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
-nodes=( $(scontrol show hostnames "${SLURM_JOB_NODELIST}") )
+nodes=( $(scontrol show hostnames "${SLURM_JOB_NODELIST_HET_GROUP_0}") )
 export MASTER_ADDR=${nodes[0]}
 export MASTER_PORT=29541
 launch_training_node() {
   export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
   exec torchrun \
-    --nnodes "${SLURM_JOB_NUM_NODES}" \
+    --nnodes 4 \
     --nproc_per_node 4 \
     --node_rank "${SLURM_PROCID}" \
     --rdzv_backend=c10d \
@@ -88,7 +103,7 @@ launch_training_node() {
     --config "${CONFIG_FILE}"
 }
 export -f launch_training_node
-srun bash -c launch_training_node
+srun --het-group=0-3 bash -c launch_training_node
 
 mkdir -p "${CONVERTED}"
 for entry in "${PREVIEW_ROOT}"/*; do
@@ -100,7 +115,7 @@ python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
   --hybrid "${EXPLODED}" \
   --dst "${CONVERTED}/transformer"
 
-srun --nodes=1 --ntasks=1 --gres=gpu:4 \
+srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   python examples/inference/basic/basic_fasth3.py \
   --model-path "${CONVERTED}" \
   --no-vsa \
