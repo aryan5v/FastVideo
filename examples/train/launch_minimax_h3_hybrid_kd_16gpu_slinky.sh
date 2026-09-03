@@ -90,8 +90,9 @@ if [[ ! -f "${PARQUET}" ]]; then
 fi
 python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
-nodes=( $(scontrol show hostnames "${SLURM_JOB_NODELIST_HET_GROUP_0}") )
-export MASTER_ADDR=${nodes[0]}
+# Heterogeneous group zero is exactly one node, so its nodelist is already a
+# concrete rendezvous hostname. The training container does not ship scontrol.
+export MASTER_ADDR=${SLURM_JOB_NODELIST_HET_GROUP_0}
 export MASTER_PORT=29541
 launch_training_node() {
   export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
