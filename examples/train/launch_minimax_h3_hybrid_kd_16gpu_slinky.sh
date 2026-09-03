@@ -5,10 +5,10 @@ set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-Minimax-FastH3-Preview-v0.2
+PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
 IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-3da750ded0ec.sqsh
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_16gpu.yaml
-RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_16gpu_overfit
+RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit
 SECRET_FILE=/mnt/lustre/vlm-aryan/.secrets/wandb_api_key
 
 [[ -f "${PREVIEW_ROOT}/modular_model_index.json" ]] || { echo "Missing Preview model: ${PREVIEW_ROOT}" >&2; exit 1; }
@@ -53,9 +53,9 @@ set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-Minimax-FastH3-Preview-v0.2
+PREVIEW_ROOT=/mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_16gpu.yaml
-RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_16gpu_overfit
+RESULT_DIR=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit
 DATA_DIR=${WORKTREE_ROOT}/data/crush-smol
 PARQUET=${WORKTREE_ROOT}/data/crush-smol_h3_t2va_single_sample_preprocessed/data_00000.parquet
 EXPLODED=${RESULT_DIR}/exploded
@@ -75,9 +75,11 @@ export FASTVIDEO_MINIMAX_H3_FUSIONS=0
 
 cd "${WORKTREE_ROOT}"
 mkdir -p data/models "${RESULT_DIR}"
-if [[ ! -e data/models/MiniMax-H3 ]]; then
-  ln -s "${PREVIEW_ROOT}" data/models/MiniMax-H3
+if [[ -e data/models/MiniMax-H3 && ! -L data/models/MiniMax-H3 ]]; then
+  echo "Refusing to replace non-symlink data/models/MiniMax-H3" >&2
+  exit 1
 fi
+ln -sfn "${PREVIEW_ROOT}" data/models/MiniMax-H3
 if [[ ! -f "${PARQUET}" ]]; then
   hf download wlsaidhi/crush-smol-merged \
     --repo-type dataset \

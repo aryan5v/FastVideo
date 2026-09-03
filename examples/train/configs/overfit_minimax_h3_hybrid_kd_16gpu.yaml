@@ -3,7 +3,7 @@
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
-    init_from: /mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-Minimax-FastH3-Preview-v0.2
+    init_from: /mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
     trainable: true
     enable_gradient_checkpointing_type: full
     attention_backend: TORCH_SDPA
@@ -12,7 +12,7 @@ models:
     sigma_grid_points: 5
   teacher:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
-    init_from: /mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-Minimax-FastH3-Preview-v0.2
+    init_from: /mnt/lustre/vlm-wlsaidhi/fastvideo/exports/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree
     trainable: false
     attention_backend: VIDEO_SPARSE_ATTN_H3
     hybrid_attention: false
@@ -55,7 +55,7 @@ training:
     gradient_accumulation_steps: 1
 
   checkpoint:
-    output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_16gpu_overfit/checkpoints
+    output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_v1_16gpu_overfit/checkpoints
     training_state_checkpointing_steps: 20
     checkpoints_total_limit: 2
     resume_from_checkpoint: ""
@@ -63,7 +63,7 @@ training:
   tracker:
     trackers: [wandb]
     project_name: fastvideo_minimax_h3
-    run_name: fasth3_native_hybrid_kd_16gpu_overfit
+    run_name: fasth3_native_hybrid_kd_v1_16gpu_overfit
 
   vsa:
     sparsity: 0.9
@@ -81,6 +81,6 @@ callbacks:
     max_grad_norm: 1.0
   hybrid_export:
     _target_: fastvideo.train.callbacks.minimax_h3_hybrid_export.MiniMaxH3HybridExportCallback
-    output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_16gpu_overfit/exploded
+    output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_v1_16gpu_overfit/exploded
 
 pipeline: {}

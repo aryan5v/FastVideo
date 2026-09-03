@@ -76,7 +76,7 @@ class MiniMaxH3HybridExportCallback(Callback):
                     },
                 },
                 "training": {
-                    "teacher": "FastVideo/FastVideo-Minimax-FastH3-Preview-v0.2",
+                    "teacher": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
                     "sigma_grid_points": 5,
                     "step": int(iteration),
                 },
