@@ -44,6 +44,9 @@ native `state_dict()`, and CPU tests that built the full DiT died in
   on CPU for hybrid unit tests.
 - Keep `minimax_h3_hybrid/__init__.py` lazy so `from ...layout import
   window_bounds` does not import CUDA PyTorch.
+- FP8 suffix matching only applies when the linear was constructed with
+  `quant_config`. Thread it into hybrid `beta_proj` / gates / `to_out_linear`,
+  not `FrameKDAAlpha` (those two linears run in fp32 on purpose).
 
 ## Prevention
 

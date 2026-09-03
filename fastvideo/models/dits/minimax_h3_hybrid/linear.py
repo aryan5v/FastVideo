@@ -285,8 +285,16 @@ class BidirectionalLinearBranch(nn.Module):
         self.delta_rule = delta_rule
         self.enable_text_state = enable_text_state
         self.a_fp32 = a_fp32
+        # Intentionally no quant_config: FrameKDAAlpha.forward uses
+        # ``F.linear(..., weight.float())`` and needs the fp32 Parameter.
         self.alpha = FrameKDAAlpha(hidden_size, num_heads, head_dim, prefix=f"{prefix}.alpha")
-        self.beta_proj = ReplicatedLinear(hidden_size, num_heads, bias=False, prefix=f"{prefix}.beta_proj")
+        self.beta_proj = ReplicatedLinear(
+            hidden_size,
+            num_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.beta_proj",
+        )
         self.output_gate = OutputGate(
             hidden_size,
             num_heads,

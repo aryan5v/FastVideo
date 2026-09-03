@@ -103,6 +103,7 @@ class HybridAttention(nn.Module):
             num_heads,
             init_value=0.99,
             init="constant",
+            quant_config=quant_config,
             prefix=f"{prefix}.softmax_gate",
         ) if enable_softmax_gate else None)
 

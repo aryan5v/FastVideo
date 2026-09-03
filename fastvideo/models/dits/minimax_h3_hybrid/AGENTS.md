@@ -18,7 +18,7 @@ These surfaces already existed on `main` and stay authoritative:
 | AdaLN, SwiGLU FFN, dual video/audio heads, text refiner | same DiT |
 | Dense `DistributedAttention` and VSA-H3 | `attention/layer.py` |
 | Sol-Engine fusions (QK-norm+RoPE, SwiGLU, RMSNorm modulate) | DiT + `FASTVIDEO_MINIMAX_H3_FUSIONS` |
-| Tensorwise FP8 on wide linears (`to_q` / `to_k` / `to_v` / `to_out`) | `layers/quantization/fp8_config.py` |
+| Tensorwise FP8 on wide linears (`to_q` / `to_k` / `to_v` / `to_out`, plus hybrid `to_out_linear` / `beta_proj` / gates) | `layers/quantization/fp8_config.py` |
 | Sequence parallel (shard / all-gather-unpad) | `distributed/` |
 | FSDP load + `ALLOWED_NEW_PARAM_PATTERNS` | `models/loader/fsdp_load.py` |
 | MLX T2VA DiT (dense SDPA, INT8/6/4, AdaLN cache) | `mlx_runtime/minimax_h3.py` |
@@ -38,10 +38,10 @@ Component and official E2E latent parity for that stack is recorded in
 | `linear.py` | Bidirectional delta-rule scan (`vdn_solve`), optional K/V short conv, text state, output gates. |
 | `attention.py` | `HybridAttention` body. Reuses parent QKV / RoPE / `to_out`. Owns `linear_attention`, `to_out_linear`, `softmax_gate`. |
 | `checkpoint.py` | VDN key remap, LoRA `W += scale * (B @ A)`, `hybrid_arch_fields_from_spec`. |
-| Wiring | `arch.hybrid_attention` (default `False`). Denoising passes `hybrid_layout`. FP8 suffix `to_out_linear`. FSDP allowlist for the new siblings. |
+| Wiring | `arch.hybrid_attention` (default `False`). Denoising passes `hybrid_layout`. FP8 suffixes `to_out_linear`, `beta_proj`, `softmax_gate`, `output_gate` (not KDA `alpha`). FSDP allowlist for the new siblings. |
 | Converter | `scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py` overlays `linear_branch/` + adapters onto a dense `transformer/`. |
 | MLX | `mlx_runtime/minimax_h3_hybrid.py`, imported only when hybrid keys are present. |
-| CLI / docs | `basic_fasth3.py --no-vsa`; MLX auto-detect; `docs/inference/optimizations.md`. |
+| CLI / docs | `basic_fasth3.py --no-vsa` (and `--fp8` to quantize tagged linears); MLX auto-detect; `docs/inference/optimizations.md`. |
 
 `MiniMaxH3Attention` registers the extra modules as **siblings** of `to_q`
 (`attn.to_out_linear`, not `attn.hybrid.to_out_linear`) so converted
@@ -81,6 +81,9 @@ SP > 1 still all-gathers the packed sequence into this module first.
    must not eagerly import `attention` / `linear` / `window` / `checkpoint`.
 10. **Weights stay under the MiniMax H3 Community License.** The conversion
     script is Apache-2.0.
+11. **FP8 suffixes are a no-op unless the linear received `quant_config`.**
+    Pass it to `beta_proj`, `softmax_gate`, `output_gate`, and `to_out_linear`.
+    Leave `FrameKDAAlpha` without it so `alpha.down` / `alpha.up` stay fp32.
 
 → `.agents/lessons/2026-09-03_h3-hybrid-mapping-and-module-tree.md`
 
@@ -116,6 +119,7 @@ External coordinates:
 | `linear.py` scan helpers | `test_minimax_h3_hybrid_linear.py` |
 | mapping / LoRA merge / spec fields | `test_minimax_h3_hybrid_param_mapping.py` |
 | `HybridAttention` or parent module names | `test_minimax_h3_hybrid_attention.py` (CPU, no full DiT) |
+| FP8 hybrid suffixes / `quant_config` plumbing | `test_fp8_hybrid_suffixes.py` + `test_hybrid_attention_fp8_tags_gates_not_kda_alpha` |
 | MLX hybrid numerics | `test_mlx_minimax_h3_hybrid_parity.py` (needs `mlx`) |
 | Converter overlay | convert a real exploded checkpoint, then load with `--no-vsa` |
 
@@ -129,6 +133,11 @@ pytest \
   fastvideo/tests/transformers/test_minimax_h3_hybrid_attention.py -q
 
 pytest fastvideo/tests/mlx/test_mlx_minimax_h3_hybrid_parity.py -q
+
+pytest \
+  fastvideo/tests/ops/quantization/test_fp8_hybrid_suffixes.py \
+  fastvideo/tests/transformers/test_minimax_h3_hybrid_attention.py::test_hybrid_attention_fp8_tags_gates_not_kda_alpha \
+  fastvideo/tests/inference/test_basic_fasth3_profile.py::test_fp8_sets_typed_transformer_quant -q
 ```
 
 `fastvideo/models/` and `fastvideo/tests/` are pre-commit-excluded. Lint

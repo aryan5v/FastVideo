@@ -139,7 +139,9 @@ automatically (`hybrid_branch_parallel`). On Apple Silicon the MLX runtime
 selects the same algorithm when the DiT weights include the linear branch.
 
 This is not a copy of an external fused stack. Tensorwise FP8 on `to_q/k/v`,
-`to_out`, and `to_out_linear` is the existing FastVideo FP8 path.
+`to_out`, `to_out_linear`, `beta_proj`, `softmax_gate`, and `output_gate` is
+the existing FastVideo FP8 path. The KDA `alpha` linears stay fp32. Pass
+`--fp8` on `basic_fasth3.py` to try it.
 
 ### FP4 Flash Attention 4 (Blackwell only)
 
@@ -316,7 +318,9 @@ before enabling them.
 Quantizes DiT linear layers (attention projections and FFN) to FP8 e4m3.
 
 On GPUs older than sm89, the FP8 matmul falls back to a bf16 dequant path
-automatically.
+automatically. Hybrid MiniMax H3 also tags `to_out_linear`, `beta_proj`,
+`softmax_gate`, and `output_gate`; the KDA `alpha` down/up projections stay
+fp32. Pass `--fp8` on `examples/inference/basic/basic_fasth3.py` to try it.
 
 ### Requirements
 

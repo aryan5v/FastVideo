@@ -204,6 +204,32 @@ def test_minimax_h3_vsa_casts_qkvg_to_backend_compute_dtype() -> None:
     assert recording_vsa.input_dtypes == (torch.bfloat16, ) * 4
 
 
+def test_hybrid_attention_fp8_tags_gates_not_kda_alpha() -> None:
+    from fastvideo.layers.linear import UnquantizedLinearMethod
+    from fastvideo.layers.quantization.fp8_config import FP8Config, FP8QuantizeMethod
+
+    hybrid = HybridAttention(
+        hidden_size=HIDDEN,
+        num_heads=HEADS,
+        head_dim=HEAD_DIM,
+        enable_softmax_gate=True,
+        enable_text_state=False,
+        short_conv_targets=(),
+        branch_parallel=False,
+        quant_config=FP8Config(),
+        prefix="blocks.0.attn",
+    )
+    assert hybrid.softmax_gate is not None
+    assert isinstance(hybrid.to_out_linear.quant_method, FP8QuantizeMethod)
+    assert isinstance(hybrid.linear_attention.beta_proj.quant_method, FP8QuantizeMethod)
+    assert isinstance(hybrid.softmax_gate.up.quant_method, FP8QuantizeMethod)
+    assert hybrid.linear_attention.output_gate.down is not None
+    assert isinstance(hybrid.linear_attention.output_gate.down.quant_method, FP8QuantizeMethod)
+    assert isinstance(hybrid.linear_attention.output_gate.up.quant_method, FP8QuantizeMethod)
+    assert isinstance(hybrid.linear_attention.alpha.down.quant_method, UnquantizedLinearMethod)
+    assert isinstance(hybrid.linear_attention.alpha.up.quant_method, UnquantizedLinearMethod)
+
+
 def test_hybrid_attention_rejects_batch_greater_than_one() -> None:
     layout = _layout(num_frames=2)
     parent = _StubParent()
