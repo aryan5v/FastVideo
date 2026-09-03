@@ -94,7 +94,7 @@ if [[ ! -f "${PARQUET}" ]]; then
 fi
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
-  python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
+  /opt/venv/bin/python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
 # Heterogeneous group zero is exactly one node, so its nodelist is already a
 # concrete rendezvous hostname. The training container does not ship scontrol.
@@ -122,14 +122,14 @@ for entry in "${PREVIEW_ROOT}"/*; do
 done
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
-  python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
+  /opt/venv/bin/python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
   --base "${PREVIEW_ROOT}/transformer" \
   --hybrid "${EXPLODED}" \
   --dst "${CONVERTED}/transformer"
 
 srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
-  python examples/inference/basic/basic_fasth3.py \
+  /opt/venv/bin/python examples/inference/basic/basic_fasth3.py \
   --model-path "${CONVERTED}" \
   --no-vsa \
   --no-fa4 \
