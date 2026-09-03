@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 import torch
 import pytest
 
@@ -28,7 +30,7 @@ def test_load_transformer_scopes_attention_backend(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(
         moduleloader,
         "verify_model_config_and_directory",
-        lambda path: {"transformer": ("diffusers", "FakeTransformer", {
+        lambda path, **kwargs: {"transformer": ("diffusers", "FakeTransformer", {
             "subfolder": "transformer"
         })},
     )
@@ -69,7 +71,7 @@ def test_load_transformer_restores_backend_when_loading_fails(
     monkeypatch.setattr(
         moduleloader,
         "verify_model_config_and_directory",
-        lambda path: {"transformer": ("diffusers", "FakeTransformer")},
+        lambda path, **kwargs: {"transformer": ("diffusers", "FakeTransformer")},
     )
 
     def _raise_during_load(**kwargs):
@@ -92,3 +94,36 @@ def test_load_transformer_restores_backend_when_loading_fails(
             attention_backend="ATTN_QAT_TRAIN",
         )
     assert _active_component_attention_backend_scope() is None
+
+
+def test_load_transformer_accepts_missing_unselected_modular_component(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Validate only the component selected by a role-scoped training load."""
+    (tmp_path / "transformer").mkdir()
+    (tmp_path / "modular_model_index.json").write_text(
+        json.dumps({
+            "_class_name": "MiniMaxH3ModularPipeline",
+            "_diffusers_version": "0.36.0.dev0",
+            "transformer": ["diffusers", "FakeTransformer"],
+            "transformer_ref": ["diffusers", "FakeTransformer"],
+        }))
+    training_config = TrainingConfig(
+        distributed=DistributedConfig(hsdp_shard_dim=1),
+        pipeline_config=PipelineConfig(),
+    )
+    monkeypatch.setattr(moduleloader, "maybe_download_model", lambda path: str(tmp_path))
+    monkeypatch.setattr(
+        moduleloader.PipelineComponentLoader,
+        "load_module",
+        lambda **kwargs: torch.nn.Linear(1, 1),
+    )
+
+    result = moduleloader.load_module_from_path(
+        model_path="fake/model",
+        module_type="transformer",
+        training_config=training_config,
+    )
+
+    assert isinstance(result, torch.nn.Module)

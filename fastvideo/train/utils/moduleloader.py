@@ -106,7 +106,14 @@ def load_module_from_path(
     fastvideo_args: Any = _make_training_args(training_config, model_path=model_path)
 
     local_model_path = maybe_download_model(model_path)
-    config = verify_model_config_and_directory(local_model_path)
+    # A role loader consumes exactly one component. Published modular
+    # checkpoints can declare optional components (for example H3 Ref2VA's
+    # ``transformer_ref``) without bundling them in a T2VA snapshot, so full
+    # snapshot validation would reject an otherwise complete transformer.
+    config = verify_model_config_and_directory(
+        local_model_path,
+        required_component_dirs=(module_type, ),
+    )
 
     if module_type not in config:
         raise ValueError(f"Module {module_type!r} not found in "
