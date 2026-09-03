@@ -85,11 +85,11 @@ if [[ ! -f "${PARQUET}" ]]; then
     --container-workdir="${WORKTREE_ROOT}" \
     bash -c "
       cd '${WORKTREE_ROOT}'
-      hf download wlsaidhi/crush-smol-merged \
+      /opt/venv/bin/hf download wlsaidhi/crush-smol-merged \
         --repo-type dataset \
         --revision 1a850a74e92d5ac3daa273ea658ec60e92fbaf4e \
         --local-dir '${DATA_DIR}'
-      torchrun --standalone --nnodes=1 --nproc-per-node=1 \
+      /opt/venv/bin/torchrun --standalone --nnodes=1 --nproc-per-node=1 \
         -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit
     "
 fi
@@ -108,7 +108,7 @@ srun --het-group=0-3 \
   --container-workdir="${WORKTREE_ROOT}" \
   bash -c '
   export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
-  exec torchrun \
+  exec /opt/venv/bin/torchrun \
     --nnodes 4 \
     --nproc_per_node 4 \
     --node_rank "${SLURM_PROCID}" \
