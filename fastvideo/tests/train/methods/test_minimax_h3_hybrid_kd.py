@@ -17,6 +17,7 @@ from fastvideo.train.models.minimax_h3.minimax_h3 import (
     _apply_trainable_parameter_patterns,
     shift_noise_amount,
 )
+from fastvideo.models.dits.minimax_h3_hybrid.linear import initialize_hybrid_parameter
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -55,6 +56,37 @@ def test_fasth3_grid_samples_only_four_forward_sigmas() -> None:
         observed.add(index)
 
     assert observed == {0, 1, 2, 3}
+
+
+def test_missing_hybrid_initialization_keeps_far_branch_live_and_residual_zero() -> None:
+    device = torch.device("cpu")
+    dtype = torch.float32
+    prefix = "transformer_blocks.0.attn"
+
+    norm = initialize_hybrid_parameter(f"{prefix}.linear_attention.norm.weight", (4, ), device, dtype)
+    conv = initialize_hybrid_parameter(f"{prefix}.linear_attention.short_conv.k_sp.weight", (4, 1, 5, 5),
+                                       device, dtype)
+    down = initialize_hybrid_parameter(f"{prefix}.linear_attention.alpha.down.weight", (4, 8), device, dtype)
+    out = initialize_hybrid_parameter(f"{prefix}.to_out_linear.weight", (8, 4), device, dtype)
+    gate_bias = initialize_hybrid_parameter(f"{prefix}.softmax_gate.up.bias", (2, ), device, dtype)
+
+    assert norm is not None and torch.equal(norm, torch.ones_like(norm))
+    assert conv is not None and torch.count_nonzero(conv) == 4
+    assert torch.equal(conv[:, 0, 2, 2], torch.ones(4))
+    assert down is not None and torch.count_nonzero(down) > 0
+    assert out is not None and torch.count_nonzero(out) == 0
+    assert gate_bias is not None
+    torch.testing.assert_close(torch.sigmoid(gate_bias), torch.full((2, ), 0.99))
+
+
+def test_missing_hybrid_random_initialization_is_name_deterministic() -> None:
+    name = "transformer_blocks.7.attn.linear_attention.output_gate.down.weight"
+    first = initialize_hybrid_parameter(name, (4, 8), torch.device("cpu"), torch.float32)
+    second = initialize_hybrid_parameter(name, (4, 8), torch.device("cpu"), torch.float32)
+    other = initialize_hybrid_parameter(name.replace(".7.", ".8."), (4, 8), torch.device("cpu"), torch.float32)
+    assert first is not None and second is not None and other is not None
+    torch.testing.assert_close(first, second)
+    assert not torch.equal(first, other)
 
 
 class _FakeJointRole:

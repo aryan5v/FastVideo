@@ -200,3 +200,30 @@ def test_weights_still_land_in_the_model() -> None:
     for name, value in expected.items():
         assert loaded[name].dtype == torch.bfloat16
         assert loaded[name][0, 0].item() == value
+
+
+def test_model_specific_initializer_materializes_allowed_missing_parameter() -> None:
+    class ModelWithHybridParameter(_TinyModel):
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear_attention = nn.Linear(8, 8, bias=False)
+
+        def initialize_missing_parameter(self, name, shape, device, dtype):
+            if name == "linear_attention.weight":
+                return torch.full(shape, 3.0, device=device, dtype=dtype)
+            return None
+
+    model = ModelWithHybridParameter()
+    load_model_from_full_model_state_dict(
+        model,
+        iter(list(_source_tensors().items())),
+        torch.device("cpu"),
+        torch.bfloat16,
+        strict=False,
+        param_names_mapping=_identity_mapping,
+        training_mode=False,
+    )
+
+    assert model.linear_attention.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(model.linear_attention.weight, torch.full((8, 8), 3.0, dtype=torch.bfloat16))

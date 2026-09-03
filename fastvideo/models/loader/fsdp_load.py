@@ -687,7 +687,8 @@ def load_model_from_full_model_state_dict(
             logger.info("Parameters absent from the checkpoint and supplied by the LoRA adapter: %d (%s)",
                         len(from_adapter), _summarize_param_names(from_adapter))
         if zero_init:
-            logger.warning("Found unloaded parameters in meta state dict, zero-initializing: %d (%s)", len(zero_init),
+            logger.warning("Found unloaded parameters in meta state dict: %d (%s); using model-specific "
+                           "initialization where available and zeros otherwise", len(zero_init),
                            _summarize_param_names(zero_init))
 
     # List of allowed parameter name patterns
@@ -728,19 +729,25 @@ def load_model_from_full_model_state_dict(
                 )
                 if cpu_offload:
                     sharded_tensor = sharded_tensor.cpu()
-        elif not hasattr(meta_sharded_param, "device_mesh"):
-            # Initialize with zeros
-            sharded_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
         else:
-            # Initialize with zeros and distribute
-            full_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
-            sharded_tensor = distribute_tensor(
-                full_tensor,
-                meta_sharded_param.device_mesh,
-                meta_sharded_param.placements,
-            )
-            if cpu_offload:
-                sharded_tensor = sharded_tensor.cpu()
+            initializer = getattr(model, "initialize_missing_parameter", None)
+            full_tensor = (initializer(new_param_name, meta_sharded_param.shape, device, target_dtype)
+                           if callable(initializer) else None)
+            if full_tensor is None:
+                full_tensor = torch.zeros_like(meta_sharded_param, device=device, dtype=target_dtype)
+            if tuple(full_tensor.shape) != tuple(meta_sharded_param.shape):
+                raise ValueError(f"Missing-parameter initializer returned shape {tuple(full_tensor.shape)} for "
+                                 f"{new_param_name}, expected {tuple(meta_sharded_param.shape)}")
+            if not hasattr(meta_sharded_param, "device_mesh"):
+                sharded_tensor = full_tensor
+            else:
+                sharded_tensor = distribute_tensor(
+                    full_tensor,
+                    meta_sharded_param.device_mesh,
+                    meta_sharded_param.placements,
+                )
+                if cpu_offload:
+                    sharded_tensor = sharded_tensor.cpu()
         sharded_sd[new_param_name] = nn.Parameter(sharded_tensor)
 
     if dense_lora_patch is not None:

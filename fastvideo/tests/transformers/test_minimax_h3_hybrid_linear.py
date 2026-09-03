@@ -10,6 +10,7 @@ from fastvideo.models.dits.minimax_h3_hybrid.linear import (
     factor_delta,
     frame_statistics,
     gather_linear_state,
+    initialize_hybrid_parameter,
     run_scans,
 )
 
@@ -82,3 +83,24 @@ def test_sep_conv_apply_conv_does_not_shadow_module_apply() -> None:
     torch.testing.assert_close(skipped, tokens)
     out = conv.apply_conv("k", tokens, 4, (1, 1))
     assert out.shape == tokens.shape
+
+
+def test_identity_initialized_sep_conv_has_live_gradients() -> None:
+    conv = LinearAttentionSepConv(4, targets=("k", ))
+    prefix = "transformer_blocks.0.attn.linear_attention.short_conv"
+    with torch.no_grad():
+        spatial = initialize_hybrid_parameter(f"{prefix}.k_sp.weight", conv.k_sp.weight.shape, torch.device("cpu"),
+                                              torch.float32)
+        temporal = initialize_hybrid_parameter(f"{prefix}.k_tm.weight", conv.k_tm.weight.shape,
+                                               torch.device("cpu"), torch.float32)
+        assert spatial is not None and temporal is not None
+        conv.k_sp.weight.copy_(spatial)
+        conv.k_tm.weight.copy_(temporal)
+
+    tokens = torch.randn(8, 2, 2)
+    conv.apply_conv("k", tokens, num_frames=2, frame_size=(2, 2)).square().mean().backward()
+
+    assert conv.k_sp.weight.grad is not None
+    assert conv.k_tm.weight.grad is not None
+    assert torch.count_nonzero(conv.k_sp.weight.grad) > 0
+    assert torch.count_nonzero(conv.k_tm.weight.grad) > 0

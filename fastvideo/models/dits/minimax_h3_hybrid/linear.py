@@ -11,6 +11,7 @@ external runtime.
 
 from __future__ import annotations
 
+import hashlib
 import math
 
 import torch
@@ -24,6 +25,69 @@ from fastvideo.models.dits.minimax_h3_hybrid.layout import HybridSequenceLayout
 DELTA_RULES = ("sana_scaled", "vdn_solve", "vdn_scaled")
 SHORT_CONV_TARGETS = ("q", "k", "v")
 TEXT_STATE_SCALE = 0.5
+
+
+def initialize_hybrid_parameter(
+    name: str,
+    shape: torch.Size | tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Materialize a missing hybrid parameter with a trainable-safe initialization.
+
+    The checkpoint loader constructs large models on ``meta`` and historically
+    replaced every checkpoint-missing parameter with zeros. That is unsafe for
+    the hybrid branch: zero RMSNorm scales erase the readout, and two zero
+    depthwise convolutions in series have zero gradients forever.
+
+    The linear residual starts at zero through ``to_out_linear`` while its
+    internal path stays live. Name-derived seeds make every data-parallel rank
+    initialize the same full tensor before FSDP shards it.
+    """
+    if ".linear_attention." not in name and ".to_out_linear." not in name and ".softmax_gate." not in name:
+        return None
+
+    shape = tuple(int(dim) for dim in shape)
+
+    def zeros() -> torch.Tensor:
+        return torch.zeros(shape, device=device, dtype=dtype)
+
+    if name.endswith(".to_out_linear.weight") or name.endswith(".linear_attention.beta_proj.weight"):
+        return zeros()
+    if name.endswith(".linear_attention.norm.weight"):
+        return torch.ones(shape, device=device, dtype=dtype)
+    if name.endswith(".softmax_gate.up.weight"):
+        return zeros()
+    if name.endswith(".softmax_gate.up.bias"):
+        logit = math.log(0.99 / 0.01)
+        return torch.full(shape, logit, device=device, dtype=dtype)
+    if name.endswith(".linear_attention.output_gate.up.weight") or name.endswith(
+            ".linear_attention.output_gate.up.bias") or name.endswith(".linear_attention.alpha.up.weight"):
+        return zeros()
+
+    if ".linear_attention.short_conv." in name and name.endswith(".weight"):
+        value = zeros()
+        if len(shape) == 4:
+            value[:, 0, shape[-2] // 2, shape[-1] // 2] = 1
+        elif len(shape) == 3:
+            value[:, 0, shape[-1] // 2] = 1
+        else:
+            raise ValueError(f"Unexpected hybrid short-conv shape for {name}: {shape}")
+        return value
+
+    seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little") & ((1 << 63) - 1)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    value = torch.empty(shape, device=device, dtype=torch.float32)
+    if name.endswith(".linear_attention.alpha.A_log"):
+        return value.uniform_(1.0, 16.0, generator=generator).log().to(dtype)
+    if name.endswith(".linear_attention.alpha.dt_bias"):
+        dt = value.uniform_(math.log(0.001), math.log(0.1), generator=generator).exp().clamp(min=1e-4)
+        return (dt + torch.log(-torch.expm1(-dt))).to(dtype)
+    if name.endswith(".linear_attention.alpha.down.weight") or name.endswith(
+            ".linear_attention.output_gate.down.weight"):
+        bound = shape[-1]**-0.5
+        return value.uniform_(-bound, bound, generator=generator).to(dtype)
+    return None
 
 
 class OutputGate(nn.Module):

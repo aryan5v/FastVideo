@@ -887,6 +887,19 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                                  (2 * arch.rope_freq_dim)))
             self.rope._buffers["inv_freq"] = inv_freq
 
+    def initialize_missing_parameter(
+        self,
+        name: str,
+        shape: torch.Size | tuple[int, ...],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        """Initialize checkpoint-missing hybrid tensors without dead branches."""
+        if not self.hybrid_attention_enabled:
+            return None
+        from fastvideo.models.dits.minimax_h3_hybrid.linear import initialize_hybrid_parameter
+        return initialize_hybrid_parameter(name, shape, device, dtype)
+
     def _rotary_for(self, position_ids: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """cos/sin depend only on positions; the denoising stage holds one
         position_ids tensor for the whole loop, so cache per layout and
