@@ -1,5 +1,41 @@
 # MiniMax H3 port status
 
+## Already had, then hybrid on top
+
+The rows below are the **dense / VSA FastH3 port**. That work is complete.
+Hybrid attention (window softmax + linear far branch) is an opt-in layer on
+that stack, not a second H3 port. Details and pitfalls:
+`fastvideo/models/dits/minimax_h3_hybrid/AGENTS.md`.
+
+### Already had (reused by hybrid)
+
+- Packed `[text | condition | audio | video]` layout
+- DiT QKV, QK-norm, 3-axis MM-RoPE, `to_out`, AdaLN, SwiGLU, dual heads
+- Dense attention and VSA-H3, Sol-Engine fusions, FP8 on wide linears
+- Sequence parallel, FSDP load, MLX T2VA
+- Video/audio VAEs, Qwen3-VL, schedulers (shift 12 / 3)
+- T2VA / FL2VA / Ref2VA pipelines and official latent parity
+
+### Added on top (hybrid, opt-in)
+
+- `hybrid_attention: true` in `transformer/config.json` (default off)
+- Chunk-aligned window softmax (`radius=1`, `chunk=5`, `anchor_frames=both`)
+- Bidirectional `vdn_solve` linear branch, softmax gate, `to_out_linear`
+- 1+1 branch-parallel when sequence parallel size is 2
+- Converter overlay of `linear_branch/` + LoRA merge onto a dense `transformer/`
+- MLX path auto-selected from hybrid weight keys
+- Run converted checkpoints with `--no-vsa`
+
+### Learned
+
+- `attn.orig.to_out.0` must map before generic `attn.orig.*`; skip dropout `to_out.1`
+- Extra hybrid modules are siblings of `to_q` (`attn.to_out_linear`), not `attn.hybrid.*`
+- Full-cover windows skip the linear branch; the softmax gate still scales (~0.99)
+- SP > 1 all-gathers into hybrid; the 1+1 split is only SP == 2
+- Converter writes `transformer/` only; do not build the full DiT on CPU to unit-test hybrid
+
+Hybrid E2E / SSIM against a converted VDN checkpoint is **not** recorded here yet.
+
 ## Status
 
 - workloads: T2VA, FL2VA, Ref2VA joint video/audio generation

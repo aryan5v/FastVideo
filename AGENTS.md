@@ -66,6 +66,7 @@ Local guidance lives next to the code. Read the in-scope file before editing:
 | `fastvideo/AGENTS.md` | Core package map, public API, registry-driven model dispatch |
 | `fastvideo/configs/AGENTS.md` | Arch + pipeline config dataclasses, `param_names_mapping` |
 | `fastvideo/models/AGENTS.md` | DiT / VAE / encoder / scheduler / loader layout (pre-commit excluded) |
+| `fastvideo/models/dits/minimax_h3_hybrid/AGENTS.md` | Hybrid MiniMax H3 on top of existing FastH3 (reuse list, pitfalls) |
 | `fastvideo/layers/AGENTS.md` | Tensor-parallel linear/attention layer rules for ports |
 | `fastvideo/attention/AGENTS.md` | Backend registry + env-var override |
 | `fastvideo/pipelines/AGENTS.md` | Stage ABC, `basic/<model>/`, `preprocess/`, presets |

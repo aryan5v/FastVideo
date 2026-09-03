@@ -116,11 +116,14 @@ evaluation option rather than an exact-parity mode.
 
 ### Hybrid MiniMax H3 (window softmax + linear far branch)
 
-A converted hybrid H3 transformer (`hybrid_attention: true` in
-`transformer/config.json`) keeps FastVideo's packed layout, QKV, RoPE, Sol-Engine
-fusions, and FP8 suffixes, and replaces only the attention body: chunk-aligned
+This sits **on top of** FastH3 that already shipped: packed layout, QKV / RoPE /
+`to_out`, Sol-Engine fusions, FP8, sequence parallel, and the MLX T2VA runtime.
+A converted hybrid transformer (`hybrid_attention: true` in
+`transformer/config.json`) replaces only the attention body: chunk-aligned
 window softmax plus a bidirectional linear scan over the frames the window does
-not see. Dense and VSA FastH3 checkpoints are unchanged.
+not see. Dense and VSA FastH3 checkpoints are unchanged. Maintainer notes
+(reuse list, pitfalls) live in
+`fastvideo/models/dits/minimax_h3_hybrid/AGENTS.md`.
 
 Convert an exploded VDN-H3 artifact onto a dense H3 `transformer/` directory:
 

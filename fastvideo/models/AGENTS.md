@@ -10,6 +10,7 @@ DiT / VAE / encoder / scheduler / upsampler / audio model classes. **Pre-commit 
 models/
 ├── dits/
 │   ├── <model>.py              # Single-file DiT (wanvideo, ltx2, hunyuanvideo, cosmos, ...)
+│   ├── minimax_h3_hybrid/      # Opt-in window+linear attention on existing MiniMax H3
 │   ├── hyworld/                # Multi-file DiT family
 │   ├── lingbotworld/           # ditto
 │   └── matrixgame2/            # ditto
