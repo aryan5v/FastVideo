@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+"""CPU contracts for FastH3-native hybrid velocity distillation."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+import yaml
+
+from fastvideo.pipelines import TrainingBatch
+from fastvideo.train.methods.knowledge_distillation.minimax_h3_velocity import MiniMaxH3VelocityKDMethod
+from fastvideo.train.models.minimax_h3.minimax_h3 import (
+    MiniMaxH3Model,
+    _apply_trainable_parameter_patterns,
+    shift_noise_amount,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def test_hybrid_trainable_mask_freezes_preview_backbone() -> None:
+    transformer = torch.nn.Module()
+    transformer.to_q = torch.nn.Linear(2, 2)
+    transformer.linear_attention = torch.nn.Linear(2, 2)
+    transformer.to_out_linear = torch.nn.Linear(2, 2)
+    transformer.softmax_gate = torch.nn.Linear(2, 1)
+
+    patterns = ("linear_attention", "to_out_linear", "softmax_gate")
+    _apply_trainable_parameter_patterns(transformer, patterns)
+
+    trainable = {name for name, parameter in transformer.named_parameters() if parameter.requires_grad}
+    assert trainable
+    assert all(any(pattern in name for pattern in patterns) for name in trainable)
+    assert not transformer.to_q.weight.requires_grad
+
+
+def test_fasth3_grid_samples_only_four_forward_sigmas() -> None:
+    model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    model._sigma_grid_points = 5
+    model.training_config = SimpleNamespace(distributed=SimpleNamespace(sp_size=1))
+    model.sp_group = None
+    observed = set()
+
+    for seed in range(32):
+        video_sigma, audio_sigma, index = model._sample_noise_amounts(
+            torch.Generator(device="cpu").manual_seed(seed),
+            torch.device("cpu"),
+        )
+        base_sigma = torch.tensor([1.0, 0.75, 0.5, 0.25])[index:index + 1]
+        torch.testing.assert_close(video_sigma, shift_noise_amount(base_sigma, 12.0))
+        torch.testing.assert_close(audio_sigma, shift_noise_amount(base_sigma, 3.0))
+        observed.add(index)
+
+    assert observed == {0, 1, 2, 3}
+
+
+class _FakeJointRole:
+
+    def __init__(self, prediction: tuple[torch.Tensor, torch.Tensor], *, prepares: bool = False) -> None:
+        self.prediction = prediction
+        self.prepares = prepares
+        self.attn_kinds: list[str] = []
+
+    def prepare_batch(self, batch, *, generator, latents_source):
+        del batch, generator, latents_source
+        assert self.prepares
+        return TrainingBatch(
+            latents=torch.zeros(1, 1, 1, 1, 1),
+            noisy_model_input=torch.zeros(1, 1, 1, 1, 1),
+            timesteps=torch.zeros(1),
+            current_timestep=2,
+        )
+
+    def predict_noise(self, noisy_latents, timesteps, batch, *, conditional, attn_kind):
+        del noisy_latents, timesteps, batch
+        assert conditional is True
+        self.attn_kinds.append(attn_kind)
+        return self.prediction
+
+
+def test_velocity_kd_uses_vsa_teacher_and_hybrid_student_on_same_batch() -> None:
+    teacher = _FakeJointRole((torch.zeros(1), torch.ones(1)))
+    student = _FakeJointRole((torch.full((1, ), 2.0), torch.full((1, ), 3.0)), prepares=True)
+    method = MiniMaxH3VelocityKDMethod.__new__(MiniMaxH3VelocityKDMethod)
+    torch.nn.Module.__init__(method)
+    method.student = student
+    method.teacher = teacher
+    method.cuda_generator = torch.Generator(device="cpu")
+
+    losses, outputs, metrics = method.single_train_step({}, 0)
+
+    torch.testing.assert_close(losses["video_velocity_mse"], torch.tensor(4.0))
+    torch.testing.assert_close(losses["audio_velocity_mse"], torch.tensor(4.0))
+    torch.testing.assert_close(losses["total_loss"], torch.tensor(8.0))
+    assert teacher.attn_kinds == ["vsa"]
+    assert student.attn_kinds == ["dense"]
+    assert outputs["_fv_backward"] == (2, None)
+    assert metrics["sigma_grid_index"] == 2
+
+
+def test_overfit_configs_encode_requested_12_and_16_gpu_meshes() -> None:
+    cases = {
+        16: (8, 2, 8, 2),
+        12: (4, 3, 4, 3),
+    }
+    for gpu_count, (sp_size, replicate, shard, repeats) in cases.items():
+        path = _REPO_ROOT / "examples/train/configs" / f"overfit_minimax_h3_hybrid_kd_{gpu_count}gpu.yaml"
+        config = yaml.safe_load(path.read_text())
+        distributed = config["training"]["distributed"]
+        assert distributed["num_gpus"] == gpu_count
+        assert distributed["sp_size"] == sp_size
+        assert distributed["tp_size"] == 1
+        assert distributed["hsdp_replicate_dim"] == replicate
+        assert distributed["hsdp_shard_dim"] == shard
+        assert distributed["hsdp_replicate_dim"] * distributed["hsdp_shard_dim"] == gpu_count
+        assert list(config["training"]["data"]["data_path"].values()) == [repeats]
+        assert config["training"]["data"]["train_batch_size"] == 1
+        assert config["models"]["student"]["sigma_grid_points"] == 5
+        assert config["models"]["teacher"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"

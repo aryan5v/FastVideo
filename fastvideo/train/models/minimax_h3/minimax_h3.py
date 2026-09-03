@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal, TYPE_CHECKING
 
 import torch
@@ -22,6 +23,7 @@ from fastvideo.pipelines.basic.minimax_h3.packing import (
     unpack_audio_tokens,
     unpatchify_video_tokens,
 )
+from fastvideo.models.dits.minimax_h3_hybrid import hybrid_layout_from_packed
 from fastvideo.platforms import AttentionBackendEnum
 
 from fastvideo.train.models.base import ModelBase, NoisePrediction
@@ -38,6 +40,7 @@ _VIDEO_SCHEDULER_SHIFT = 12.0
 _AUDIO_SCHEDULER_SHIFT = 3.0
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
+_HYBRID_PARAMETER_PATTERNS = ("linear_attention", "to_out_linear", "softmax_gate")
 
 
 def shift_noise_amount(base_noise_amount: torch.Tensor, shift: float) -> torch.Tensor:
@@ -45,6 +48,24 @@ def shift_noise_amount(base_noise_amount: torch.Tensor, shift: float) -> torch.T
     if shift <= 0:
         raise ValueError(f"shift must be positive, got {shift}")
     return shift * base_noise_amount / (1.0 + (shift - 1.0) * base_noise_amount)
+
+
+def _apply_trainable_parameter_patterns(
+    transformer: torch.nn.Module,
+    patterns: Sequence[str],
+) -> None:
+    """Freeze a transformer, then unfreeze only parameters matching every requested family."""
+    transformer.requires_grad_(False)
+    matched = {pattern: 0 for pattern in patterns}
+    for name, parameter in transformer.named_parameters():
+        for pattern in patterns:
+            if pattern in name:
+                parameter.requires_grad_(True)
+                matched[pattern] += 1
+                break
+    missing = [pattern for pattern, count in matched.items() if count == 0]
+    if missing:
+        raise ValueError(f"No MiniMax H3 parameters matched trainable patterns: {missing}")
 
 
 class MiniMaxH3Model(ModelBase):
@@ -62,16 +83,21 @@ class MiniMaxH3Model(ModelBase):
         enable_gradient_checkpointing_type: str | None = None,
         transformer_override_safetensor: str | None = None,
         attention_backend: AttentionBackendEnum | str | None = AttentionBackendEnum.TORCH_SDPA,
+        hybrid_attention: bool | None = None,
+        trainable_parameter_patterns: Sequence[str] | None = None,
+        sigma_grid_points: int | None = None,
+        vsa_tile_size: int = 64,
     ) -> None:
         """Validate the single-document T2VA contract and load the transformer."""
         super().__init__(
             trainable=trainable,
             attention_backend=attention_backend,
         )
-        # PyTorch scaled dot product attention (SDPA) provides dense attention
-        # without adding another attention-kernel dependency to H3 training.
-        if self.attention_backend != AttentionBackendEnum.TORCH_SDPA:
-            raise ValueError("MiniMaxH3Model requires the TORCH_SDPA attention backend")
+        if self.attention_backend not in (
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
+        ):
+            raise ValueError("MiniMaxH3Model requires TORCH_SDPA or VIDEO_SPARSE_ATTN_H3")
         if training_config.pipeline_config is None:
             raise ValueError("MiniMaxH3Model requires a resolved MiniMax H3 pipeline config")
         # Packed row indices describe one text-video-audio document without a
@@ -91,8 +117,19 @@ class MiniMaxH3Model(ModelBase):
         # parameter dtype, including modules that H3 inference keeps in FP32.
         training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
 
+        if sigma_grid_points is not None and int(sigma_grid_points) < 2:
+            raise ValueError("sigma_grid_points must be at least 2")
+        if int(vsa_tile_size) not in (64, 256):
+            raise ValueError("vsa_tile_size must be 64 or 256")
+
         self._init_from = str(init_from)
         self.training_config = training_config
+        self._hybrid_attention = hybrid_attention
+        selected_patterns = (_HYBRID_PARAMETER_PATTERNS if trainable_parameter_patterns is None and hybrid_attention
+                             else trainable_parameter_patterns)
+        self._trainable_parameter_patterns = tuple(str(pattern) for pattern in (selected_patterns or ()))
+        self._sigma_grid_points = int(sigma_grid_points) if sigma_grid_points is not None else None
+        self._vsa_tile_size = int(vsa_tile_size)
         self.transformer = self._load_transformer(
             trainable=trainable,
             disable_custom_init_weights=disable_custom_init_weights,
@@ -115,15 +152,22 @@ class MiniMaxH3Model(ModelBase):
         transformer_override_safetensor: str | None,
     ) -> torch.nn.Module:
         """Load H3 through the training FSDP loader and apply block checkpointing."""
-        transformer = load_module_from_path(
-            model_path=self._init_from,
-            module_type="transformer",
-            training_config=self.training_config,
-            disable_custom_init_weights=disable_custom_init_weights,
-            override_transformer_cls_name=self._transformer_cls_name,
-            transformer_override_safetensor=transformer_override_safetensor,
-            attention_backend=self.attention_backend,
-        )
+        arch = self.training_config.pipeline_config.dit_config.arch_config  # type: ignore[union-attr]
+        previous_hybrid = getattr(arch, "hybrid_attention", False)
+        if self._hybrid_attention is not None:
+            arch.hybrid_attention = bool(self._hybrid_attention)
+        try:
+            transformer = load_module_from_path(
+                model_path=self._init_from,
+                module_type="transformer",
+                training_config=self.training_config,
+                disable_custom_init_weights=disable_custom_init_weights,
+                override_transformer_cls_name=self._transformer_cls_name,
+                transformer_override_safetensor=transformer_override_safetensor,
+                attention_backend=self.attention_backend,
+            )
+        finally:
+            arch.hybrid_attention = previous_hybrid
         checkpointing_type = (enable_gradient_checkpointing_type
                               or self.training_config.model.enable_gradient_checkpointing_type)
         if trainable and checkpointing_type:
@@ -131,7 +175,18 @@ class MiniMaxH3Model(ModelBase):
                 transformer,
                 checkpointing_type=checkpointing_type,
             )
-        return apply_trainable(transformer, trainable=trainable)
+        transformer = apply_trainable(transformer, trainable=trainable)
+        if trainable and self._trainable_parameter_patterns:
+            _apply_trainable_parameter_patterns(transformer, self._trainable_parameter_patterns)
+        return transformer
+
+    def trainable_parameters(self) -> list[torch.nn.Parameter]:
+        """Return the explicitly unfrozen H3 parameters."""
+        return [parameter for parameter in self.transformer.parameters() if parameter.requires_grad]
+
+    @property
+    def trainable_parameter_patterns(self) -> tuple[str, ...]:
+        return self._trainable_parameter_patterns
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
         """Load precomputed text embeddings and paired video-audio latents."""
@@ -205,21 +260,40 @@ class MiniMaxH3Model(ModelBase):
         self,
         generator: torch.Generator,
         device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Sample one shared denoising stage and apply both modality shifts."""
-        base_noise_amount = torch.rand(
-            (1, ),
-            generator=generator,
-            device=device,
-            dtype=torch.float32,
-        )
+        grid_index = 0
+        sigma_grid_points = getattr(self, "_sigma_grid_points", None)
+        if sigma_grid_points is None:
+            base_noise_amount = torch.rand(
+                (1, ),
+                generator=generator,
+                device=device,
+                dtype=torch.float32,
+            )
+        else:
+            # Inference counts sigma-grid points, so a five-point FastH3 grid
+            # supplies the four model-evaluation sigmas [1, .75, .5, .25].
+            sampled_index = torch.randint(
+                0,
+                sigma_grid_points - 1,
+                (1, ),
+                generator=generator,
+                device=device,
+            )
+            base_grid = torch.linspace(1.0, 0.0, sigma_grid_points, device=device, dtype=torch.float32)
+            base_noise_amount = base_grid[sampled_index]
         if int(self.training_config.distributed.sp_size) > 1:
             # Sequence-parallel ranks shard one document and therefore require
             # identical video and audio noise amounts for that document.
             self.sp_group.broadcast(base_noise_amount, src=0)
+        if sigma_grid_points is not None:
+            grid = torch.linspace(1.0, 0.0, sigma_grid_points, device=device, dtype=torch.float32)
+            grid_index = int((grid[:-1] - base_noise_amount[0]).abs().argmin().item())
         return (
             shift_noise_amount(base_noise_amount, _VIDEO_SCHEDULER_SHIFT),
             shift_noise_amount(base_noise_amount, _AUDIO_SCHEDULER_SHIFT),
+            grid_index,
         )
 
     def prepare_batch(
@@ -250,7 +324,7 @@ class MiniMaxH3Model(ModelBase):
         )
         video_noise = torch.randn(video_latents.shape, generator=generator, device=device, dtype=dtype)
         audio_noise = torch.randn(audio_latents.shape, generator=generator, device=device, dtype=dtype)
-        video_noise_amount, audio_noise_amount = self._sample_noise_amounts(generator, device)
+        video_noise_amount, audio_noise_amount, grid_index = self._sample_noise_amounts(generator, device)
         video_sigmas = video_noise_amount.to(dtype).view(1, 1, 1, 1, 1)
         audio_sigmas = audio_noise_amount.to(dtype).view(1, 1, 1, 1)
         noisy_video_latents = (1.0 - video_sigmas) * video_latents + video_sigmas * video_noise
@@ -294,7 +368,29 @@ class MiniMaxH3Model(ModelBase):
         training_batch.minimax_h3_layout = layout
         training_batch.attn_metadata = None
         training_batch.attn_metadata_vsa = None
+        training_batch.current_timestep = grid_index
         return training_batch
+
+    def _build_vsa_metadata(self, batch: TrainingBatch, layout: MiniMaxH3PackedLayout) -> Any:
+        """Build Preview's packed VSA-H3 metadata for the sampled grid point."""
+        from fastvideo.attention.backends.video_sparse_attn_h3 import MiniMaxH3VSAMetadataBuilder
+
+        prefix_segments = tuple(segment for segment in (
+            int(layout.text_indices.numel()),
+            int(layout.num_condition_video_rows),
+            int(layout.audio_indices.numel()),
+        ) if segment > 0)
+        builder = MiniMaxH3VSAMetadataBuilder()
+        return builder.build(
+            current_timestep=int(batch.current_timestep),
+            raw_latent_shape=(layout.num_video_latent_frames, layout.latent_height, layout.latent_width),
+            patch_size=tuple(int(value) for value in self.transformer.patch_size),
+            VSA_sparsity=float(self.training_config.vsa_sparsity),
+            prefix_segments=prefix_segments,
+            device=self.device,
+            exempt=True,
+            tile_size=self._vsa_tile_size,
+        )
 
     def add_noise(
         self,
@@ -322,8 +418,10 @@ class MiniMaxH3Model(ModelBase):
         del timestep
         if not conditional or cfg_uncond is not None:
             raise ValueError("MiniMaxH3Model predicts one conditional T2VA sample")
-        if attn_kind != "dense":
-            raise ValueError("MiniMaxH3Model supports dense attention for training")
+        if attn_kind not in ("dense", "vsa"):
+            raise ValueError(f"Unsupported MiniMax H3 attention kind: {attn_kind!r}")
+        if attn_kind == "vsa" and self.attention_backend != AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3:
+            raise ValueError("MiniMax H3 VSA training requires VIDEO_SPARSE_ATTN_H3")
         layout = batch.minimax_h3_layout
         if not isinstance(layout, MiniMaxH3PackedLayout):
             raise RuntimeError("prepare_batch() must set TrainingBatch.minimax_h3_layout")
@@ -352,9 +450,16 @@ class MiniMaxH3Model(ModelBase):
         unique_timesteps = unique_timesteps.to(device)
         timestep_indices = timestep_indices.to(device)
 
+        attn_metadata = self._build_vsa_metadata(batch, layout) if attn_kind == "vsa" else None
+        if attn_kind == "vsa":
+            batch.attn_metadata_vsa = attn_metadata
+        hybrid_kwargs = {}
+        if getattr(self.transformer, "hybrid_attention_enabled", False):
+            hybrid_kwargs["hybrid_layout"] = hybrid_layout_from_packed(layout, tuple(self.transformer.patch_size))
+
         with torch.autocast(device.type, dtype=dtype), set_forward_context(
-                current_timestep=unique_timesteps,
-                attn_metadata=None,
+                current_timestep=int(batch.current_timestep),
+                attn_metadata=attn_metadata,
         ):
             video_velocity, audio_velocity = self.transformer(
                 hidden_states=video_rows[None],
@@ -367,6 +472,7 @@ class MiniMaxH3Model(ModelBase):
                 video_indices=layout.video_indices.to(device),
                 audio_indices=layout.audio_indices.to(device),
                 text_indices=layout.text_indices.to(device),
+                **hybrid_kwargs,
             )
 
         _, _, num_video_latents, latent_height, latent_width = video_bcthw.shape
