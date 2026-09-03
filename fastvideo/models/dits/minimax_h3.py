@@ -613,6 +613,10 @@ class MiniMaxH3TransformerBlock(nn.Module):
 
 
 class MiniMaxH3Transformer3DModel(BaseDiT):
+    # Preview-v1 VSA snapshots include one learned compression gate per
+    # attention block. Dense/hybrid construction intentionally omits those
+    # VSA-only modules, while VSA construction still creates and loads them.
+    _allowed_unexpected_checkpoint_patterns = (".attn.to_gate_compress.", )
     """Joint H3 Transformer over one padless text/audio/video document.
 
     The layout builder validates semantic rows before denoising. Sequence-

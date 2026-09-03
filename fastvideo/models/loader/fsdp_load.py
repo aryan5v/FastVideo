@@ -606,6 +606,20 @@ def load_model_from_full_model_state_dict(
                 )
                 continue
 
+            # A model family may publish backend-specific tensors in the same
+            # checkpoint. For example, MiniMax H3 Preview-v1 carries VSA
+            # compression gates which are deliberately absent when the dense
+            # hybrid student is instantiated. Keep this opt-in and
+            # model-scoped so strict loading catches every unrelated mapping
+            # mistake.
+            allowed_unexpected = getattr(model, "_allowed_unexpected_checkpoint_patterns", ())
+            if any(pattern in target_param_name for pattern in allowed_unexpected):
+                logger.warning(
+                    "Skipping backend-specific checkpoint key absent from model: %s",
+                    target_param_name,
+                )
+                continue
+
             # For non-strict loads, treat this as an "unexpected key" and skip it
             # (mirrors torch.nn.Module.load_state_dict(strict=False)).
             if not strict:
