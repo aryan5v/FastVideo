@@ -42,6 +42,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from fastvideo.models.dits.minimax_h3_hybrid.checkpoint import (
+    assert_conversion_paths_disjoint,
     hybrid_arch_fields_from_spec,
     lora_scale_from_adapter_config,
     merge_lora_pairs,
@@ -184,6 +185,8 @@ def main() -> None:
     if not (hybrid / SPEC_NAME).is_file() and not (hybrid / BRANCH_DIR).is_dir():
         raise FileNotFoundError(f"{hybrid} is not an exploded VDN checkpoint "
                                 f"(need {SPEC_NAME} and/or {BRANCH_DIR}/).")
+
+    assert_conversion_paths_disjoint(dst, base, hybrid)
 
     print(f"loading dense transformer from {base}")
     weights = load_safetensors_dir(base)

@@ -522,6 +522,7 @@ def _attention(
                 window_chunk=int(cfg.get("hybrid_window_chunk", 5)),
                 anchor_frames=str(cfg.get("hybrid_anchor_frames", "both")),
                 delta_rule=str(cfg.get("hybrid_delta_rule", "vdn_solve")),
+                enable_text_state=bool(cfg.get("hybrid_enable_text_state", True)),
             )
     # contiguous() guards against MLX fused-SDPA mis-computation on strided views.
     attended = mx.fast.scaled_dot_product_attention(

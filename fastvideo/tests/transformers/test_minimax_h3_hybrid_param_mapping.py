@@ -3,11 +3,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import torch
 
 from fastvideo.configs.models.dits.minimax_h3 import MiniMaxH3ArchConfig
 from fastvideo.models.dits.minimax_h3_hybrid.checkpoint import (
+    assert_conversion_paths_disjoint,
     hybrid_arch_fields_from_spec,
+    lora_scale_from_adapter_config,
     merge_lora_pairs,
     normalize_lora_key,
     remap_vdn_key,
@@ -54,6 +59,44 @@ def test_merge_lora_pairs_adds_b_at_a() -> None:
     assert merged == 1
     expected = 0.5 * (lora_b @ lora_a)
     torch.testing.assert_close(weights["transformer_blocks.0.attn.to_q.weight"], expected)
+
+
+def test_merge_lora_pairs_accumulates_in_fp32() -> None:
+    weight = torch.full((2, 2), 0.1, dtype=torch.bfloat16)
+    lora_a = torch.full((1, 2), 1e-3, dtype=torch.float32)
+    lora_b = torch.full((2, 1), 1e-2, dtype=torch.float32)
+    weights = {"transformer_blocks.0.attn.to_q.weight": weight.clone()}
+    lora = {
+        "transformer_blocks.0.attn.to_q.lora_A.weight": lora_a,
+        "transformer_blocks.0.attn.to_q.lora_B.weight": lora_b,
+    }
+    assert merge_lora_pairs(weights, lora, scale=1.0) == 1
+    expected = (weight.float() + (lora_b @ lora_a)).to(torch.bfloat16)
+    torch.testing.assert_close(weights["transformer_blocks.0.attn.to_q.weight"].float(), expected.float())
+
+
+def test_lora_scale_from_adapter_config_prefers_lora_alpha() -> None:
+    assert lora_scale_from_adapter_config({"lora_alpha": 16, "r": 8}, rank=8) == 2.0
+    assert lora_scale_from_adapter_config({"alpha": 4, "r": 8}, rank=8) == 0.5
+    assert lora_scale_from_adapter_config({"lora_alpha": 16, "alpha": 4, "r": 8}, rank=8) == 2.0
+    assert lora_scale_from_adapter_config({"config": {"lora_alpha": 8, "r": 4}}, rank=None) == 2.0
+    assert lora_scale_from_adapter_config({}, rank=8) == 1.0
+
+
+def test_assert_conversion_paths_disjoint(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    hybrid = tmp_path / "hybrid"
+    dst = tmp_path / "out"
+    base.mkdir()
+    hybrid.mkdir()
+    assert_conversion_paths_disjoint(dst, base, hybrid)
+    with pytest.raises(ValueError, match="overlaps source"):
+        assert_conversion_paths_disjoint(base, base, hybrid)
+    nested = base / "transformer"
+    with pytest.raises(ValueError, match="overlaps source"):
+        assert_conversion_paths_disjoint(nested, base, hybrid)
+    with pytest.raises(ValueError, match="overlaps source"):
+        assert_conversion_paths_disjoint(tmp_path, base, hybrid)
 
 
 def test_hybrid_arch_fields_from_released_spec() -> None:

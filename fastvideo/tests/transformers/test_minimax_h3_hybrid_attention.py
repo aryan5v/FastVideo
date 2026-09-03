@@ -159,3 +159,21 @@ def test_minimax_h3_attention_requires_hybrid_layout() -> None:
     hidden = torch.randn(1, 6, HIDDEN)
     with pytest.raises(ValueError, match="HybridSequenceLayout"):
         attn.forward(hidden, rotary_emb=None, original_seq_len=6, hybrid_layout=None)
+
+
+def test_hybrid_attention_rejects_batch_greater_than_one() -> None:
+    layout = _layout(num_frames=2)
+    parent = _StubParent()
+    hybrid = HybridAttention(
+        hidden_size=HIDDEN,
+        num_heads=HEADS,
+        head_dim=HEAD_DIM,
+        enable_softmax_gate=False,
+        enable_text_state=False,
+        short_conv_targets=(),
+        branch_parallel=False,
+    )
+    _init_linears(parent)
+    hidden = torch.randn(2, layout.seq_len, HIDDEN)
+    with pytest.raises(ValueError, match="batch size 1"):
+        hybrid(parent, hidden, None, layout.seq_len, layout, _identity_norm_rope)

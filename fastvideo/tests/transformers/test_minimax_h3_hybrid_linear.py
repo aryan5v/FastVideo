@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 
 from fastvideo.models.dits.minimax_h3_hybrid.linear import (
+    LinearAttentionSepConv,
     factor_delta,
     frame_statistics,
     gather_linear_state,
@@ -55,3 +56,15 @@ def test_gather_linear_state_radius_zero_uses_neighbours() -> None:
     torch.testing.assert_close(state[1], prefix[0] + suffix[2], atol=1e-5, rtol=1e-5)
     # Query frame 0 has no before; after = suffix[1].
     torch.testing.assert_close(state[0], suffix[1], atol=1e-5, rtol=1e-5)
+
+
+def test_sep_conv_apply_conv_does_not_shadow_module_apply() -> None:
+    conv = LinearAttentionSepConv(8, targets=("k", ))
+    seen: list[str] = []
+    conv.apply(lambda module: seen.append(type(module).__name__))
+    assert "LinearAttentionSepConv" in seen
+    tokens = torch.randn(4, 2, 4)
+    skipped = conv.apply_conv("q", tokens, 4, (1, 1))
+    torch.testing.assert_close(skipped, tokens)
+    out = conv.apply_conv("k", tokens, 4, (1, 1))
+    assert out.shape == tokens.shape

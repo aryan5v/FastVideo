@@ -45,46 +45,79 @@ class MiniMaxH3HybridExportCallback(Callback):
                 ignore_frozen_params=True,
             ),
         )
-        if dist.get_rank() == 0:
-            tensors = {
-                name: value.detach().cpu().contiguous()
-                for name, value in state.items()
-                if isinstance(value, torch.Tensor) and any(pattern in name for pattern in patterns)
-            }
-            if not tensors:
-                raise RuntimeError("Hybrid export found no trainable tensors")
+        export_error: str | None = None
+        if self._is_rank0():
+            try:
+                self._write_export(transformer, state, patterns, iteration)
+            except Exception as exc:
+                logger.exception("Hybrid export failed on rank 0")
+                export_error = f"{type(exc).__name__}: {exc}"
+        if not self._broadcast_ok(export_error is None):
+            raise RuntimeError("Hybrid export failed on rank 0" + (f": {export_error}" if export_error else ""))
 
-            branch_dir = self._output_dir / "linear_branch"
-            branch_dir.mkdir(parents=True, exist_ok=True)
-            save_file(tensors, str(branch_dir / "model.safetensors"))
+    def _write_export(
+        self,
+        transformer: torch.nn.Module,
+        state: dict[str, Any],
+        patterns: tuple[str, ...],
+        iteration: int,
+    ) -> None:
+        tensors = {
+            name: value.detach().cpu().contiguous()
+            for name, value in state.items()
+            if isinstance(value, torch.Tensor) and any(pattern in name for pattern in patterns)
+        }
+        if not tensors:
+            raise RuntimeError("Hybrid export found no trainable tensors")
 
-            arch = transformer.config.arch_config
-            model_spec: dict[str, Any] = {
-                "hybrid_attention": {
-                    "softmax_attention": {
-                        "radius": int(arch.hybrid_window_radius),
-                        "chunk": int(arch.hybrid_window_chunk),
-                    },
-                    "anchor_frames": str(arch.hybrid_anchor_frames),
-                    "enable_softmax_gate": bool(arch.hybrid_enable_softmax_gate),
-                    "linear_attention": {
-                        "delta_rule": str(arch.hybrid_delta_rule),
-                        "enable_text_state": bool(arch.hybrid_enable_text_state),
-                        "short_conv": {
-                            "targets": list(arch.hybrid_short_conv_targets)
-                        },
+        branch_dir = self._output_dir / "linear_branch"
+        branch_dir.mkdir(parents=True, exist_ok=True)
+        save_file(tensors, str(branch_dir / "model.safetensors"))
+
+        arch = transformer.config.arch_config
+        model_spec: dict[str, Any] = {
+            "hybrid_attention": {
+                "softmax_attention": {
+                    "radius": int(arch.hybrid_window_radius),
+                    "chunk": int(arch.hybrid_window_chunk),
+                },
+                "anchor_frames": str(arch.hybrid_anchor_frames),
+                "enable_softmax_gate": bool(arch.hybrid_enable_softmax_gate),
+                "linear_attention": {
+                    "delta_rule": str(arch.hybrid_delta_rule),
+                    "enable_text_state": bool(arch.hybrid_enable_text_state),
+                    "short_conv": {
+                        "targets": list(arch.hybrid_short_conv_targets)
                     },
                 },
-                "training": {
-                    "teacher": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
-                    "sigma_grid_points": 5,
-                    "step": int(iteration),
-                },
-            }
-            self._output_dir.mkdir(parents=True, exist_ok=True)
-            (self._output_dir / "model_spec.json").write_text(json.dumps(model_spec, indent=2) + "\n")
-            logger.info("Exported %d hybrid tensors to %s", len(tensors), self._output_dir)
+            },
+            "training": {
+                "teacher": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree",
+                "sigma_grid_points": 5,
+                "step": int(iteration),
+            },
+        }
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        (self._output_dir / "model_spec.json").write_text(json.dumps(model_spec, indent=2) + "\n")
+        logger.info("Exported %d hybrid tensors to %s", len(tensors), self._output_dir)
+
+    def _is_rank0(self) -> bool:
+        if not dist.is_available() or not dist.is_initialized():
+            return True
+        return dist.get_rank() == 0
+
+    def _broadcast_ok(self, ok: bool) -> bool:
+        if not dist.is_available() or not dist.is_initialized():
+            return ok
+        backend = dist.get_backend()
+        if backend != "gloo" and torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+        else:
+            device = torch.device("cpu")
+        flag = torch.tensor([1 if ok else 0], device=device, dtype=torch.int32)
+        dist.broadcast(flag, src=0)
         dist.barrier()
+        return bool(flag.item())
 
 
 __all__ = ["MiniMaxH3HybridExportCallback"]

@@ -77,7 +77,8 @@ SP > 1 still all-gathers the packed sequence into this module first.
    Linux). Exercise `HybridAttention` with a stub parent, or patch the backend.
 9. **`layout.py` must stay importable without torch** so the MLX dense path
    does not pull CUDA PyTorch when hybrid keys are absent. `window_bounds` is
-   pure Python; import torch only inside tensor helpers.
+   pure Python; import torch only inside tensor helpers. Package `__init__.py`
+   must not eagerly import `attention` / `linear` / `window` / `checkpoint`.
 10. **Weights stay under the MiniMax H3 Community License.** The conversion
     script is Apache-2.0.
 
@@ -92,7 +93,7 @@ SP > 1 still all-gathers the packed sequence into this module first.
 | `linear.py` | Scan, gates, short conv |
 | `attention.py` | Hybrid body used by `MiniMaxH3Attention` |
 | `checkpoint.py` | Converter arithmetic (unit-tested without 70 GiB weights) |
-| `__init__.py` | Public exports |
+| `__init__.py` | Layout-safe lazy exports (no eager torch) |
 | `AGENTS.md` | This file |
 
 External coordinates:

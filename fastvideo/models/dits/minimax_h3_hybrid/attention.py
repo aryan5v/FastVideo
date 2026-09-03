@@ -210,6 +210,9 @@ class HybridAttention(nn.Module):
                 sin = sequence_model_parallel_all_gather_with_unpad(rotary_emb[1], original_seq_len, dim=0)
                 working_rope = (cos, sin)
 
+        if working.shape[0] != 1:
+            raise ValueError(f"HybridAttention supports batch size 1, got {working.shape[0]}.")
+
         query_raw, key_raw, value_raw = self.project_qkv(attn, working)
         query, key = apply_norm_rope(query_raw, key_raw, working_rope)
         bounds = window_bounds(layout.num_frames, self.window_radius, self.window_chunk)

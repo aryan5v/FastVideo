@@ -173,7 +173,7 @@ def _factor_delta(delta_rule: str, alpha, matrix_a, matrix_b, per_frame: int):
         inv = 1.0 / per_frame
         return alpha[..., None] * (eye - inv * matrix_a), (inv**0.5) * matrix_b
     scaled = 1.0 / per_frame if delta_rule == "vdn_scaled" else 1.0
-    inverse = mx.linalg.inv(matrix_a.astype(mx.float32) * scaled + eye.astype(mx.float32))
+    inverse = mx.linalg.inv(matrix_a.astype(mx.float32) * scaled + eye.astype(mx.float32), stream=mx.cpu)
     transitions = (alpha[..., None] * inverse).astype(matrix_a.dtype)
     injections = ((matrix_b.astype(mx.float32) * (scaled**0.5)) @ inverse).astype(matrix_b.dtype)
     return transitions, injections
@@ -316,6 +316,7 @@ def hybrid_attention(
     window_chunk: int = 5,
     anchor_frames: str = "both",
     delta_rule: str = "vdn_solve",
+    enable_text_state: bool = True,
 ):
     """Window softmax + linear far branch, then the existing ``to_out`` projection."""
     import mlx.core as mx
@@ -341,7 +342,7 @@ def hybrid_attention(
     if not full_cover:
         video = slice(geom["video_start"], geom["video_end"])
         text = slice(geom["text_start"], geom["text_end"])
-        text_x = hidden_states[text] if geom["text_end"] > geom["text_start"] else None
+        text_x = hidden_states[text] if enable_text_state and geom["text_end"] > geom["text_start"] else None
         text_qkv = None
         if text_x is not None:
             text_qkv = (query_raw[text], key_raw[text], value_raw[text])

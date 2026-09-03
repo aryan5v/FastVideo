@@ -9,6 +9,7 @@ weights. It does not vendor an external runtime.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -62,21 +63,47 @@ def merge_lora_pairs(
         if target not in weights:
             raise KeyError(f"LoRA target {target!r} (from {name!r}) is missing from the base weights.")
         delta = (lora_b.to(torch.float32) @ lora_a.to(torch.float32)) * scale
-        weights[target] = weights[target] + delta.to(dtype=weights[target].dtype)
+        base = weights[target]
+        weights[target] = (base.to(torch.float32) + delta).to(dtype=base.dtype)
         merged += 1
     return merged
 
 
+def _adapter_config_value(config: dict[str, Any], *keys: str) -> Any:
+    nested = config.get("config") if isinstance(config.get("config"), dict) else {}
+    for key in keys:
+        if config.get(key) is not None:
+            return config[key]
+        if nested.get(key) is not None:
+            return nested[key]
+    return None
+
+
 def lora_scale_from_adapter_config(config: dict[str, Any], rank: int | None) -> float:
-    """``alpha / rank`` when both are known, else 1.0 (alpha == rank)."""
-    alpha = config.get("alpha")
-    if alpha is None and isinstance(config.get("config"), dict):
-        alpha = config["config"].get("alpha")
-        rank = rank or config["config"].get("r") or config["config"].get("rank")
-    rank = rank or config.get("r") or config.get("rank")
+    """``lora_alpha / rank`` when both are known, else 1.0 (alpha == rank)."""
+    alpha = _adapter_config_value(config, "lora_alpha", "alpha")
+    rank = rank or _adapter_config_value(config, "r", "rank")
     if alpha is None or rank in (None, 0):
         return 1.0
     return float(alpha) / float(rank)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def assert_conversion_paths_disjoint(dst: Path, *sources: Path) -> None:
+    """Refuse ``dst`` that equals or nests with a source checkpoint path."""
+    dst_resolved = Path(dst).resolve()
+    for source in sources:
+        src_resolved = Path(source).resolve()
+        if _is_relative_to(dst_resolved, src_resolved) or _is_relative_to(src_resolved, dst_resolved):
+            raise ValueError(f"conversion destination {dst_resolved} overlaps source {src_resolved}; "
+                             "refusing to delete a source checkpoint.")
 
 
 def hybrid_arch_fields_from_spec(model_spec: dict[str, Any] | None) -> dict[str, Any]:

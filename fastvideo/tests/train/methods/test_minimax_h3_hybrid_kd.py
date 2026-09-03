@@ -3,11 +3,14 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 import torch
 import yaml
 
 from fastvideo.pipelines import TrainingBatch
+from fastvideo.train.callbacks.minimax_h3_hybrid_export import MiniMaxH3HybridExportCallback
 from fastvideo.train.methods.knowledge_distillation.minimax_h3_velocity import MiniMaxH3VelocityKDMethod
 from fastvideo.train.models.minimax_h3.minimax_h3 import (
     MiniMaxH3Model,
@@ -117,3 +120,41 @@ def test_overfit_configs_encode_requested_12_and_16_gpu_meshes() -> None:
         assert config["training"]["data"]["train_batch_size"] == 1
         assert config["models"]["student"]["sigma_grid_points"] == 5
         assert config["models"]["teacher"]["attention_backend"] == "VIDEO_SPARSE_ATTN_H3"
+
+
+def test_hybrid_export_broadcasts_rank0_failure_before_barrier(tmp_path: Path) -> None:
+    barrier_calls: list[bool] = []
+    broadcast_values: list[int] = []
+    module = "fastvideo.train.callbacks.minimax_h3_hybrid_export"
+
+    def fake_broadcast(tensor: torch.Tensor, src: int = 0) -> None:
+        del src
+        broadcast_values.append(int(tensor.item()))
+
+    student = SimpleNamespace(
+        transformer=SimpleNamespace(config=SimpleNamespace(arch_config=SimpleNamespace(
+            hybrid_window_radius=1,
+            hybrid_window_chunk=5,
+            hybrid_anchor_frames="both",
+            hybrid_enable_softmax_gate=True,
+            hybrid_delta_rule="vdn_solve",
+            hybrid_enable_text_state=True,
+            hybrid_short_conv_targets=["k", "v"],
+        ))),
+        trainable_parameter_patterns=("linear_attention", ),
+    )
+    callback = MiniMaxH3HybridExportCallback(output_dir=str(tmp_path))
+    with (
+            patch(f"{module}.get_model_state_dict", return_value={}),
+            patch(f"{module}.dist.is_available", return_value=True),
+            patch(f"{module}.dist.is_initialized", return_value=True),
+            patch(f"{module}.dist.get_rank", return_value=0),
+            patch(f"{module}.dist.get_backend", return_value="gloo"),
+            patch(f"{module}.dist.broadcast", side_effect=fake_broadcast),
+            patch(f"{module}.dist.barrier", side_effect=lambda: barrier_calls.append(True)),
+    ):
+        with pytest.raises(RuntimeError, match="Hybrid export failed on rank 0"):
+            callback.on_train_end(SimpleNamespace(student=student), iteration=1)
+
+    assert barrier_calls == [True]
+    assert broadcast_values == [0]

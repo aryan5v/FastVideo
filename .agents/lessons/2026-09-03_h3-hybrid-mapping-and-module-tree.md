@@ -28,6 +28,9 @@ native `state_dict()`, and CPU tests that built the full DiT died in
    `attn.to_out_linear`.
 3. `MiniMaxH3Attention.__init__` always constructs `DistributedAttention`, even
    when hybrid is on, so a full DiT is not a valid CPU unit-test fixture.
+4. Package `__init__.py` must not eagerly import `attention` / `linear` /
+   `window` / `checkpoint`. MLX imports `layout` through the package, and an
+   eager torch import there defeats the torch-free layout contract.
 
 ## Fix / Workaround
 
@@ -39,6 +42,8 @@ native `state_dict()`, and CPU tests that built the full DiT died in
 - Test `HybridAttention` with a stub parent (`ReplicatedLinear` QKV/`to_out`)
   or patch `get_attn_backend`. Do not instantiate `MiniMaxH3Transformer3DModel`
   on CPU for hybrid unit tests.
+- Keep `minimax_h3_hybrid/__init__.py` lazy so `from ...layout import
+  window_bounds` does not import CUDA PyTorch.
 
 ## Prevention
 

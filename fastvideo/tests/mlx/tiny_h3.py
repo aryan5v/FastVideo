@@ -119,6 +119,7 @@ def build_hf_config(config: MiniMaxH3Config) -> dict[str, object]:
         "hybrid_window_chunk": int(getattr(arch, "hybrid_window_chunk", 5)),
         "hybrid_anchor_frames": str(getattr(arch, "hybrid_anchor_frames", "both")),
         "hybrid_delta_rule": str(getattr(arch, "hybrid_delta_rule", "vdn_solve")),
+        "hybrid_enable_text_state": bool(getattr(arch, "hybrid_enable_text_state", True)),
     }
 
 

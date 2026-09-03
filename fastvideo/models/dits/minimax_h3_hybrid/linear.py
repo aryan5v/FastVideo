@@ -122,7 +122,7 @@ class LinearAttentionSepConv(nn.Module):
             setattr(self, f"{name}_sp", spatial)
             setattr(self, f"{name}_tm", temporal)
 
-    def apply(self, proj: str, tokens: torch.Tensor, num_frames: int, frame_size: tuple[int, int]) -> torch.Tensor:
+    def apply_conv(self, proj: str, tokens: torch.Tensor, num_frames: int, frame_size: tuple[int, int]) -> torch.Tensor:
         if proj not in self.targets:
             return tokens
         heads, head_dim = tokens.shape[-2], tokens.shape[-1]
@@ -305,8 +305,8 @@ class BidirectionalLinearBranch(nn.Module):
         outs = []
         for proj, tokens in zip(("q", "k", "v"), qkv_raw, strict=True):
             if use_conv and self.short_conv is not None:
-                tokens = self.short_conv.apply(proj, tokens, layout.num_frames,
-                                               (layout.frame_height, layout.frame_width))
+                tokens = self.short_conv.apply_conv(proj, tokens, layout.num_frames,
+                                                    (layout.frame_height, layout.frame_width))
             outs.append(_activate_features(tokens, l2norm=proj != "v"))
         return outs[0], outs[1], outs[2]
 
