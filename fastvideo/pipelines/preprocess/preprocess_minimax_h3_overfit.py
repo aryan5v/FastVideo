@@ -323,7 +323,20 @@ def main() -> None:
     resolved_model_path = MODEL_PATH.resolve()
     if not resolved_model_path.is_dir():
         raise FileNotFoundError(f"Filtered MiniMax H3 model directory is missing at {resolved_model_path}")
-    model_index = verify_model_config_and_directory(str(resolved_model_path))
+    # Published FastH3 T2VA snapshots declare ``transformer_ref`` for Ref2VA
+    # lineage without shipping that optional component locally. This overfit
+    # path only encodes T2VA conditioning and targets, so validate exactly the
+    # components it loads instead of requiring the unused reference DiT.
+    model_index = verify_model_config_and_directory(
+        str(resolved_model_path),
+        required_component_dirs=(
+            "vae",
+            "audio_vae",
+            "tokenizer",
+            "processor",
+            "text_encoder",
+        ),
+    )
     video_path, caption = load_crush_smol_training_sample(
         DATA_DIR / "videos2caption.json",
         DATA_DIR / "videos",
