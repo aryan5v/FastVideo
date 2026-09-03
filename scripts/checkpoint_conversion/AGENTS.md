@@ -15,6 +15,7 @@ checkpoint_conversion/
 ├── convert_gen3c_to_fastvideo.py
 ├── convert_ltx2_weights.py
 ├── convert_minimax_h3_adaln_rank.py     # Rank-reduces AdaLN in place; same family
+├── convert_vdn_h3_to_fastvideo.py       # Hybrid MiniMax H3 branch + LoRA merge
 ├── convert_turbodiffusion_to_diffusers.py
 ├── convert_turbodiffusion_i2v_to_diffusers.py
 ├── extract_llava_text_encoder.py        # Encoder extraction from a multimodal repo

@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Linear-branch scan helpers for MiniMax H3 hybrid attention."""
+
+from __future__ import annotations
+
+import torch
+
+from fastvideo.models.dits.minimax_h3_hybrid.linear import (
+    factor_delta,
+    frame_statistics,
+    gather_linear_state,
+    run_scans,
+)
+
+
+def test_frame_statistics_and_sana_factor_shapes() -> None:
+    torch.manual_seed(0)
+    frames, heads, tokens, dim = 3, 2, 4, 8
+    keys = torch.randn(frames, heads, tokens, dim)
+    values = torch.randn(frames, heads, tokens, dim)
+    beta = torch.rand(frames, heads, tokens)
+    matrix_a, matrix_b = frame_statistics(keys, values, beta, a_fp32=True)
+    assert matrix_a.shape == (frames, heads, dim, dim)
+    assert matrix_b.shape == (frames, heads, dim, dim)
+    alpha = torch.rand(frames, heads, dim).clamp(min=0.1, max=0.9)
+    transitions, injections = factor_delta("sana_scaled", alpha, matrix_a, matrix_b, tokens)
+    assert transitions.shape == injections.shape == (frames, heads, dim, dim)
+
+
+def test_run_scans_identity_transition_accumulates_injections() -> None:
+    frames, heads, dim = 4, 2, 3
+    eye = torch.eye(dim).expand(frames, heads, dim, dim).contiguous()
+    injections = torch.randn(frames, heads, dim, dim)
+    prefix, suffix = run_scans(eye.clone(), injections, text_state=None)
+    expected_prefix = injections.clone()
+    expected_prefix[1] = injections[0] + injections[1]
+    expected_prefix[2] = expected_prefix[1] + injections[2]
+    expected_prefix[3] = expected_prefix[2] + injections[3]
+    torch.testing.assert_close(prefix, expected_prefix, atol=1e-5, rtol=1e-5)
+    expected_suffix = injections.clone()
+    expected_suffix[2] = injections[3] + injections[2]
+    expected_suffix[1] = expected_suffix[2] + injections[1]
+    expected_suffix[0] = expected_suffix[1] + injections[0]
+    torch.testing.assert_close(suffix, expected_suffix, atol=1e-5, rtol=1e-5)
+
+
+def test_gather_linear_state_radius_zero_uses_neighbours() -> None:
+    frames, heads, dim = 3, 1, 2
+    prefix = torch.randn(frames, heads, dim, dim)
+    suffix = torch.randn(frames, heads, dim, dim)
+    alpha = torch.ones(frames, heads, dim)
+    bounds = [(0, 0), (1, 1), (2, 2)]
+    state = gather_linear_state(prefix, suffix, alpha, bounds, text_state=None)
+    # Query frame 1 sees neither itself in the far branch: before=prefix[0], after=suffix[2].
+    torch.testing.assert_close(state[1], prefix[0] + suffix[2], atol=1e-5, rtol=1e-5)
+    # Query frame 0 has no before; after = suffix[1].
+    torch.testing.assert_close(state[0], suffix[1], atol=1e-5, rtol=1e-5)

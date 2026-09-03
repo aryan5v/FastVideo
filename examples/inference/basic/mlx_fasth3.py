@@ -19,6 +19,9 @@ denoising fewer video frames, then uses MLX RIFE 4.25 to reconstruct the
 requested frame count. A 1280x720 request runs on H3's 1280x736 grid and is
 center-cropped after decode.
 
+Hybrid MiniMax H3 MLX checkpoints (window softmax + linear far branch) are
+detected from the DiT weight keys; no extra flag is required.
+
 This entrypoint currently supports text-to-video-with-audio only. It does not
 yet wire FL2VA, Ref2VA, spatial fast mode, or two-pass refinement.
 """

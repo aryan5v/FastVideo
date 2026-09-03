@@ -36,6 +36,7 @@ _FP8_SUFFIXES = (
     "to_k",
     "to_v",
     "to_out",
+    "to_out_linear",
     # Kandinsky5
     "self_attention.out_layer",
     "cross_attention.out_layer",

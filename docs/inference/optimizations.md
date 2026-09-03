@@ -14,6 +14,7 @@ This page describes the various options for speeding up generation times in Fast
 - Optimized Attention Backends
 
   - [Flash Attention](#flash-attention)
+  - [Hybrid MiniMax H3](#hybrid-minimax-h3-window-softmax--linear-far-branch)
   - [Sliding Tile Attention (Archived)](#sliding-tile-attention-archived)
   - [Sage Attention](#sage-attention)
   - [Sage Attention 3](#sage-attention-3)
@@ -112,6 +113,30 @@ grad-enabled calls, and NVFP4 on their established paths. It does not apply to
 the Preview checkpoint's sparse VSA blocks. Packed-varlen changes floating-point
 reduction order relative to fixed-length FA4, so treat it as a speed/quality
 evaluation option rather than an exact-parity mode.
+
+### Hybrid MiniMax H3 (window softmax + linear far branch)
+
+A converted hybrid H3 transformer (`hybrid_attention: true` in
+`transformer/config.json`) keeps FastVideo's packed layout, QKV, RoPE, Sol-Engine
+fusions, and FP8 suffixes, and replaces only the attention body: chunk-aligned
+window softmax plus a bidirectional linear scan over the frames the window does
+not see. Dense and VSA FastH3 checkpoints are unchanged.
+
+Convert an exploded VDN-H3 artifact onto a dense H3 `transformer/` directory:
+
+```bash
+python scripts/checkpoint_conversion/convert_vdn_h3_to_fastvideo.py \
+  --base /path/to/MiniMax-H3/transformer \
+  --hybrid /path/to/vdn-minimax-h3/ckpts/stage-dmd-step-250 \
+  --dst /path/to/FastH3-Hybrid/transformer
+```
+
+Then run with `--no-vsa`. Two sequence-parallel ranks split softmax vs linear
+automatically (`hybrid_branch_parallel`). On Apple Silicon the MLX runtime
+selects the same algorithm when the DiT weights include the linear branch.
+
+This is not a copy of an external fused stack. Tensorwise FP8 on `to_q/k/v`,
+`to_out`, and `to_out_linear` is the existing FastVideo FP8 path.
 
 ### FP4 Flash Attention 4 (Blackwell only)
 

@@ -7,6 +7,10 @@ grid (exactly four DiT forwards), trained VSA policy, Blackwell sparse kernel,
 regional fullgraph DiT compile, compiled/parallel video VAE, and inference-only
 H3 fusions. One compile warmup is excluded before three measured requests.
 
+Converted hybrid MiniMax H3 checkpoints (window softmax + linear far branch)
+auto-enable from ``transformer/config.json``. Pass ``--no-vsa`` for those;
+two GPUs split the softmax and linear branches when sequence parallel size is 2.
+
 Both regional compile and the default fusions can change floating-point
 operation order, so ``all`` is a report-only performance profile.
 ``--profile strict`` disables the H3 fusions but preserves regional compile;
@@ -83,6 +87,10 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
                         default="sm100a",
                         help="tile-64 sparse kernel; sm100a is the measured GB200 route and requires a compatible "
                         "fastvideo-kernel build")
+    parser.add_argument("--vsa",
+                        action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="use the checkpoint's VSA policy; pass --no-vsa for dense or converted hybrid H3")
     parser.add_argument("--fa4",
                         action=argparse.BooleanOptionalAction,
                         default=True,

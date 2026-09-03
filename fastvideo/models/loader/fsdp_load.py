@@ -677,7 +677,13 @@ def load_model_from_full_model_state_dict(
                            _summarize_param_names(zero_init))
 
     # List of allowed parameter name patterns
-    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress", "proj_l"]  # Can be extended as needed
+    ALLOWED_NEW_PARAM_PATTERNS = [
+        "gate_compress",
+        "proj_l",
+        "linear_attention",
+        "to_out_linear",
+        "softmax_gate",
+    ]
     for new_param_name in unused_keys:
         # An adapter that ships the parameter outright both supplies the value and
         # authorizes it: the allowlist exists to catch a checkpoint silently missing a

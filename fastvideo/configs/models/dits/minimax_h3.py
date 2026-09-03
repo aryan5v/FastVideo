@@ -36,6 +36,12 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
         default_factory=lambda: {
             r"^time_embedder\.linear_1\.(.*)$": r"time_embedder.fc_in.\1",
             r"^time_embedder\.linear_2\.(.*)$": r"time_embedder.fc_out.\1",
+            # Hybrid checkpoints wrap dense attention under ``attn.orig``. First
+            # match wins, so ``orig.to_out.0`` must land on ``to_out`` in one
+            # substitution — a generic ``orig`` rewrite would stop at
+            # ``to_out.0`` and miss the FastVideo linear name.
+            r"^(.*)\.attn\.orig\.to_out\.0\.(.*)$": r"\1.attn.to_out.\2",
+            r"^(.*)\.attn\.orig\.(.*)$": r"\1.attn.\2",
             r"^(.*)\.attn\.to_out\.0\.(.*)$": r"\1.attn.to_out.\2",
             r"^(.*)\.ff\.net\.0\.proj\.(.*)$": r"\1.ff.fc_in.\2",
             r"^(.*)\.ff\.net\.2\.(.*)$": r"\1.ff.fc_out.\2",
@@ -59,6 +65,21 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
+    # Window softmax + linear far-branch. Off by default so dense / VSA
+    # checkpoints keep their existing attention body. A converted hybrid
+    # checkpoint stamps these fields in transformer/config.json.
+    hybrid_attention: bool = False
+    hybrid_window_radius: int = 1
+    hybrid_window_chunk: int = 5
+    hybrid_anchor_frames: str = "both"
+    hybrid_delta_rule: str = "vdn_solve"
+    hybrid_enable_softmax_gate: bool = True
+    hybrid_enable_text_state: bool = True
+    hybrid_short_conv_targets: tuple[str, ...] = ("k", "v")
+    # Two sequence-parallel ranks split softmax vs linear (all-reduce). Off
+    # automatically when SP != 2; True here so a dual-GPU/Spark job opts in
+    # without a second flag.
+    hybrid_branch_parallel: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -74,6 +95,18 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
         if rotary_dim > self.attention_head_dim or rotary_dim % 2:
             raise ValueError(f"MiniMax H3 rotary width must be even and no larger than the head width; got "
                              f"rotary_dim={rotary_dim}, attention_head_dim={self.attention_head_dim}.")
+        if self.hybrid_anchor_frames not in ("none", "columns", "rows", "both"):
+            raise ValueError(f"hybrid_anchor_frames must be none/columns/rows/both, got {self.hybrid_anchor_frames!r}.")
+        if self.hybrid_delta_rule not in ("sana_scaled", "vdn_solve", "vdn_scaled"):
+            raise ValueError("hybrid_delta_rule must be sana_scaled/vdn_solve/vdn_scaled, "
+                             f"got {self.hybrid_delta_rule!r}.")
+        if self.hybrid_window_radius < 0 or self.hybrid_window_chunk < 0:
+            raise ValueError("hybrid window radius and chunk must be >= 0.")
+        self.hybrid_short_conv_targets = tuple(self.hybrid_short_conv_targets)
+        allowed_conv = {"q", "k", "v"}
+        if any(target not in allowed_conv for target in self.hybrid_short_conv_targets):
+            raise ValueError(f"hybrid_short_conv_targets must be a subset of {sorted(allowed_conv)}, "
+                             f"got {self.hybrid_short_conv_targets!r}.")
 
 
 @dataclass

@@ -12,6 +12,7 @@ from fastvideo.distributed import get_local_torch_device
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.forward_context import set_forward_context
 from fastvideo.hooks.activation_trace import trace_step
+from fastvideo.models.dits.minimax_h3_hybrid import hybrid_layout_from_packed
 from fastvideo.profiler import nvtx_range, profiler_region
 from fastvideo.pipelines.basic.minimax_h3.packing import (
     MINIMAX_H3_KEYFRAME_NOISE_AUG,
@@ -24,6 +25,14 @@ from fastvideo.pipelines.stages.base import PipelineStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.utils import get_compute_dtype
+
+
+def _hybrid_layout_kwargs(transformer: Any, layout: MiniMaxH3PackedLayout) -> dict[str, Any]:
+    """Pass packed geometry into hybrid attention; no-op on dense/VSA H3."""
+    if not getattr(transformer, "hybrid_attention_enabled", False):
+        return {}
+    patch_size = tuple(int(v) for v in transformer.patch_size)
+    return {"hybrid_layout": hybrid_layout_from_packed(layout, patch_size)}
 
 
 def _h3_vsa_metadata_builder(transformer: Any, fastvideo_args: FastVideoArgs) -> Any:
@@ -198,6 +207,7 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                             video_indices=video_indices,
                             audio_indices=audio_indices,
                             text_indices=text_indices,
+                            **_hybrid_layout_kwargs(self.transformer, layout),
                         )
 
                     video_start = layout.num_condition_video_rows
