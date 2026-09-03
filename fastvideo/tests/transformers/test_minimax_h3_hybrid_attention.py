@@ -38,6 +38,24 @@ class _StubParent(nn.Module):
         self.to_out = ReplicatedLinear(INNER, HIDDEN, bias=False)
 
 
+class _IdentityLinear(nn.Module):
+
+    def forward(self, value):
+        return value, None
+
+
+class _RecordingVSA(nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dtype = torch.bfloat16
+        self.input_dtypes = None
+
+    def forward(self, query, key, value, *, gate_compress, **_kwargs):
+        self.input_dtypes = (query.dtype, key.dtype, value.dtype, gate_compress.dtype)
+        return value, None
+
+
 def _init_linears(module: nn.Module) -> None:
     torch.manual_seed(0)
     with torch.no_grad():
@@ -159,6 +177,31 @@ def test_minimax_h3_attention_requires_hybrid_layout() -> None:
     hidden = torch.randn(1, 6, HIDDEN)
     with pytest.raises(ValueError, match="HybridSequenceLayout"):
         attn.forward(hidden, rotary_emb=None, original_seq_len=6, hybrid_layout=None)
+
+
+def test_minimax_h3_vsa_casts_qkvg_to_backend_compute_dtype() -> None:
+    backend = MagicMock()
+    backend.get_name.return_value = "VIDEO_SPARSE_ATTN_H3"
+    recording_vsa = _RecordingVSA()
+    with patch("fastvideo.models.dits.minimax_h3.get_attn_backend", return_value=backend), patch(
+            "fastvideo.models.dits.minimax_h3.DistributedAttention_VSA", return_value=recording_vsa):
+        attn = MiniMaxH3Attention(
+            hidden_size=HIDDEN,
+            num_attention_heads=HEADS,
+            attention_head_dim=HEAD_DIM,
+            qk_norm_eps=1e-5,
+            supported_attention_backends=(AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3, ),
+            quant_config=None,
+            prefix="blocks.0.attn",
+        )
+    # Keep the projection path FP32, matching the promotion that exposed the
+    # production failure, while avoiding a CPU mixed-dtype output GEMM.
+    attn.to_out = _IdentityLinear()
+    hidden = torch.randn(1, 6, HIDDEN, dtype=torch.float32)
+
+    attn(hidden, rotary_emb=None, original_seq_len=6)
+
+    assert recording_vsa.input_dtypes == (torch.bfloat16, ) * 4
 
 
 def test_hybrid_attention_rejects_batch_greater_than_one() -> None:

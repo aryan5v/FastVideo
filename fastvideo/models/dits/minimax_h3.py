@@ -353,8 +353,17 @@ class MiniMaxH3Attention(nn.Module):
         extra_attention_kwargs = {}
         if self.to_gate_compress is not None and self._gate_active():
             gate_compress, _ = self.to_gate_compress(hidden_states)
-            extra_attention_kwargs["gate_compress"] = gate_compress.unflatten(
-                -1, (self.num_attention_heads, self.attention_head_dim))
+            gate_compress = gate_compress.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+            # MiniMax-H3 boundary projections intentionally remain FP32, so
+            # residual/AdaLN promotion can leave QKVG in FP32 even under
+            # autocast. The VSA kernels are selected for the attention
+            # module's declared compute dtype (BF16 in training) and the
+            # tile-64 Triton dot requires Q/K/V to match it exactly.
+            vsa_dtype = self.distributed_attention.dtype
+            query = query.to(vsa_dtype)
+            key = key.to(vsa_dtype)
+            value = value.to(vsa_dtype)
+            extra_attention_kwargs["gate_compress"] = gate_compress.to(vsa_dtype)
         hidden_states, _ = self.distributed_attention(
             query,
             key,
