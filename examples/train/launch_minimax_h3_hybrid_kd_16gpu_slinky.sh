@@ -98,6 +98,15 @@ srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
   --container-workdir="${WORKTREE_ROOT}" \
   /opt/venv/bin/python -m fastvideo.pipelines.preprocess.preprocess_minimax_h3_overfit --validate-only
 
+# Catch checkpoint-rotation and resume-progress regressions inside the exact
+# runtime image before the four-node training process starts.
+srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
+  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+  --container-workdir="${WORKTREE_ROOT}" \
+  /opt/venv/bin/python -m pytest -q \
+    fastvideo/tests/train/utils/test_checkpoint.py \
+    tests/local_tests/test_trainer_managed_optimization.py
+
 # Heterogeneous group zero is exactly one node, so its nodelist is already a
 # concrete rendezvous hostname. The training container does not ship scontrol.
 export MASTER_ADDR=${SLURM_JOB_NODELIST_HET_GROUP_0}
