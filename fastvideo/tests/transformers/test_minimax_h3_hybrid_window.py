@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from fastvideo.models.dits.minimax_h3_hybrid import window as window_module
 from fastvideo.models.dits.minimax_h3_hybrid.layout import (
     HybridSequenceLayout,
     window_bounds,
@@ -87,3 +88,25 @@ def test_radius_zero_window_keeps_globals_and_own_frame() -> None:
     v = value[allowed].permute(1, 0, 2).unsqueeze(0)
     expected = F.scaled_dot_product_attention(q, k, v, scale=scale, dropout_p=0.0, is_causal=False)
     torch.testing.assert_close(out[token], expected.squeeze(0).permute(1, 0, 2)[0], atol=1e-5, rtol=1e-5)
+
+
+def test_window_softmax_accepts_autocast_output_dtype(monkeypatch) -> None:
+    """SDPA may return BF16 while the FP32 residual stream owns ``out``."""
+    layout = _layout(num_frames=2, tokens_per_frame=1)
+    query = torch.randn(layout.seq_len, 1, 4, dtype=torch.float32)
+
+    def fake_sdpa(q, _key, _value, _scale):
+        return torch.zeros_like(q, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(window_module, "_sdpa", fake_sdpa)
+    result = window_softmax(
+        query,
+        query,
+        query,
+        layout,
+        window_bounds(layout.num_frames, radius=0, chunk=0),
+        scale=0.5,
+        anchor_frames="none",
+    )
+
+    assert result.dtype == torch.float32

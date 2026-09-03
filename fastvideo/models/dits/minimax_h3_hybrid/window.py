@@ -58,7 +58,10 @@ def window_softmax(
     clamped = _clamp_bounds(bounds, layout.num_frames)
 
     if global_idx.numel():
-        out[global_idx] = _sdpa(query[global_idx], key, value, scale)
+        # CUDA autocast may return BF16 SDPA output for FP32 residual-stream
+        # inputs. Preserve the caller-visible query dtype while satisfying
+        # index_put's exact source/destination dtype requirement.
+        out[global_idx] = _sdpa(query[global_idx], key, value, scale).to(out.dtype)
 
     video_start, video_end = layout.video_start, layout.video_end
     frame_shape = (layout.num_frames, layout.tokens_per_frame, heads, head_dim)
@@ -89,7 +92,7 @@ def window_softmax(
             v_parts.append(video_value[list(key_frames)].reshape(-1, heads, head_dim))
         k_rows = torch.cat(k_parts, dim=0) if k_parts else global_key
         v_rows = torch.cat(v_parts, dim=0) if v_parts else global_value
-        attended = _sdpa(q_rows, k_rows, v_rows, scale)
+        attended = _sdpa(q_rows, k_rows, v_rows, scale).to(out.dtype)
         out_rows = attended.reshape(len(query_frames), layout.tokens_per_frame, heads, head_dim)
         for local, frame in enumerate(query_frames):
             start = video_start + frame * layout.tokens_per_frame

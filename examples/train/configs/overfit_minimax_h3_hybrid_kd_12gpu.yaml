@@ -58,7 +58,7 @@ training:
     output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_12gpu_overfit/checkpoints
     training_state_checkpointing_steps: 20
     checkpoints_total_limit: 2
-    resume_from_checkpoint: ""
+    resume_from_checkpoint: latest
 
   tracker:
     trackers: [wandb]

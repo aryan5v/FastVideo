@@ -103,20 +103,65 @@ srun --het-group=0 --nodes=1 --ntasks=1 --gres=gpu:4 \
 export MASTER_ADDR=${SLURM_JOB_NODELIST_HET_GROUP_0}
 export MASTER_PORT=29541
 export CONFIG_FILE
-srun --het-group=0-3 \
-  --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
-  --container-workdir="${WORKTREE_ROOT}" \
-  bash -c '
-  export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
-  exec /opt/venv/bin/torchrun \
-    --nnodes 4 \
-    --nproc_per_node 4 \
-    --node_rank "${SLURM_PROCID}" \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-    fastvideo/train/entrypoint/train.py \
-    --config "${CONFIG_FILE}"
-'
+CONTROL_DIR=${RESULT_DIR}/control
+RETRY_FILE=${CONTROL_DIR}/retry-${SLURM_JOB_ID}
+STOP_FILE=${CONTROL_DIR}/stop-${SLURM_JOB_ID}
+FAILURE_FILE=${CONTROL_DIR}/failure-${SLURM_JOB_ID}.txt
+MAX_RESTART_WAIT_SECONDS=${FASTVIDEO_RESTART_WAIT_SECONDS:-7200}
+mkdir -p "${CONTROL_DIR}"
+rm -f "${RETRY_FILE}" "${STOP_FILE}" "${FAILURE_FILE}"
+
+# Keep the expensive heterogeneous allocation after a failed torchrun. Code
+# lives on the shared Lustre mount, so an operator can patch and validate it
+# in place, then `touch ${RETRY_FILE}` to relaunch on these same four nodes.
+# A new process group must reload the model after a rank crashes, but this
+# avoids SLURM requeueing and benefits from the nodes' warm filesystem cache.
+training_attempt=0
+while true; do
+  training_attempt=$((training_attempt + 1))
+  echo "Starting training attempt ${training_attempt} in allocation ${SLURM_JOB_ID}"
+  set +e
+  srun --kill-on-bad-exit=1 --het-group=0-3 \
+    --container-image="${IMAGE}" --container-mounts=/mnt/lustre:/mnt/lustre \
+    --container-workdir="${WORKTREE_ROOT}" \
+    bash -c '
+    export TRITON_CACHE_DIR="/tmp/triton_cache_${SLURM_PROCID}"
+    exec /opt/venv/bin/torchrun \
+      --nnodes 4 \
+      --nproc_per_node 4 \
+      --node_rank "${SLURM_PROCID}" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+      fastvideo/train/entrypoint/train.py \
+      --config "${CONFIG_FILE}"
+  '
+  training_status=$?
+  set -e
+  if (( training_status == 0 )); then
+    rm -f "${FAILURE_FILE}"
+    break
+  fi
+
+  printf 'attempt=%d\nexit_code=%d\nfailed_at=%s\n' \
+    "${training_attempt}" "${training_status}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${FAILURE_FILE}"
+  echo "Training attempt ${training_attempt} failed with exit ${training_status}."
+  echo "Holding allocation for ${MAX_RESTART_WAIT_SECONDS}s; retry with: touch ${RETRY_FILE}"
+  waited=0
+  while (( waited < MAX_RESTART_WAIT_SECONDS )); do
+    if [[ -e "${STOP_FILE}" ]]; then
+      echo "Stop requested through ${STOP_FILE}; releasing allocation."
+      exit "${training_status}"
+    fi
+    if [[ -e "${RETRY_FILE}" ]]; then
+      rm -f "${RETRY_FILE}"
+      continue 2
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+  echo "No retry requested before timeout; releasing allocation."
+  exit "${training_status}"
+done
 
 mkdir -p "${CONVERTED}"
 for entry in "${PREVIEW_ROOT}"/*; do
