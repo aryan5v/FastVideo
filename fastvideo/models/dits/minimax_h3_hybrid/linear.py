@@ -209,17 +209,21 @@ def run_scans(transitions: torch.Tensor, injections: torch.Tensor,
               text_state: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
     """Bidirectional frame scans. transitions/injections: [F, H, d, d] / [F, H, d, d]."""
     start = torch.zeros_like(injections[0]) if text_state is None else text_state.to(injections.dtype)
-    prefix = torch.empty((transitions.shape[0], *start.shape), dtype=injections.dtype, device=injections.device)
-    suffix = torch.empty_like(prefix)
+    # Do not use baddbmm(out=...). PyTorch forbids out= kernels when any
+    # operand requires gradients, which is exactly the hybrid-training path.
+    # Keeping each functional result in a list also preserves the scan graph
+    # from every frame to the trainable linear-attention parameters.
+    prefix_states = []
     state = start
     for frame in range(transitions.shape[0]):
-        torch.baddbmm(injections[frame], state, transitions[frame], out=prefix[frame])
-        state = prefix[frame]
+        state = torch.baddbmm(injections[frame], state, transitions[frame])
+        prefix_states.append(state)
+    suffix_states = []
     state = start
     for frame in range(transitions.shape[0] - 1, -1, -1):
-        torch.baddbmm(injections[frame], state, transitions[frame], out=suffix[frame])
-        state = suffix[frame]
-    return prefix, suffix
+        state = torch.baddbmm(injections[frame], state, transitions[frame])
+        suffix_states.append(state)
+    return torch.stack(prefix_states), torch.stack(list(reversed(suffix_states)))
 
 
 def gather_linear_state(

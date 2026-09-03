@@ -45,6 +45,20 @@ def test_run_scans_identity_transition_accumulates_injections() -> None:
     torch.testing.assert_close(suffix, expected_suffix, atol=1e-5, rtol=1e-5)
 
 
+def test_run_scans_supports_autograd() -> None:
+    frames, heads, dim = 3, 1, 2
+    transitions = torch.randn(frames, heads, dim, dim, requires_grad=True)
+    injections = torch.randn(frames, heads, dim, dim, requires_grad=True)
+
+    prefix, suffix = run_scans(transitions, injections, text_state=None)
+    (prefix.square().mean() + suffix.square().mean()).backward()
+
+    assert transitions.grad is not None
+    assert injections.grad is not None
+    assert torch.isfinite(transitions.grad).all()
+    assert torch.isfinite(injections.grad).all()
+
+
 def test_gather_linear_state_radius_zero_uses_neighbours() -> None:
     frames, heads, dim = 3, 1, 2
     prefix = torch.randn(frames, heads, dim, dim)
