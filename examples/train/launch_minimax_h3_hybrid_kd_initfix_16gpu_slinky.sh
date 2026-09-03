@@ -5,7 +5,7 @@ set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
+PREVIEW_ROOT=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit/compare/FastH3-Preview-v1
 IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-2f28adad2e05.sqsh
 KERNEL_TARGET=/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/sm100a_main/prefix
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_initfix_16gpu.yaml
@@ -22,26 +22,26 @@ mkdir -p "${RESULT_DIR}/slurm"
 
 sbatch \
   --job-name=fasth3-initfix-16g \
-  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --partition=hpc-rack-2 --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive \
   --chdir="${WORKTREE_ROOT}" \
   --output="${RESULT_DIR}/slurm/%x_%j.out" \
   --error="${RESULT_DIR}/slurm/%x_%j.err" \
   : \
-  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --partition=hpc-rack-2 --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive --chdir="${WORKTREE_ROOT}" \
   : \
-  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --partition=hpc-rack-2 --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive --chdir="${WORKTREE_ROOT}" \
   : \
-  --partition=all --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
+  --partition=hpc-rack-2 --nodes=1 --ntasks=1 --ntasks-per-node=1 --gres=gpu:4 \
   --cpus-per-task=120 --mem=900G --time=24:00:00 --exclusive --chdir="${WORKTREE_ROOT}" <<'SBATCH_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
 
 WORKTREE_ROOT=/mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training
-PREVIEW_ROOT=/mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
+PREVIEW_ROOT=${WORKTREE_ROOT}/runs/fasth3_hybrid_kd_v1_16gpu_overfit/compare/FastH3-Preview-v1
 IMAGE=/mnt/lustre/vlm-wlsaidhi/fastvideo/images/fastvideo-dev-sm100-2f28adad2e05.sqsh
 KERNEL_TARGET=/mnt/lustre/vlm-wlsaidhi/fastvideo/vsa_gate/sm100a_main/prefix
 CONFIG_FILE=${WORKTREE_ROOT}/examples/train/configs/overfit_minimax_h3_hybrid_kd_initfix_16gpu.yaml

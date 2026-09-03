@@ -4,7 +4,7 @@
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
-    init_from: /mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
+    init_from: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_v1_16gpu_overfit/compare/FastH3-Preview-v1
     trainable: true
     enable_gradient_checkpointing_type: full
     attention_backend: TORCH_SDPA
@@ -13,7 +13,7 @@ models:
     sigma_grid_points: 5
   teacher:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
-    init_from: /mnt/lustre/vlm-aryan/models/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree-b65818d
+    init_from: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_v1_16gpu_overfit/compare/FastH3-Preview-v1
     trainable: false
     attention_backend: VIDEO_SPARSE_ATTN_H3
     hybrid_attention: false
