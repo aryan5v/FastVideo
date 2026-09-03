@@ -58,6 +58,7 @@ class CheckpointConfig:
     resume_from_checkpoint: str = ""
     training_state_checkpointing_steps: int = 0
     checkpoints_total_limit: int = 0
+    predelete_old_checkpoints: bool = False
 
 
 @dataclass(slots=True)

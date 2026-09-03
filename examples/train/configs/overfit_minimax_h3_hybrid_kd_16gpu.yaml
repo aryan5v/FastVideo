@@ -57,9 +57,11 @@ training:
   checkpoint:
     output_dir: /mnt/lustre/vlm-aryan/fastvideo-h3-hybrid-training/runs/fasth3_hybrid_kd_v1_16gpu_overfit/checkpoints
     training_state_checkpointing_steps: 20
-    # Keep one complete checkpoint so writing the next shard set stays below
-    # the shared-filesystem quota; rotation happens after a successful write.
+    # Retain one complete checkpoint between saves.
     checkpoints_total_limit: 1
+    # This filesystem cannot hold the retained checkpoint and its replacement
+    # simultaneously, so free the single slot immediately before each save.
+    predelete_old_checkpoints: true
     resume_from_checkpoint: latest
 
   tracker:

@@ -184,6 +184,7 @@ class _CallbackStateWrapper:
 class CheckpointConfig:
     save_steps: int
     keep_last: int
+    predelete_old: bool = False
 
 
 class CheckpointManager:
@@ -244,9 +245,17 @@ class CheckpointManager:
         save_steps = int(self.config.save_steps or 0)
         if save_steps <= 0:
             return
+        if self._last_saved_step == step:
+            return
         self.save(step)
 
     def save(self, step: int) -> None:
+        # Some quota-constrained filesystems cannot hold both the retained
+        # checkpoint and its replacement. This opt-in policy trades atomic
+        # rotation for bounded peak storage by freeing one slot first.
+        if self.config.predelete_old:
+            self._cleanup_old_checkpoints(reserve_slots=1)
+
         checkpoint_dir = self._checkpoint_dir(step)
         dcp_dir = self._dcp_dir(step)
         os.makedirs(dcp_dir, exist_ok=True)
@@ -382,10 +391,11 @@ class CheckpointManager:
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
 
-    def _cleanup_old_checkpoints(self) -> None:
+    def _cleanup_old_checkpoints(self, *, reserve_slots: int = 0) -> None:
         keep_last = int(self.config.keep_last or 0)
         if keep_last <= 0:
             return
+        keep_existing = max(0, keep_last - max(0, int(reserve_slots)))
 
         if _rank() != 0:
             _barrier()
@@ -405,9 +415,18 @@ class CheckpointManager:
             candidates.append((step, child))
 
         candidates.sort(key=lambda x: x[0])
-        to_delete = candidates[:-keep_last] if len(candidates) > keep_last else []
+        if keep_existing == 0:
+            to_delete = candidates
+        else:
+            to_delete = (candidates[:-keep_existing]
+                         if len(candidates) > keep_existing else [])
         for step, path in to_delete:
-            logger.info("Removing old checkpoint (keep_last=%s): %s", keep_last, path)
+            logger.info(
+                "Removing old checkpoint (keep_last=%s, reserve_slots=%s): %s",
+                keep_last,
+                reserve_slots,
+                path,
+            )
             shutil.rmtree(path, ignore_errors=True)
 
         _barrier()
