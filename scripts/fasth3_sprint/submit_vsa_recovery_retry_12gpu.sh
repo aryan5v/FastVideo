@@ -33,7 +33,7 @@ submit_vsa() {
     --job-name="h3-vsa-${job_suffix}-12g" \
     --output="${LOG_ROOT}/h3-vsa-${job_suffix}-12g-%j.out" \
     "${dependency_args[@]}" \
-    --wrap="/usr/bin/env SPRINT_ROOT='${SPRINT_ROOT}' SOURCE_KIND=vsa MAP_STRATEGY=activation TARGET_STEPS='${target_steps}' RUN_MODE='${run_mode}' /bin/bash '${LAUNCHER}'"
+    --wrap="/usr/bin/env SPRINT_ROOT='${SPRINT_ROOT}' SOURCE_KIND=vsa MAP_STRATEGY=activation TARGET_STEPS='${target_steps}' RUN_MODE='${run_mode}' RUN_TAG=hsdp3x4 /bin/bash '${LAUNCHER}'"
 }
 
 scale_gate_job="$(submit_vsa scale_gate 1 scale-gate-s1 "")"

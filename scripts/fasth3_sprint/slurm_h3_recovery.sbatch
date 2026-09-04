@@ -15,6 +15,11 @@ export SLURM_EXPORT_ENV=ALL
 : "${MAP_STRATEGY:?MAP_STRATEGY is required}"
 : "${TARGET_STEPS:?TARGET_STEPS is required}"
 RUN_MODE="${RUN_MODE:-long}"
+RUN_TAG="${RUN_TAG:-}"
+if [[ -n "${RUN_TAG}" && ! "${RUN_TAG}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+  echo "RUN_TAG may contain only letters, numbers, dots, underscores, and hyphens" >&2
+  exit 2
+fi
 
 case "${SOURCE_KIND}" in
   dense)
@@ -99,6 +104,9 @@ else
   OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-recovery/${SOURCE_KIND}-${MAP_STRATEGY}"
   RUN_ID="h36-recovery-${SOURCE_KIND}-${MAP_STRATEGY}-step${TARGET_STEPS}"
   CHECKPOINT_ARGS=""
+fi
+if [[ -n "${RUN_TAG}" ]]; then
+  RUN_ID="${RUN_ID}-${RUN_TAG}"
 fi
 LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 SYNC_REVIEW="${SPRINT_ROOT}/eval/h0-vsa-sync-gate/00_speech_exact_presenter_review_manifest.json"
