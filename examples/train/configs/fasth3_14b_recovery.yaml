@@ -82,9 +82,11 @@ callbacks:
   grad_clip:
     _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
     max_grad_norm: 1.0
-  ema:
-    _target_: fastvideo.train.callbacks.ema.EMACallback
-    decay: 0.9999
-    start_iter: 0
+
+# Do not maintain an in-run local-shard EMA here. After the first optimizer
+# update FSDP2 has resharded the VSA-only gate projections; the legacy
+# EMA_FSDP local-shard walk can leave those parameters with empty backing
+# storage before activation-checkpoint recomputation on the next step. Keep
+# every milestone checkpoint and select/average recovery weights post hoc.
 
 pipeline: {}
