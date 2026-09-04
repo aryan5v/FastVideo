@@ -82,6 +82,7 @@ def test_recovery_launcher_requires_method_gate_before_long_run() -> None:
 
     assert 'RUN_MODE="${RUN_MODE:-long}"' in launcher
     assert 'finite recovery TARGET_STEPS must be 1 or 2' in launcher
+    assert 'scale_gate recovery TARGET_STEPS must be 1 or 2' in launcher
     assert 'Finite FastH3 recovery gate requires exactly 4 GPUs' in launcher
     assert 'RECOVERY_GATE_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/${SOURCE_KIND}-activation"' in launcher
     assert 'test -s "${RECOVERY_GATE_ROOT}/checkpoint-2/metadata.json"' in launcher

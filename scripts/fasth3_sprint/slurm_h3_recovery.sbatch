@@ -59,11 +59,11 @@ case "${RUN_MODE}" in
     ;;
   scale_gate)
     case "${TARGET_STEPS}" in
-      1)
+      1|2)
         RESUME_ARGS=""
         ;;
       *)
-        echo "scale_gate recovery TARGET_STEPS must be 1" >&2
+        echo "scale_gate recovery TARGET_STEPS must be 1 or 2" >&2
         exit 2
         ;;
     esac
