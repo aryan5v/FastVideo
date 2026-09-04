@@ -339,6 +339,7 @@ class MiniMaxH3Model(ModelBase):
             device=device,
             exempt=True,
             tile_size=tile_size,
+            cache_tile_buf=bool(self.training_config.vsa_cache_tile_buf),
         )
 
     def add_noise(

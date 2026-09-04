@@ -313,6 +313,10 @@ class MiniMaxH3VSAMetadata(AttentionMetadata):
     tile_elems: int = _TILE_ELEMS
     # layers forced dense regardless of sparsity (probe-guided opt-outs)
     dense_layers: tuple[int, ...] = ()
+    # Reuse is inference-only. Training must allocate fresh tile transport so
+    # activation-checkpoint graphs cannot retain and mutate one shared buffer
+    # across layers or optimizer steps.
+    cache_tile_buf: bool = True
     # Builder-owned padded tile buffer. It records the geometry that last
     # populated the allocation so a same-shaped geometry change can clear
     # stale pad rows once while steady-state denoising reuses the buffer.
@@ -338,6 +342,7 @@ class MiniMaxH3VSAMetadataBuilder(AttentionMetadataBuilder):
         exempt: bool = True,
         dense_layers: tuple[int, ...] = (),
         tile_size: int = _TILE_ELEMS,
+        cache_tile_buf: bool = True,
         **kwargs: dict[str, Any],
     ) -> MiniMaxH3VSAMetadata:
         tile_shape = VSA_H3_TILE_SHAPES.get(int(tile_size))
@@ -364,6 +369,7 @@ class MiniMaxH3VSAMetadataBuilder(AttentionMetadataBuilder):
             tile_elems=int(tile_size),
             dense_layers=dense_layers,
             dense_layers_tensor=torch.tensor(dense_layers, device=device, dtype=torch.int64),
+            cache_tile_buf=bool(cache_tile_buf),
             tile_buf_holder=self._tile_buf_holder,
         )
 
@@ -525,6 +531,9 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         needs_sm100a_pair = (attn_metadata.tile_elems == 64 and n_tiles % 2 != 0 and not grad_mode and sm100a_requested)
         kernel_tiles = n_tiles + int(needs_sm100a_pair)
         target_shape = (x.shape[0], kernel_tiles * attn_metadata.tile_elems, x.shape[-2], x.shape[-1])
+
+        if not attn_metadata.cache_tile_buf:
+            return scatter_into_tile_buf(x, target_shape, attn_metadata.untile_combined_index, None)
 
         # ``untile_combined_index`` maps each packed row to a logical tile
         # slot. Different geometries can share one transport shape; clear a

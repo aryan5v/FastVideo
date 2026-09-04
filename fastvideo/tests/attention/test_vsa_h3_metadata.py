@@ -27,7 +27,7 @@ _PROD = dict(raw_latent_shape=(37, 48, 84), patch_size=(1, 2, 2), prefix_segment
 _CPU = torch.device("cpu")
 
 
-def _build(spec, sparsity=0.0, device=_CPU, tile_size=_TILE_ELEMS):
+def _build(spec, sparsity=0.0, device=_CPU, tile_size=_TILE_ELEMS, cache_tile_buf=True):
     return MiniMaxH3VSAMetadataBuilder().build(
         current_timestep=0,
         raw_latent_shape=spec["raw_latent_shape"],
@@ -36,6 +36,7 @@ def _build(spec, sparsity=0.0, device=_CPU, tile_size=_TILE_ELEMS):
         prefix_segments=spec["prefix_segments"],
         device=device,
         tile_size=tile_size,
+        cache_tile_buf=cache_tile_buf,
     )
 
 
@@ -246,6 +247,21 @@ def test_builder_rejects_unknown_tile_size():
             _build(_TINY, tile_size=bad)
 
 
+def test_training_tile_buffer_is_not_reused_when_disabled():
+    meta = _build(_TINY64, tile_size=64, cache_tile_buf=False)
+    impl = _impl()
+    first_input = torch.randn(1, meta.total_seq_length, 2, 8)
+    second_input = torch.randn_like(first_input)
+
+    first = impl.tile(first_input, meta)
+    first_snapshot = first.clone()
+    second = impl.tile(second_input, meta)
+
+    assert first.data_ptr() != second.data_ptr()
+    assert torch.equal(first, first_snapshot)
+    assert torch.equal(second[:, meta.untile_combined_index], second_input)
+
+
 if __name__ == "__main__":
     test_geometry_720p()
     test_mask_policy()
@@ -256,4 +272,5 @@ if __name__ == "__main__":
     test_sparsity_zero_matches_dense_sdpa_tile64()
     test_geometry_guard_enforces_tile64_bound()
     test_builder_rejects_unknown_tile_size()
+    test_training_tile_buffer_is_not_reused_when_disabled()
     print("all VSA-H3 CPU checks passed")

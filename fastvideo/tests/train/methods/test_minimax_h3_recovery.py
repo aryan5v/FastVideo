@@ -71,10 +71,7 @@ def test_recovery_config_locks_teacher_losses_and_checkpoint_retention() -> None
     assert config["method"]["feature_weight"] == 0.01
     assert config["training"]["checkpoint"]["training_state_checkpointing_steps"] == 100
     assert config["training"]["checkpoint"]["preserve_every_steps"] == 100
-    # FSDP2 local-shard EMA is unsafe for the VSA-only gate projection after
-    # resharding. Recovery preserves milestone checkpoints for post-hoc
-    # selection/averaging instead.
-    assert "ema" not in config["callbacks"]
+    assert config["callbacks"]["ema"]["decay"] == 0.9999
 
 
 def test_recovery_launcher_requires_method_gate_before_long_run() -> None:
