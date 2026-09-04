@@ -97,7 +97,8 @@ if [[ "${RUN_MODE}" == "finite" ]]; then
   RUN_ID="h18-recovery-gate-${SOURCE_KIND}-${MAP_STRATEGY}-step${TARGET_STEPS}"
   CHECKPOINT_ARGS="--training.checkpoint.training_state_checkpointing_steps 1"
 elif [[ "${RUN_MODE}" == "scale_gate" ]]; then
-  OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-recovery-scale-gates/${SOURCE_KIND}-${MAP_STRATEGY}"
+  SCALE_GATE_SUFFIX="${RUN_TAG:+-${RUN_TAG}}"
+  OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-recovery-scale-gates/${SOURCE_KIND}-${MAP_STRATEGY}${SCALE_GATE_SUFFIX}"
   RUN_ID="h36-recovery-scale-gate-${SOURCE_KIND}-${MAP_STRATEGY}-step${TARGET_STEPS}"
   CHECKPOINT_ARGS="--training.checkpoint.training_state_checkpointing_steps 1"
 else
