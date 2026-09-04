@@ -35,7 +35,7 @@ Component and official E2E latent parity for that stack is recorded in
 |-------|------|
 | `layout.py` | `HybridSequenceLayout` derived from the packed layout; `window_bounds` / `windows_cover_all_frames`. No torch import at module level (MLX reuses the geometry helpers). |
 | `window.py` | Chunk-aligned softmax as a union of dense SDPA rectangles. c1 default: `radius=1`, `chunk=5`, `anchor_frames=both`. |
-| `linear.py` | Bidirectional delta-rule scan (`vdn_solve`), optional K/V short conv, text state, output gates. |
+| `linear.py` | Bidirectional delta-rule scan (`vdn_solve`) with dynamic `d_k/n` exponential writes and FP32 state, optional K/V short conv, text state, output gates. |
 | `attention.py` | `HybridAttention` body. Reuses parent QKV / RoPE / `to_out`. Owns `linear_attention`, `to_out_linear`, `softmax_gate`. |
 | `checkpoint.py` | VDN key remap, LoRA `W += scale * (B @ A)`, `hybrid_arch_fields_from_spec`. |
 | Wiring | `arch.hybrid_attention` (default `False`). Denoising passes `hybrid_layout`. FP8 suffixes `to_out_linear`, `beta_proj`, `softmax_gate`, `output_gate` (not KDA `alpha`). FSDP allowlist for the new siblings. |

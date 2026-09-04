@@ -125,6 +125,13 @@ not see. Dense and VSA FastH3 checkpoints are unchanged. Maintainer notes
 (reuse list, pitfalls) live in
 `fastvideo/models/dits/minimax_h3_hybrid/AGENTS.md`.
 
+The default implicit rule uses positive writes
+`gamma = (head_dim / tokens_per_frame) * exp(log_scale + token_logit)`. Each
+block learns one `log_scale` per head, initialised to zero, while video and text
+use their own runtime token counts. Gram matrices, Cholesky solves, and the
+recurrent scan stay FP32. The older `sana_scaled` and `vdn_scaled` rules remain
+available only for controlled ablations.
+
 Convert an exploded VDN-H3 artifact onto a dense H3 `transformer/` directory:
 
 ```bash

@@ -85,6 +85,7 @@ class MiniMaxH3HybridExportCallback(Callback):
                 "enable_softmax_gate": bool(arch.hybrid_enable_softmax_gate),
                 "linear_attention": {
                     "delta_rule": str(arch.hybrid_delta_rule),
+                    "write_strength": "head_dim_over_tokens_scaled_exp",
                     "enable_text_state": bool(arch.hybrid_enable_text_state),
                     "short_conv": {
                         "targets": list(arch.hybrid_short_conv_targets)

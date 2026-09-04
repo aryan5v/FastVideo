@@ -67,6 +67,8 @@ def test_missing_hybrid_initialization_keeps_far_branch_live_and_residual_zero()
     conv = initialize_hybrid_parameter(f"{prefix}.linear_attention.short_conv.k_sp.weight", (4, 1, 5, 5),
                                        device, dtype)
     down = initialize_hybrid_parameter(f"{prefix}.linear_attention.alpha.down.weight", (4, 8), device, dtype)
+    write_log_scale = initialize_hybrid_parameter(
+        f"{prefix}.linear_attention.write_log_scale", (2,), device, dtype)
     out = initialize_hybrid_parameter(f"{prefix}.to_out_linear.weight", (8, 4), device, dtype)
     gate_bias = initialize_hybrid_parameter(f"{prefix}.softmax_gate.up.bias", (2, ), device, dtype)
 
@@ -74,6 +76,7 @@ def test_missing_hybrid_initialization_keeps_far_branch_live_and_residual_zero()
     assert conv is not None and torch.count_nonzero(conv) == 4
     assert torch.equal(conv[:, 0, 2, 2], torch.ones(4))
     assert down is not None and torch.count_nonzero(down) > 0
+    assert write_log_scale is not None and torch.count_nonzero(write_log_scale) == 0
     assert out is not None and torch.count_nonzero(out) == 0
     assert gate_bias is not None
     torch.testing.assert_close(torch.sigmoid(gate_bias), torch.full((2, ), 0.99))

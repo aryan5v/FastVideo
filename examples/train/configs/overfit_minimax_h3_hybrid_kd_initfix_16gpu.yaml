@@ -78,6 +78,9 @@ training:
   dit_precision: bf16
 
 callbacks:
+  hybrid_diagnostics:
+    _target_: fastvideo.train.callbacks.minimax_h3_hybrid_diagnostics.MiniMaxH3HybridDiagnosticsCallback
+    every_n_steps: 10
   hybrid_grad_liveness:
     _target_: fastvideo.train.callbacks.minimax_h3_hybrid_liveness.MiniMaxH3HybridGradientLivenessCallback
     readout_step: 1

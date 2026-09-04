@@ -18,6 +18,7 @@ from fastvideo.models.dits.minimax_h3_hybrid.layout import window_bounds, window
 
 TEXT_STATE_SCALE = 0.5
 SHORT_CONV_KERNEL = 5
+WRITE_LOGIT_CLAMP = 8.0
 
 
 def is_hybrid_block(weights: dict[str, Any]) -> bool:
@@ -174,22 +175,45 @@ def _factor_delta(delta_rule: str, alpha, matrix_a, matrix_b, per_frame: int):
         return alpha[..., None] * (eye - inv * matrix_a), (inv**0.5) * matrix_b
     scaled = 1.0 / per_frame if delta_rule == "vdn_scaled" else 1.0
     inverse = mx.linalg.inv(matrix_a.astype(mx.float32) * scaled + eye.astype(mx.float32), stream=mx.cpu)
-    transitions = (alpha[..., None] * inverse).astype(matrix_a.dtype)
-    injections = ((matrix_b.astype(mx.float32) * (scaled**0.5)) @ inverse).astype(matrix_b.dtype)
+    transitions = alpha.astype(mx.float32)[..., None] * inverse
+    injections = (matrix_b.astype(mx.float32) * (scaled**0.5)) @ inverse
     return transitions, injections
+
+
+def _write_strength(weights: dict[str, Any], hidden, *, delta_rule: str, heads: int, head_dim: int, token_count: int):
+    import mlx.core as mx
+
+    from fastvideo.mlx_runtime.fastwan import linear
+
+    logits = linear(hidden, weights["attn.linear_attention.beta_proj.weight"])
+    if delta_rule != "vdn_solve":
+        return mx.sigmoid(logits)
+    log_scale = weights.get("attn.linear_attention.write_log_scale")
+    if log_scale is None:
+        # Old checkpoints did not carry the learned multiplier.  Zero is the
+        # defined migration value and starts at head_dim / token_count.
+        log_scale = mx.zeros((heads, ), dtype=mx.float32)
+    combined = logits.astype(mx.float32) + log_scale.astype(mx.float32)
+    relative = mx.exp(mx.clip(combined, -WRITE_LOGIT_CLAMP, WRITE_LOGIT_CLAMP))
+    return relative * (float(head_dim) / float(token_count))
 
 
 def _text_state(weights: dict[str, Any], text_x, text_qkv, *, delta_rule: str, heads: int, head_dim: int):
     import mlx.core as mx
 
-    from fastvideo.mlx_runtime.fastwan import linear
-
     length = text_qkv[1].shape[0]
     key = _activate(text_qkv[1], l2norm=True).reshape(1, length, heads, head_dim).transpose(0, 2, 1, 3)
     value = _activate(text_qkv[2], l2norm=False).reshape(1, length, heads, head_dim).transpose(0, 2, 1, 3)
-    beta = mx.sigmoid(linear(text_x, weights["attn.linear_attention.beta_proj.weight"]))
-    beta = beta.reshape(1, length, heads).transpose(0, 2, 1)
-    weighted = key * beta[..., None]
+    gamma = _write_strength(
+        weights,
+        text_x,
+        delta_rule=delta_rule,
+        heads=heads,
+        head_dim=head_dim,
+        token_count=length,
+    )
+    gamma = gamma.reshape(1, length, heads).transpose(0, 2, 1)
+    weighted = key * gamma[..., None]
     matrix_a = mx.matmul(weighted.transpose(0, 1, 3, 2), key)
     matrix_b = mx.matmul(value.transpose(0, 1, 3, 2), weighted)
     ones = mx.ones((1, heads, head_dim), dtype=matrix_a.dtype)
@@ -251,9 +275,16 @@ def _linear_scan(weights: dict[str, Any],
     query = query.reshape(num_frames, per_frame, heads, head_dim).transpose(0, 2, 1, 3)
     key = key.reshape(num_frames, per_frame, heads, head_dim).transpose(0, 2, 1, 3)
     value = value.reshape(num_frames, per_frame, heads, head_dim).transpose(0, 2, 1, 3)
-    beta = mx.sigmoid(linear(video_x, weights["attn.linear_attention.beta_proj.weight"]))
-    beta = beta.reshape(num_frames, per_frame, heads).transpose(0, 2, 1)
-    weighted = key * beta[..., None]
+    gamma = _write_strength(
+        weights,
+        video_x,
+        delta_rule=delta_rule,
+        heads=heads,
+        head_dim=head_dim,
+        token_count=per_frame,
+    )
+    gamma = gamma.reshape(num_frames, per_frame, heads).transpose(0, 2, 1)
+    weighted = key * gamma[..., None]
     matrix_a = mx.matmul(weighted.transpose(0, 1, 3, 2), key)
     matrix_b = mx.matmul(value.transpose(0, 1, 3, 2), weighted)
     frame_mean = video_x.reshape(num_frames, per_frame, -1).mean(axis=1)

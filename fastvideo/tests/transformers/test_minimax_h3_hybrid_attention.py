@@ -145,6 +145,50 @@ def test_hybrid_attention_softmax_gate_scales_window_output() -> None:
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
 
 
+def test_hybrid_attention_records_finite_solver_and_gate_diagnostics() -> None:
+    layout = _layout(num_frames=4)
+    parent = _StubParent()
+    hybrid = HybridAttention(
+        hidden_size=HIDDEN,
+        num_heads=HEADS,
+        head_dim=HEAD_DIM,
+        window_radius=0,
+        window_chunk=0,
+        anchor_frames="none",
+        enable_softmax_gate=True,
+        enable_text_state=True,
+        short_conv_targets=(),
+        branch_parallel=False,
+    )
+    _init_linears(parent)
+    _init_linears(hybrid)
+    hybrid.linear_attention.record_diagnostics = True
+    hybrid.linear_attention.output_gate.record_diagnostics = True
+    assert hybrid.softmax_gate is not None
+    hybrid.softmax_gate.record_diagnostics = True
+
+    output = hybrid(parent, torch.randn(1, layout.seq_len, HIDDEN), None, layout.seq_len, layout,
+                    _identity_norm_rope)
+
+    assert torch.isfinite(output).all()
+    expected = {
+        "gamma_min",
+        "gamma_median",
+        "gamma_p95",
+        "gamma_max",
+        "trace_g_over_d",
+        "retention_mean",
+        "erase_gram_norm",
+        "write_injection_norm",
+        "cholesky_diag_min",
+        "cholesky_condition_proxy",
+    }
+    assert expected == hybrid.linear_attention.latest_diagnostics.keys()
+    assert all(torch.isfinite(value) for value in hybrid.linear_attention.latest_diagnostics.values())
+    assert hybrid.linear_attention.output_gate.latest_diagnostics
+    assert hybrid.softmax_gate.latest_diagnostics
+
+
 def test_minimax_h3_attention_requires_hybrid_layout() -> None:
     backend = MagicMock()
     backend.get_name.return_value = "FLASH_ATTN"

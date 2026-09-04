@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         frame_statistics,
         gather_linear_state,
         run_scans,
+        scaled_exponential_write_strength,
     )
     from fastvideo.models.dits.minimax_h3_hybrid.window import window_softmax
 
@@ -47,6 +48,7 @@ __all__ = [
     "merge_lora_pairs",
     "remap_vdn_key",
     "run_scans",
+    "scaled_exponential_write_strength",
     "window_bounds",
     "window_softmax",
     "windows_cover_all_frames",
@@ -64,6 +66,7 @@ _LAZY_ATTRS = {
     "frame_statistics": "fastvideo.models.dits.minimax_h3_hybrid.linear",
     "gather_linear_state": "fastvideo.models.dits.minimax_h3_hybrid.linear",
     "run_scans": "fastvideo.models.dits.minimax_h3_hybrid.linear",
+    "scaled_exponential_write_strength": "fastvideo.models.dits.minimax_h3_hybrid.linear",
     "hybrid_arch_fields_from_spec": "fastvideo.models.dits.minimax_h3_hybrid.checkpoint",
     "merge_lora_pairs": "fastvideo.models.dits.minimax_h3_hybrid.checkpoint",
     "remap_vdn_key": "fastvideo.models.dits.minimax_h3_hybrid.checkpoint",

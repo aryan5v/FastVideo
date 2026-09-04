@@ -42,6 +42,8 @@ def test_hybrid_branch_keys_pass_through() -> None:
         "transformer_blocks.0.attn.to_out_linear.weight")
     assert remap_vdn_key("transformer_blocks.0.attn.linear_attention.beta_proj.weight") == (
         "transformer_blocks.0.attn.linear_attention.beta_proj.weight")
+    assert remap_vdn_key("transformer_blocks.0.attn.linear_attention.write_log_scale") == (
+        "transformer_blocks.0.attn.linear_attention.write_log_scale")
     assert remap_vdn_key("transformer_blocks.0.attn.orig.to_out.1.weight") is None
 
 

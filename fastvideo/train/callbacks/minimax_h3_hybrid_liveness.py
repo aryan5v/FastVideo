@@ -29,6 +29,7 @@ class MiniMaxH3HybridGradientLivenessCallback(Callback):
     _INTERNAL_MARKERS = (
         "linear_attention.alpha.",
         "linear_attention.beta_proj.",
+        "linear_attention.write_log_scale",
         "linear_attention.norm.",
         "linear_attention.output_gate.",
         "linear_attention.short_conv.",
@@ -61,6 +62,7 @@ class MiniMaxH3HybridGradientLivenessCallback(Callback):
         method: TrainingMethod,
         iteration: int = 0,
     ) -> None:
+        markers: tuple[str, ...]
         if iteration == self._readout_step:
             label = "readout"
             markers = ("to_out_linear.", )

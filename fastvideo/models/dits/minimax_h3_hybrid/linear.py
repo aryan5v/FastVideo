@@ -25,6 +25,7 @@ from fastvideo.models.dits.minimax_h3_hybrid.layout import HybridSequenceLayout
 DELTA_RULES = ("sana_scaled", "vdn_solve", "vdn_scaled")
 SHORT_CONV_TARGETS = ("q", "k", "v")
 TEXT_STATE_SCALE = 0.5
+WRITE_LOGIT_CLAMP = 8.0
 
 
 def initialize_hybrid_parameter(
@@ -52,7 +53,8 @@ def initialize_hybrid_parameter(
     def zeros() -> torch.Tensor:
         return torch.zeros(shape, device=device, dtype=dtype)
 
-    if name.endswith(".to_out_linear.weight") or name.endswith(".linear_attention.beta_proj.weight"):
+    if (name.endswith(".to_out_linear.weight") or name.endswith(".linear_attention.beta_proj.weight")
+            or name.endswith(".linear_attention.write_log_scale")):
         return zeros()
     if name.endswith(".linear_attention.norm.weight"):
         return torch.ones(shape, device=device, dtype=dtype)
@@ -132,11 +134,21 @@ class OutputGate(nn.Module):
             nn.init.constant_(self.up.bias, math.log(init_value / (1.0 - init_value)))
         elif init != "random":
             raise ValueError(f"OutputGate init must be 'constant' or 'random', got {init!r}.")
+        self.record_diagnostics = False
+        self.latest_diagnostics: dict[str, torch.Tensor] = {}
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         projected = hidden_states if self.down is None else self.down(hidden_states)[0]
         gate, _ = self.up(projected)
-        return torch.sigmoid(gate).view(-1, self.num_heads, self.head_dim or 1)
+        gate = torch.sigmoid(gate).view(-1, self.num_heads, self.head_dim or 1)
+        if self.training and self.record_diagnostics:
+            detached = gate.detach().float()
+            self.latest_diagnostics = {
+                "gate_min": detached.amin(),
+                "gate_mean": detached.mean(),
+                "gate_max": detached.amax(),
+            }
+        return gate
 
 
 class FrameKDAAlpha(nn.Module):
@@ -216,13 +228,13 @@ def _activate_features(tokens: torch.Tensor, l2norm: bool) -> torch.Tensor:
 def frame_statistics(
     keys: torch.Tensor,
     values: torch.Tensor,
-    beta: torch.Tensor,
+    gamma: torch.Tensor,
     a_fp32: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-frame ``A = k^T beta k``, ``B = v^T beta k``. keys/values: [F, H, S, d]."""
+    """Per-frame ``G = k^T gamma k``, ``C = v^T gamma k``. Inputs are [F, H, S, d]."""
     keys = keys.contiguous()
     values = values.contiguous()
-    weighted = keys * beta.unsqueeze(-1)
+    weighted = keys * gamma.unsqueeze(-1)
     if a_fp32:
         with torch.autocast(device_type=keys.device.type, enabled=False):
             matrix_a = torch.matmul(weighted.float().transpose(-1, -2), keys.float())
@@ -231,6 +243,34 @@ def frame_statistics(
     matrix_a = torch.matmul(weighted.transpose(-1, -2), keys)
     matrix_b = torch.matmul(values.transpose(-1, -2), weighted)
     return matrix_a, matrix_b
+
+
+def scaled_exponential_write_strength(
+    logits: torch.Tensor,
+    log_scale: torch.Tensor,
+    *,
+    head_dim: int,
+    token_count: int,
+    logit_clamp: float = WRITE_LOGIT_CLAMP,
+) -> torch.Tensor:
+    """Positive per-token write strength for the implicit delta rule.
+
+    A frame contributes ``token_count`` rank-one updates to a ``head_dim``
+    state.  Initialising their aggregate strength near ``head_dim`` keeps the
+    first solve away from the near-total overwrite caused by
+    ``sigmoid(0) == 0.5`` on long video frames.  ``log_scale`` is one learned
+    multiplier per head; every block owns its own instance.
+    """
+    if head_dim <= 0:
+        raise ValueError(f"head_dim must be positive, got {head_dim}")
+    if token_count <= 0:
+        raise ValueError(f"token_count must be positive, got {token_count}")
+    if logit_clamp <= 0:
+        raise ValueError(f"logit_clamp must be positive, got {logit_clamp}")
+    with torch.autocast(device_type=logits.device.type, enabled=False):
+        combined = logits.float() + log_scale.float()
+        relative = torch.exp(combined.clamp(min=-logit_clamp, max=logit_clamp))
+        return relative * (float(head_dim) / float(token_count))
 
 
 def _factor_sana(alpha: torch.Tensor, matrix_a: torch.Tensor, matrix_b: torch.Tensor,
@@ -242,17 +282,29 @@ def _factor_sana(alpha: torch.Tensor, matrix_a: torch.Tensor, matrix_b: torch.Te
     return transition, injection
 
 
-def _factor_vdn(alpha: torch.Tensor, matrix_a: torch.Tensor, matrix_b: torch.Tensor, scaled: bool,
-                tokens_per_frame: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _factor_vdn(
+    alpha: torch.Tensor,
+    matrix_a: torch.Tensor,
+    matrix_b: torch.Tensor,
+    scaled: bool,
+    tokens_per_frame: int,
+    diagnostics: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     scale = (1.0 / tokens_per_frame) if scaled else 1.0
     sqrt_scale = scale**0.5 if scaled else 1.0
     matrix_a32 = matrix_a.float() * scale
     eye = torch.eye(matrix_a32.shape[-1], device=matrix_a32.device, dtype=torch.float32).expand_as(matrix_a32)
     chol = torch.linalg.cholesky(matrix_a32 + eye)
+    if diagnostics is not None:
+        chol_diag = chol.detach().diagonal(dim1=-2, dim2=-1).abs().clamp_min(1e-12)
+        diagnostics["cholesky_diag_min"] = chol_diag.amin()
+        diagnostics["cholesky_condition_proxy"] = (chol_diag.amax() / chol_diag.amin()).square()
     inverse = torch.cholesky_solve(eye.contiguous(), chol)
-    transition = alpha.unsqueeze(-1) * inverse
+    transition = alpha.float().unsqueeze(-1) * inverse
     injection = (matrix_b.float() * sqrt_scale) @ inverse
-    return transition.to(matrix_a.dtype), injection.to(matrix_b.dtype)
+    # The recurrent state is numerically sensitive.  Keep both factors in
+    # FP32 so ``run_scans`` cannot silently fall back to BF16 accumulation.
+    return transition, injection
 
 
 def factor_delta(
@@ -261,12 +313,21 @@ def factor_delta(
     matrix_a: torch.Tensor,
     matrix_b: torch.Tensor,
     tokens_per_frame: int,
+    *,
+    diagnostics: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if rule not in DELTA_RULES:
         raise ValueError(f"unknown delta_rule {rule!r}; expected one of {DELTA_RULES}.")
     if rule == "sana_scaled":
         return _factor_sana(alpha, matrix_a, matrix_b, tokens_per_frame)
-    return _factor_vdn(alpha, matrix_a, matrix_b, scaled=rule == "vdn_scaled", tokens_per_frame=tokens_per_frame)
+    return _factor_vdn(
+        alpha,
+        matrix_a,
+        matrix_b,
+        scaled=rule == "vdn_scaled",
+        tokens_per_frame=tokens_per_frame,
+        diagnostics=diagnostics,
+    )
 
 
 def run_scans(transitions: torch.Tensor, injections: torch.Tensor,
@@ -359,6 +420,10 @@ class BidirectionalLinearBranch(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.beta_proj",
         )
+        # One multiplier per head in this block: together, module ownership
+        # makes this a learned per-layer/per-head scale.  Zero gives the
+        # principled initial write strength ``head_dim / tokens_per_frame``.
+        self.write_log_scale = nn.Parameter(torch.zeros(num_heads, dtype=torch.float32))
         self.output_gate = OutputGate(
             hidden_size,
             num_heads,
@@ -371,6 +436,52 @@ class BidirectionalLinearBranch(nn.Module):
         self.norm = nn.RMSNorm(head_dim, eps=1e-6)
         self.short_conv = (LinearAttentionSepConv(num_heads * head_dim, short_conv_targets)
                            if short_conv_targets else None)
+        self.record_diagnostics = False
+        self.latest_diagnostics: dict[str, torch.Tensor] = {}
+
+    def _write_strength(self, hidden_states: torch.Tensor, token_count: int) -> torch.Tensor:
+        logits = self.beta_proj(hidden_states)[0]
+        if self.delta_rule == "vdn_solve":
+            return scaled_exponential_write_strength(
+                logits,
+                self.write_log_scale,
+                head_dim=self.head_dim,
+                token_count=token_count,
+            )
+        # Retain the released alternatives only as explicit ablations.
+        return torch.sigmoid(logits)
+
+    def _record_diagnostics(
+        self,
+        gamma: torch.Tensor,
+        matrix_a: torch.Tensor,
+        transition: torch.Tensor,
+        injection: torch.Tensor,
+        solver_diagnostics: dict[str, torch.Tensor],
+    ) -> None:
+        """Retain detached scalar health signals for the training callback."""
+        if not self.training:
+            return
+        flat_gamma = gamma.detach().float().flatten()
+        stride = max(1, flat_gamma.numel() // 4096)
+        sampled_gamma = flat_gamma[::stride]
+        diag = transition.detach().float().diagonal(dim1=-2, dim2=-1)
+        frame_stride = max(1, matrix_a.shape[0] // 4)
+        head_stride = max(1, matrix_a.shape[1] // 4)
+        sampled_erase = matrix_a.detach()[::frame_stride, ::head_stride].float()
+        sampled_write = injection.detach()[::frame_stride, ::head_stride].float()
+        self.latest_diagnostics = {
+            "gamma_min": sampled_gamma.amin(),
+            "gamma_median": sampled_gamma.median(),
+            "gamma_p95": torch.quantile(sampled_gamma, 0.95),
+            "gamma_max": sampled_gamma.amax(),
+            "trace_g_over_d": matrix_a.detach().float().diagonal(dim1=-2, dim2=-1).sum(-1).mean()
+            / matrix_a.shape[-1],
+            "retention_mean": diag.mean(),
+            "erase_gram_norm": sampled_erase.norm(dim=(-2, -1)).mean(),
+            "write_injection_norm": sampled_write.norm(dim=(-2, -1)).mean(),
+            **solver_diagnostics,
+        }
 
     def _features(
         self,
@@ -396,8 +507,8 @@ class BidirectionalLinearBranch(nn.Module):
         value = _activate_features(text_qkv[2], l2norm=False)
         key = key.view(1, length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         value = value.view(1, length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        beta = torch.sigmoid(self.beta_proj(text_x)[0]).view(1, length, self.num_heads).permute(0, 2, 1)
-        matrix_a, matrix_b = frame_statistics(key, value, beta, a_fp32=self.a_fp32)
+        gamma = self._write_strength(text_x, length).view(1, length, self.num_heads).permute(0, 2, 1)
+        matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
         ones = torch.ones(1, self.num_heads, self.head_dim, device=matrix_a.device, dtype=matrix_a.dtype)
         _, injection = factor_delta(self.delta_rule, ones, matrix_a, matrix_b, length)
         return TEXT_STATE_SCALE * injection[0]
@@ -426,12 +537,22 @@ class BidirectionalLinearBranch(nn.Module):
         query = query.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         key = key.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         value = value.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        beta = torch.sigmoid(self.beta_proj(video_hidden)[0])
-        beta = beta.view(scan_frames, per_frame, self.num_heads).permute(0, 2, 1)
+        gamma = self._write_strength(video_hidden, per_frame)
+        gamma = gamma.view(scan_frames, per_frame, self.num_heads).permute(0, 2, 1)
         frame_mean = video_hidden.view(scan_frames, per_frame, -1).mean(dim=1)
         alpha = self.alpha(frame_mean)
-        matrix_a, matrix_b = frame_statistics(key, value, beta, a_fp32=self.a_fp32)
-        transitions, injections = factor_delta(self.delta_rule, alpha, matrix_a, matrix_b, per_frame)
+        matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
+        solver_diagnostics: dict[str, torch.Tensor] | None = {} if self.record_diagnostics else None
+        transitions, injections = factor_delta(
+            self.delta_rule,
+            alpha,
+            matrix_a,
+            matrix_b,
+            per_frame,
+            diagnostics=solver_diagnostics,
+        )
+        if solver_diagnostics is not None:
+            self._record_diagnostics(gamma, matrix_a, transitions, injections, solver_diagnostics)
         text_state = None
         if self.enable_text_state and text_hidden is not None and text_qkv is not None:
             text_state = self._text_state(text_hidden, text_qkv)
