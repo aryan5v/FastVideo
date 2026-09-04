@@ -52,6 +52,17 @@ case "${RUN_MODE}" in
         ;;
     esac
     ;;
+  scale_gate)
+    case "${TARGET_STEPS}" in
+      1)
+        RESUME_ARGS=""
+        ;;
+      *)
+        echo "scale_gate recovery TARGET_STEPS must be 1" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   long)
     case "${TARGET_STEPS}" in
       200)
@@ -79,6 +90,10 @@ STEP_GATE_ROOT="${SPRINT_ROOT}/runs/h18-step-gates/${SOURCE_KIND}-${MAP_STRATEGY
 if [[ "${RUN_MODE}" == "finite" ]]; then
   OUTPUT_ROOT="${SPRINT_ROOT}/runs/h18-recovery-gates/${SOURCE_KIND}-${MAP_STRATEGY}"
   RUN_ID="h18-recovery-gate-${SOURCE_KIND}-${MAP_STRATEGY}-step${TARGET_STEPS}"
+  CHECKPOINT_ARGS="--training.checkpoint.training_state_checkpointing_steps 1"
+elif [[ "${RUN_MODE}" == "scale_gate" ]]; then
+  OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-recovery-scale-gates/${SOURCE_KIND}-${MAP_STRATEGY}"
+  RUN_ID="h36-recovery-scale-gate-${SOURCE_KIND}-${MAP_STRATEGY}-step${TARGET_STEPS}"
   CHECKPOINT_ARGS="--training.checkpoint.training_state_checkpointing_steps 1"
 else
   OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-recovery/${SOURCE_KIND}-${MAP_STRATEGY}"
@@ -115,7 +130,7 @@ elif [[ "${RUN_MODE}" == "long" && "${TARGET_STEPS}" != "200" ]]; then
   test -s "${OUTPUT_ROOT}/checkpoint-${previous}/metadata.json"
   test -d "${OUTPUT_ROOT}/checkpoint-${previous}/dcp"
 fi
-if [[ "${RUN_MODE}" == "long" ]]; then
+if [[ "${RUN_MODE}" == "long" || "${RUN_MODE}" == "scale_gate" ]]; then
   # The activation candidate is the backend-specific recovery canary. Every
   # map-specific candidate already passed its own optimizer/resume gate; the
   # recovery method path varies by Dense versus VSA, not by block indices.
@@ -137,8 +152,12 @@ elif (( FASTH3_TOTAL_GPUS < 12 || FASTH3_TOTAL_GPUS > 32 || FASTH3_TOTAL_GPUS % 
   echo "Long FastH3 recovery requires 12 through 32 GPUs and SP=4 divisibility" >&2
   exit 4
 fi
+FASTH3_SP_SIZE=4
+FASTH3_HSDP_SHARD_DIM="${FASTH3_SP_SIZE}"
+FASTH3_HSDP_REPLICATE_DIM="$((FASTH3_TOTAL_GPUS / FASTH3_SP_SIZE))"
 export REPO_ROOT CONFIG_PATH CANDIDATE_ROOT OUTPUT_ROOT RUN_ID LOG_DIR SPRINT_ROOT
 export ATTENTION_BACKEND VSA_SPARSITY TARGET_STEPS RESUME_ARGS FASTH3_TOTAL_GPUS RUN_MODE CHECKPOINT_ARGS
+export FASTH3_SP_SIZE FASTH3_HSDP_SHARD_DIM FASTH3_HSDP_REPLICATE_DIM
 
 srun \
   --export=ALL \
@@ -164,7 +183,7 @@ srun \
     export TORCH_NCCL_ENABLE_MONITORING=0
     export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}/node-${SLURM_PROCID}"
     mkdir -p "${TRITON_CACHE_DIR}"
-    echo "$(date -Is) job=${SLURM_JOB_ID} node_rank=${SLURM_PROCID} total_gpus=${FASTH3_TOTAL_GPUS} commit=$(git -C "${REPO_ROOT}" rev-parse HEAD) backend=${ATTENTION_BACKEND} run_mode=${RUN_MODE} target_steps=${TARGET_STEPS}"
+    echo "$(date -Is) job=${SLURM_JOB_ID} node_rank=${SLURM_PROCID} total_gpus=${FASTH3_TOTAL_GPUS} commit=$(git -C "${REPO_ROOT}" rev-parse HEAD) backend=${ATTENTION_BACKEND} run_mode=${RUN_MODE} target_steps=${TARGET_STEPS} sp_size=${FASTH3_SP_SIZE} hsdp_replicate_dim=${FASTH3_HSDP_REPLICATE_DIM} hsdp_shard_dim=${FASTH3_HSDP_SHARD_DIM}"
     exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
       -m torch.distributed.run \
       --nnodes "${SLURM_JOB_NUM_NODES}" \
@@ -177,8 +196,9 @@ srun \
       --models.student.init_from "${CANDIDATE_ROOT}" \
       --models.student.attention_backend "${ATTENTION_BACKEND}" \
       --training.distributed.num_gpus "${FASTH3_TOTAL_GPUS}" \
-      --training.distributed.hsdp_replicate_dim 1 \
-      --training.distributed.hsdp_shard_dim "${FASTH3_TOTAL_GPUS}" \
+      --training.distributed.sp_size "${FASTH3_SP_SIZE}" \
+      --training.distributed.hsdp_replicate_dim "${FASTH3_HSDP_REPLICATE_DIM}" \
+      --training.distributed.hsdp_shard_dim "${FASTH3_HSDP_SHARD_DIM}" \
       --training.loop.max_train_steps "${TARGET_STEPS}" \
       --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
       --training.tracker.run_name "${RUN_ID}" \
