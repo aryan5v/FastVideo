@@ -5,11 +5,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 import yaml
 
 from fastvideo.train.methods.knowledge_distillation.minimax_h3_recovery import (
     _capture_hidden_summaries,
+    _deployment_sigmas,
+    _euler_update,
     _hidden_summary,
     _normalized_mse,
 )
@@ -60,6 +63,48 @@ def test_hidden_capture_selects_only_requested_blocks() -> None:
 
     assert set(captures) == {0, 2}
     assert all(summary.shape == (1, 8) for summary in captures.values())
+
+
+def test_h3_four_call_rollout_reaches_constant_flow_endpoint() -> None:
+    for shift in (12.0, 3.0):
+        sigmas = _deployment_sigmas(5, shift, torch.device("cpu"))
+        state = torch.tensor([2.0])
+        flow = torch.tensor([1.0])
+        for interval in range(4):
+            state = _euler_update(state, flow, sigmas[interval], sigmas[interval + 1])
+
+        torch.testing.assert_close(state, torch.tensor([1.0]))
+
+
+def test_h3_four_call_schedule_rejects_non_deployment_grid() -> None:
+    with pytest.raises(ValueError, match="five-point/four-call"):
+        _deployment_sigmas(4, 12.0, torch.device("cpu"))
+
+
+def test_four_call_rescue_config_locks_fp32_branch_matching_and_gate_retention() -> None:
+    config = yaml.safe_load(
+        (_REPO_ROOT / "examples/train/configs/fasth3_14b_four_call_rescue.yaml").read_text())
+
+    assert config["method"]["_target_"].endswith("MiniMaxH3FourCallRecoveryMethod")
+    assert config["method"]["match_teacher_backend"] is True
+    assert config["method"]["require_fp32_master"] is True
+    assert config["method"]["deployment_grid_points"] == 5
+    assert config["training"]["dit_precision"] == "fp32"
+    assert config["training"]["data"]["num_frames"] == 124
+    assert config["training"]["data"]["num_latent_t"] == 37
+    assert config["training"]["checkpoint"]["training_state_checkpointing_steps"] == 25
+    assert config["training"]["checkpoint"]["preserve_every_steps"] == 25
+    assert config["training"]["checkpoint"]["preserve_steps"] == [25, 50, 75, 100, 200]
+
+
+def test_four_call_rescue_launcher_stops_at_quality_gates() -> None:
+    launcher = (_REPO_ROOT / "scripts/fasth3_sprint/slurm_h3_four_call_rescue.sbatch").read_text()
+
+    assert '25) RESUME=""' in launcher
+    assert '50|75|100|200) RESUME="latest"' in launcher
+    assert "TARGET_STEPS must stop at a 25-step rescue gate" in launcher
+    assert "validated {len(records)} aligned rescue records" in launcher
+    assert '--training.data.data_path "[${DATA_ROOT}, ${SYNTH_DATA_ROOT}]"' in launcher
 
 
 def test_recovery_config_locks_teacher_losses_and_checkpoint_retention() -> None:

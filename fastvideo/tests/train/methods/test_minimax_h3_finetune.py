@@ -400,7 +400,7 @@ def test_h3_candidate_step_gate_uses_16_gpu_sharding_and_persistent_receipts() -
     assert distributed["hsdp_replicate_dim"] * distributed["hsdp_shard_dim"] == 16
     assert 56 % distributed["sp_size"] == 0
     assert training["data"]["preprocessed_data_type"] == "t2va"
-    assert training["data"]["num_frames"] == 120
+    assert training["data"]["num_frames"] == 124
     assert training["checkpoint"]["training_state_checkpointing_steps"] == 1
     assert training["tracker"]["trackers"] == ["wandb"]
     assert training["loop"]["max_train_steps"] == 1

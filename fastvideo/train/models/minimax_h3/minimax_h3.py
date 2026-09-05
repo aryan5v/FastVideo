@@ -90,8 +90,10 @@ class MiniMaxH3Model(ModelBase):
         if str(training_config.data.preprocessed_data_type) != "t2va":
             raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type='t2va'")
 
-        # FastVideo's Fully Sharded Data Parallel loading path requires one BF16
-        # parameter dtype, including modules that H3 inference keeps in FP32.
+        # FastVideo's Fully Sharded Data Parallel loading path requires one
+        # configured parameter dtype, including modules that inference may
+        # otherwise keep in FP32. Recovery can therefore retain an FP32 master
+        # while predict_joint_noise uses BF16 activations/autocast below.
         training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
 
         self._init_from = str(init_from)
@@ -326,7 +328,13 @@ class MiniMaxH3Model(ModelBase):
         training_batch.attn_metadata_vsa = self._build_vsa_metadata(layout, device)
         return training_batch
 
-    def _build_vsa_metadata(self, layout: MiniMaxH3PackedLayout, device: torch.device) -> Any:
+    def _build_vsa_metadata(
+        self,
+        layout: MiniMaxH3PackedLayout,
+        device: torch.device,
+        *,
+        current_timestep: int = 0,
+    ) -> Any:
         if getattr(self, "_attn_kind", "dense") != "vsa":
             return None
         if self._vsa_metadata_builder is None:
@@ -344,7 +352,7 @@ class MiniMaxH3Model(ModelBase):
             int(layout.audio_indices.numel()),
         )
         return self._vsa_metadata_builder.build(
-            current_timestep=0,
+            current_timestep=int(current_timestep),
             raw_latent_shape=(layout.num_video_latent_frames, layout.latent_height, layout.latent_width),
             patch_size=patch_size,
             VSA_sparsity=sparsity,
