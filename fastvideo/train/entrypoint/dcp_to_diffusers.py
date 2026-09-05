@@ -38,6 +38,13 @@ from fastvideo.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _remove_existing_weight_files(module_dir: Any) -> None:
+    """Remove copied weight payloads and indexes before a single-file export."""
+    for pattern in ("*.safetensors", "*.safetensors.index.json"):
+        for path in module_dir.glob(pattern):
+            path.unlink(missing_ok=True)
+
+
 def _ensure_distributed() -> None:
     """Set up a single-process distributed env if needed.
 
@@ -158,8 +165,7 @@ def _save_role_pretrained(
         )
 
         if _rank() == 0:
-            for path in module_dir.glob("*.safetensors"):
-                path.unlink(missing_ok=True)
+            _remove_existing_weight_files(module_dir)
 
             # Convert internal parameter names back to HF format.
             # load_model_from_full_model_state_dict builds reverse_param_names_mapping

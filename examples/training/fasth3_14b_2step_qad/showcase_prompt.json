@@ -1,0 +1,10 @@
+[
+  {
+    "id": "spellblade_stand_back",
+    "category": "showcase_motion_speech_sync",
+    "expected_audio": "The English line 'Stand back!' is intelligible and synchronized, with storm wind, stone impacts, blade motion, and magical crackle matching visible events.",
+    "prompt": "integrated_multimodal_description: [Shot 1] A 16:9 single-take motion-graphics design in a vivid 2D anime action-fantasy style, with crisp cel-shaded planes, layered vector-like shapes, luminous energy streaks, and no readable text, opens on one lone sky-blue-haired spellblade standing on a shattered moonstone bridge above a violet storm. The spellblade pivots, raises a glowing crescent blade, and releases a high-speed spiral of gold-and-cyan energy that tears through incoming shadow shards; (S1) shouts <d>[English]Stand back!</d> while bracing against the magical recoil, with a sharp gasp and strained breath audible. After the action begins, the camera makes one rapid, smooth forward push-in toward the spellblade's determined face as the energy spiral fills the frame, maintaining the same continuous take through 00:05.000. Keep the spellblade as the only principal character, with no additional characters, logos, captions, subtitles, or readable signage.\n\noverall_soundscape: Violet storm wind roars around the bridge while stone fragments clatter, magical energy crackles, and the blade slices through the air. The spellblade's sharp gasp, strained breath, and shouted line remain clearly synchronized with the action.\n\nnon_diegetic_music: N/A",
+    "source_id": "t2va-2026082050-000102",
+    "source_seed": 2026082050
+  }
+]
