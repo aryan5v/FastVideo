@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-project", default="fasth3-14b-2step-qad-sprint")
     parser.add_argument("--seed", type=int, default=20260829)
     parser.add_argument("--max-prompts", type=int, default=0)
+    parser.add_argument(
+        "--prompts-jsonl",
+        type=Path,
+        default=None,
+        help="Optional pre-split JSONL containing prompt and id fields.",
+    )
     return parser.parse_args()
 
 
@@ -186,7 +192,18 @@ def main() -> None:
     if not os.environ.get("WANDB_API_KEY"):
         raise RuntimeError("WANDB_API_KEY is required for calibration generation")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    prompts = PROMPTS[:args.max_prompts] if args.max_prompts > 0 else PROMPTS
+    source_prompt_rows: list[dict[str, Any]] = []
+    if args.prompts_jsonl is not None:
+        source_prompt_rows = [
+            json.loads(line)
+            for line in args.prompts_jsonl.read_text().splitlines()
+            if line.strip()
+        ]
+        prompts = tuple(str(row["prompt"]) for row in source_prompt_rows)
+    else:
+        prompts = PROMPTS
+    prompts = prompts[:args.max_prompts] if args.max_prompts > 0 else prompts
+    source_prompt_rows = source_prompt_rows[:len(prompts)]
     if not prompts:
         raise ValueError("The multi-shot calibration prompt set is empty")
     latent_dir = args.output_dir / "latents"
@@ -249,9 +266,14 @@ def main() -> None:
                 "latent_width": int(video.shape[4]),
                 "num_audio_latents": int(audio.shape[0] // 2),
                 "category": "multiple_shots",
-                "provenance": "released_dense_v1_synthetic_multishot",
+                "provenance": ("released_dense_v1_synthetic_prompt_pool"
+                               if args.prompts_jsonl is not None else
+                               "released_dense_v1_synthetic_multishot"),
                 "seed": args.seed + index,
             }
+            if source_prompt_rows:
+                record["source_prompt_id"] = str(source_prompt_rows[index]["id"])
+                record["source_prompt_sha256"] = str(source_prompt_rows[index]["prompt_sha256"])
             records.append(record)
             run.log({
                 "calibration/completed_examples": index + 1,
@@ -273,6 +295,7 @@ def main() -> None:
         "quantization": "none",
         "sample_count": len(records),
         "sample_ids": [record["id"] for record in records],
+        "prompt_split": str(args.prompts_jsonl.resolve()) if args.prompts_jsonl is not None else None,
         "wandb_run": run.url,
         "persistent_manifest": str(manifest_path),
         "elapsed_seconds": time.time() - started,
