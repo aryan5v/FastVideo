@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--profile", choices=("strict", "all"), default="strict")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--compile-vae", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--fa4", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--upload-videos", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -206,7 +207,7 @@ def _inference_args(args: argparse.Namespace, first_prompt: str) -> argparse.Nam
         "--vsa-tile-size", "64",
         "--replicated-dit",
         "--parallel-vae",
-        "--compile-vae",
+        "--compile-vae" if args.compile_vae else "--no-compile-vae",
         "--pin-cpu-memory",
         "--no-torch-compile",
         "--inference-torch-compile" if args.compile else "--no-inference-torch-compile",
@@ -249,6 +250,7 @@ def main() -> None:
             "checkpoint_role": args.checkpoint_role,
             "attention": args.attention,
             "profile": args.profile,
+            "compile_vae": args.compile_vae,
             "height": args.height,
             "width": args.width,
             "num_frames": args.num_frames,
@@ -271,6 +273,7 @@ def main() -> None:
         "checkpoint_role": args.checkpoint_role,
         "attention": args.attention,
         "quantization": "none",
+        "compile_vae": args.compile_vae,
         "negative_prompt": "",
         "seed": args.seed,
         "resolution": {"width": args.width, "height": args.height},

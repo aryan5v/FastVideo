@@ -21,6 +21,33 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "${EXPORT_ROOT}" "${HF_XET_CACHE}" "${WANDB_CACHE_DIR}"
 
+prepare_output_dir() {
+  local output_dir="$1"
+  local expected_mp4s="$2"
+  local actual_mp4s=0
+  if [[ -d "${output_dir}" ]]; then
+    actual_mp4s="$(find "${output_dir}" -maxdepth 1 -type f -name '*.mp4' | wc -l)"
+  fi
+  if [[ -s "${output_dir}/run_manifest.json" && "${actual_mp4s}" -eq "${expected_mp4s}" ]]; then
+    echo "$(date -Is) reusing completed generation output=${output_dir} mp4s=${actual_mp4s}"
+    return 1
+  fi
+  if [[ -e "${output_dir}" ]]; then
+    local archived="${output_dir}.incomplete-job${SLURM_JOB_ID:-manual}-$(date +%s)"
+    echo "$(date -Is) archiving incomplete generation output=${output_dir} archived=${archived}"
+    mv "${output_dir}" "${archived}"
+  fi
+  return 0
+}
+
+prepare_local_compile_cache() {
+  local run_id="$1"
+  local cache_root="${TMPDIR:-/tmp}/fasth3-${SLURM_JOB_ID:-manual}/${run_id}"
+  export TRITON_CACHE_DIR="${cache_root}/triton"
+  export TORCHINDUCTOR_CACHE_DIR="${cache_root}/torchinductor"
+  mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}"
+}
+
 export_model() {
   local source_kind="$1"
   local checkpoint="${SPRINT_ROOT}/runs/h36-recovery/${source_kind}-activation/checkpoint-200"
@@ -66,11 +93,10 @@ generate_recovery_matrix() {
   local output_dir="${SPRINT_ROOT}/videos/${run_id}"
   local log_dir="${SPRINT_ROOT}/logs/${run_id}"
 
-  if [[ -e "${output_dir}" ]]; then
-    echo "Refusing to reuse existing comparison directory: ${output_dir}" >&2
-    exit 3
+  if ! prepare_output_dir "${output_dir}" 12; then
+    return
   fi
-  export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${run_id}"
+  prepare_local_compile_cache "${run_id}"
   export WANDB_DIR="${log_dir}"
   mkdir -p "${TRITON_CACHE_DIR}" "${log_dir}"
 
@@ -108,11 +134,10 @@ generate_showcase() {
   local output_dir="${SPRINT_ROOT}/videos/${run_id}"
   local log_dir="${SPRINT_ROOT}/logs/${run_id}"
 
-  if [[ -e "${output_dir}" ]]; then
-    echo "Refusing to reuse existing showcase directory: ${output_dir}" >&2
-    exit 3
+  if ! prepare_output_dir "${output_dir}" 1; then
+    return
   fi
-  export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${run_id}"
+  prepare_local_compile_cache "${run_id}"
   export WANDB_DIR="${log_dir}"
   mkdir -p "${TRITON_CACHE_DIR}" "${log_dir}"
 
