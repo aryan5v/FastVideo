@@ -254,6 +254,29 @@ def test_h3_plugin_prepares_and_restores_joint_latent_shapes(monkeypatch: pytest
     assert batch.minimax_h3_layout.sequence_length == 26
 
 
+def test_h3_plugin_rejects_mismatched_video_and_audio_duration_config() -> None:
+    model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    model.training_config = SimpleNamespace(
+        data=SimpleNamespace(
+            num_latent_t=37,
+            num_frames=120,
+            num_height=480,
+            num_width=832,
+        ), )
+    raw_batch = {
+        "vae_latent": torch.zeros(1, 24, 37, 30, 52),
+        "audio_latent": torch.zeros(1, 2, 32, 200),
+    }
+
+    with pytest.raises(ValueError, match="describe different H3 durations"):
+        model._resolve_clean_latents(
+            raw_batch,
+            "data",
+            torch.bfloat16,
+            torch.device("cpu"),
+        )
+
+
 @pytest.mark.parametrize(
     ("backend", "expected"),
     [

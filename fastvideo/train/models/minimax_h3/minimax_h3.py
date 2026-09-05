@@ -21,6 +21,7 @@ from fastvideo.pipelines.basic.minimax_h3.packing import (
     patchify_video_latents,
     unpack_audio_tokens,
     unpatchify_video_tokens,
+    video_latent_num_frames,
 )
 from fastvideo.platforms import AttentionBackendEnum
 
@@ -194,6 +195,18 @@ class MiniMaxH3Model(ModelBase):
             )
         else:
             raise ValueError(f"Unknown latents_source: {latents_source!r}")
+
+        try:
+            expected_video_frames = video_latent_num_frames(int(data_config.num_frames))
+        except ValueError as error:
+            raise ValueError(
+                "training.data.num_latent_t and num_frames describe different H3 durations: "
+                f"{error}") from error
+        if int(data_config.num_latent_t) != expected_video_frames:
+            raise ValueError(
+                "training.data.num_latent_t and num_frames describe different H3 durations: "
+                f"num_frames={data_config.num_frames} requires num_latent_t={expected_video_frames}, "
+                f"got {data_config.num_latent_t}")
 
         if video_latents.ndim != 5 or tuple(video_latents.shape[:2]) != (1, _VIDEO_LATENT_CHANNELS):
             raise ValueError("vae_latent must have shape [1, 24, latent_frames, latent_height, latent_width], "

@@ -34,8 +34,9 @@ training:
     num_latent_t: 37
     num_height: 512
     num_width: 896
-    # The released corpus carries 200 audio latents: 120 / 24 fps * 40 Hz.
-    num_frames: 120
+    # 37 H3 video latents represent 124 frames and require 207 audio latents.
+    # Existing 37/200 artifacts must be recached; the model rejects them.
+    num_frames: 124
 
   optimizer:
     learning_rate: 1.0e-5
