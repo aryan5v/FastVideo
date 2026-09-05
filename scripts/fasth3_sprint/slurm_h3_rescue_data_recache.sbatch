@@ -33,19 +33,30 @@ export PYTHONDONTWRITEBYTECODE=1
 export TOKENIZERS_PARALLELISM=false
 export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}"
 
-python3 "${REPO_ROOT}/scripts/fasth3_sprint/recache_h3_rescue_audio.py" select \
-  --source-root "${SOURCE_ROOT}" \
-  --raw-manifest "${RAW_MANIFEST}" \
-  --output "${OUTPUT}" \
-  --max-clips 512
-python3 "${REPO_ROOT}/scripts/fasth3_sprint/split_h3_prompt_pool.py" \
-  --input "${PROMPT_POOL}" \
-  --output-dir "${PROMPT_SPLITS}"
-
 mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 export MASTER_ADDR="${nodes[0]}"
 export MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
 echo "$(date -Is) run=${RUN_ID} node=${SLURM_JOB_NODELIST}"
+srun \
+  --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+  --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+  --container-workdir="${REPO_ROOT}" \
+  --export=ALL \
+  /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+    "${REPO_ROOT}/scripts/fasth3_sprint/recache_h3_rescue_audio.py" select \
+      --source-root "${SOURCE_ROOT}" \
+      --raw-manifest "${RAW_MANIFEST}" \
+      --output "${OUTPUT}" \
+      --max-clips 512
+srun \
+  --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+  --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+  --container-workdir="${REPO_ROOT}" \
+  --export=ALL \
+  /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+    "${REPO_ROOT}/scripts/fasth3_sprint/split_h3_prompt_pool.py" \
+      --input "${PROMPT_POOL}" \
+      --output-dir "${PROMPT_SPLITS}"
 srun \
   --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
   --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
@@ -59,7 +70,12 @@ srun \
       --output "${OUTPUT}" \
       --model-root "${MODEL_ROOT}"
 
-python3 - "${OUTPUT}" "${RUN_ID}" <<'PY'
+srun \
+  --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+  --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+  --container-workdir="${REPO_ROOT}" \
+  --export=ALL \
+  /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python - "${OUTPUT}" "${RUN_ID}" <<'PY'
 import glob
 import hashlib
 import json
