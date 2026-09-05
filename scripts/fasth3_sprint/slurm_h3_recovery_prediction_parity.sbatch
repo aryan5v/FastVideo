@@ -28,7 +28,7 @@ export MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
 
 for source_kind in dense vsa; do
   checkpoint="${SPRINT_ROOT}/runs/h36-recovery/${source_kind}-activation/checkpoint-200"
-  export_dir="${SPRINT_ROOT}/exports/h36-recovery-diagnostics/${source_kind}-activation-step200-raw"
+  export_dir="${SPRINT_ROOT}/exports/h36-recovery-comparison/${source_kind}-activation-step200-raw"
   run_id="h36-export-parity-${source_kind}-step200-v1"
   echo "$(date -Is) branch=${source_kind} checkpoint=${checkpoint} export=${export_dir}"
   srun \
@@ -44,4 +44,3 @@ for source_kind in dense vsa; do
         --wandb-project fasth3-14b-2step-qad-sprint \
         --wandb-run-id "${run_id}"
 done
-
