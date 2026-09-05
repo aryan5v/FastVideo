@@ -217,6 +217,17 @@ def _inference_args(args: argparse.Namespace, first_prompt: str) -> argparse.Nam
     return basic_fasth3.validate_args(parser, inference_args)
 
 
+def _build_prompt_request(
+    inference_args: argparse.Namespace,
+    output_path: Path,
+    seed: int,
+    prompt: str,
+) -> Any:
+    """Bind each matrix row's prompt before building its request."""
+    inference_args.prompt = str(prompt)
+    return basic_fasth3.build_request(inference_args, output_path, seed)
+
+
 def main() -> None:
     args = parse_args()
     prompts = json.loads(args.prompts.read_text())
@@ -262,6 +273,7 @@ def main() -> None:
             "backend_environment": environment,
             "gpu_receipt": gpu_receipt,
             "persistent_output": str(args.output_dir),
+            "prompt_binding_version": 1,
         },
     )
     manifest: dict[str, Any] = {
@@ -274,6 +286,7 @@ def main() -> None:
         "attention": args.attention,
         "quantization": "none",
         "compile_vae": args.compile_vae,
+        "prompt_binding_version": 1,
         "negative_prompt": "",
         "seed": args.seed,
         "resolution": {"width": args.width, "height": args.height},
@@ -304,7 +317,8 @@ def main() -> None:
         for index, prompt in enumerate(prompts):
             output_path = args.output_dir / f"{index:02d}_{prompt['id']}.mp4"
             started = time.perf_counter()
-            result = generator.generate(basic_fasth3.build_request(inference_args, output_path, args.seed))
+            request = _build_prompt_request(inference_args, output_path, args.seed, prompt["prompt"])
+            result = generator.generate(request)
             wall_seconds = time.perf_counter() - started
             actual_path = basic_fasth3._actual_output_path(result, output_path)
             probe = _probe_media(actual_path)

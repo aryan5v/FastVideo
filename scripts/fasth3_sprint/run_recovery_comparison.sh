@@ -89,8 +89,9 @@ generate_recovery_matrix() {
   local source_kind="$1"
   local attention="$2"
   local export_dir="${EXPORT_ROOT}/${source_kind}-activation-step200-raw"
-  local run_id="h36-recovery-compare-${source_kind}-activation-step200-raw"
-  local output_dir="${SPRINT_ROOT}/videos/${run_id}"
+  local output_slug="h36-recovery-compare-${source_kind}-activation-step200-raw"
+  local run_id="${output_slug}-promptfix-v1"
+  local output_dir="${SPRINT_ROOT}/videos/${output_slug}"
   local log_dir="${SPRINT_ROOT}/logs/${run_id}"
 
   if ! prepare_output_dir "${output_dir}" 12; then
