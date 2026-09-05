@@ -28,9 +28,16 @@ export_model() {
 
   test -s "${checkpoint}/metadata.json"
   test -s "${checkpoint}/dcp/.metadata"
+  if [[ -s "${export_dir}/export_sha256.txt" ]]; then
+    sha256sum --check "${export_dir}/export_sha256.txt"
+    echo "$(date -Is) reusing verified ${source_kind} export=${export_dir}"
+    return
+  fi
+
+  local overwrite_args=()
   if [[ -e "${export_dir}" ]]; then
-    echo "Refusing to reuse existing export directory: ${export_dir}" >&2
-    exit 3
+    echo "$(date -Is) replacing incomplete ${source_kind} export=${export_dir}"
+    overwrite_args+=(--overwrite)
   fi
 
   echo "$(date -Is) exporting ${source_kind} checkpoint=${checkpoint} output=${export_dir}"
@@ -39,6 +46,7 @@ export_model() {
     --checkpoint "${checkpoint}" \
     --output-dir "${export_dir}" \
     --role student \
+    "${overwrite_args[@]}" \
     --verify
 
   test -s "${export_dir}/transformer/model.safetensors"

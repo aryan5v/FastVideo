@@ -225,7 +225,12 @@ def _save_role_pretrained(
     return str(dst)
 
 
-def _strict_reload_verify(*, output_dir: str, training_config: Any) -> None:
+def _strict_reload_verify(
+    *,
+    output_dir: str,
+    training_config: Any,
+    attention_backend: Any = None,
+) -> None:
     """Reload the just-exported transformer from disk and fail loudly on
     any key mismatch.
 
@@ -242,6 +247,7 @@ def _strict_reload_verify(*, output_dir: str, training_config: Any) -> None:
         model_path=output_dir,
         module_type="transformer",
         training_config=training_config,
+        attention_backend=attention_backend,
     )
     logger.info("Strict reload verification passed.")
 
@@ -352,7 +358,11 @@ def convert(
     logger.info("Export complete: %s", result)
 
     if verify:
-        _strict_reload_verify(output_dir=result, training_config=tc)
+        _strict_reload_verify(
+            output_dir=result,
+            training_config=tc,
+            attention_backend=getattr(model, "attention_backend", None),
+        )
 
     return result
 

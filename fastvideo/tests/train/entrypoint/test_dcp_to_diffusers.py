@@ -9,6 +9,7 @@ import torch
 from fastvideo.train.entrypoint.dcp_to_diffusers import (
     _remove_existing_weight_files,
     _role_model_checkpoint_state,
+    _strict_reload_verify,
 )
 from fastvideo.training.checkpointing_utils import ModelWrapper
 
@@ -48,3 +49,30 @@ def test_role_model_checkpoint_state_rejects_unknown_role() -> None:
 
     with pytest.raises(KeyError, match="Unknown role 'critic'"):
         _role_model_checkpoint_state(method, "critic")
+
+
+def test_strict_reload_verify_preserves_role_attention_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_load_module_from_path(**kwargs: object) -> torch.nn.Module:
+        calls.append(kwargs)
+        return torch.nn.Linear(2, 2)
+
+    monkeypatch.setattr(
+        "fastvideo.train.utils.moduleloader.load_module_from_path",
+        fake_load_module_from_path,
+    )
+    training_config = object()
+
+    _strict_reload_verify(
+        output_dir="/tmp/export",
+        training_config=training_config,
+        attention_backend="VIDEO_SPARSE_ATTN_H3",
+    )
+
+    assert calls == [{
+        "model_path": "/tmp/export",
+        "module_type": "transformer",
+        "training_config": training_config,
+        "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+    }]
