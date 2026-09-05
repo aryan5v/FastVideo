@@ -62,6 +62,21 @@ def _ensure_distributed() -> None:
         os.environ.setdefault(key, default)
 
 
+def _role_model_checkpoint_state(method: Any, role: str) -> dict[str, Any]:
+    """Return the single model-only DCP entry needed for an export."""
+    from fastvideo.training.checkpointing_utils import ModelWrapper
+
+    try:
+        model = method._role_models[role]
+    except KeyError as error:
+        raise KeyError(f"Unknown role {role!r}; available roles: {sorted(method._role_models)}") from error
+    if model.transformer is None:
+        raise ValueError(f"Role {role!r} does not have a transformer to export")
+    return {
+        f"roles.{role}.transformer": ModelWrapper(model.transformer),
+    }
+
+
 def _save_role_pretrained(
     *,
     role: str,
@@ -300,8 +315,14 @@ def convert(
     # -- Build model (loads pretrained weights + FSDP) --
     _, method, _, _ = build_from_config(cfg)
 
-    # -- Load DCP weights into the model --
-    states = method.checkpoint_state()
+    # -- Load only the requested role's model weights from DCP --
+    #
+    # Do not use method.checkpoint_state() here.  Besides the model it exposes
+    # optimizer and scheduler state.  DCP materializes missing Adam moments by
+    # taking a dummy optimizer step, which can require roughly another 2x the
+    # model size and makes an inference-only export OOM unnecessarily.
+    states = _role_model_checkpoint_state(method, role)
+    model = method._role_models[role]
     logger.info(
         "Loading DCP checkpoint from %s",
         resolved,
@@ -309,7 +330,6 @@ def convert(
     dcp.load(states, checkpoint_id=str(dcp_dir))
 
     # -- Export to diffusers format --
-    model = method._role_models[role]
     base_model_path = str(tc.model_path)
     if not base_model_path:
         raise ValueError("Cannot determine base_model_path from "
