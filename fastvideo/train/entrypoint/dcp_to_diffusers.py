@@ -260,6 +260,7 @@ def convert(
     role: str = "student",
     overwrite: bool = False,
     verify: bool = False,
+    load_precision: str | None = None,
 ) -> str:
     """Load a DCP checkpoint and export as a diffusers model.
 
@@ -304,6 +305,16 @@ def convert(
         cfg = _run_config_from_raw(raw_config)
 
     tc = cfg.training
+    if load_precision is not None:
+        if load_precision not in {"bf16", "fp32"}:
+            raise ValueError("load_precision must be 'bf16' or 'fp32'")
+        tc.dit_precision = load_precision
+        if tc.pipeline_config is not None:
+            tc.pipeline_config.dit_precision = load_precision
+        # A deployment export may intentionally materialize an FP32-master
+        # training checkpoint into BF16 inference tensors. Do not let a
+        # training-only constructor assertion reject that role load.
+        cfg.method["require_fp32_master"] = False
 
     # -- Init distributed (1 GPU is enough; DCP reshards) --
     maybe_init_distributed_environment_and_model_parallel(
@@ -479,6 +490,13 @@ def main() -> None:
               "the exported directory to catch key-mapping bugs "
               "immediately."),
     )
+    parser.add_argument(
+        "--load-precision",
+        choices=("bf16", "fp32"),
+        default=None,
+        help=("Optional model materialization precision. Use bf16 to export "
+              "an FP32-master training checkpoint for deployment/evaluation."),
+    )
     args = parser.parse_args(sys.argv[1:])
 
     convert(
@@ -488,6 +506,7 @@ def main() -> None:
         role=args.role,
         overwrite=args.overwrite,
         verify=args.verify,
+        load_precision=args.load_precision,
     )
 
 

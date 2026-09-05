@@ -1,0 +1,26 @@
+[
+  {
+    "id": "speech_exact_presenter",
+    "category": "exact_speech",
+    "prompt": "(S1) In a quiet recording studio, a presenter looks directly into the camera and says <d>[English] Fast video and clear audio arrive together.</d> The camera is locked off, the face is well lit, and no music plays.",
+    "expected_audio": "Exact intelligible English sentence with visible lip motion and no music."
+  },
+  {
+    "id": "motorcycle_tracking",
+    "category": "large_motion",
+    "prompt": "A motorcycle accelerates along a wet coastal road while the camera tracks beside it at speed. Water sprays from the tires, scenery moves rapidly, and the engine pitch rises with acceleration in stereo.",
+    "expected_audio": "Engine pitch and tire spray synchronized to acceleration and motion."
+  },
+  {
+    "id": "mechanical_press",
+    "category": "visible_mechanical_sound",
+    "prompt": "Inside a clean workshop, a metal stamping press descends once onto a small steel plate. The visible impact produces one sharp metallic clang followed by a short machine hiss. Static three-quarter camera view.",
+    "expected_audio": "One impact clang and a short hiss synchronized to the press."
+  },
+  {
+    "id": "two_shot_transition",
+    "category": "two_shot_transition",
+    "prompt": "A two-shot sequence: first, a wide view of a steam train entering a rural station with rhythmic wheel sounds; then a clean cut to a close view of the conductor opening a carriage door as steam hisses. Audio perspective changes naturally after the cut.",
+    "expected_audio": "Wheel rhythm before the cut and close steam hiss after it, with no desynchronization."
+  }
+]
