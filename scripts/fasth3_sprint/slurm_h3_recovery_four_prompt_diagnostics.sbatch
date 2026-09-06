@@ -39,19 +39,24 @@ generate() {
   export TORCHINDUCTOR_CACHE_DIR="${cache}/torchinductor"
   export WANDB_DIR="${SPRINT_ROOT}/logs/${run_id}"
   mkdir -p "${TRITON_CACHE_DIR}" "${TORCHINDUCTOR_CACHE_DIR}" "${WANDB_DIR}"
-  /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
-    "${REPO_ROOT}/scripts/fasth3_sprint/run_baseline_matrix.py" \
-      --model-path "${model}" \
-      --checkpoint-role "diagnostic-${kind}-${stage}" \
-      --attention "${attention}" \
-      --prompts "${PROMPTS}" \
-      --output-dir "${output}" \
-      --run-id "${run_id}" \
-      --source-commit "${SOURCE_COMMIT}" \
-      --max-prompts 4 \
-      --height 480 --width 832 --num-frames 124 --seed 2026082050 \
-      --steps "${grid_points}" --num-gpus 4 \
-      --profile strict --no-fa4 --no-compile --no-upload-videos
+  srun \
+    --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+    --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+    --container-workdir="${REPO_ROOT}" \
+    --export=ALL \
+    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+      "${REPO_ROOT}/scripts/fasth3_sprint/run_baseline_matrix.py" \
+        --model-path "${model}" \
+        --checkpoint-role "diagnostic-${kind}-${stage}" \
+        --attention "${attention}" \
+        --prompts "${PROMPTS}" \
+        --output-dir "${output}" \
+        --run-id "${run_id}" \
+        --source-commit "${SOURCE_COMMIT}" \
+        --max-prompts 4 \
+        --height 480 --width 832 --num-frames 124 --seed 2026082050 \
+        --steps "${grid_points}" --num-gpus 4 \
+        --profile strict --no-fa4 --no-compile --no-upload-videos
 }
 
 for kind in dense vsa; do
