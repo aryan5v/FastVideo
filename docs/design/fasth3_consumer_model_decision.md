@@ -1,23 +1,55 @@
 # FastH3 consumer model: decision and next experiment
 
-Decision date: September 6, 2026. This supersedes the target and stage ordering
-in the earlier pruning/release plans. The latest user direction prioritizes
-consumer memory, speed and joint audiovisual quality, with freedom to choose
-the method. Neither 14B nor pruning is an unconditional release requirement
-under that direction. A week or longer is available when results justify it.
+Decision date: September 6, 2026, updated after the user's follow-up about
+extending hard-prune recovery. This supersedes the target and stage ordering
+in the earlier pruning/release plans. Structural pruning is again the main
+path to consumer memory headroom and speed, while preserving joint audiovisual
+quality. Approximately 14B is flexible. A week or longer is available when
+results justify it.
 
 ## Decision
 
-Make released FastH3 four-call to two-call distillation the next main experiment.
-Keep the healthy backbone and its trained attention backend for this test.
-Use quantization to address weight memory after the high-precision two-call
-model passes quality checks. Preserve approximately 20B/four-call structural
-compression as the alternative if the larger model misses memory or latency
-targets. Do not automatically extend the current 24-block recovery pilots.
+Continue evaluating recovery of the hard-pruned four-call model before
+switching the main experiment to full-backbone call distillation. The 200-update
+hard curve is improving and does not establish its recovery ceiling. The
+uniform 24-block dense model is approximately 16.34B after physical extraction,
+already a useful consumer-size candidate if it recovers.
 
-This is a choice of the next experiment, not evidence that two-call H3 works.
-It isolates call reduction from capacity reduction. An already distilled
-teacher can still lose motion, diversity or speech when distilled again.
+Propose a continuation from the complete step-200 checkpoint toward 2,000 total
+updates, with explicit review points at 500 and 1,000. Preserve optimizer state,
+mask, parent teacher and exact four-call solver. This is a bounded continuation
+proposal, not a launched job or a prediction of convergence. Advance to call
+distillation and quantization after a healthy smaller checkpoint exists.
+
+## Immediate hard-recovery continuation plan
+
+1. Decode the completed step-200 hard model beside its step-zero masked control
+   and released V1, first verifying export and masked-to-static prediction parity.
+   Establish what the latent-error trend means for real video and audio. Poor
+   media at 200 alone does not prove irrecoverability; it supplies the baseline
+   for judging whether further training repairs the failure.
+2. Resume the same hard run to a first review at 500 total updates. Verify exact
+   model/optimizer resume and nonzero FP32 updates. Keep the method unchanged so
+   this answers whether additional optimization helps. Do not restart from V1
+   or from the old ineffective BF16-optimizer checkpoints.
+3. Add a broader held-out decoded panel and keep its captions out of training.
+   Track both teacher-state and closed-loop errors separately for video/audio,
+   together with motion, appearance, speech and synchronization. Two fixed
+   canaries cannot establish generalization. Keep checkpoint I/O less frequent
+   than metric logging; preserve every checkpoint already written.
+4. Continue toward 1,000 and then 2,000 total updates when held-out error and
+   media show useful progress. If training improves while held-out samples
+   deteriorate, address corpus coverage before adding more repetitions of the
+   current 526-record training split. If both curves stall, diagnose learning
+   rate, targets and capacity with a controlled change rather than assuming
+   that another fixed number of updates will solve it.
+5. If the approximately 16B model remains destructive despite adequate recovery,
+   move the pruning target toward approximately 20B/four calls. Keep two-call
+   distillation, PDD and target QAT/QAD downstream of joint-quality recovery.
+
+The full-backbone four-to-two experiment below is retained as an alternative
+proposal. It is no longer the next main action. No continuation beyond 200 or
+new distillation job has been launched by this plan update.
 
 ## Evidence checked on the cluster
 
@@ -112,7 +144,7 @@ The proposed direct four-to-two experiment instead follows the idea of
 update to reproduce two teacher updates. This is an H3 adaptation to validate,
 not a reproduction of that paper or a completed PDD implementation.
 
-## Concrete execution sequence
+## Deferred alternative: full-backbone four-to-two experiment
 
 1. Close the current pruning pilot and retain decoded comparisons as evidence.
    Build a fixed release-evaluation set of 32 held-out prompts and two seeds,
@@ -172,7 +204,7 @@ not a reproduction of that paper or a completed PDD implementation.
    score oracle. Gate video and audio again after each change. PDD, QAT and QAD
    remain available tools; running every stage regardless of results adds risk.
 
-## Consumer outcome and fallback
+## Consumer outcome and size tradeoff
 
 Two calls reduce transformer evaluations, not stored backbone weights. Rough
 weight-only sizes at four bits are 16.5 GB for 33B and 10 GB for 20B, before
@@ -184,9 +216,9 @@ its particular settings, showing that depth pruning is not the only possible
 memory route. That measurement is not a guarantee for our candidate, longer
 clips or other hardware. See the [local runtime report](https://haoailab.com/blogs/fasth3-local/).
 
-If the full-backbone two-call model misses the chosen consumer memory or
-latency target, test approximately 20B at four calls before combining depth
-and call compression again. The existing audited maps suggest dense30 or
+If the approximately 16B hard model does not recover adequately, test
+approximately 20B at four calls before combining depth and call compression
+again. The existing audited maps suggest dense30 or
 VSA28 as approximately 20B candidates; they still require recovery and decoded
 quality evidence. A smaller four-call model may offer the better product.
 Keep 14B as a research option, not a forced release criterion.
@@ -200,12 +232,13 @@ must be separately labeled.
 
 ## Budget and current execution status
 
-Allow 1–2 days for implementation, numerical checks and a decoded four-to-two
-pilot, excluding queue/access delays. Allow several more days for successful
-continuation and target quantization; one to two weeks is a planning allowance,
-not a promised release. Measure throughput before giving a training ETA.
+The next work is a decoded step-200 audit and preparation of a resumable hard
+continuation with reviews at 500/1,000/2,000 total updates. Measure its throughput
+and checkpoint/evaluation overhead before giving a wall-time estimate. A week
+or longer remains available if progress is promising; it is not a promised
+release date or an automatically approved unbounded run.
 
 No new four-to-two, PDD, QAT or QAD job was launched during this investigation.
 The current work is completing the existing pruning experiment and preparing
-the next distillation implementation. This document specifies the next work;
+its hard-recovery continuation. This document specifies the next work;
 it must not be reported as completed training or a ready consumer model.

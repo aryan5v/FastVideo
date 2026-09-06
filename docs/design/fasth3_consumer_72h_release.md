@@ -1,8 +1,8 @@
 # FastH3 sprint repair addendum
 
 > Latest scope: follow the [consumer model decision](fasth3_consumer_model_decision.md).
-> The user now prioritizes quality, consumer memory and speed regardless of
-> method. Mandatory pruning and the fixed stage sequence below are historical.
+> The latest follow-up restores structural pruning as the main path and asks
+> whether the improving hard run can recover with a longer training budget.
 
 > Research review, September 6: before committing to repeated small cuts,
 > follow the [pruning experiment decision](fasth3_pruning_research_decision.md).

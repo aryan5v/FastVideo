@@ -1,7 +1,7 @@
 # FastH3 pruning: research review and experiment decision
 
-> Superseded scope, September 6: the user's later instruction permits any
-> method that achieves consumer speed, memory fit and joint quality. Follow
+> Updated scope, September 6: the user's latest follow-up prioritizes pruning
+> and a longer hard-recovery trial for consumer memory fit and quality. Follow
 > the [current consumer model decision](fasth3_consumer_model_decision.md) for
 > targets and next experiments. The pruning research below remains background.
 
