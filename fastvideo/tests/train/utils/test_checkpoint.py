@@ -406,3 +406,28 @@ def test_save_final_captures_unscheduled_final_step(tmp_path: Path) -> None:
     mgr.maybe_save(step=20)
     mgr.save_final(step=23)
     assert calls == [20, 23]
+
+
+@pytest.mark.parametrize('use_cpu_group', [False, True])
+def test_checkpoint_save_routes_only_opted_in_coordination_to_cpu(tmp_path, monkeypatch, use_cpu_group):
+    from types import SimpleNamespace
+    import fastvideo.distributed as distributed
+    import fastvideo.train.utils.checkpoint as checkpoint
+
+    cpu_group = object()
+    monkeypatch.setattr(distributed, 'get_world_group', lambda: SimpleNamespace(cpu_group=cpu_group))
+    manager = _make_manager(tmp_path, save_steps=1, keep_last=2)
+    manager.config.use_cpu_process_group = use_cpu_group
+    captured = {}
+    monkeypatch.setattr(manager, '_build_states', lambda: {'model': 'original-state'})
+    monkeypatch.setattr(manager, '_save_rng_snapshot', lambda path: None)
+    monkeypatch.setattr(checkpoint, '_barrier', lambda: None)
+
+    def save(states, **kwargs):
+        captured.update(states=states, **kwargs)
+
+    monkeypatch.setattr(checkpoint.dcp, 'save', save)
+    manager.save(1)
+    assert captured['states'] == {'model': 'original-state'}
+    assert captured.get('process_group') is (cpu_group if use_cpu_group else None)
+    assert ('process_group' in captured) is use_cpu_group

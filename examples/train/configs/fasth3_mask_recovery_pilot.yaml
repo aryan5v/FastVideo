@@ -104,6 +104,7 @@ training:
   checkpoint:
     output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/day1-mask/hard-finite
     training_state_checkpointing_steps: 2
+    use_cpu_process_group: true
     checkpoints_total_limit: 8
     preserve_every_steps: 25
     preserve_steps:

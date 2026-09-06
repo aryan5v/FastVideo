@@ -63,6 +63,8 @@ class CheckpointConfig:
     # locked evaluation has selected the release checkpoint.
     preserve_every_steps: int = 0
     preserve_steps: list[int] = field(default_factory=list)
+    # Coordinate checkpoint metadata on CPU to avoid NCCL scratch allocations.
+    use_cpu_process_group: bool = False
 
 
 @dataclass(slots=True)

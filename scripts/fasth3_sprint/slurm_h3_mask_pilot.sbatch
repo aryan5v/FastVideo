@@ -51,6 +51,7 @@ srun --export=ALL --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
   export PYTHONPATH="${CODE_ROOT}:${SPRINT_ROOT}/python-packages"
   export PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=online WANDB_DIR="${LOG_DIR}" WANDB_RUN_ID="${RUN_ID}"
   export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0 TOKENIZERS_PARALLELISM=false
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export TORCH_NCCL_ENABLE_MONITORING=0
   export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}"
   mkdir -p "${TRITON_CACHE_DIR}"

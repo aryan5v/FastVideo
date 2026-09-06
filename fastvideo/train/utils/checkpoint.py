@@ -188,6 +188,7 @@ class CheckpointConfig:
     keep_last: int
     preserve_every_steps: int = 0
     preserve_steps: tuple[int, ...] = ()
+    use_cpu_process_group: bool = False
 
 
 def preserve_checkpoint(
@@ -250,6 +251,14 @@ class CheckpointManager:
         self._raw_config = raw_config
         self._last_saved_step: int | None = None
 
+    def _coordination_kwargs(self) -> dict[str, Any]:
+        if not self.config.use_cpu_process_group:
+            return {}
+        from fastvideo.distributed import get_world_group
+        # DTensor state collection retains its own FSDP device mesh. Only DCP
+        # planning/metadata collectives use this existing all-rank CPU group.
+        return {"process_group": get_world_group().cpu_group}
+
     def _build_states(self) -> dict[str, Any]:
         states: dict[str, Any] = self.method.checkpoint_state()
 
@@ -302,7 +311,7 @@ class CheckpointManager:
                 checkpoint_dir,
             )
             self._write_metadata(checkpoint_dir, step)
-        dcp.save(states, checkpoint_id=str(dcp_dir))
+        dcp.save(states, checkpoint_id=str(dcp_dir), **self._coordination_kwargs())
         _barrier()
 
         # Save RNG state AFTER dcp.save so it captures the
@@ -434,7 +443,7 @@ class CheckpointManager:
 
         states = self._build_states()
         logger.info("Loading Phase 2 checkpoint from %s", resolved)
-        dcp.load(states, checkpoint_id=str(resolved / "dcp"))
+        dcp.load(states, checkpoint_id=str(resolved / "dcp"), **self._coordination_kwargs())
         _barrier()
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
