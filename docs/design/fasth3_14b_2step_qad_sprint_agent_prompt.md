@@ -1,5 +1,12 @@
 # FastH3 14B two-step QAD sprint
 
+> Direction update, September 5, 2026: the user made model size flexible and
+> prioritized a consumer release in roughly three days. Follow
+> [the consumer release plan](fasth3_consumer_72h_release.md) for current scope
+> and decision gates. This document retains the original research plan; its
+> fixed 14B/two-call targets and mandatory sequence of training stages no
+> longer determine release eligibility.
+
 This document is the execution prompt for the GPU agent. Treat it as the source
 of truth for the sprint. Work on the branch named below, keep the user updated at
 each decision gate, and continue until the release artifacts pass the stated
