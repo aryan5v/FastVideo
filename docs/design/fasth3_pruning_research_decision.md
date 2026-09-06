@@ -88,6 +88,12 @@ Optional DFD/reward repair remains conditional as in the handoff.
 
 ## Time estimate and decision budget
 
+The user subsequently authorized a week or longer, provided results are
+promising. Use one week as the initial planning horizon and extend based on
+held-out joint-quality gains and a credible path to the target. The earlier
+three-day target no longer constrains experiment selection. This is permission
+for evidence-backed work, not automatic long training on a failed method.
+
 A reliable total ETA is not yet available: corrected H3 recovery throughput,
 quality-versus-updates and joint PDD/QAD execution remain unmeasured. The old
 BF16 20-block run's approximately 6.8 seconds per step on 12 GPUs cannot be
@@ -106,9 +112,8 @@ waits and assuming sustained GPU access and a successful method pilot:
 This yields roughly 4–9 days in a favorable engineering scenario, not a
 statistical forecast or a promise that 14B is recoverable. Budget 1–2 weeks
 operationally, with longer possible if aggressive pruning, data sufficiency or
-joint QAD fails. Three days remains a stretch for a promising pruned candidate;
-it is unsupported as a commitment for the complete 14B/two-call multi-format
-release. After a stable pilot, replace allowances with measured steps/sec,
+joint QAD fails. The complete 14B/two-call multi-format release remains
+conditional on quality gates. After a stable pilot, replace allowances with measured steps/sec,
 examples/sec, checkpoint/evaluation cost and observed recovery slope.
 
 For scale only: 5,000 updates at 10/30/60 seconds per update take approximately

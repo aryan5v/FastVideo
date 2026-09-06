@@ -6,6 +6,8 @@
 > recovery, superseding the presumed small-cut ladder below. The 48-block run
 > remains a diagnostic control. The approximately 14B pruned/two-call objective
 > is unchanged; the review also resolves training-stage order and time estimates.
+> The user now permits a week or longer when results are promising, replacing
+> the earlier three-day constraint described below.
 
 ## Scope
 

@@ -12,6 +12,8 @@
 > [pruning experiment decision](fasth3_pruning_research_decision.md) supersedes
 > a fixed small-cut recovery ladder and the older QAT-before-PDD ordering.
 > Validate the pruning/adaptation mechanism before scaling training.
+> The user permits a week or longer when results are promising; this supersedes
+> the earlier three-day and 96-hour deadlines throughout the plan.
 
 This document is the execution prompt for the GPU agent. Treat it as the source
 of truth for the sprint. Work on the branch named below, keep the user updated at
