@@ -71,6 +71,82 @@ def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, floa
     }
 
 
+def _canonical_parameter_name(name: str) -> str:
+    """Remove wrappers that are present only on the trainable DCP graph."""
+    return name.replace("_checkpoint_wrapped_module.", "").replace("_fsdp_wrapped_module.", "")
+
+
+def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -> dict[str, dict[str, Any]]:
+    """Collect small deterministic samples without copying the full 14B model."""
+    result: dict[str, dict[str, Any]] = {}
+    for raw_name, parameter in model.transformer.named_parameters():
+        name = _canonical_parameter_name(raw_name)
+        if name in result:
+            raise ValueError(f"duplicate canonical parameter name: {name}")
+        flat = parameter.detach().reshape(-1)
+        sample_count = min(samples_per_tensor, flat.numel())
+        indices = torch.linspace(
+            0,
+            flat.numel() - 1,
+            sample_count,
+            device=flat.device,
+            dtype=torch.float64,
+        ).round().to(torch.long)
+        result[name] = {
+            "shape": list(parameter.shape),
+            "dtype": str(parameter.dtype),
+            "numel": parameter.numel(),
+            "indices": indices.cpu().tolist(),
+            "values": flat[indices].float().cpu().tolist(),
+        }
+    return result
+
+
+def _compare_parameter_samples(
+    reference: dict[str, dict[str, Any]],
+    candidate: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    missing = sorted(set(reference) - set(candidate))
+    unexpected = sorted(set(candidate) - set(reference))
+    mismatches: list[dict[str, Any]] = []
+    compared_values = 0
+    different_values = 0
+    max_abs = 0.0
+    for name in sorted(set(reference) & set(candidate)):
+        ref = reference[name]
+        cand = candidate[name]
+        metadata_equal = all(ref[key] == cand[key] for key in ("shape", "dtype", "numel", "indices"))
+        ref_values = torch.tensor(ref["values"], dtype=torch.float32)
+        cand_values = torch.tensor(cand["values"], dtype=torch.float32)
+        values_equal = ref_values.shape == cand_values.shape and torch.equal(ref_values, cand_values)
+        if ref_values.shape == cand_values.shape:
+            difference = (ref_values - cand_values).abs()
+            compared_values += difference.numel()
+            different_values += int(torch.count_nonzero(difference))
+            if difference.numel():
+                max_abs = max(max_abs, float(difference.max()))
+        if not metadata_equal or not values_equal:
+            mismatches.append({
+                "name": name,
+                "metadata_equal": metadata_equal,
+                "values_equal": values_equal,
+                "reference": ref,
+                "candidate": cand,
+            })
+    return {
+        "passed": not missing and not unexpected and not mismatches,
+        "reference_parameter_count": len(reference),
+        "candidate_parameter_count": len(candidate),
+        "sampled_values_compared": compared_values,
+        "sampled_values_different": different_values,
+        "max_abs": max_abs,
+        "missing_parameters": missing[:20],
+        "unexpected_parameters": unexpected[:20],
+        "mismatch_count": len(mismatches),
+        "first_mismatches": mismatches[:20],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -110,6 +186,7 @@ def main() -> None:
         raise TypeError("prediction parity is specific to MiniMaxH3Model")
     states = _role_model_checkpoint_state(method, "student")
     dcp.load(states, checkpoint_id=str(checkpoint / "dcp"))
+    dcp_parameter_samples = _parameter_samples(model)
 
     # Use the smallest valid H3 geometry so this tests model arithmetic rather
     # than exhausting memory. Five frames map to two video and eight audio
@@ -126,6 +203,11 @@ def main() -> None:
     batch = model.prepare_batch(raw_batch, generator=generator, latents_source="zeros")
     attn_kind = "vsa" if model.attention_backend_name in {"VIDEO_SPARSE_ATTN", "VIDEO_SPARSE_ATTN_H3"} else "dense"
     reference_video, reference_audio = _predict(model, batch, attn_kind)
+    reference_repeat_video, reference_repeat_audio = _predict(model, batch, attn_kind)
+    dcp_repeat = {
+        "video": _metrics(reference_video, reference_repeat_video),
+        "audio": _metrics(reference_audio, reference_repeat_audio),
+    }
 
     # Release the original role graph, including the 33B teacher, before
     # loading the exported model into the same one-GPU process.
@@ -142,14 +224,21 @@ def main() -> None:
         attention_backend=attention_backend,
     )
     exported_model.sp_group = get_sp_group()
+    exported_parameter_samples = _parameter_samples(exported_model)
+    parameter_parity = _compare_parameter_samples(dcp_parameter_samples, exported_parameter_samples)
     candidate_video, candidate_audio = _predict(exported_model, batch, attn_kind)
+    candidate_repeat_video, candidate_repeat_audio = _predict(exported_model, batch, attn_kind)
+    export_repeat = {
+        "video": _metrics(candidate_video, candidate_repeat_video),
+        "audio": _metrics(candidate_audio, candidate_repeat_audio),
+    }
     video_metrics = _metrics(reference_video, candidate_video)
     audio_metrics = _metrics(reference_audio, candidate_audio)
     passed = all(
         math.isfinite(value)
         for values in (video_metrics, audio_metrics)
         for value in values.values()
-    ) and all(
+    ) and parameter_parity["passed"] and all(
         values["relative_rmse"] <= args.max_relative_rmse and values["cosine"] >= args.min_cosine
         for values in (video_metrics, audio_metrics)
     )
@@ -172,6 +261,11 @@ def main() -> None:
         },
         "video": video_metrics,
         "audio": audio_metrics,
+        "parameter_samples": parameter_parity,
+        "same_model_repeat": {
+            "dcp": dcp_repeat,
+            "export": export_repeat,
+        },
         "passed": passed,
     }
     receipt_path = Path(args.receipt).resolve()
@@ -188,6 +282,11 @@ def main() -> None:
             "parity/video_cosine": video_metrics["cosine"],
             "parity/audio_relative_rmse": audio_metrics["relative_rmse"],
             "parity/audio_cosine": audio_metrics["cosine"],
+            "parity/parameter_samples_passed": int(parameter_parity["passed"]),
+            "parity/dcp_repeat_video_relative_rmse": dcp_repeat["video"]["relative_rmse"],
+            "parity/dcp_repeat_audio_relative_rmse": dcp_repeat["audio"]["relative_rmse"],
+            "parity/export_repeat_video_relative_rmse": export_repeat["video"]["relative_rmse"],
+            "parity/export_repeat_audio_relative_rmse": export_repeat["audio"]["relative_rmse"],
             "parity/passed": int(passed),
         })
         run.finish()

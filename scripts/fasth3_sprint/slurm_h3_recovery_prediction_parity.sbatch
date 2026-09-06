@@ -26,21 +26,29 @@ export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/h36-recovery-export-parity
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
 
+failed_branches=()
 for source_kind in dense vsa; do
   checkpoint="${SPRINT_ROOT}/runs/h36-recovery/${source_kind}-activation/checkpoint-200"
   export_dir="${SPRINT_ROOT}/exports/h36-recovery-comparison/${source_kind}-activation-step200-raw"
   run_id="h36-export-parity-${source_kind}-step200-v1"
   echo "$(date -Is) branch=${source_kind} checkpoint=${checkpoint} export=${export_dir}"
-  srun \
-    --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
-    --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
-    --container-workdir="${REPO_ROOT}" \
-    --export=ALL \
-    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
-      "${REPO_ROOT}/scripts/fasth3_sprint/verify_recovery_export_prediction_parity.py" \
-        --checkpoint "${checkpoint}" \
-        --export "${export_dir}" \
-        --receipt "${DIAGNOSTICS}/${source_kind}-activation-step200-prediction-parity.json" \
-        --wandb-project fasth3-14b-2step-qad-sprint \
-        --wandb-run-id "${run_id}"
+  if ! srun \
+      --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+      --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+      --container-workdir="${REPO_ROOT}" \
+      --export=ALL \
+      /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+        "${REPO_ROOT}/scripts/fasth3_sprint/verify_recovery_export_prediction_parity.py" \
+          --checkpoint "${checkpoint}" \
+          --export "${export_dir}" \
+          --receipt "${DIAGNOSTICS}/${source_kind}-activation-step200-prediction-parity.json" \
+          --wandb-project fasth3-14b-2step-qad-sprint \
+          --wandb-run-id "${run_id}"; then
+    failed_branches+=("${source_kind}")
+  fi
 done
+
+if ((${#failed_branches[@]})); then
+  echo "Prediction parity failed for: ${failed_branches[*]}" >&2
+  exit 1
+fi
