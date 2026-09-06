@@ -1,5 +1,9 @@
 # FastH3 day 1–2 mask recovery pilot
 
+> This remains the protocol for the already launched bounded pilots. The
+> [current consumer model decision](fasth3_consumer_model_decision.md) supersedes
+> the mandatory 14B/pruning target and automatic stage ordering below.
+
 The deliverable remains a static, substantially pruned joint video/audio model,
 with roughly 14B / 20 blocks as the primary target and 24 blocks as a fallback.
 PDD, QAT and QAD follow successful recovery. This experiment tests the removal

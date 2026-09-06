@@ -1,5 +1,10 @@
 # FastH3 pruning: research review and experiment decision
 
+> Superseded scope, September 6: the user's later instruction permits any
+> method that achieves consumer speed, memory fit and joint quality. Follow
+> the [current consumer model decision](fasth3_consumer_model_decision.md) for
+> targets and next experiments. The pruning research below remains background.
+
 ## Decision
 
 Approximately 14B, structurally pruned, joint video/audio, and two transformer
