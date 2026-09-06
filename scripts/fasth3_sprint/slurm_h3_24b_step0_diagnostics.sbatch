@@ -11,7 +11,10 @@ set -euo pipefail
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 REPO_ROOT="${SPRINT_ROOT}/repo"
 PROMPTS="${REPO_ROOT}/examples/training/fasth3_14b_2step_qad/rescue_gate_prompts.json"
-OUTPUT_ROOT="${SPRINT_ROOT}/videos/h36-24b-step0-diagnostics"
+KEEP_BLOCKS="${KEEP_BLOCKS:-24}"
+MAP_STRATEGIES="${MAP_STRATEGIES:-activation uniform}"
+RUN_TAG="${RUN_TAG:-v1}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${SPRINT_ROOT}/videos/h36-${KEEP_BLOCKS}b-step0-diagnostics}"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 mkdir -p "${OUTPUT_ROOT}" "${SPRINT_ROOT}/caches/wandb"
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env
@@ -28,8 +31,8 @@ generate() {
   local kind="$1" strategy="$2"
   local attention=dense
   [[ "${kind}" == vsa ]] && attention=vsa
-  local model="${SPRINT_ROOT}/checkpoints/h18-candidates/${kind}-${strategy}-24b"
-  local run_id="h36-four-prompt-${kind}-${strategy}-24b-step0-grid5-v1"
+  local model="${SPRINT_ROOT}/checkpoints/h18-candidates/${kind}-${strategy}-${KEEP_BLOCKS}b"
+  local run_id="h36-four-prompt-${kind}-${strategy}-${KEEP_BLOCKS}b-step0-grid5-${RUN_TAG}"
   local output="${OUTPUT_ROOT}/${run_id}"
   local cache="${TMPDIR:-/tmp}/fasth3-${SLURM_JOB_ID}/${run_id}"
   test -s "${model}/transformer/candidate_validation_receipt.json"
@@ -49,7 +52,7 @@ generate() {
     /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
       "${REPO_ROOT}/scripts/fasth3_sprint/run_baseline_matrix.py" \
         --model-path "${model}" \
-        --checkpoint-role "fallback-${kind}-${strategy}-24b-step0" \
+        --checkpoint-role "initializer-${kind}-${strategy}-${KEEP_BLOCKS}b-step0" \
         --attention "${attention}" \
         --prompts "${PROMPTS}" \
         --output-dir "${output}" \
@@ -62,7 +65,7 @@ generate() {
 }
 
 for kind in dense vsa; do
-  for strategy in activation uniform; do
+  for strategy in ${MAP_STRATEGIES}; do
     generate "${kind}" "${strategy}"
   done
 done

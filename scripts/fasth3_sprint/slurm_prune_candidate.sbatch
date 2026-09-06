@@ -12,8 +12,8 @@ set -euo pipefail
 : "${SOURCE_KIND:?SOURCE_KIND is required}"
 : "${MAP_STRATEGY:?MAP_STRATEGY is required}"
 KEEP_BLOCKS="${KEEP_BLOCKS:-20}"
-if ! [[ "${KEEP_BLOCKS}" =~ ^(20|24)$ ]]; then
-  echo "KEEP_BLOCKS must be 20 or 24" >&2
+if ! [[ "${KEEP_BLOCKS}" =~ ^(20|24|32|36|40)$ ]]; then
+  echo "KEEP_BLOCKS must be 20, 24, 32, 36 or 40" >&2
   exit 2
 fi
 
