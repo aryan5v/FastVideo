@@ -9,8 +9,10 @@
 set -euo pipefail
 
 : "${SOURCE_KIND:?SOURCE_KIND must be dense or vsa}"
-: "${CHECKPOINT_STEP:?CHECKPOINT_STEP must be 25, 50, 75, 100, or 200}"
-case "${CHECKPOINT_STEP}" in 25|50|75|100|200) ;; *) exit 2 ;; esac
+: "${EXPERIMENT_ID:?EXPERIMENT_ID must match the recovery run}"
+[[ "${EXPERIMENT_ID}" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
+: "${CHECKPOINT_STEP:?CHECKPOINT_STEP must be 25, 50, 75, or 100}"
+case "${CHECKPOINT_STEP}" in 25|50|75|100) ;; *) exit 2 ;; esac
 case "${SOURCE_KIND}" in
   dense) ATTENTION=dense ;;
   vsa) ATTENTION=vsa ;;
@@ -19,10 +21,10 @@ esac
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 REPO_ROOT="${SPRINT_ROOT}/repo"
-CHECKPOINT="${SPRINT_ROOT}/runs/h36-four-call-rescue/${SOURCE_KIND}/checkpoint-${CHECKPOINT_STEP}"
-EXPORT="${SPRINT_ROOT}/exports/h36-four-call-rescue/${SOURCE_KIND}-step${CHECKPOINT_STEP}-bf16"
-OUTPUT="${SPRINT_ROOT}/videos/h36-four-call-rescue-${SOURCE_KIND}-step${CHECKPOINT_STEP}"
-RUN_ID="h36-four-call-rescue-gate-${SOURCE_KIND}-step${CHECKPOINT_STEP}-v1"
+CHECKPOINT="${SPRINT_ROOT}/runs/h36-four-call-rescue/${EXPERIMENT_ID}/checkpoint-${CHECKPOINT_STEP}"
+EXPORT="${SPRINT_ROOT}/exports/h36-four-call-rescue/${EXPERIMENT_ID}-step${CHECKPOINT_STEP}-bf16"
+OUTPUT="${SPRINT_ROOT}/videos/h36-four-call-rescue-${EXPERIMENT_ID}-step${CHECKPOINT_STEP}"
+RUN_ID="h36-four-call-rescue-gate-${EXPERIMENT_ID}-step${CHECKPOINT_STEP}-v1"
 LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 PROMPTS="${REPO_ROOT}/examples/training/fasth3_14b_2step_qad/rescue_gate_prompts.json"
 mkdir -p "$(dirname "${EXPORT}")" "${OUTPUT}" "${LOG_DIR}" "${SPRINT_ROOT}/caches/triton/${RUN_ID}"
@@ -43,8 +45,7 @@ export TRITON_CACHE_DIR="${SPRINT_ROOT}/caches/triton/${RUN_ID}"
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
 
-overwrite=()
-[[ -e "${EXPORT}" ]] && overwrite+=(--overwrite)
+[[ ! -e "${EXPORT}" ]] || { echo "refusing to overwrite ${EXPORT}" >&2; exit 2; }
 srun \
   --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
   --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
@@ -56,8 +57,7 @@ srun \
       --output-dir "${EXPORT}" \
       --role student \
       --load-precision bf16 \
-      --verify \
-      "${overwrite[@]}"
+      --verify
 
 srun \
   --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
@@ -74,6 +74,5 @@ srun \
       --run-id "${RUN_ID}" \
       --source-commit "$(git -C "${REPO_ROOT}" rev-parse HEAD)" \
       --max-prompts 4 \
-      --height 480 --width 832 --num-frames 124 --steps 5 --num-gpus 4 \
+      --height 480 --width 832 --num-frames 124 --seed 2026082050 --steps 5 --num-gpus 4 \
       --profile strict --no-fa4 --no-compile --no-upload-videos
-

@@ -11,6 +11,9 @@ set -euo pipefail
 : "${SOURCE_KIND:?SOURCE_KIND must be dense or vsa}"
 : "${WARM_START_PATH:?WARM_START_PATH is required}"
 : "${DATA_ROOT:?DATA_ROOT is required}"
+: "${EXPERIMENT_ID:?EXPERIMENT_ID must identify this initializer and recovery branch}"
+: "${QUALITY_GATE_RECEIPT:?QUALITY_GATE_RECEIPT must record a passed initializer review}"
+[[ "${EXPERIMENT_ID}" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 SYNTH_DATA_ROOT="${SYNTH_DATA_ROOT:-${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}/data/h3-rescue-synthetic-train64-124f-207a}"
 TARGET_STEPS="${TARGET_STEPS:-25}"
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
@@ -19,7 +22,7 @@ CONFIG="${REPO_ROOT}/examples/train/configs/fasth3_14b_four_call_rescue.yaml"
 
 case "${TARGET_STEPS}" in
   25) RESUME="" ;;
-  50|75|100|200) RESUME="latest" ;;
+  50|75|100) RESUME="previous" ;;
   *) echo "TARGET_STEPS must stop at a 25-step rescue gate" >&2; exit 2 ;;
 esac
 case "${SOURCE_KIND}" in
@@ -36,13 +39,31 @@ case "${SOURCE_KIND}" in
   *) echo "SOURCE_KIND must be dense or vsa" >&2; exit 2 ;;
 esac
 
-OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-four-call-rescue/${SOURCE_KIND}"
-RUN_ID="h36-four-call-rescue-${SOURCE_KIND}-step${TARGET_STEPS}"
+OUTPUT_ROOT="${SPRINT_ROOT}/runs/h36-four-call-rescue/${EXPERIMENT_ID}"
+RUN_ID="h36-four-call-rescue-${EXPERIMENT_ID}-step${TARGET_STEPS}"
 LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}" "${SPRINT_ROOT}/caches/triton/${RUN_ID}"
 test -s "${WARM_START_PATH}/transformer/config.json"
 test -d "${DATA_ROOT}"
 test -d "${SYNTH_DATA_ROOT}"
+FEATURE_INDICES="$(python3 - "${WARM_START_PATH}" "${QUALITY_GATE_RECEIPT}" "${SOURCE_KIND}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+model, gate_path, kind = sys.argv[1:]
+gate = json.loads(Path(gate_path).read_text())
+config = json.loads((Path(model) / "transformer/config.json").read_text())
+assert Path(gate["model_path"]).resolve() == Path(model).resolve()
+assert gate["source_kind"] == kind
+assert all(gate.get(key) is True for key in ("recognizable_video", "motion", "noncollapsed_audio"))
+digest = hashlib.sha256(json.dumps(config["block_map"], separators=(",", ":")).encode()).hexdigest()
+assert gate["block_map_sha256"] == digest
+count = int(config["num_layers"])
+print(json.dumps([round(i * count / 4) - 1 for i in range(1, 5)]))
+PY
+)"
 
 python3 - "${DATA_ROOT}" "${SYNTH_DATA_ROOT}" <<'PY'
 import glob
@@ -66,6 +87,12 @@ if [[ -n "${RESUME}" ]]; then
   previous="$((TARGET_STEPS - 25))"
   test -s "${OUTPUT_ROOT}/checkpoint-${previous}/metadata.json"
   test -s "${OUTPUT_ROOT}/checkpoint-${previous}/dcp/.metadata"
+  RESUME="${OUTPUT_ROOT}/checkpoint-${previous}"
+else
+  if find "${OUTPUT_ROOT}" -mindepth 1 -maxdepth 1 -name 'checkpoint-*' | read -r _; then
+    echo "refusing fresh recovery over existing checkpoints: ${OUTPUT_ROOT}" >&2
+    exit 2
+  fi
 fi
 
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env
@@ -97,6 +124,7 @@ srun \
     --models.student.attention_backend "${ATTENTION_BACKEND}" \
     --models.teacher.init_from "${TEACHER_PATH}" \
     --models.teacher.attention_backend "${ATTENTION_BACKEND}" \
+    --method.feature_local_block_indices "${FEATURE_INDICES}" \
     --training.data.data_path "[${DATA_ROOT}, ${SYNTH_DATA_ROOT}]" \
     --training.loop.max_train_steps "${TARGET_STEPS}" \
     --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
