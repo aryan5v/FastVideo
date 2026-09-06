@@ -45,6 +45,13 @@ PARAMETER_RANGES = {
     # selected block, making the sparse release tier roughly 14.5B.
     "vsa": (14_400_000_000, 14_650_000_000),
 }
+PARAMETER_RANGES_BY_LAYERS = {
+    20: PARAMETER_RANGES,
+    24: {
+        "dense": (16_250_000_000, 16_420_000_000),
+        "vsa": (17_150_000_000, 17_380_000_000),
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -185,7 +192,13 @@ def validate_candidate(
 
 def main() -> None:
     args = parse_args()
-    default_minimum, default_maximum = PARAMETER_RANGES[args.expected_source_kind]
+    try:
+        default_minimum, default_maximum = PARAMETER_RANGES_BY_LAYERS[args.expected_layers][args.expected_source_kind]
+    except KeyError as error:
+        if args.min_parameters is None or args.max_parameters is None:
+            raise ValueError(
+                f"No default parameter range for {args.expected_layers} layers; pass explicit bounds") from error
+        default_minimum, default_maximum = args.min_parameters, args.max_parameters
     receipt = validate_candidate(
         args.transformer,
         expected_source_kind=args.expected_source_kind,

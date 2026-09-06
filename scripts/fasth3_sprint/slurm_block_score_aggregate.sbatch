@@ -9,9 +9,18 @@
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
+KEEP_BLOCKS="${KEEP_BLOCKS:-20}"
+if ! [[ "${KEEP_BLOCKS}" =~ ^(20|24)$ ]]; then
+  echo "KEEP_BLOCKS must be 20 or 24" >&2
+  exit 2
+fi
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
-LOG_DIR="${SPRINT_ROOT}/logs/h6-block-score-aggregate"
+RUN_ID="h6-block-score-aggregate"
+if [[ "${KEEP_BLOCKS}" != 20 ]]; then
+  RUN_ID="h36-block-score-aggregate-${KEEP_BLOCKS}b-v1"
+fi
+LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 mkdir -p "${LOG_DIR}"
 
 srun \
@@ -28,5 +37,7 @@ srun \
       scripts/fasth3_sprint/aggregate_minimax_h3_block_scores.py \
       --partials '${SPRINT_ROOT}/eval/h6-block-score' \
       --output-dir '${SPRINT_ROOT}/manifests/h6-block-score' \
-      --expected-shards 16
+      --expected-shards 16 \
+      --keep-blocks '${KEEP_BLOCKS}' \
+      --run-id '${RUN_ID}'
   "

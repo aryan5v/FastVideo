@@ -134,8 +134,8 @@ def main() -> None:
     activation_map = sorted([0, num_blocks - 1, *interior[:args.keep_blocks - 2]])
     uniform_map = _uniform_map(num_blocks, args.keep_blocks)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    activation_path = args.output_dir / "activation_20_block_map.json"
-    uniform_path = args.output_dir / "uniform_20_block_map.json"
+    activation_path = args.output_dir / f"activation_{args.keep_blocks}_block_map.json"
+    uniform_path = args.output_dir / f"uniform_{args.keep_blocks}_block_map.json"
     activation_path.write_text(json.dumps({
         "strategy": "activation_ablation_structure_aware",
         "source_num_layers": num_blocks,
@@ -170,7 +170,8 @@ def main() -> None:
         "uniform_block_map": uniform_map,
         "partials": [str(path) for path in paths],
     }
-    manifest_path = args.output_dir / "block_score_manifest.json"
+    manifest_name = "block_score_manifest.json" if args.keep_blocks == 20 else f"block_score_{args.keep_blocks}_manifest.json"
+    manifest_path = args.output_dir / manifest_name
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     import wandb

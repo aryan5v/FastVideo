@@ -11,6 +11,11 @@ set -euo pipefail
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
 : "${SOURCE_KIND:?SOURCE_KIND is required}"
 : "${MAP_STRATEGY:?MAP_STRATEGY is required}"
+KEEP_BLOCKS="${KEEP_BLOCKS:-20}"
+if ! [[ "${KEEP_BLOCKS}" =~ ^(20|24)$ ]]; then
+  echo "KEEP_BLOCKS must be 20 or 24" >&2
+  exit 2
+fi
 
 case "${SOURCE_KIND}" in
   dense)
@@ -38,10 +43,14 @@ esac
 
 REPO_ROOT="${SPRINT_ROOT}/repo"
 SOURCE_ROOT="${SOURCE_MODEL_ROOT}/transformer"
-MAP_PATH="${SPRINT_ROOT}/manifests/h6-block-score/${MAP_STRATEGY}_20_block_map.json"
-OUTPUT_ROOT="${SPRINT_ROOT}/checkpoints/h18-candidates/${SOURCE_KIND}-${MAP_STRATEGY}"
+MAP_PATH="${SPRINT_ROOT}/manifests/h6-block-score/${MAP_STRATEGY}_${KEEP_BLOCKS}_block_map.json"
+candidate_suffix=""
+if [[ "${KEEP_BLOCKS}" != 20 ]]; then
+  candidate_suffix="-${KEEP_BLOCKS}b"
+fi
+OUTPUT_ROOT="${SPRINT_ROOT}/checkpoints/h18-candidates/${SOURCE_KIND}-${MAP_STRATEGY}${candidate_suffix}"
 OUTPUT_TRANSFORMER="${OUTPUT_ROOT}/transformer"
-RUN_ID="h18-prune-${SOURCE_KIND}-${MAP_STRATEGY}-20b"
+RUN_ID="h36-prune-${SOURCE_KIND}-${MAP_STRATEGY}-${KEEP_BLOCKS}b-v1"
 LOG_DIR="${SPRINT_ROOT}/logs/${RUN_ID}"
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}"
 
@@ -63,7 +72,7 @@ srun \
       --src '${SOURCE_ROOT}' \
       --dst '${OUTPUT_TRANSFORMER}' \
       --block-map '${MAP_PATH}' \
-      --strategy '${MAP_STRATEGY}_20_block_${SOURCE_KIND}_v1' \
+      --strategy '${MAP_STRATEGY}_${KEEP_BLOCKS}_block_${SOURCE_KIND}_v1' \
       --source-model '${MODEL_ID}' \
       --source-revision '${SOURCE_REVISION}' \
       --wandb-project fasth3-14b-2step-qad-sprint \
@@ -85,3 +94,18 @@ for component in "${SOURCE_MODEL_ROOT}"/*; do
   fi
   ln -s "${component}" "${OUTPUT_ROOT}/${name}"
 done
+
+srun \
+  --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+  --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+  --container-workdir="${REPO_ROOT}" \
+  bash -lc "
+    set -euo pipefail
+    export PYTHONPATH=${REPO_ROOT}:${SPRINT_ROOT}/python-packages
+    /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python \
+      scripts/fasth3_sprint/validate_h3_candidate.py \
+      --transformer '${OUTPUT_TRANSFORMER}' \
+      --expected-source-kind '${SOURCE_KIND}' \
+      --expected-layers '${KEEP_BLOCKS}' \
+      > '${LOG_DIR}/candidate-validation.json'
+  "
