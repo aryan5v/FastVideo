@@ -10,8 +10,9 @@ set -euo pipefail
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 REPO_ROOT="${SPRINT_ROOT}/repo"
-DIAGNOSTICS="${SPRINT_ROOT}/diagnostics/recovery-failure"
-LOG_DIR="${SPRINT_ROOT}/logs/h36-recovery-export-parity"
+RUN_TAG="${RUN_TAG:-v2-${SLURM_JOB_ID}}"
+DIAGNOSTICS="${SPRINT_ROOT}/diagnostics/recovery-failure/${RUN_TAG}"
+LOG_DIR="${SPRINT_ROOT}/logs/h36-recovery-export-parity/${RUN_TAG}"
 mkdir -p "${DIAGNOSTICS}" "${LOG_DIR}" "${SPRINT_ROOT}/caches/triton/h36-recovery-export-parity"
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env
 export HF_HOME=/mnt/nfs/vlm-aryan/hf-cache
@@ -30,7 +31,7 @@ failed_branches=()
 for source_kind in dense vsa; do
   checkpoint="${SPRINT_ROOT}/runs/h36-recovery/${source_kind}-activation/checkpoint-200"
   export_dir="${SPRINT_ROOT}/exports/h36-recovery-comparison/${source_kind}-activation-step200-raw"
-  run_id="h36-export-parity-${source_kind}-step200-v1"
+  run_id="h36-export-parity-${source_kind}-step200-${RUN_TAG}"
   echo "$(date -Is) branch=${source_kind} checkpoint=${checkpoint} export=${export_dir}"
   if ! srun \
       --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \

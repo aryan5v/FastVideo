@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
+import os
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +34,27 @@ from fastvideo.train.entrypoint.dcp_to_diffusers import (
 from fastvideo.train.models.minimax_h3 import MiniMaxH3Model
 from fastvideo.train.utils.builder import build_from_config
 from fastvideo.train.utils.checkpoint import CheckpointManager, _resolve_resume_checkpoint
+
+
+def _backend_receipt(model: MiniMaxH3Model) -> dict[str, Any]:
+    requested = model.attention_backend
+    resolved = getattr(model.transformer.config, "_resolved_attention_backend", None)
+    if resolved != requested:
+        raise RuntimeError(f"attention backend changed during load: {requested} -> {resolved}")
+    kernels = {}
+    for name, module in model.transformer.named_modules():
+        backend = getattr(module, "backend", None)
+        if backend is not None:
+            kernels[_canonical_parameter_name(name)] = getattr(backend, "name", str(backend))
+    if not kernels:
+        raise RuntimeError("no constructed attention kernels found")
+    return {
+        "requested": requested.name,
+        "resolved": resolved.name,
+        "layer_backends": kernels,
+        "parameter_dtypes": sorted({str(p.dtype) for p in model.transformer.parameters()}),
+        "quantization": str(getattr(model.transformer.config, "quant_config", None)),
+    }
 
 
 def _predict(model: MiniMaxH3Model, batch: Any, attn_kind: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -104,6 +129,9 @@ def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -
             "indices": indices.cpu().tolist(),
             "values": flat[indices].float().cpu().tolist(),
         }
+        if "attn.to_gate_compress.weight" in name:
+            gate_bytes = local_parameter.contiguous().view(torch.uint8).cpu().numpy().tobytes()
+            result[name]["full_tensor_sha256"] = hashlib.sha256(gate_bytes).hexdigest()
     return result
 
 
@@ -121,6 +149,7 @@ def _compare_parameter_samples(
         ref = reference[name]
         cand = candidate[name]
         metadata_equal = all(ref[key] == cand[key] for key in ("shape", "dtype", "numel", "indices"))
+        metadata_equal = metadata_equal and ref.get("full_tensor_sha256") == cand.get("full_tensor_sha256")
         ref_values = torch.tensor(ref["values"], dtype=torch.float32)
         cand_values = torch.tensor(cand["values"], dtype=torch.float32)
         values_equal = ref_values.shape == cand_values.shape and torch.equal(ref_values, cand_values)
@@ -149,6 +178,10 @@ def _compare_parameter_samples(
         "unexpected_parameters": unexpected[:20],
         "mismatch_count": len(mismatches),
         "first_mismatches": mismatches[:20],
+        "gate_full_tensor_sha256": {
+            name: value["full_tensor_sha256"] for name, value in reference.items()
+            if "full_tensor_sha256" in value
+        },
     }
 
 
@@ -163,6 +196,7 @@ def main() -> None:
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-run-id", default=None)
     args = parser.parse_args()
+    started = time.time()
 
     checkpoint = _resolve_resume_checkpoint(args.checkpoint, output_dir=args.checkpoint)
     export = Path(args.export).resolve()
@@ -192,6 +226,7 @@ def main() -> None:
     states = _role_model_checkpoint_state(method, "student")
     dcp.load(states, checkpoint_id=str(checkpoint / "dcp"))
     dcp_parameter_samples = _parameter_samples(model)
+    dcp_backend = _backend_receipt(model)
 
     # Use the smallest valid H3 geometry so this tests model arithmetic rather
     # than exhausting memory. Five frames map to two video and eight audio
@@ -229,6 +264,7 @@ def main() -> None:
         attention_backend=attention_backend,
     )
     exported_model.sp_group = get_sp_group()
+    export_backend = _backend_receipt(exported_model)
     exported_parameter_samples = _parameter_samples(exported_model)
     parameter_parity = _compare_parameter_samples(dcp_parameter_samples, exported_parameter_samples)
     candidate_video, candidate_audio = _predict(exported_model, batch, attn_kind)
@@ -239,16 +275,24 @@ def main() -> None:
     }
     video_metrics = _metrics(reference_video, candidate_video)
     audio_metrics = _metrics(reference_audio, candidate_audio)
-    passed = all(
+    comparisons = (video_metrics, audio_metrics, *dcp_repeat.values(), *export_repeat.values())
+    passed = dcp_backend == export_backend and all(
         math.isfinite(value)
-        for values in (video_metrics, audio_metrics)
+        for values in comparisons
         for value in values.values()
     ) and parameter_parity["passed"] and all(
         values["relative_rmse"] <= args.max_relative_rmse and values["cosine"] >= args.min_cosine
-        for values in (video_metrics, audio_metrics)
+        for values in comparisons
     )
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "node": os.uname().nodename,
+        "elapsed_seconds": time.time() - started,
+        "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(),
+        "wandb_run_id": args.wandb_run_id,
+        "backends": {"dcp": dcp_backend, "export": export_backend},
         "checkpoint": str(checkpoint),
         "export": str(export),
         "seed": args.seed,

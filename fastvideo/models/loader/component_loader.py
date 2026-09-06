@@ -45,6 +45,7 @@ from fastvideo.models.loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from fastvideo.models.registry import ModelRegistry
+from fastvideo.platforms import AttentionBackendEnum
 from fastvideo.utils import PRECISION_TO_TYPE, is_pin_memory_available
 from fastvideo.hooks.layerwise_offload import enable_layerwise_offload
 
@@ -1051,8 +1052,9 @@ class TransformerLoader(ComponentLoader):
         # Generator-only QAT for DMD distillation: the teacher (real_score) and
         # critic (fake_score) transformers load with this flag set and must stay
         # full precision. Drop the nvfp4_qat quant from their copied config, and
-        # build their attention under a scope that ignores any process-wide
-        # ATTN_QAT_TRAIN request so it falls back to dense. The generator loads
+        # ignore process-wide quantized attention requests. Explicit SDPA,
+        # FlashAttention, or trained H3 VSA choices must survive: changing the
+        # latter also changes the model's gate parameters. The generator loads
         # without the flag and keeps both. The scope is exception-safe and
         # needs no env mutation or selector cache flush (the request is part
         # of the resolution cache key).
@@ -1105,8 +1107,18 @@ class TransformerLoader(ComponentLoader):
         # non-strictly for Cosmos2.5 only; keep upstream strict behavior for others.
         strict_load = not (cls_name.startswith("Cosmos25") or cls_name == "Cosmos25Transformer3DModel"
                            or getattr(fastvideo_args.pipeline_config, "prefix", "") == "Cosmos25")
+        role_scope = _active_component_attention_backend_scope()
+        preserve_role_backend = (
+            role_scope is not None
+            and role_scope.component == "transformer"
+            and role_scope.backend in {
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
+            }
+        )
         attention_context = (_component_attention_backend_scope(None, component="transformer")
-                             if _qat_generator_only else nullcontext())
+                             if _qat_generator_only and not preserve_role_backend else nullcontext())
         with attention_context:
             # dit_config is what the model is handed and keeps as `self.config`,
             # so recording here makes the decision readable from the loaded
