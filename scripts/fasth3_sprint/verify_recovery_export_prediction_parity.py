@@ -83,7 +83,12 @@ def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -
         name = _canonical_parameter_name(raw_name)
         if name in result:
             raise ValueError(f"duplicate canonical parameter name: {name}")
-        flat = parameter.detach().reshape(-1)
+        detached = parameter.detach()
+        # FSDP exposes DTensor parameters even when this gate reshards onto a
+        # one-rank process. Its local shard is the complete tensor here and can
+        # be sampled with ordinary Tensor indexing.
+        local_parameter = detached.to_local() if hasattr(detached, "to_local") else detached
+        flat = local_parameter.reshape(-1)
         sample_count = min(samples_per_tensor, flat.numel())
         indices = torch.linspace(
             0,
@@ -93,9 +98,9 @@ def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -
             dtype=torch.float64,
         ).round().to(torch.long)
         result[name] = {
-            "shape": list(parameter.shape),
-            "dtype": str(parameter.dtype),
-            "numel": parameter.numel(),
+            "shape": list(detached.shape),
+            "dtype": str(detached.dtype),
+            "numel": detached.numel(),
             "indices": indices.cpu().tolist(),
             "values": flat[indices].float().cpu().tolist(),
         }
