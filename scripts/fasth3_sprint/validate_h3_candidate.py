@@ -55,7 +55,7 @@ PARAMETER_RANGES_BY_LAYERS = {
 # Exact counts from both immutable V1 source checkpoint headers: shared
 # modules plus identical-size transformer blocks. These larger models are
 # initializer experiments, not a change to the 20-block release target.
-for _layers in (32, 36, 40):
+for _layers in (32, 36, 40, 48):
     PARAMETER_RANGES_BY_LAYERS[_layers] = {
         kind: (844_400_896 + _layers * per_block,) * 2
         for kind, per_block in {"dense": 645_571_840, "vsa": 684_107_008}.items()

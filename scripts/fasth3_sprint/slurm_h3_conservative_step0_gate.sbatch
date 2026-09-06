@@ -9,6 +9,7 @@
 
 set -euo pipefail
 export SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
+export CANDIDATE_DEPTHS="${CANDIDATE_DEPTHS:-40 36 32}"
 REPO_ROOT="${SPRINT_ROOT}/repo"
 export RUN_TAG="conservative-${SLURM_JOB_ID}"
 export OUTPUT_ROOT="${SPRINT_ROOT}/videos/h36-conservative-step0/${RUN_TAG}"
@@ -22,7 +23,10 @@ import os
 from pathlib import Path
 
 root = Path(os.environ["SPRINT_ROOT"]) / "manifests/h6-block-score"
-for count in (40, 36, 32):
+depths = [int(value) for value in os.environ["CANDIDATE_DEPTHS"].split()]
+assert depths and len(depths) == len(set(depths))
+assert all(count in (32, 36, 40, 48) for count in depths)
+for count in depths:
     block_map = [round(i * 49 / (count - 1)) for i in range(count)]
     assert len(set(block_map)) == count
     assert block_map[0] == 0 and block_map[-1] == 49
@@ -36,7 +40,7 @@ for count in (40, 36, 32):
     print(json.dumps(payload), flush=True)
 PY
 
-for keep_blocks in 40 36 32; do
+for keep_blocks in ${CANDIDATE_DEPTHS}; do
   for source_kind in dense vsa; do
     model="${SPRINT_ROOT}/checkpoints/h18-candidates/${source_kind}-uniform-${keep_blocks}b"
     if [[ -e "${model}" ]]; then

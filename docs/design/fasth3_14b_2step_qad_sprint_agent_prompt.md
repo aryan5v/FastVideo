@@ -1,11 +1,12 @@
 # FastH3 14B two-step QAD sprint
 
-> Direction update, September 5, 2026: the user made model size flexible and
-> prioritized a consumer release in roughly three days. Follow
-> [the consumer release plan](fasth3_consumer_72h_release.md) for current scope
-> and decision gates. This document retains the original research plan; its
-> fixed 14B/two-call targets and mandatory sequence of training stages no
-> longer determine release eligibility.
+> Scope correction, September 5, 2026: a smaller, structurally pruned model
+> is required. Approximately 14B and two transformer calls remain the primary
+> targets; a larger pruned model remains a quality fallback. The released
+> intact model is the teacher/reference, not a substitute deliverable. Apply
+> only the evidence-driven pruning and recovery corrections in
+> [the sprint repair addendum](fasth3_consumer_72h_release.md). The user targets
+> a release candidate in roughly three days; the quality gates still apply.
 
 This document is the execution prompt for the GPU agent. Treat it as the source
 of truth for the sprint. Work on the branch named below, keep the user updated at
@@ -226,10 +227,17 @@ VAE decoders, communication, and kernel efficiency do not scale by that ratio.
 
 ### Select the blocks
 
-Build two 20-block candidates:
+Reach the 20-block target through progressive pruning and recovery. The
+existing direct 20/24-block cuts collapsed, and both uniform 40-block branches
+failed the exact-speech check despite recognizable video. Do not repeat these
+large cuts and assume a longer run will repair them.
 
-1. An activation-selected candidate.
-2. A uniform-depth control candidate.
+Start the next experiment with a small reduction from the healthy 50-block
+V1 parent, initially two blocks. Compare activation-informed selections with
+a uniform control. Rank the proposed joint removal, not just each block in
+isolation. Accept a cut only after joint video/audio evaluation; recover the
+accepted candidate before taking another cut. Adapt the next cut size to
+measured recoverability rather than prescribing an untested ladder to 20.
 
 Always retain the first and final main blocks. Score the remaining blocks on at
 least 256 representative packed T2VA examples. The score must include:
@@ -246,14 +254,19 @@ Use the PARE paper as guidance for structure-aware importance scoring, but do
 not implement its adaptive router during this sprint. H3 has a different packed
 audio-video layout, and a router adds training and runtime risk.
 
-Remap selected teacher block indices to contiguous student indices. Save the
-mapping in checkpoint metadata. Teach every loader, exporter, MLX converter,
+Remap selected parent block indices to contiguous student indices. Preserve
+both the parent-local selection and its composed original V1 block mapping,
+plus parent checkpoint hashes, in checkpoint metadata. Copy recovered parent
+weights for subsequent cuts rather than resetting to the original V1 weights.
+Teach every loader, exporter, MLX converter,
 and inference config to derive block count from the checkpoint rather than
 assuming 50.
 
-If neither 20-block candidate produces at least 10 usable results in the first
-12-prompt gate after 400 recovery steps, switch to the 24-block fallback. Do
-not spend the remaining sprint trying to rescue a collapsed 20-block model.
+The 24-block quality fallback must also be reached from a recovered parent;
+the failed direct 24-block initializers are not usable fallbacks. Intermediate
+40/48-block checkpoints establish recovery progress, not completion of the
+approximately 14B target. Any final larger pruned fallback must demonstrate
+useful end-to-end improvement and disclose its actual size.
 
 ## Implement joint H3 distillation
 
@@ -330,26 +343,39 @@ published four-call output with synchronized audio.
 
 ## Phase B: recover the pruned four-call student
 
-Initialize each student by copying the selected FastH3 V1 blocks and all shared
-modules. Use the dense V1 checkpoint for the MLX track and the VSA V1 checkpoint
-for the CUDA sparse track. Do not run VSA weights through dense attention.
+Initialize the first cut from FastH3 V1 and later cuts from the last accepted
+recovered parent, copying selected blocks and shared modules. Retain the
+original branch-matched V1 as the frozen trajectory teacher so successive
+parents do not become the sole quality target. Use the dense branch for MLX
+and the VSA branch for sparse CUDA. Do not run VSA weights through dense attention.
 
 Use a short high-precision recovery before target quantization:
 
-- 200-step smoke checkpoint;
-- 400-step candidate-selection checkpoint;
-- continue the winner to 600 to 1,000 steps only if validation improves;
+- first verify finite gradients, FP32 optimizer state and nonzero master-weight
+  updates, then save a 25-step diagnostic checkpoint;
+- treat 25 steps as an implementation check, not a recovery budget or proof
+  that a candidate cannot recover;
+- review decoded video/audio and held-out trajectory errors at 25/50/75/100;
+  continue stable improving recovery toward the original 200/400-step gates
+  when justified, extending the bounded launcher explicitly if needed;
+- continue toward 600 to 1,000 steps only if validation and remaining sprint
+  time justify it; roll back failed cuts instead of training collapse blindly;
 - learning-rate search centered on `1e-6` and `2e-6`;
-- BF16 model execution with FP32 optimizer state;
+- BF16 model execution with FP32 master parameters and FP32 optimizer state;
+  start a fresh optimizer when replacing the old BF16 optimizer state;
 - EMA checkpoint selection;
 - gradient clipping at 1.0 unless measured gradients justify a change.
 
-Use teacher velocity matching, selected hidden-state matching, and the normal H3
-T2VA denoising target. Keep feature loss small enough that it cannot dominate
+Use branch-matched teacher trajectory matching and selected hidden-state
+matching, with independently normalized video and audio terms. A normal H3
+T2VA denoising auxiliary requires a separate correctly noised data forward;
+do not apply the paired noise-minus-data target to generated rollout states.
+It is disabled in the first corrected trial. Use the corrected 124-frame,
+37-video-latent, 207-audio-latent corpus. Keep feature loss small enough that it cannot dominate
 video and audio prediction losses. Record the exact weights in the config.
 
-At 400 steps, compare activation-selected and uniform students on the locked 12
-prompts. Select one block map for both deployment tracks if possible. If VSA and
+Compare recovered activation-selected and uniform candidates on the locked 12
+prompts before accepting another cut. Select one block map for both deployment tracks if possible. If VSA and
 dense tracks require different maps, document the evidence and keep the maps
 separate.
 
@@ -833,7 +859,10 @@ logs.
 
 ## Stop and fallback rules
 
-- If 20 blocks fail the 400-step recovery gate, use 24 blocks.
+- If a pruning stage fails, restore its last healthy parent and reduce or
+  reselect the cut. If the 20-block target remains below quality gates, retain
+  the smallest recovered pruned fallback; do not reuse the collapsed direct
+  24-block model or substitute an intact quantized model for the deliverable.
 - If two-call consistency fails but three calls are stable, continue QAD on the
   two-call branch while preserving the three-call checkpoint. Ask the user
   before changing the public target.
