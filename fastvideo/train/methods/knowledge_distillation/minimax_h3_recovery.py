@@ -121,8 +121,9 @@ class MiniMaxH3RecoveryMethod(TrainingMethod):
             raise ValueError("recovery requires trainable student and frozen teacher")
         self.teacher = teacher
         self._student_attn_kind: Literal["dense", "vsa"] = self._infer_attn_kind()
-        self._teacher_attn_kind: Literal["dense", "vsa"] = (
-            "vsa" if teacher.attention_backend_name in {"VIDEO_SPARSE_ATTN", "VIDEO_SPARSE_ATTN_H3"} else "dense")
+        self._teacher_attn_kind: Literal["dense",
+                                         "vsa"] = ("vsa" if teacher.attention_backend_name
+                                                   in {"VIDEO_SPARSE_ATTN", "VIDEO_SPARSE_ATTN_H3"} else "dense")
         match_teacher_backend = bool(self.method_config.get("match_teacher_backend", False))
         if match_teacher_backend:
             if self._teacher_attn_kind != self._student_attn_kind:
@@ -394,9 +395,8 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 if parameter.requires_grad and parameter.dtype != torch.float32
             ]
             if bad:
-                raise ValueError(
-                    "four-call recovery requires FP32 trainable parameters; "
-                    f"found non-FP32 tensors including {bad[:5]}")
+                raise ValueError("four-call recovery requires FP32 trainable parameters; "
+                                 f"found non-FP32 tensors including {bad[:5]}")
 
     def _interval_weights(self, raw: Any, modality: str) -> tuple[float, ...]:
         intervals = self._grid_points - 1
@@ -440,14 +440,14 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         video = batch.noise.permute(0, 2, 1, 3, 4)
         audio = batch.audio_noise
-        model = self.student if use_student else self.teacher
+        predict = self._predict_student_joint_noise if use_student else self.teacher.predict_joint_noise
         attn_kind = self._student_attn_kind if use_student else self._teacher_attn_kind
         with torch.no_grad():
             for step in range(interval):
                 self._set_vsa_interval(batch, step)
                 video_time = (1.0 - video_sigmas[step]).reshape(1)
                 audio_time = (1.0 - audio_sigmas[step]).reshape(1)
-                video_flow, audio_flow = model.predict_joint_noise(
+                video_flow, audio_flow = predict(
                     video,
                     audio,
                     video_time,
@@ -459,6 +459,9 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 video = _euler_update(video, video_flow, video_sigmas[step], video_sigmas[step + 1])
                 audio = _euler_update(audio, audio_flow, audio_sigmas[step], audio_sigmas[step + 1])
         return video.detach(), audio.detach()
+
+    def _predict_student_joint_noise(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.student.predict_joint_noise(*args, **kwargs)
 
     def single_train_step(
         self,
@@ -515,7 +518,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 attn_kind=self._teacher_attn_kind,
             )
         with _capture_hidden_summaries(self.student, self._student_feature_indices) as student_features:
-            student_video, student_audio = self.student.predict_joint_noise(
+            student_video, student_audio = self._predict_student_joint_noise(
                 state_video,
                 state_audio,
                 video_time,
@@ -643,24 +646,23 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             changed += int(torch.count_nonzero(after != before).item())
             elements += before.numel()
             delta_sq += float(torch.sum((after - before).square()).item())
-        state_dtypes = Counter(
-            value.dtype
-            for state in self._student_optimizer.state.values()
-            for name, value in state.items()
-            if name in {"exp_avg", "exp_avg_sq"} and isinstance(value, torch.Tensor))
+        state_dtypes = Counter(value.dtype for state in self._student_optimizer.state.values()
+                               for name, value in state.items()
+                               if name in {"exp_avg", "exp_avg_sq"} and isinstance(value, torch.Tensor))
         if any(dtype != torch.float32 for dtype in state_dtypes):
             raise RuntimeError(f"four-call recovery optimizer state is not FP32: {dict(state_dtypes)}")
         if changed == 0 or delta_sq == 0.0:
             raise RuntimeError("FP32 warm restart produced zero changes across all parameter probes")
         if not dist.is_initialized() or dist.get_rank() == 0:
             assert self.tracker is not None
-            self.tracker.log({
-                "optimizer/master_parameter_dtype": "float32",
-                "optimizer/state_dtype": "float32",
-                "optimizer/update_probe_elements": elements,
-                "optimizer/update_probe_changed_fraction": changed / elements,
-                "optimizer/update_probe_l2": delta_sq**0.5,
-            }, iteration)
+            self.tracker.log(
+                {
+                    "optimizer/master_parameter_dtype": "float32",
+                    "optimizer/state_dtype": "float32",
+                    "optimizer/update_probe_elements": elements,
+                    "optimizer/update_probe_changed_fraction": changed / elements,
+                    "optimizer/update_probe_l2": delta_sq**0.5,
+                }, iteration)
 
 
 __all__ = [

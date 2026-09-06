@@ -124,7 +124,7 @@ sensitivity examples, not measured H3 throughput or a chosen step count.
 
 Job 6529 completed both uniform 48-block controls and speech checks in 30m19s
 on hpc-rack-3-7. Both speech clips have WER 0; visual review is still required.
-No corrected recovery training has run. Job 6524 ended with an NFS stale file
+At that checkpoint, no corrected recovery training had run. The active day 1–2 implementation and gates are specified in [the mask pilot protocol](fasth3_mask_pilot.md). Job 6524 ended with an NFS stale file
 handle after the final VSA32 evaluation log; preserve and inventory its media
 rather than rerunning the entire matrix. Do not change the checkout beneath a
 running shell job; use immutable job script/code snapshots for future runs.

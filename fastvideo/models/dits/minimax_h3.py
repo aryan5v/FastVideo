@@ -866,8 +866,14 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
+        block_execution_mask: tuple[bool, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict video and audio velocities from one caller-defined packed layout."""
+        if block_execution_mask is not None:
+            if (len(block_execution_mask) != len(self.transformer_blocks)
+                    or any(type(value) is not bool for value in block_execution_mask)
+                    or not block_execution_mask[0] or not block_execution_mask[-1]):
+                raise ValueError("block_execution_mask must contain one bool per block and retain both endpoints")
         if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
             raise ValueError(f"position_ids must have shape (seq_len, 3), got {tuple(position_ids.shape)}.")
         sequence_length = position_ids.shape[0]
@@ -913,6 +919,11 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         # The eager driver owns profiling markers while each block's compiled
         # forward owns the graph that the marker surrounds.
         for block_index, block in enumerate(self.transformer_blocks):
+            # The caller samples once outside the forward. Branch selection is
+            # outside each checkpointed block, so backward recomputation never
+            # resamples a mask or changes which collectives execute.
+            if block_execution_mask is not None and not block_execution_mask[block_index]:
+                continue
             with nvtx_range(f"minimax_h3.transformer_block.{block_index}"):
                 packed_hidden_states = block(
                     packed_hidden_states,

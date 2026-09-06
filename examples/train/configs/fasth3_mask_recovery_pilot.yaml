@@ -1,0 +1,133 @@
+# Fixed 24-block comparison, full V1 parent in both arms. Static extraction follows adaptation.
+# Two steps are only a numerical gate; 25/200-step pilots require its receipt.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: TORCH_SDPA
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.minimax_h3_mask_recovery.MiniMaxH3MaskRecoveryMethod
+  match_teacher_backend: true
+  require_fp32_master: true
+  deployment_grid_points: 5
+  student_state_probability: 0.5
+  trajectory_weight: 1.0
+  denoising_weight: 0.0
+  teacher_velocity_weight: 0.0
+  feature_weight: 0.01
+  feature_local_block_indices:
+  - 11
+  - 23
+  - 36
+  - 49
+  video_interval_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  audio_interval_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  modality_energy_floor: 0.001
+  pruning_mode: hard
+  retained_blocks:
+  - 0
+  - 2
+  - 4
+  - 6
+  - 9
+  - 11
+  - 13
+  - 15
+  - 17
+  - 19
+  - 21
+  - 23
+  - 26
+  - 28
+  - 30
+  - 32
+  - 34
+  - 36
+  - 38
+  - 40
+  - 43
+  - 45
+  - 47
+  - 49
+  mask_seed: 20260906
+  initial_drop_probability: 0.5
+  mask_anneal_steps: 100
+  validation_every: 25
+  validation_samples: 2
+  validation_data_path: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/data/day1-mask-split/validation
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+    pin_cpu_memory: true
+  data:
+    data_path: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/data/day1-mask-split/train
+    preprocessed_data_type: t2va
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 20260829
+    num_latent_t: 37
+    num_height: 480
+    num_width: 832
+    num_frames: 124
+  optimizer:
+    learning_rate: 1.0e-06
+    betas:
+    - 0.9
+    - 0.999
+    weight_decay: 0.0
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+  loop:
+    max_train_steps: 2
+    gradient_accumulation_steps: 1
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/day1-mask/hard-finite
+    training_state_checkpointing_steps: 2
+    checkpoints_total_limit: 8
+    preserve_every_steps: 25
+    preserve_steps:
+    - 2
+    - 25
+    - 50
+    - 100
+    - 200
+    resume_from_checkpoint: ''
+  tracker:
+    trackers:
+    - wandb
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: day1-mask-hard-finite
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+  vsa:
+    sparsity: 0.0
+    tile_size: 64
+    cache_tile_buf: false
+  dit_precision: fp32
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+pipeline: {}

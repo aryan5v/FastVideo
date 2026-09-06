@@ -201,14 +201,12 @@ class MiniMaxH3Model(ModelBase):
         try:
             expected_video_frames = video_latent_num_frames(int(data_config.num_frames))
         except ValueError as error:
-            raise ValueError(
-                "training.data.num_latent_t and num_frames describe different H3 durations: "
-                f"{error}") from error
+            raise ValueError("training.data.num_latent_t and num_frames describe different H3 durations: "
+                             f"{error}") from error
         if int(data_config.num_latent_t) != expected_video_frames:
-            raise ValueError(
-                "training.data.num_latent_t and num_frames describe different H3 durations: "
-                f"num_frames={data_config.num_frames} requires num_latent_t={expected_video_frames}, "
-                f"got {data_config.num_latent_t}")
+            raise ValueError("training.data.num_latent_t and num_frames describe different H3 durations: "
+                             f"num_frames={data_config.num_frames} requires num_latent_t={expected_video_frames}, "
+                             f"got {data_config.num_latent_t}")
 
         if video_latents.ndim != 5 or tuple(video_latents.shape[:2]) != (1, _VIDEO_LATENT_CHANNELS):
             raise ValueError("vae_latent must have shape [1, 24, latent_frames, latent_height, latent_width], "
@@ -416,6 +414,7 @@ class MiniMaxH3Model(ModelBase):
         conditional: bool,
         cfg_uncond: dict[str, Any] | None = None,
         attn_kind: Literal["dense", "vsa"] = "dense",
+        block_execution_mask: tuple[bool, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pack arbitrary joint states and return noise-minus-clean flows."""
         if not conditional or cfg_uncond is not None:
@@ -465,6 +464,7 @@ class MiniMaxH3Model(ModelBase):
                 video_indices=layout.video_indices.to(device),
                 audio_indices=layout.audio_indices.to(device),
                 text_indices=layout.text_indices.to(device),
+                block_execution_mask=block_execution_mask,
             )
 
         _, _, num_video_latents, latent_height, latent_width = video_bcthw.shape
