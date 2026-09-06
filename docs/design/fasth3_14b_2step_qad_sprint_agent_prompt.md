@@ -7,6 +7,11 @@
 > only the evidence-driven pruning and recovery corrections in
 > [the sprint repair addendum](fasth3_consumer_72h_release.md). The user targets
 > a release candidate in roughly three days; the quality gates still apply.
+>
+> September 6 research correction: the
+> [pruning experiment decision](fasth3_pruning_research_decision.md) supersedes
+> a fixed small-cut recovery ladder and the older QAT-before-PDD ordering.
+> Validate the pruning/adaptation mechanism before scaling training.
 
 This document is the execution prompt for the GPU agent. Treat it as the source
 of truth for the sprint. Work on the branch named below, keep the user updated at

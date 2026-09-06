@@ -1,5 +1,12 @@
 # FastH3 sprint repair addendum
 
+> Research review, September 6: before committing to repeated small cuts,
+> follow the [pruning experiment decision](fasth3_pruning_research_decision.md).
+> It requires a bounded comparison of adaptation-aware pruning and hard-cut
+> recovery, superseding the presumed small-cut ladder below. The 48-block run
+> remains a diagnostic control. The approximately 14B pruned/two-call objective
+> is unchanged; the review also resolves training-stage order and time estimates.
+
 ## Scope
 
 The user's latest direction requires a smaller, structurally pruned FastH3.
