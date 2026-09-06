@@ -67,6 +67,9 @@ A packed four-bit file alone is not proof of native FP4 execution or speedup.
 - If a pruned initializer passes, allow a single bounded 25-step recovery
   trial with FP32 master parameters and Adam moments, BF16 computation,
   branch-matched four-call V1 supervision and corrected 124/37/207 geometry.
+  Disable the paired noise-minus-data auxiliary loss on generated trajectory
+  states: it assumes the corresponding straight data/noise interpolation.
+  A future data-flow auxiliary loss needs its own correctly noised forward.
   Continue only on decoded improvement. Do not spend the release window
   training a visibly collapsed initializer by default.
 

@@ -1,4 +1,4 @@
-# Bounded FastH3 20-block warm restart. The launcher overrides branch-specific
+# Bounded FastH3 depth-pruning recovery. The launcher overrides branch-specific
 # student/teacher/data/output paths and stops after each 25-step quality gate.
 models:
   student:
@@ -21,7 +21,10 @@ method:
   deployment_grid_points: 5
   student_state_probability: 0.5
   trajectory_weight: 1.0
-  denoising_weight: 0.05
+  # These predictions use generated teacher/student trajectory states. The
+  # paired noise-minus-data target is valid on its straight interpolation,
+  # not on these states; use branch-matched teacher targets for this trial.
+  denoising_weight: 0.0
   teacher_velocity_weight: 0.0
   feature_weight: 0.01
   feature_local_block_indices: [4, 9, 14, 19]

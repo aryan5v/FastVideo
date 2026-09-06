@@ -89,6 +89,7 @@ def test_four_call_rescue_config_locks_fp32_branch_matching_and_gate_retention()
     assert config["method"]["match_teacher_backend"] is True
     assert config["method"]["require_fp32_master"] is True
     assert config["method"]["deployment_grid_points"] == 5
+    assert config["method"]["denoising_weight"] == 0.0
     assert config["training"]["dit_precision"] == "fp32"
     assert config["training"]["data"]["num_frames"] == 124
     assert config["training"]["data"]["num_latent_t"] == 37
@@ -101,7 +102,7 @@ def test_four_call_rescue_launcher_stops_at_quality_gates() -> None:
     launcher = (_REPO_ROOT / "scripts/fasth3_sprint/slurm_h3_four_call_rescue.sbatch").read_text()
 
     assert '25) RESUME=""' in launcher
-    assert '50|75|100|200) RESUME="latest"' in launcher
+    assert '50|75|100) RESUME="previous"' in launcher
     assert "TARGET_STEPS must stop at a 25-step rescue gate" in launcher
     assert "validated {len(records)} aligned rescue records" in launcher
     assert '--training.data.data_path "[${DATA_ROOT}, ${SYNTH_DATA_ROOT}]"' in launcher
