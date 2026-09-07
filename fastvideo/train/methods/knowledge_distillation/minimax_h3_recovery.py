@@ -180,6 +180,23 @@ class MiniMaxH3RecoveryMethod(TrainingMethod):
         del iteration
         return [self._student_lr_scheduler]
 
+    def on_checkpoint_loaded(self, iteration: int) -> None:
+        """Make the configured recovery LR authoritative after optimizer restore."""
+        learning_rate = float(self.training_config.optimizer.learning_rate)
+        if learning_rate <= 0:
+            raise ValueError("Resumed recovery learning rate must be positive")
+        for group in self._student_optimizer.param_groups:
+            group["lr"] = learning_rate
+            group["initial_lr"] = learning_rate
+        if hasattr(self._student_lr_scheduler, "base_lrs"):
+            self._student_lr_scheduler.base_lrs = [learning_rate] * len(self._student_optimizer.param_groups)
+        if hasattr(self._student_lr_scheduler, "_last_lr"):
+            self._student_lr_scheduler._last_lr = [learning_rate] * len(self._student_optimizer.param_groups)
+        actual = {float(group["lr"]) for group in self._student_optimizer.param_groups}
+        if actual != {learning_rate}:
+            raise RuntimeError(f"Recovery LR override failed after resume: {sorted(actual)}")
+        self.tracker.log({"optimizer/resumed_learning_rate": learning_rate}, step=iteration)
+
     def on_train_start(self) -> None:
         super().on_train_start()
         self.teacher.on_train_start()

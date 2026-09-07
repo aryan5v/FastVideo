@@ -127,6 +127,7 @@ class Trainer:
             resumed_step = (checkpoint_manager.maybe_resume(resume_from_checkpoint=(resume_from_checkpoint)))
             if resumed_step is not None:
                 start_step = int(resumed_step)
+                method.on_checkpoint_loaded(start_step)
         self.callbacks.on_validation_begin(
             method,
             iteration=start_step,

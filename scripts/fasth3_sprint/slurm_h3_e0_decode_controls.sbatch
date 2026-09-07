@@ -7,8 +7,9 @@
 #SBATCH --time=02:00:00
 set -euo pipefail
 export SLURM_EXPORT_ENV=ALL
-: "${SPRINT_ROOT:?}"
-: "${CODE_ROOT:?Immutable snapshot required}"
+export SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
+export CODE_ROOT="${CODE_ROOT:-${SPRINT_ROOT}/code/e0-26dd95c9}"
+test -s "${CODE_ROOT}/CODE_COMMIT"
 
 PARENT="${SPRINT_ROOT}/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558"
 CONTROL48="${SPRINT_ROOT}/checkpoints/h18-candidates/dense-uniform-48b"

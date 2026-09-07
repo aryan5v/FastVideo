@@ -11,6 +11,25 @@ from fastvideo.train.methods.knowledge_distillation.minimax_h3_recovery import (
 )
 
 
+def test_resume_configured_learning_rate_overrides_loaded_optimizer() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-6)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    obj = object.__new__(MiniMaxH3RecoveryMethod)
+    obj.training_config = SimpleNamespace(optimizer=SimpleNamespace(learning_rate=3.0e-5))
+    obj._student_optimizer = optimizer
+    obj._student_lr_scheduler = scheduler
+    logs = []
+    obj.tracker = SimpleNamespace(log=lambda values, step: logs.append((values, step)))
+
+    obj.on_checkpoint_loaded(200)
+
+    assert optimizer.param_groups[0]["lr"] == 3.0e-5
+    assert optimizer.param_groups[0]["initial_lr"] == 3.0e-5
+    assert scheduler.base_lrs == [3.0e-5]
+    assert logs == [({"optimizer/resumed_learning_rate": 3.0e-5}, 200)]
+
+
 @pytest.mark.parametrize('learning_rate', [0.0, 0.01])
 def test_resume_checks_first_real_update_at_step_201(monkeypatch, learning_rate):
     model = torch.nn.Linear(2, 2, bias=False)

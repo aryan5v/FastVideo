@@ -174,6 +174,9 @@ class TrainingMethod(torch.nn.Module, ABC):
             except TypeError:
                 optimizer.zero_grad()
 
+    def on_checkpoint_loaded(self, iteration: int) -> None:  # noqa: B027
+        """Apply method-specific resume checks after DCP restores all state."""
+
     def seed_optimizer_state_for_resume(self) -> None:
         """Seed optimizer state so DCP can load saved state.
 
