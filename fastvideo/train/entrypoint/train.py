@@ -99,6 +99,7 @@ def run_training_from_config(
         keep_last=int(tc.checkpoint.checkpoints_total_limit or 0),
         preserve_every_steps=int(tc.checkpoint.preserve_every_steps or 0),
         use_cpu_process_group=tc.checkpoint.use_cpu_process_group,
+        reset_dataloader_on_resume=tc.checkpoint.reset_dataloader_on_resume,
         preserve_steps=tuple(int(step) for step in tc.checkpoint.preserve_steps),
     )
 

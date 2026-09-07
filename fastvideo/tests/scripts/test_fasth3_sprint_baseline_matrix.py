@@ -32,3 +32,28 @@ def test_matrix_request_binds_current_prompt(monkeypatch: Any, tmp_path: Path) -
     runner._build_prompt_request(inference_args, output_path, 7, "second prompt")
 
     assert calls == [("second prompt", output_path, 7)]
+
+
+def test_explicit_attention_backend_overrides_dense_default(monkeypatch: Any) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(runner.basic_fasth3, "validate_args", lambda parser, args: args)
+    args = argparse.Namespace(
+        model_path="model",
+        output_dir=Path("output"),
+        profile="strict",
+        height=480,
+        width=832,
+        num_frames=124,
+        steps=5,
+        seed=7,
+        num_gpus=4,
+        compile_vae=False,
+        compile=False,
+        fa4=False,
+        attention="dense",
+        attention_backend="TORCH_SDPA",
+    )
+
+    inference_args = runner._inference_args(args, "prompt")
+
+    assert inference_args.attention_backend == "TORCH_SDPA"

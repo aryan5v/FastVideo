@@ -189,6 +189,7 @@ class CheckpointConfig:
     preserve_every_steps: int = 0
     preserve_steps: tuple[int, ...] = ()
     use_cpu_process_group: bool = False
+    reset_dataloader_on_resume: bool = False
 
 
 def preserve_checkpoint(
@@ -442,6 +443,9 @@ class CheckpointManager:
         step = _parse_step_from_dir(resolved)
 
         states = self._build_states()
+        if self.config.reset_dataloader_on_resume:
+            states.pop("dataloader", None)
+            logger.info("Explicitly resetting dataloader for a changed dataset; restoring model and optimizer")
         logger.info("Loading Phase 2 checkpoint from %s", resolved)
         dcp.load(states, checkpoint_id=str(resolved / "dcp"), **self._coordination_kwargs())
         _barrier()

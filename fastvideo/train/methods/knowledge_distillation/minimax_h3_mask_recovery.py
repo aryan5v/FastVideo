@@ -98,6 +98,36 @@ class MiniMaxH3MaskRecoveryMethod(MiniMaxH3FourCallRecoveryMethod):
                 raise ValueError("not enough held-out validation samples")
         self._train_started_at = 0.0
 
+    def seed_optimizer_state_for_resume(self) -> None:
+        """Seed only Adam entries actually saved by the masked execution graph."""
+        from torch.distributed.checkpoint import FileSystemReader
+        checkpoint = Path(self.training_config.checkpoint.resume_from_checkpoint)
+        metadata = FileSystemReader(str(checkpoint / 'dcp')).read_metadata()
+        saved = {
+            key
+            for key in metadata.state_dict_metadata
+            if key.startswith('optimizers.student.') and key.endswith('.exp_avg')
+        }
+        if not saved:
+            raise ValueError('No saved student Adam moments found; refusing optimizer reset')
+        matched = set()
+        for name, parameter in self.student.transformer.named_parameters():
+            canonical = name.replace('_checkpoint_wrapped_module.', '')
+            suffix = '.transformer.' + canonical + '.exp_avg'
+            keys = {key for key in saved if key.endswith(suffix)}
+            if not keys:
+                continue
+            if len(keys) != 1:
+                raise ValueError(f'Ambiguous saved optimizer entry for {canonical}')
+            matched.update(keys)
+            self._student_optimizer.state[parameter] = {
+                'step': torch.tensor(0.0),
+                'exp_avg': torch.zeros_like(parameter),
+                'exp_avg_sq': torch.zeros_like(parameter),
+            }
+        if matched != saved:
+            raise ValueError(f'Unmatched saved Adam entries: {sorted(saved - matched)[:5]}')
+
     def on_train_start(self) -> None:
         super().on_train_start()
         self._train_started_at = time.monotonic()

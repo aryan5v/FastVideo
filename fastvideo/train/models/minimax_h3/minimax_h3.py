@@ -150,6 +150,16 @@ class MiniMaxH3Model(ModelBase):
         from fastvideo.train.utils.dataloader import build_parquet_t2v_train_dataloader
 
         self.sp_group = get_sp_group()
+        from pathlib import Path
+        if isinstance(training_config.data.data_path,
+                      str) and (Path(training_config.data.data_path) / 'prompt_index.jsonl').is_file():
+            from fastvideo.dataset.minimax_h3_prompt_index import build_prompt_index_loader
+            if int(training_config.data.train_batch_size) != 1:
+                raise ValueError('H3 prompt index requires batch size one')
+            self.dataloader = build_prompt_index_loader(training_config.data.data_path,
+                                                        seed=int(training_config.data.seed or 0))
+            self.start_step = 0
+            return
         if is_minimax_h3_artifact_path(training_config.data.data_path):
             _dataset, self.dataloader = build_minimax_h3_artifact_dataloader(
                 training_config.data.data_path,
@@ -175,7 +185,19 @@ class MiniMaxH3Model(ModelBase):
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Resolve fixed visual and stereo-audio latent tensors for one sample."""
-        data_config = self.training_config.data
+        data_config: Any = self.training_config.data
+        if raw_batch.get('prompt_only', False):
+            from types import SimpleNamespace
+            geometry = raw_batch['prompt_geometry']
+            if latents_source != 'zeros' or geometry['fps'] != 24 or not geometry['generate_audio']:
+                raise ValueError('Prompt-only recovery requires zero placeholders and joint 24 FPS geometry')
+            height, width, frames = (int(geometry[key]) for key in ('height', 'width', 'num_frames'))
+            if min(height, width, frames) <= 0 or height % 16 or width % 16:
+                raise ValueError('Invalid native prompt geometry')
+            data_config = SimpleNamespace(num_latent_t=video_latent_num_frames(frames),
+                                          num_height=height,
+                                          num_width=width,
+                                          num_frames=frames)
         if latents_source == "data":
             if "vae_latent" not in raw_batch or "audio_latent" not in raw_batch:
                 raise ValueError("A T2VA batch requires vae_latent and audio_latent tensors")

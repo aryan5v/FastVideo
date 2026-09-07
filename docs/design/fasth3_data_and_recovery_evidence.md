@@ -78,3 +78,57 @@ unless suitable permission is established. No BVD media was downloaded.
 No reviewed result guarantees recovery of this particular mask. Success must
 be established through decoded joint media, held-out generalization and actual
 consumer runtime measurements, with an explicit viable fallback in size.
+
+## Completed pilot check: September 7, 2026 UTC
+
+Both 200-update pilots completed successfully and retain their checkpoints.
+Hard job 6533 took 1:29:58 (about 6.00 GPU-hours on four GPUs); annealed job
+6535 took 1:49:57 (about 7.33 GPU-hours), excluding its separate 25:40
+numerical retry 6534. These are equal-update, not equal-compute comparisons.
+
+| Candidate | Video endpoint error | Audio endpoint error | Reduction from initial video / audio |
+| --- | ---: | ---: | --- |
+| Hard, step 200 | 2.038985 | 4.335886 | 2.008% / 11.899% |
+| Annealed, step 200 | 2.064647 | 4.402529 | 0.775% / 10.545% |
+
+These are two fixed held-out canaries, not perceptual quality percentages.
+Earlier FP32 update checks passed; this check reconfirmed successful SLURM exits.
+
+Static audit 6627 completed in 17:16. Compact 24-block export and masked
+checkpoint predictions were bit-identical for video and audio on the tested
+64x64, five-frame input, with 5,216 sampled parameter values matching. This
+establishes parity only for the tested configuration. Four BF16 sample MP4s
+were generated and passed media-format checks; perceptual and audio review
+remain outstanding. Next: review those clips against matched parent samples,
+then decide whether to execute the separately prepared longer recovery.
+No additional training was launched during this capped pilot follow-up.
+
+All 58,669 training prompts finished uploading with SHA256
+42369c2fe0ba2356a861ef83453bcb6303a48e2e5b5bbb1ee7b25548080816f5.
+Cached-embedding audit 6631 failed with host-memory exhaustion after 52 seconds;
+encoding readiness is unverified. The next data task is a bounded higher-memory
+metadata audit before reuse or encoding. This failure did not affect checkpoints.
+
+### Decoded inspection and diagnostic continuation
+
+Sampled frames 0, 60 and 120 from all four hard step-200 clips show multicolored
+noise without recognizable prompted subjects. Audio quality remains unassessed.
+The numerical gains have not yet produced demonstrated visual recovery.
+Training and inference use matching four-call sigma schedules (video shift 12,
+audio shift 3). Submitted one-prompt FP32 inference diagnostic 6633, capped at
+one hour on four GPUs, using immutable audit-193ac259 code and the existing
+compact export. This checks a precision contribution before longer training.
+CPU cache-audit retry 6632 requests 32 GB and 20 minutes: the previous failure
+occurred during container image import, before dataset inspection. Both jobs
+were pending resources at submission. Checkpoints and optimizer remain intact.
+
+### September 7 restart
+
+No full-prompt training was submitted overnight. Local loader/resume changes
+pass eight focused tests and pre-commit checks. Full-corpus cache audit job
+6649 is submitted from immutable code/full-prompt-audit-v1; submission 6648
+was cancelled after a SLURM environment-retrieval failure, before execution.
+The cache READY manifest advertises 49,688 records for the 49,700-row source,
+so full coverage must be measured and missing embeddings encoded explicitly.
+The prepared recovery script now also requires encoder provenance verification.
+Do not treat a cached shape or caption match as encoder equivalence.

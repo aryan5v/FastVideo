@@ -472,10 +472,13 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
         del iteration
         if self.cuda_generator is None:
             raise RuntimeError("Training RNG is not initialized")
+        prompt_only = bool(batch.get("prompt_only", False))
+        if prompt_only and self._denoising_weight != 0:
+            raise ValueError("Prompt-only recovery cannot use paired denoising targets")
         training_batch = self.student.prepare_batch(
             batch,
             generator=self.cuda_generator,
-            latents_source="data",
+            latents_source="zeros" if prompt_only else "data",
         )
         required = {
             "clean_video": training_batch.latents,

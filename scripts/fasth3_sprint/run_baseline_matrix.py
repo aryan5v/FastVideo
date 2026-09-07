@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--checkpoint-role", required=True)
     parser.add_argument("--attention", choices=("dense", "vsa"), required=True)
+    parser.add_argument(
+        "--attention-backend",
+        default=None,
+        help="Explicit transformer attention backend. Dense defaults to FLASH_ATTN; pass TORCH_SDPA for parity controls.",
+    )
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
@@ -215,6 +220,8 @@ def _inference_args(args: argparse.Namespace, first_prompt: str) -> argparse.Nam
         "--fa4" if args.fa4 else "--no-fa4",
     ])
     inference_args.vsa = args.attention == "vsa"
+    if args.attention_backend is not None:
+        inference_args.attention_backend = args.attention_backend
     return basic_fasth3.validate_args(parser, inference_args)
 
 
@@ -315,6 +322,8 @@ def main() -> None:
         "results": [],
     }
     generator_config = basic_fasth3.build_generator_config(inference_args)
+    if args.attention_backend is not None:
+        generator_config.pipeline.experimental["attention_backend"] = args.attention_backend
     generator_config.pipeline.experimental["dit_precision"] = args.dit_precision
     generator = basic_fasth3.VideoGenerator.from_config(generator_config)
     wall_times: list[float] = []

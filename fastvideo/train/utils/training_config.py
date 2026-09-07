@@ -65,6 +65,7 @@ class CheckpointConfig:
     preserve_steps: list[int] = field(default_factory=list)
     # Coordinate checkpoint metadata on CPU to avoid NCCL scratch allocations.
     use_cpu_process_group: bool = False
+    reset_dataloader_on_resume: bool = False
 
 
 @dataclass(slots=True)

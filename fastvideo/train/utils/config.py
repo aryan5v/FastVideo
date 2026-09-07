@@ -425,6 +425,7 @@ def _build_training_config(
             preserve_every_steps=int(ck.get("preserve_every_steps", 0) or 0),
             preserve_steps=[int(step) for step in (ck.get("preserve_steps", []) or [])],
             use_cpu_process_group=bool(ck.get("use_cpu_process_group", False)),
+            reset_dataloader_on_resume=bool(ck.get("reset_dataloader_on_resume", False)),
         ),
         tracker=TrackerConfig(
             trackers=list(tr.get("trackers", []) or []),
