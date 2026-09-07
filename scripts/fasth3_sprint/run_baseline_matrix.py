@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=5,
                         help="Sigma-grid points; five points execute the released four-call schedule.")
     parser.add_argument("--num-gpus", type=int, default=4)
+    parser.add_argument("--dit-precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--profile", choices=("strict", "all"), default="strict")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile-vae", action=argparse.BooleanOptionalAction, default=False)
@@ -261,6 +262,7 @@ def main() -> None:
             "checkpoint_role": args.checkpoint_role,
             "attention": args.attention,
             "profile": args.profile,
+            "dit_precision": args.dit_precision,
             "compile_vae": args.compile_vae,
             "height": args.height,
             "width": args.width,
@@ -285,6 +287,7 @@ def main() -> None:
         "checkpoint_role": args.checkpoint_role,
         "attention": args.attention,
         "quantization": "none",
+        "dit_precision": args.dit_precision,
         "compile_vae": args.compile_vae,
         "prompt_binding_version": 1,
         "negative_prompt": "",
@@ -311,7 +314,9 @@ def main() -> None:
         "media_contract": "one video stream, stereo 32 kHz audio; semantic synchronization requires review",
         "results": [],
     }
-    generator = basic_fasth3.VideoGenerator.from_config(basic_fasth3.build_generator_config(inference_args))
+    generator_config = basic_fasth3.build_generator_config(inference_args)
+    generator_config.pipeline.experimental["dit_precision"] = args.dit_precision
+    generator = basic_fasth3.VideoGenerator.from_config(generator_config)
     wall_times: list[float] = []
     try:
         for index, prompt in enumerate(prompts):

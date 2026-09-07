@@ -9,11 +9,13 @@ small video/audio latent state and checks both outputs numerically.
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -57,7 +59,8 @@ def _backend_receipt(model: MiniMaxH3Model) -> dict[str, Any]:
     }
 
 
-def _predict(model: MiniMaxH3Model, batch: Any, attn_kind: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _predict(model: MiniMaxH3Model, batch: Any, attn_kind: str,
+             execution_mask: tuple[bool, ...] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     assert isinstance(batch.noisy_model_input, torch.Tensor)
     assert isinstance(batch.audio_noisy_model_input, torch.Tensor)
     assert isinstance(batch.timesteps, torch.Tensor)
@@ -72,6 +75,7 @@ def _predict(model: MiniMaxH3Model, batch: Any, attn_kind: str) -> tuple[torch.T
             batch,
             conditional=True,
             attn_kind=attn_kind,  # type: ignore[arg-type]
+            block_execution_mask=execution_mask,
         )
     return video.detach().float().cpu(), audio.detach().float().cpu()
 
@@ -99,6 +103,23 @@ def _metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, floa
 def _canonical_parameter_name(name: str) -> str:
     """Remove wrappers that are present only on the trainable DCP graph."""
     return name.replace("_checkpoint_wrapped_module.", "").replace("_fsdp_wrapped_module.", "")
+
+
+def _compact_named_entries(entries: dict[str, Any], retained: tuple[int, ...]) -> dict[str, Any]:
+    """Drop removed block entries and map original indices to compact indices."""
+    source_to_local = {source: local for local, source in enumerate(retained)}
+    result = {}
+    for name, value in entries.items():
+        match = re.match(r"^(blocks|transformer_blocks)\.(\d+)\.(.*)$", name)
+        if match:
+            source = int(match.group(2))
+            if source not in source_to_local:
+                continue
+            name = f"{match.group(1)}.{source_to_local[source]}.{match.group(3)}"
+        if name in result:
+            raise ValueError(f"duplicate compact entry: {name}")
+        result[name] = value
+    return result
 
 
 def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -> dict[str, dict[str, Any]]:
@@ -195,6 +216,8 @@ def main() -> None:
     parser.add_argument("--min-cosine", type=float, default=0.99999)
     parser.add_argument("--wandb-project", default=None)
     parser.add_argument("--wandb-run-id", default=None)
+    parser.add_argument("--masked-to-static", action="store_true",
+                        help="Load only the masked parent student and compare its physically pruned export.")
     args = parser.parse_args()
     started = time.time()
 
@@ -209,6 +232,23 @@ def main() -> None:
     raw_config = metadata.get("config")
     if not isinstance(raw_config, dict):
         raise ValueError("checkpoint metadata has no resolved config")
+    execution_mask = None
+    retained = None
+    if args.masked_to_static:
+        retained = tuple(raw_config["method"]["retained_blocks"])
+        arch = json.loads((export / "transformer/config.json").read_text())
+        if tuple(arch.get("block_map", [])) != retained or arch["num_layers"] != len(retained):
+            raise ValueError("export block map differs from trained mask")
+        source_layers = int(arch["source_num_layers"])
+        if retained != tuple(sorted(set(retained))) or retained[0] != 0 or retained[-1] != source_layers - 1:
+            raise ValueError("invalid retained-block map")
+        execution_mask = tuple(i in retained for i in range(source_layers))
+        raw_config = copy.deepcopy(raw_config)
+        raw_config["models"] = {"student": raw_config["models"]["student"]}
+        raw_config["models"]["student"]["enable_gradient_checkpointing_type"] = None
+        raw_config["method"] = {"_target_": "fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod"}
+        raw_config["callbacks"] = {}
+        raw_config["training"]["model"]["enable_gradient_checkpointing_type"] = None
     cfg = _run_config_from_raw(raw_config)
     tc = cfg.training
     _ensure_distributed()
@@ -227,6 +267,9 @@ def main() -> None:
     dcp.load(states, checkpoint_id=str(checkpoint / "dcp"))
     dcp_parameter_samples = _parameter_samples(model)
     dcp_backend = _backend_receipt(model)
+    if retained is not None:
+        dcp_parameter_samples = _compact_named_entries(dcp_parameter_samples, retained)
+        dcp_backend["layer_backends"] = _compact_named_entries(dcp_backend["layer_backends"], retained)
 
     # Use the smallest valid H3 geometry so this tests model arithmetic rather
     # than exhausting memory. Five frames map to two video and eight audio
@@ -242,8 +285,8 @@ def main() -> None:
     }
     batch = model.prepare_batch(raw_batch, generator=generator, latents_source="zeros")
     attn_kind = "vsa" if model.attention_backend_name in {"VIDEO_SPARSE_ATTN", "VIDEO_SPARSE_ATTN_H3"} else "dense"
-    reference_video, reference_audio = _predict(model, batch, attn_kind)
-    reference_repeat_video, reference_repeat_audio = _predict(model, batch, attn_kind)
+    reference_video, reference_audio = _predict(model, batch, attn_kind, execution_mask)
+    reference_repeat_video, reference_repeat_audio = _predict(model, batch, attn_kind, execution_mask)
     dcp_repeat = {
         "video": _metrics(reference_video, reference_repeat_video),
         "audio": _metrics(reference_audio, reference_repeat_audio),
@@ -286,7 +329,9 @@ def main() -> None:
     )
     receipt = {
         "schema_version": 2,
-        "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "source_commit": (Path("CODE_COMMIT").read_text().strip() if Path("CODE_COMMIT").exists()
+                          else subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()),
+        "retained_blocks": retained,
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "node": os.uname().nodename,
         "elapsed_seconds": time.time() - started,

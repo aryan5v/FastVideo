@@ -381,6 +381,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
         self._student_state_probability = float(method.get("student_state_probability", 0.5))
         self._trajectory_weight = float(method.get("trajectory_weight", 1.0))
         self._require_fp32_master = bool(method.get("require_fp32_master", True))
+        self._optimizer_update_verified = False
         self._video_interval_weights = self._interval_weights(method.get("video_interval_weights"), "video")
         self._audio_interval_weights = self._interval_weights(method.get("audio_interval_weights"), "audio")
         if not 0.0 <= self._student_state_probability <= 1.0:
@@ -626,7 +627,8 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
 
     def optimizers_schedulers_step(self, iteration: int) -> None:
         probes: list[tuple[torch.Tensor, torch.Tensor]] = []
-        if self._require_fp32_master and iteration == 1:
+        verify_update = self._require_fp32_master and not self._optimizer_update_verified
+        if verify_update:
             for parameter in self.student.transformer.parameters():
                 if parameter.requires_grad:
                     local = _local_parameter_tensor(parameter).detach().reshape(-1)
@@ -635,7 +637,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 if len(probes) >= 16:
                     break
         super().optimizers_schedulers_step(iteration)
-        if not self._require_fp32_master or iteration != 1:
+        if not verify_update:
             return
 
         changed = 0
@@ -653,6 +655,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             raise RuntimeError(f"four-call recovery optimizer state is not FP32: {dict(state_dtypes)}")
         if changed == 0 or delta_sq == 0.0:
             raise RuntimeError("FP32 warm restart produced zero changes across all parameter probes")
+        self._optimizer_update_verified = True
         if not dist.is_initialized() or dist.get_rank() == 0:
             assert self.tracker is not None
             self.tracker.log(
