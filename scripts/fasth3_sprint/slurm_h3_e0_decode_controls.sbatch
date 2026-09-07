@@ -14,11 +14,11 @@ fi
 export CODE_ROOT
 test -s "${CODE_ROOT}/CODE_COMMIT"
 
-PARENT="${SPRINT_ROOT}/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558"
+PARENT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558"
 CONTROL48="${SPRINT_ROOT}/checkpoints/h18-candidates/dense-uniform-48b"
 PROMPTS="${CODE_ROOT}/examples/training/fasth3_14b_2step_qad/rescue_gate_prompts.json"
 AUDIT_ROOT="${SPRINT_ROOT}/diagnostics/e0-decode-controls/${SLURM_JOB_ID}"
-test -s "${PARENT}/transformer/model.safetensors.index.json"
+test -s "${PARENT}/modular_model_index.json"
 test -s "${CONTROL48}/transformer/candidate_validation_receipt.json"
 test ! -e "${AUDIT_ROOT}"
 mkdir -p "${AUDIT_ROOT}"
