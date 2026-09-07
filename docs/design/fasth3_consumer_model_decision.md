@@ -242,3 +242,58 @@ No new four-to-two, PDD, QAT or QAD job was launched during this investigation.
 The current work is completing the existing pruning experiment and preparing
 its hard-recovery continuation. This document specifies the next work;
 it must not be reported as completed training or a ready consumer model.
+
+## Authorized extension and supplied prompt data
+
+The user accepted the staged hard-recovery plan and explicitly permits up to
+4,000 total updates if progress warrants it. Review at 500, 1,000 and 2,000;
+4,000 is a ceiling for a promising continuation, not the first unchecked run.
+The continuation launcher requires a recorded decoded review of its parent.
+Keep the first 200→500 continuation on the existing data as the control, while
+preparing expanded data for a separately recorded comparison. Changing the
+dataset requires intentional dataloader-state handling; preserve optimizer
+state but do not silently restore an old data cursor into a different manifest.
+
+Audited user files: `t2va-prompts-50k.jsonl 2` contains 49,700 records and
+`h3_t2va_prompts_10k.jsonl` contains 10,000. All parse, and the combined set has
+59,700 distinct prompts under Unicode/whitespace/case normalization. This is
+not semantic deduplication or an independent confirmation of prompt quality.
+The files contain prompt text and generation metadata, not clean audiovisual
+examples. Embedded generation instructions are dataset content only.
+
+The prepared split excludes seven captions matching the existing held-out
+set, reserves 1,024 new held-out prompts that do not match prior training,
+and leaves 58,669 training prompts. Of those, 5,585 specify 124 frames; use
+these for the first short-clip curriculum with matching geometry. Preserve
+longer prompts for later duration buckets rather than truncating their action
+or dialogue into five seconds. There are 57 exact normalized matches to prior
+training captions. Current recovery used 526 records but only 341 distinct
+captions; limited coverage is a plausible bottleneck, not a proven sole cause.
+
+Local reproducible audit artifacts and hashes are in
+`/Users/aryank/Fast video1/.sprint-review/prompt-audit/receipt.json`.
+Text encoding/cache compatibility, geometry and broader leakage checks remain
+before these manifests are training inputs. Prefer reusing matching shared
+cached embeddings after verifying prompt identity, encoder provenance and
+shape; do not regenerate the entire corpus by default.
+
+The existing recovery loss uses teacher trajectories and hidden summaries.
+Its real-data denoising weight is zero. A later controlled data-loss experiment
+must use actual paired video/audio latents on their own correctly noised
+forward, not apply noise-minus-clean targets to unrelated rollout states.
+Prompts alone can expand teacher-supervised rollout coverage; they do not
+provide ground-truth video or audio.
+
+QAT primarily adapts to the deployment precision. Quantized-generator QAD/DMD
+can supply additional teacher supervision and may improve generation quality,
+but neither is evidence that severe pruning damage will disappear later.
+The lab's [FastWan-QAD recipe](https://haoailab.com/blogs/fastwan-qad/) combines
+precision-aware finetuning and distribution matching, with data choice varying
+by checkpoint. Transfer to joint H3 still requires separate media validation.
+
+Execution receipt: both 200-update pilots completed. Hard final endpoint errors
+are 2.038985 video / 4.335886 audio; annealed errors are 2.064647 / 4.402529.
+Hard export job 6536 completed in 9m54s. Static extraction/parity/four-prompt
+decode job 6627 is submitted from immutable commit 193ac259. No recovery beyond
+200 has launched at this update. Fourteen focused tests and applicable
+pre-commit checks passed for the static audit and resumed-update verification.
