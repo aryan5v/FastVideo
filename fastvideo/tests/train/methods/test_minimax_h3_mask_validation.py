@@ -55,8 +55,13 @@ def test_heldout_uses_final_mask_preserves_rng_and_scores_perfect_teacher_zero(t
     assert all(mask == (True, False, True) for mask in obj.student.seen_masks)
     assert all(mask is None for mask in obj.teacher.seen_masks)
     assert torch.equal(rng, torch.get_rng_state())
-    errors = [value for name, value in metrics.items() if 'interval' in name or 'endpoint' in name]
+    errors = [
+        value for name, value in metrics.items()
+        if 'teacher_state_interval' in name or 'closed_loop_endpoint' in name
+    ]
     assert len(errors) == 10 and all(value == 0 for value in errors)
+    cosines = [value for name, value in metrics.items() if 'cosine' in name]
+    assert len(cosines) == 10 and all(value == pytest.approx(1.0) for value in cosines)
     assert (tmp_path / 'heldout_metrics.jsonl').is_file()
     assert obj.on_validation_begin(1) == {}
 

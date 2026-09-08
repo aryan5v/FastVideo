@@ -218,6 +218,14 @@ class MiniMaxH3MaskRecoveryMethod(MiniMaxH3FourCallRecoveryMethod):
                         error = float(_normalized_mse(prediction, target, energy_floor=self._energy_floor)[2])
                         key = f"validation/{modality}_teacher_state_interval{interval}"
                         totals[key] = totals.get(key, 0.0) + error / self._validation_samples
+                        cosine = float(
+                            torch.nn.functional.cosine_similarity(
+                                prediction.reshape(-1).float(),
+                                target.reshape(-1).float(),
+                                dim=0,
+                            ))
+                        cosine_key = f"validation/{modality}_teacher_update_cosine_interval{interval}"
+                        totals[cosine_key] = totals.get(cosine_key, 0.0) + cosine / self._validation_samples
                     if interval:
                         sfv, sfa = self._predict_student_joint_noise(sv,
                                                                      sa,
@@ -234,6 +242,14 @@ class MiniMaxH3MaskRecoveryMethod(MiniMaxH3FourCallRecoveryMethod):
                     error = float(_normalized_mse(prediction, target, energy_floor=self._energy_floor)[2])
                     key = f"validation/{modality}_closed_loop_endpoint"
                     totals[key] = totals.get(key, 0.0) + error / self._validation_samples
+                    cosine = float(
+                        torch.nn.functional.cosine_similarity(
+                            prediction.reshape(-1).float(),
+                            target.reshape(-1).float(),
+                            dim=0,
+                        ))
+                    cosine_key = f"validation/{modality}_closed_loop_cosine"
+                    totals[cosine_key] = totals.get(cosine_key, 0.0) + cosine / self._validation_samples
         finally:
             self._execution_mask = old_mask
         if not all(math.isfinite(value) for value in totals.values()):

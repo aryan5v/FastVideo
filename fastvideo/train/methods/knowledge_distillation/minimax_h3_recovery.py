@@ -13,6 +13,9 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager
 from collections.abc import Generator, Sequence
+import hashlib
+import json
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -399,6 +402,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
         self._trajectory_weight = float(method.get("trajectory_weight", 1.0))
         self._require_fp32_master = bool(method.get("require_fp32_master", True))
         self._optimizer_update_verified = False
+        self._layer_update_baselines: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._video_interval_weights = self._interval_weights(method.get("video_interval_weights"), "video")
         self._audio_interval_weights = self._interval_weights(method.get("audio_interval_weights"), "audio")
         if not 0.0 <= self._student_state_probability <= 1.0:
@@ -423,6 +427,112 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             raise ValueError(f"{modality}_interval_weights must contain {intervals} positive values")
         mean = sum(values) / len(values)
         return tuple(value / mean for value in values)
+
+    def on_checkpoint_loaded(self, iteration: int) -> None:
+        """Prove that DCP restored usable Adam state before taking an update."""
+        super().on_checkpoint_loaded(iteration)
+        configured_lr = float(self.training_config.optimizer.learning_rate)
+        actual_lrs = sorted({float(group["lr"]) for group in self._student_optimizer.param_groups})
+        digest = hashlib.sha256()
+        step_values: list[float] = []
+        moment_tensor_count = 0
+        sampled_values = 0
+        sampled_nonzero = 0
+        parameters_with_state = 0
+        for name, parameter in self.student.transformer.named_parameters():
+            state = self._student_optimizer.state.get(parameter)
+            if not state:
+                continue
+            parameters_with_state += 1
+            step = state.get("step")
+            if isinstance(step, torch.Tensor):
+                local_step = _local_parameter_tensor(step).detach().float().reshape(-1)
+                if local_step.numel():
+                    step_values.extend(float(value) for value in local_step.cpu().tolist())
+            elif step is not None:
+                step_values.append(float(step))
+            for key in ("exp_avg", "exp_avg_sq"):
+                value = state.get(key)
+                if not isinstance(value, torch.Tensor):
+                    continue
+                local = _local_parameter_tensor(value).detach().reshape(-1)
+                if not local.numel():
+                    continue
+                moment_tensor_count += 1
+                count = min(16, local.numel())
+                indices = torch.linspace(
+                    0,
+                    local.numel() - 1,
+                    count,
+                    device=local.device,
+                    dtype=torch.float64,
+                ).round().to(torch.long)
+                sample = local[indices].float().cpu().contiguous()
+                sampled_values += sample.numel()
+                sampled_nonzero += int(torch.count_nonzero(sample).item())
+                digest.update(name.encode())
+                digest.update(key.encode())
+                digest.update(sample.numpy().tobytes())
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        receipt = {
+            "checkpoint": str(self.training_config.checkpoint.resume_from_checkpoint),
+            "iteration": int(iteration),
+            "rank": int(rank),
+            "configured_learning_rate": configured_lr,
+            "actual_learning_rates": actual_lrs,
+            "parameters_with_state": parameters_with_state,
+            "moment_tensor_count": moment_tensor_count,
+            "sampled_moment_values": sampled_values,
+            "sampled_nonzero_moment_values": sampled_nonzero,
+            "sampled_moment_sha256": digest.hexdigest(),
+            "optimizer_step_min": min(step_values) if step_values else None,
+            "optimizer_step_max": max(step_values) if step_values else None,
+        }
+        receipt["passed"] = bool(actual_lrs == [configured_lr] and parameters_with_state > 0
+                                 and moment_tensor_count >= 2 and sampled_nonzero > 0 and step_values
+                                 and min(step_values) > 0)
+        output_dir = Path(self.training_config.checkpoint.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        destination = output_dir / f"resume_optimizer_audit_step{iteration}_rank{rank}.json"
+        temporary = destination.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        temporary.replace(destination)
+        if not receipt["passed"]:
+            raise RuntimeError(f"Restored optimizer audit failed on rank {rank}: {receipt}")
+        self._capture_layer_update_baselines()
+
+    def _capture_layer_update_baselines(self) -> None:
+        """Keep small local samples for cumulative per-block update ratios."""
+        self._layer_update_baselines = {}
+        blocks = getattr(self.student.transformer, "transformer_blocks", None)
+        if not isinstance(blocks, torch.nn.ModuleList):
+            return
+        for index, block in enumerate(blocks):
+            parameter = next((value for value in block.parameters() if value.requires_grad), None)
+            if parameter is None:
+                continue
+            local = _local_parameter_tensor(parameter).detach().reshape(-1)
+            if not local.numel():
+                continue
+            count = min(256, local.numel())
+            indices = torch.linspace(
+                0,
+                local.numel() - 1,
+                count,
+                device=local.device,
+                dtype=torch.float64,
+            ).round().to(torch.long)
+            self._layer_update_baselines[index] = (local, indices, local[indices].float().clone())
+
+    def _layer_update_ratio_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for index, (local, indices, baseline) in self._layer_update_baselines.items():
+            current = local[indices].float()
+            delta_norm = float(torch.linalg.vector_norm(current - baseline))
+            weight_norm = max(float(torch.linalg.vector_norm(baseline)), 1.0e-12)
+            metrics[f"optimizer/block_{index:02d}_update_weight_ratio"] = delta_norm / weight_norm
+        return metrics
 
     def _shared_choice(self, upper: int) -> int:
         if self.cuda_generator is None:
@@ -657,35 +767,38 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 if len(probes) >= 16:
                     break
         super().optimizers_schedulers_step(iteration)
-        if not verify_update:
-            return
-
-        changed = 0
-        elements = 0
-        delta_sq = 0.0
-        for local, before in probes:
-            after = local[:before.numel()].float()
-            changed += int(torch.count_nonzero(after != before).item())
-            elements += before.numel()
-            delta_sq += float(torch.sum((after - before).square()).item())
-        state_dtypes = Counter(value.dtype for state in self._student_optimizer.state.values()
-                               for name, value in state.items()
-                               if name in {"exp_avg", "exp_avg_sq"} and isinstance(value, torch.Tensor))
-        if any(dtype != torch.float32 for dtype in state_dtypes):
-            raise RuntimeError(f"four-call recovery optimizer state is not FP32: {dict(state_dtypes)}")
-        if changed == 0 or delta_sq == 0.0:
-            raise RuntimeError("FP32 warm restart produced zero changes across all parameter probes")
-        self._optimizer_update_verified = True
-        if not dist.is_initialized() or dist.get_rank() == 0:
+        if verify_update:
+            changed = 0
+            elements = 0
+            delta_sq = 0.0
+            for local, before in probes:
+                after = local[:before.numel()].float()
+                changed += int(torch.count_nonzero(after != before).item())
+                elements += before.numel()
+                delta_sq += float(torch.sum((after - before).square()).item())
+            state_dtypes = Counter(value.dtype for state in self._student_optimizer.state.values()
+                                   for name, value in state.items()
+                                   if name in {"exp_avg", "exp_avg_sq"} and isinstance(value, torch.Tensor))
+            if any(dtype != torch.float32 for dtype in state_dtypes):
+                raise RuntimeError(f"four-call recovery optimizer state is not FP32: {dict(state_dtypes)}")
+            if changed == 0 or delta_sq == 0.0:
+                raise RuntimeError("FP32 warm restart produced zero changes across all parameter probes")
+            self._optimizer_update_verified = True
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                assert self.tracker is not None
+                self.tracker.log(
+                    {
+                        "optimizer/master_parameter_dtype": "float32",
+                        "optimizer/state_dtype": "float32",
+                        "optimizer/update_probe_elements": elements,
+                        "optimizer/update_probe_changed_fraction": changed / elements,
+                        "optimizer/update_probe_l2": delta_sq**0.5,
+                    }, iteration)
+        if iteration % 50 == 0 and (not dist.is_initialized() or dist.get_rank() == 0):
             assert self.tracker is not None
-            self.tracker.log(
-                {
-                    "optimizer/master_parameter_dtype": "float32",
-                    "optimizer/state_dtype": "float32",
-                    "optimizer/update_probe_elements": elements,
-                    "optimizer/update_probe_changed_fraction": changed / elements,
-                    "optimizer/update_probe_l2": delta_sq**0.5,
-                }, iteration)
+            layer_metrics = self._layer_update_ratio_metrics()
+            if layer_metrics:
+                self.tracker.log(layer_metrics, iteration)
 
 
 __all__ = [

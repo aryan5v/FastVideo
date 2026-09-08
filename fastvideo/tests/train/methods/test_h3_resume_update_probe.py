@@ -30,6 +30,35 @@ def test_resume_configured_learning_rate_overrides_loaded_optimizer() -> None:
     assert logs == [({"optimizer/resumed_learning_rate": 3.0e-5}, 200)]
 
 
+def test_four_call_resume_writes_nonzero_optimizer_audit(tmp_path) -> None:
+    model = torch.nn.Linear(4, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-6)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    obj = object.__new__(MiniMaxH3FourCallRecoveryMethod)
+    obj.training_config = SimpleNamespace(
+        optimizer=SimpleNamespace(learning_rate=3.0e-5),
+        checkpoint=SimpleNamespace(
+            resume_from_checkpoint="checkpoint-200",
+            output_dir=str(tmp_path),
+        ),
+    )
+    obj.student = SimpleNamespace(transformer=model)
+    obj._student_optimizer = optimizer
+    obj._student_lr_scheduler = scheduler
+    obj.tracker = SimpleNamespace(log=lambda values, step: None)
+
+    obj.on_checkpoint_loaded(200)
+
+    receipt = __import__("json").loads(
+        (tmp_path / "resume_optimizer_audit_step200_rank0.json").read_text())
+    assert receipt["passed"] is True
+    assert receipt["actual_learning_rates"] == [3.0e-5]
+    assert receipt["sampled_nonzero_moment_values"] > 0
+    assert receipt["optimizer_step_min"] == 1.0
+
+
 @pytest.mark.parametrize('learning_rate', [0.0, 0.01])
 def test_resume_checks_first_real_update_at_step_201(monkeypatch, learning_rate):
     model = torch.nn.Linear(2, 2, bias=False)
