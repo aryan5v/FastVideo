@@ -1,0 +1,111 @@
+# Dense V12 algorithm adapted to compact42, SDPA, SP4/FSDP8, global batch2.
+# 500 alternating phases =400 critic updates +100 student updates, not500 generator updates.
+# Full58669 prompt pool, native geometry; transient carry reuses each prompt for4 phases.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/preserved/activation42-step500-job6878/export-500
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: TORCH_SDPA
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+    disable_custom_init_weights: true
+method:
+  _target_: fastvideo.train.methods.distribution_matching.minimax_h3_joint_dmd2.MiniMaxH3JointDMD2Method
+  rollout_mode: simulate
+  rollout_carry: true
+  rollout_carry_slots: 1
+  rollout_sample_type: ode
+  generator_update_interval: 5
+  real_score_guidance_scale: 1.0
+  dmd_denoising_steps:
+  - 999
+  - 749
+  - 500
+  - 250
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  score_timestep_warp_max: 0.999
+  score_timestep_continuous: true
+  fake_score_loss_space: x0
+  cfg_uncond:
+    text: keep
+  fake_score_learning_rate: 2.0e-06
+  fake_score_betas:
+  - 0.9
+  - 0.999
+  fake_score_lr_scheduler: constant
+training:
+  distributed:
+    num_gpus: 8
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 8
+    pin_cpu_memory: true
+  data:
+    data_path: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/data/user-prompts-20260906/index-v2
+    preprocessed_data_type: t2va
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 480
+    num_width: 832
+    num_frames: 124
+  optimizer:
+    learning_rate: 2.0e-06
+    betas:
+    - 0.9
+    - 0.999
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+  loop:
+    max_train_steps: 500
+    gradient_accumulation_steps: 1
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/activation42-dmd4
+    training_state_checkpointing_steps: 100
+    use_cpu_process_group: true
+    checkpoints_total_limit: 8
+    preserve_every_steps: 100
+    preserve_steps:
+    - 5
+    - 100
+    - 200
+    - 300
+    - 400
+    - 500
+    resume_from_checkpoint: ''
+  tracker:
+    trackers:
+    - wandb
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: activation42-step500-dmd4-prompts58k
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+  vsa:
+    sparsity: 0.0
+    tile_size: 64
+    cache_tile_buf: false
+  dit_precision: fp32
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+pipeline: {}
