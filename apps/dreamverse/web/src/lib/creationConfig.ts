@@ -46,18 +46,18 @@ export const CREATION_MODELS: CreationModelOption[] = [
 	{
 		id: "fast-ltx23",
 		label: "FastLTX 2.3",
-		description: "Latest distilled LTX rollout with OmniNFT LoRA",
+		description: "LTX 2.3 with OmniNFT LoRA",
 		badge: "New",
 	},
 	{
 		id: "fast-ltx2",
 		label: "FastLTX 2",
-		description: "Balanced quality and speed for realtime streaming",
+		description: "FastLTX 2 for streaming",
 	},
 	{
 		id: "fast-h3",
 		label: "FastH3 Preview",
-		description: "MiniMax H3 synchronized audio-video segments",
+		description: "H3 audio-video segments",
 		badge: "New",
 	},
 ];
@@ -73,7 +73,7 @@ export const DISCOVERY_TABS = ["Trends", "Skills", "AI Shorts", "Events"] as con
 export const MOCK_DISCOVERY_ASSETS: DiscoveryAsset[] = [
 	{
 		id: "featured-program",
-		title: "Creative Partner Program",
+		title: "Partner program",
 		author: "Dreamverse",
 		aspect: "16:9",
 		durationSec: 0,

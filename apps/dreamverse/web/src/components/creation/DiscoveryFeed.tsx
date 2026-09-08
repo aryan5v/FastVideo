@@ -85,7 +85,7 @@ export default function DiscoveryFeed() {
 				<div className="mb-5 flex flex-col items-center gap-3 sm:flex-row sm:items-end sm:justify-between">
 					<div className="text-center sm:text-left">
 						<h2 className="text-lg font-semibold text-foreground">Discover</h2>
-						<p className="mt-0.5 text-xs text-muted-foreground">Community creations, skills, and templates</p>
+						<p className="mt-0.5 text-xs text-muted-foreground">Recent work from the community</p>
 					</div>
 					<TabsList className="mx-auto h-auto border border-border/50 bg-secondary/80 p-1 sm:mx-0">
 						{DISCOVERY_TABS.map((tab) => (

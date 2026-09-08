@@ -239,12 +239,9 @@ export default function CreationComposer({
 
 	return (
 		<section className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-			<div className="text-center">
-				<p className="text-xs tracking-wide text-muted-foreground uppercase">Start creating with</p>
-				<h2 className="mt-1 text-xl font-semibold text-foreground sm:text-2xl">
-					<span className="text-accent-blue">AI Video</span>
-				</h2>
-			</div>
+			<h2 className="text-center text-xl font-semibold text-foreground sm:text-2xl">
+				<span className="text-accent-blue">AI Video</span>
+			</h2>
 
 			<div className="rounded-[32px] border border-border/40 bg-secondary/95 p-4 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.72)] backdrop-blur-xl sm:p-5">
 				<div className="flex gap-3.5">
@@ -283,7 +280,7 @@ export default function CreationComposer({
 							onChange={handleInputChange}
 							onKeyDown={handleKeyDown}
 							onClick={(event) => updateMentionState(value, event.currentTarget.selectionStart ?? value.length)}
-							placeholder="Describe your video or mention elements with @"
+							placeholder="Describe your video (@ for presets)"
 							disabled={disabled || sttBusy}
 							rows={3}
 							className={cn(
@@ -328,7 +325,7 @@ export default function CreationComposer({
 							</ConfigPill>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="start" className="w-56">
-							<DropdownMenuLabel>Creation type</DropdownMenuLabel>
+							<DropdownMenuLabel>Type</DropdownMenuLabel>
 							<DropdownMenuSeparator />
 							<DropdownMenuItem disabled>AI Video</DropdownMenuItem>
 							<DropdownMenuItem disabled>AI Image</DropdownMenuItem>
@@ -345,7 +342,7 @@ export default function CreationComposer({
 							</ConfigPill>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="start" className="w-72">
-							<DropdownMenuLabel>Generate with</DropdownMenuLabel>
+							<DropdownMenuLabel>Model</DropdownMenuLabel>
 							<DropdownMenuSeparator />
 							{CREATION_MODELS.map((model) => (
 								<DropdownMenuItem key={model.id} onClick={() => onModelChange(model.id)} className="flex-col items-start gap-1 py-2.5">
@@ -368,7 +365,7 @@ export default function CreationComposer({
 							</ConfigPill>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="start" className="w-64">
-							<DropdownMenuLabel>Reference mode</DropdownMenuLabel>
+							<DropdownMenuLabel>Mode</DropdownMenuLabel>
 							<DropdownMenuSeparator />
 							{CREATION_MODES.map((mode) => (
 								<DropdownMenuItem key={mode.id} onClick={() => onModeChange(mode.id)} className="flex-col items-start gap-1 py-2.5">
@@ -464,7 +461,7 @@ export default function CreationComposer({
 
 				{referenceMissing && value.trim() && (
 					<p className="mt-3 text-center text-xs text-amber-600 dark:text-amber-400">
-						Add a reference image or clip to generate in reference-guided mode.
+						Add a reference image or clip.
 					</p>
 				)}
 			</div>

@@ -2,9 +2,10 @@
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import Image from "next/image";
-import { Film, ArrowUp, X, Loader2, ArrowLeft } from "lucide-react";
+import { ArrowUp, X, Loader2, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LeaveSessionModal, { shouldShowLeaveWarning } from "@/components/LeaveSessionModal";
+import PresetQuickLaunchRail from "@/components/creation/PresetQuickLaunchRail";
 import SessionCreationConfigPills, { type SessionCreationConfig } from "@/components/creation/SessionCreationConfigPills";
 import SpeechToTextButton from "@/components/SpeechToTextButton";
 import type { AspectRatioId, CreationModeId, CreationModelId, ResolutionId } from "@/lib/creationConfig";
@@ -82,134 +83,11 @@ export default function ChatBar({
 		: isBusy
 			? "Generating video\u2026"
 			: !sessionStarted
-				? "What video are you imagining?"
+				? "Describe your video"
 				: "What do you want to edit?";
 	const actionLabel = !sessionStarted ? "Generate" : "Rewrite rollout";
 
 	const inputRef = useRef<HTMLTextAreaElement>(null);
-	const scrollRef = useRef<HTMLDivElement>(null);
-	const [canScrollLeft, setCanScrollLeft] = useState(false);
-	const [canScrollRight, setCanScrollRight] = useState(false);
-	const [presetRailDragging, setPresetRailDragging] = useState(false);
-	const presetDragStateRef = useRef({
-		pointerId: null as number | null,
-		startX: 0,
-		startScrollLeft: 0,
-		moved: false,
-	});
-	const suppressPresetClickRef = useRef(false);
-
-	const updateScrollState = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		setCanScrollLeft(el.scrollLeft > 2);
-		setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
-	}, []);
-
-	const handlePresetWheel = useCallback(
-		(event: React.WheelEvent<HTMLDivElement>) => {
-			const el = scrollRef.current;
-			if (!el) return;
-			if (el.scrollWidth <= el.clientWidth + 1) return;
-
-			const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
-				? event.deltaX
-				: event.deltaY;
-			if (!dominantDelta) return;
-
-			const maxScrollLeft = Math.max(el.scrollWidth - el.clientWidth, 0);
-			const nextScrollLeft = Math.min(
-				Math.max(el.scrollLeft + dominantDelta, 0),
-				maxScrollLeft,
-			);
-			if (nextScrollLeft === el.scrollLeft) return;
-
-			event.preventDefault();
-			el.scrollLeft = nextScrollLeft;
-			updateScrollState();
-		},
-		[updateScrollState],
-	);
-
-	const finishPresetDrag = useCallback(() => {
-		presetDragStateRef.current = {
-			pointerId: null,
-			startX: 0,
-			startScrollLeft: 0,
-			moved: false,
-		};
-		setPresetRailDragging(false);
-	}, []);
-
-	const handlePresetPointerDown = useCallback(
-		(event: React.PointerEvent<HTMLDivElement>) => {
-			const el = scrollRef.current;
-			if (!el) return;
-			if (event.pointerType !== "mouse" || event.button !== 0) return;
-			if (el.scrollWidth <= el.clientWidth + 1) return;
-
-			suppressPresetClickRef.current = false;
-			presetDragStateRef.current = {
-				pointerId: event.pointerId,
-				startX: event.clientX,
-				startScrollLeft: el.scrollLeft,
-				moved: false,
-			};
-		},
-		[],
-	);
-
-	const handlePresetPointerMove = useCallback(
-		(event: React.PointerEvent<HTMLDivElement>) => {
-			const el = scrollRef.current;
-			const dragState = presetDragStateRef.current;
-			if (!el || dragState.pointerId !== event.pointerId) return;
-
-			const deltaX = event.clientX - dragState.startX;
-			if (!dragState.moved && Math.abs(deltaX) > 4) {
-				dragState.moved = true;
-				suppressPresetClickRef.current = true;
-				setPresetRailDragging(true);
-				el.setPointerCapture?.(event.pointerId);
-			}
-			if (!dragState.moved) return;
-
-			event.preventDefault();
-			const maxScrollLeft = Math.max(el.scrollWidth - el.clientWidth, 0);
-			el.scrollLeft = Math.min(
-				Math.max(dragState.startScrollLeft - deltaX, 0),
-				maxScrollLeft,
-			);
-			updateScrollState();
-		},
-		[updateScrollState],
-	);
-
-	const handlePresetPointerUp = useCallback(
-		(event: React.PointerEvent<HTMLDivElement>) => {
-			const el = scrollRef.current;
-			if (!el || presetDragStateRef.current.pointerId !== event.pointerId) return;
-			if (el.hasPointerCapture?.(event.pointerId)) {
-				el.releasePointerCapture(event.pointerId);
-			}
-			finishPresetDrag();
-		},
-		[finishPresetDrag],
-	);
-
-	const handlePresetClickCapture = useCallback(
-		(event: React.MouseEvent<HTMLDivElement>) => {
-			if (!suppressPresetClickRef.current) return;
-			suppressPresetClickRef.current = false;
-			event.preventDefault();
-			event.stopPropagation();
-		},
-		[],
-	);
-
-	useEffect(() => {
-		updateScrollState();
-	}, [storyPresets, updateScrollState]);
 
 	useEffect(() => {
 		if (!isBusy && !sttBusy && !window.matchMedia("(pointer: coarse)").matches) {
@@ -255,7 +133,7 @@ export default function ChatBar({
 				<div className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-card/80 px-6 py-4 text-center shadow-md backdrop-blur-sm">
 					<div className="flex flex-col gap-1">
 						<p className="text-sm font-semibold text-foreground">View-only project</p>
-						<p className="max-w-md text-xs text-muted-foreground">Project sessions are currently limited to 5 minutes. Start a new project to create more videos.</p>
+						<p className="max-w-md text-xs text-muted-foreground">Sessions are limited to 5 minutes. Start a new project to keep creating.</p>
 					</div>
 					<div className="mt-1 flex items-center gap-2">
 						<Button onClick={onBackFromViewing} variant="outline" size="sm" className="gap-1.5 rounded-full px-4">
@@ -277,7 +155,7 @@ export default function ChatBar({
 				<div className="flex flex-col items-center gap-3 rounded-2xl border border-border bg-card/80 px-8 py-5 text-center shadow-md backdrop-blur-sm">
 					<div className="flex flex-col gap-1">
 						<p className="text-sm font-semibold text-foreground">Session ended</p>
-						<p className="max-w-xs text-xs text-muted-foreground">Each project currently has a 5-minute session. Start a new project to continue creating videos.</p>
+						<p className="max-w-xs text-xs text-muted-foreground">Sessions are limited to 5 minutes. Start a new project to continue.</p>
 					</div>
 					<div className="mt-1 flex items-center gap-2">
 						<Button onClick={onStartNewProject} size="sm" className="rounded-full px-5">
@@ -296,51 +174,8 @@ export default function ChatBar({
 
 	return (
 		<section className="mx-auto flex w-full max-w-2xl shrink-0 flex-col gap-4">
-			{storyPresets.length > 0 && !sessionStarted && (
-				<div className={cn("relative transition-opacity duration-200", isGenerating && "pointer-events-none opacity-40")}>
-					<div
-						ref={scrollRef}
-						onScroll={updateScrollState}
-						onWheel={handlePresetWheel}
-						onPointerDown={handlePresetPointerDown}
-						onPointerMove={handlePresetPointerMove}
-						onPointerUp={handlePresetPointerUp}
-						onPointerCancel={handlePresetPointerUp}
-						onLostPointerCapture={finishPresetDrag}
-						onClickCapture={handlePresetClickCapture}
-						className={cn(
-							"scrollbar-hidden flex gap-3 overflow-x-auto px-1 select-none",
-							presetRailDragging ? "cursor-grabbing" : "cursor-grab",
-						)}
-					>
-						{storyPresets.map((preset) => (
-							<button
-								key={preset.id}
-								type="button"
-								disabled={isGenerating}
-								onClick={() => onPresetGenerate(preset.id)}
-								className="flex flex-col sm:flex-row items-start gap-1.5 shrink-0 rounded-xl border p-2.5 text-left backdrop-blur-sm transition-colors max-w-42 sm:max-w-[215px] border-input bg-card/80 text-muted-foreground hover:bg-slate-200/60 hover:border-slate-400 hover:text-slate-700 dark:bg-slate-800/80 dark:text-slate-300 dark:hover:bg-slate-700/50 dark:hover:border-slate-500 dark:hover:text-slate-200"
-							>
-								<Film className="mt-0.5 size-4 shrink-0 opacity-60" />
-								<span className="flex flex-col gap-1 min-w-0">
-									<span className="text-[14px] font-medium line-clamp-1">{preset.label}</span>
-									{preset.description && <span className="text-xs leading-tight opacity-70 line-clamp-3 sm:line-clamp-2">{preset.description}</span>}
-								</span>
-							</button>
-						))}
-					</div>
-
-					<div
-						className={cn("pointer-events-none absolute inset-y-0 left-0 w-8 bg-background transition-opacity duration-150", canScrollLeft ? "opacity-100" : "opacity-0")}
-						style={{ maskImage: "linear-gradient(to right, black, transparent)", WebkitMaskImage: "linear-gradient(to right, black, transparent)" }}
-						aria-hidden="true"
-					/>
-					<div
-						className={cn("pointer-events-none absolute inset-y-0 right-0 w-8 bg-background transition-opacity duration-150", canScrollRight ? "opacity-100" : "opacity-0")}
-						style={{ maskImage: "linear-gradient(to left, black, transparent)", WebkitMaskImage: "linear-gradient(to left, black, transparent)" }}
-						aria-hidden="true"
-					/>
-				</div>
+			{!sessionStarted && (
+				<PresetQuickLaunchRail storyPresets={storyPresets} disabled={isGenerating} onPresetGenerate={onPresetGenerate} />
 			)}
 
 			{sessionNotice && (
@@ -358,7 +193,7 @@ export default function ChatBar({
 
 			{projectResetPending && sessionStarted && (
 				<div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-2.5 text-center text-xs text-sky-700 dark:text-sky-300">
-					Starting a new project after the current shot finishes. Your GPU session stays active.
+					Starting a new project when this shot finishes. GPU session stays open.
 				</div>
 			)}
 

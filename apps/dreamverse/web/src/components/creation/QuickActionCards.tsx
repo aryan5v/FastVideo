@@ -9,7 +9,7 @@ const QUICK_ACTIONS = [
 	{
 		id: "canvas",
 		label: "Canvas",
-		description: "Try it now",
+		description: "Soon",
 		icon: Palette,
 		accent: "text-sky-400",
 	},
@@ -23,21 +23,21 @@ const QUICK_ACTIONS = [
 	{
 		id: "image",
 		label: "AI Image",
-		description: "Dream presets",
+		description: "Presets",
 		icon: ImageIcon,
 		accent: "text-orange-400",
 	},
 	{
 		id: "avatar",
 		label: "AI Avatar",
-		description: "Character refs",
+		description: "Characters",
 		icon: Film,
 		accent: "text-violet-400",
 	},
 	{
 		id: "audio",
 		label: "AI Audio",
-		description: "Turn text into speech",
+		description: "Text to speech",
 		icon: Mic,
 		accent: "text-emerald-400",
 	},

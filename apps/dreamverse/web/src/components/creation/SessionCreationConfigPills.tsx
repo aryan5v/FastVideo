@@ -103,7 +103,7 @@ export default function SessionCreationConfigPills({
 					</ConfigPill>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="start" className="w-72">
-					<DropdownMenuLabel>Generate with</DropdownMenuLabel>
+					<DropdownMenuLabel>Model</DropdownMenuLabel>
 					<DropdownMenuSeparator />
 					{CREATION_MODELS.map((model) => (
 						<DropdownMenuItem key={model.id} onClick={() => onModelChange?.(model.id)} className="flex-col items-start gap-1 py-2.5">
@@ -126,7 +126,7 @@ export default function SessionCreationConfigPills({
 					</ConfigPill>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="start" className="w-64">
-					<DropdownMenuLabel>Reference mode</DropdownMenuLabel>
+					<DropdownMenuLabel>Mode</DropdownMenuLabel>
 					<DropdownMenuSeparator />
 					{CREATION_MODES.map((mode) => (
 						<DropdownMenuItem key={mode.id} onClick={() => onModeChange?.(mode.id)} className="flex-col items-start gap-1 py-2.5">
