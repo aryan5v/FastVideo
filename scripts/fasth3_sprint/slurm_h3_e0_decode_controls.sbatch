@@ -8,20 +8,30 @@
 set -euo pipefail
 export SLURM_EXPORT_ENV=ALL
 export SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
-if [[ -z "${CODE_ROOT:-}" ]]; then
-  CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-fi
+CODE_ROOT="${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is required}"
 export CODE_ROOT
-test -s "${CODE_ROOT}/CODE_COMMIT"
+
+require_file() {
+  if [[ ! -s "$1" ]]; then
+    echo "required file is missing or empty: $1" >&2
+    exit 1
+  fi
+}
+
+require_file "${CODE_ROOT}/CODE_COMMIT"
 
 PARENT="/mnt/nfs/vlm-aryan/hf-cache/hub/models--FastVideo--FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree/snapshots/f624f08c6c279ab43534c003e556fc5b295b6558"
 CONTROL48="${SPRINT_ROOT}/checkpoints/h18-candidates/dense-uniform-48b"
 PROMPTS="${CODE_ROOT}/examples/training/fasth3_14b_2step_qad/rescue_gate_prompts.json"
 AUDIT_ROOT="${SPRINT_ROOT}/diagnostics/e0-decode-controls/${SLURM_JOB_ID}"
-test -s "${PARENT}/modular_model_index.json"
-test -s "${CONTROL48}/transformer/candidate_validation_receipt.json"
-test ! -e "${AUDIT_ROOT}"
+require_file "${PARENT}/modular_model_index.json"
+require_file "${CONTROL48}/transformer/candidate_validation_receipt.json"
+if [[ -e "${AUDIT_ROOT}" ]]; then
+  echo "refusing to overwrite existing audit root: ${AUDIT_ROOT}" >&2
+  exit 1
+fi
 mkdir -p "${AUDIT_ROOT}"
+echo "starting E0 controls from ${CODE_ROOT} into ${AUDIT_ROOT}"
 export SPRINT_ROOT CODE_ROOT PARENT CONTROL48 PROMPTS AUDIT_ROOT
 
 srun --export=ALL --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
