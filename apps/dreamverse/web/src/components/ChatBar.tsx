@@ -5,7 +5,9 @@ import Image from "next/image";
 import { Film, ArrowUp, X, Loader2, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LeaveSessionModal, { shouldShowLeaveWarning } from "@/components/LeaveSessionModal";
+import SessionCreationConfigPills, { type SessionCreationConfig } from "@/components/creation/SessionCreationConfigPills";
 import SpeechToTextButton from "@/components/SpeechToTextButton";
+import type { AspectRatioId, CreationModeId, CreationModelId, ResolutionId } from "@/lib/creationConfig";
 import { cn } from "@/lib/utils";
 
 const PROMPT_MAX_LENGTH = 500;
@@ -32,6 +34,13 @@ interface Props {
 	onBackFromViewing?: () => void;
 	onSpeechTranscript?: (text: string) => void;
 	onSpeechInterimChange?: (text: string) => void;
+	sessionCreationConfig?: SessionCreationConfig | null;
+	configPillsReadOnly?: boolean;
+	onSessionModelChange?: (modelId: CreationModelId) => void;
+	onSessionModeChange?: (modeId: CreationModeId) => void;
+	onSessionAspectRatioChange?: (aspectRatio: AspectRatioId) => void;
+	onSessionResolutionChange?: (resolution: ResolutionId) => void;
+	onSessionDurationChange?: (durationSec: number) => void;
 }
 
 export default function ChatBar({
@@ -56,6 +65,13 @@ export default function ChatBar({
 	onBackFromViewing = () => {},
 	onSpeechTranscript,
 	onSpeechInterimChange,
+	sessionCreationConfig = null,
+	configPillsReadOnly = false,
+	onSessionModelChange,
+	onSessionModeChange,
+	onSessionAspectRatioChange,
+	onSessionResolutionChange,
+	onSessionDurationChange,
 }: Props) {
 	const [sttBusy, setSttBusy] = useState(false);
 	const [leaveModalOpen, setLeaveModalOpen] = useState(false);
@@ -348,11 +364,24 @@ export default function ChatBar({
 
 			<div
 				className={cn(
-					"flex min-w-0 items-center gap-1.5 rounded-4xl border py-2.5 pl-5 pr-2.5 shadow-md backdrop-blur-sm transition-all duration-200",
+					"flex min-w-0 flex-col gap-2 rounded-4xl border py-2.5 pl-5 pr-2.5 shadow-md backdrop-blur-sm transition-all duration-200",
 					isBusy ? "border-input/60 bg-card/40" : "border-input bg-card/65",
 				)}
 			>
-				<textarea
+				{sessionStarted && sessionCreationConfig && (
+					<SessionCreationConfigPills
+						{...sessionCreationConfig}
+						disabled={isBusy}
+						readOnly={configPillsReadOnly}
+						onModelChange={onSessionModelChange}
+						onModeChange={onSessionModeChange}
+						onAspectRatioChange={onSessionAspectRatioChange}
+						onResolutionChange={onSessionResolutionChange}
+						onDurationChange={onSessionDurationChange}
+					/>
+				)}
+				<div className="flex min-w-0 items-center gap-1.5">
+					<textarea
 					ref={inputRef}
 					id="continuation-prompt"
 					aria-label="Continuation prompt"
@@ -367,36 +396,37 @@ export default function ChatBar({
 						"min-w-0 flex-1 resize-none bg-transparent text-foreground outline-none placeholder:text-muted-foreground transition-opacity duration-200 scrollbar-thin leading-snug",
 						(isBusy || sttBusy) && "cursor-not-allowed opacity-50",
 					)}
-				/>
-				{onSpeechTranscript && <SpeechToTextButton disabled={isBusy} onTranscript={onSpeechTranscript} onInterimChange={onSpeechInterimChange} onBusyChange={setSttBusy} />}
-				{!sessionStarted ? (
-					<Button
-						aria-label={actionLabel}
-						title={actionLabel}
-						onClick={onGenerate}
-						disabled={!canJoinSession || isGenerating || !continuationDraft.trim()}
-						size="icon-sm"
-						className="shrink-0 rounded-full"
-					>
-						{showSpinner ? <Loader2 className="size-5 animate-spin" /> : <ArrowUp className="size-5" />}
-					</Button>
-				) : (
-					<>
+					/>
+					{onSpeechTranscript && <SpeechToTextButton disabled={isBusy} onTranscript={onSpeechTranscript} onInterimChange={onSpeechInterimChange} onBusyChange={setSttBusy} />}
+					{!sessionStarted ? (
 						<Button
 							aria-label={actionLabel}
 							title={actionLabel}
-							onClick={onSubmitContinuation}
-							disabled={!canSubmitContinuation || showSpinner || projectResetPending || !continuationDraft.trim()}
+							onClick={onGenerate}
+							disabled={!canJoinSession || isGenerating || !continuationDraft.trim()}
 							size="icon-sm"
 							className="shrink-0 rounded-full"
 						>
 							{showSpinner ? <Loader2 className="size-5 animate-spin" /> : <ArrowUp className="size-5" />}
 						</Button>
-						<Button variant="outline" aria-label="Leave" title="Leave" onClick={() => { if (shouldShowLeaveWarning()) setLeaveModalOpen(true); else onLeave(); }} disabled={isGenerating || projectResetPending} size="icon-sm" className="shrink-0 rounded-full">
-							<X className="size-5" />
-						</Button>
-					</>
-				)}
+					) : (
+						<>
+							<Button
+								aria-label={actionLabel}
+								title={actionLabel}
+								onClick={onSubmitContinuation}
+								disabled={!canSubmitContinuation || showSpinner || projectResetPending || !continuationDraft.trim()}
+								size="icon-sm"
+								className="shrink-0 rounded-full"
+							>
+								{showSpinner ? <Loader2 className="size-5 animate-spin" /> : <ArrowUp className="size-5" />}
+							</Button>
+							<Button variant="outline" aria-label="Leave" title="Leave" onClick={() => { if (shouldShowLeaveWarning()) setLeaveModalOpen(true); else onLeave(); }} disabled={isGenerating || projectResetPending} size="icon-sm" className="shrink-0 rounded-full">
+								<X className="size-5" />
+							</Button>
+						</>
+					)}
+				</div>
 			</div>
 			<p className="px-2 text-center text-[11px] text-muted-foreground">
 				LLM powered by{" "}

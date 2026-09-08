@@ -130,6 +130,14 @@ export function formatDurationLabel(seconds: number): string {
 	return `${seconds}s`;
 }
 
+export function modeRequiresReference(modeId: CreationModeId): boolean {
+	return modeId === "ref2av";
+}
+
+export function modeUsesDualFrames(modeId: CreationModeId): boolean {
+	return modeId === "fl2av";
+}
+
 export function buildMentionOptions(storyPresets: Array<{ id?: string; label?: string; description?: string }>): MentionOption[] {
 	return storyPresets
 		.filter((preset) => typeof preset.label === "string" && preset.label.trim())

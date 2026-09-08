@@ -27,7 +27,13 @@ export default function AppNavRail({
 	className,
 }: AppNavRailProps) {
 	return (
-		<aside className={cn("hidden shrink-0 flex-col items-center gap-3 px-3 py-4 lg:flex", className)} aria-label="Primary navigation">
+		<aside
+			className={cn(
+				"hidden shrink-0 flex-col items-center gap-2 border-r border-border/40 bg-background/30 px-2.5 py-5 lg:flex",
+				className,
+			)}
+			aria-label="Primary navigation"
+		>
 			{NAV_ITEMS.map((item) => {
 				const Icon = item.icon;
 				const isActive = item.id === activeSection;
@@ -42,11 +48,13 @@ export default function AppNavRail({
 							onSectionChange(item.id);
 						}}
 						className={cn(
-							"flex w-16 flex-col items-center gap-1 rounded-2xl px-2 py-3 text-[11px] font-medium transition-colors",
-							isActive ? "bg-card/80 text-foreground shadow-sm" : "text-muted-foreground hover:bg-card/50 hover:text-foreground",
+							"flex w-[4.5rem] flex-col items-center gap-1 rounded-xl px-2 py-2.5 text-[10px] font-medium tracking-wide transition-colors",
+							isActive
+								? "bg-secondary/90 text-foreground shadow-sm ring-1 ring-border/60"
+								: "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
 						)}
 					>
-						<Icon className={cn("size-5", isActive && "text-accent-blue")} />
+						<Icon className={cn("size-[18px]", isActive && "text-accent-blue")} />
 						{item.label}
 					</button>
 				);

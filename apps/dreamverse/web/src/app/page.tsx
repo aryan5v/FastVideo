@@ -1,5 +1,5 @@
 "use client";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Download, Share2 } from "lucide-react";
 import DevtoolsShell from "@/components/devtools/DevtoolsShell";
@@ -13,6 +13,7 @@ import {
 	type CreationModelId,
 	type ResolutionId,
 } from "@/lib/creationConfig";
+import type { SessionCreationConfig } from "@/components/creation/SessionCreationConfigPills";
 import SessionTimeoutModal from "@/components/SessionTimeoutModal";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
@@ -338,7 +339,16 @@ export default function Page() {
 	const [creationAspectRatio, setCreationAspectRatio] = useState<AspectRatioId>("16:9");
 	const [creationResolution, setCreationResolution] = useState<ResolutionId>("720p");
 	const [creationDurationSec, setCreationDurationSec] = useState(5);
+	const [sessionCreationConfig, setSessionCreationConfig] = useState<SessionCreationConfig>({
+		modelId: "fast-ltx23",
+		modeId: "t2v",
+		aspectRatio: "16:9",
+		resolution: "720p",
+		durationSec: 5,
+	});
 	const [referencePreviewUrl, setReferencePreviewUrl] = useState<string | null>(null);
+	const [firstFramePreviewUrl, setFirstFramePreviewUrl] = useState<string | null>(null);
+	const [lastFramePreviewUrl, setLastFramePreviewUrl] = useState<string | null>(null);
 	const [currentThumbnail, setCurrentThumbnail] = useState<string | null>(null);
 	const currentProjectIdRef = useRef("");
 	const currentProjectCreatedAtRef = useRef(0);
@@ -364,17 +374,47 @@ export default function Page() {
 			if (referencePreviewUrl) {
 				URL.revokeObjectURL(referencePreviewUrl);
 			}
+			if (firstFramePreviewUrl) {
+				URL.revokeObjectURL(firstFramePreviewUrl);
+			}
+			if (lastFramePreviewUrl) {
+				URL.revokeObjectURL(lastFramePreviewUrl);
+			}
 		};
-	}, [referencePreviewUrl]);
+	}, [referencePreviewUrl, firstFramePreviewUrl, lastFramePreviewUrl]);
 
-	const mentionOptions = useMemo(() => buildMentionOptions(storyPresets as Array<{ id?: string; label?: string; description?: string }>), [storyPresets]);
-
-	function handleReferenceSelect(file: File | null) {
-		setReferencePreviewUrl((current) => {
+	function setPreviewUrl(setter: Dispatch<SetStateAction<string | null>>, file: File | null) {
+		setter((current) => {
 			if (current) URL.revokeObjectURL(current);
 			return file ? URL.createObjectURL(file) : null;
 		});
 	}
+
+	function handleReferenceSelect(file: File | null) {
+		setPreviewUrl(setReferencePreviewUrl, file);
+	}
+
+	function handleFirstFrameSelect(file: File | null) {
+		setPreviewUrl(setFirstFramePreviewUrl, file);
+	}
+
+	function handleLastFrameSelect(file: File | null) {
+		setPreviewUrl(setLastFramePreviewUrl, file);
+	}
+
+	const mentionOptions = useMemo(() => buildMentionOptions(storyPresets as Array<{ id?: string; label?: string; description?: string }>), [storyPresets]);
+
+	const lobbyStoryPresets = useMemo(
+		() =>
+			(storyPresets as Array<{ id?: string; label?: string; description?: string }>)
+				.filter((preset) => typeof preset.id === "string" && typeof preset.label === "string")
+				.map((preset) => ({
+					id: String(preset.id),
+					label: String(preset.label),
+					description: typeof preset.description === "string" ? preset.description : undefined,
+				})),
+		[storyPresets],
+	);
 
 	const videoElRef = useRef<HTMLVideoElement | null>(null);
 	const archivedPlaybackElRef = useRef<HTMLVideoElement | null>(null);
@@ -1968,10 +2008,21 @@ export default function Page() {
 		}
 	}
 
+	function syncSessionCreationConfigFromLobby() {
+		setSessionCreationConfig({
+			modelId: creationModelId,
+			modeId: creationModeId,
+			aspectRatio: creationAspectRatio,
+			resolution: creationResolution,
+			durationSec: creationDurationSec,
+		});
+	}
+
 	function beginProjectLocally({ force = false } = {}) {
 		if (!force && !canStartSession) return;
 		if (sessionStore.get().sessionStarted || sessionStore.get().projectResetPending) return false;
 		setTimeoutModalOpen(false);
+		syncSessionCreationConfigFromLobby();
 		// Unmute during the user gesture so iOS Safari permits audio playback.
 		setVideoMuted(false);
 		if (viewingProject) closeViewingProject();
@@ -2801,7 +2852,10 @@ export default function Page() {
 							resolution={creationResolution}
 							durationSec={creationDurationSec}
 							referencePreviewUrl={referencePreviewUrl}
+							firstFramePreviewUrl={firstFramePreviewUrl}
+							lastFramePreviewUrl={lastFramePreviewUrl}
 							mentionOptions={mentionOptions}
+							storyPresets={lobbyStoryPresets}
 							onValueChange={(value) => sessionStore.patch({ livePromptDraft: value })}
 							onSubmit={() => void joinSession()}
 							onKeyDown={handleLivePromptKeydown}
@@ -2811,6 +2865,9 @@ export default function Page() {
 							onResolutionChange={setCreationResolution}
 							onDurationChange={setCreationDurationSec}
 							onReferenceSelect={handleReferenceSelect}
+							onFirstFrameSelect={handleFirstFrameSelect}
+							onLastFrameSelect={handleLastFrameSelect}
+							onPresetGenerate={handlePresetGenerate}
 							onSpeechTranscript={handleLivePromptSpeechTranscript}
 							onSpeechInterimChange={handleLivePromptSpeechInterim}
 							onOpenProjects={() => setSidebarOpen(true)}
@@ -2828,6 +2885,12 @@ export default function Page() {
 								sessionExpired={sessionExpired as boolean}
 								sessionNotice={sessionNotice as string}
 								projectResetPending={projectResetPending as boolean}
+								sessionCreationConfig={sessionCreationConfig}
+								onSessionModelChange={(modelId) => setSessionCreationConfig((current) => ({ ...current, modelId }))}
+								onSessionModeChange={(modeId) => setSessionCreationConfig((current) => ({ ...current, modeId }))}
+								onSessionAspectRatioChange={(aspectRatio) => setSessionCreationConfig((current) => ({ ...current, aspectRatio }))}
+								onSessionResolutionChange={(resolution) => setSessionCreationConfig((current) => ({ ...current, resolution }))}
+								onSessionDurationChange={(durationSec) => setSessionCreationConfig((current) => ({ ...current, durationSec }))}
 								onPresetGenerate={handlePresetGenerate}
 								onContinuationInput={handleLivePromptInput}
 								onContinuationKeydown={handleLivePromptKeydown}

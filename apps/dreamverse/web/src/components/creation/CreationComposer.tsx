@@ -3,6 +3,7 @@
 import React, { useMemo, useRef, useState } from "react";
 import { ArrowUp, Box, ChevronDown, Clock, ImagePlus, Monitor, Sparkles, Wand2 } from "lucide-react";
 
+import ConfigPill from "@/components/creation/ConfigPill";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -20,6 +21,8 @@ import {
 	CREATION_MODELS,
 	CREATION_MODES,
 	RESOLUTIONS,
+	modeRequiresReference,
+	modeUsesDualFrames,
 	type AspectRatioId,
 	type CreationModeId,
 	type CreationModelId,
@@ -43,6 +46,8 @@ interface CreationComposerProps {
 	resolution: ResolutionId;
 	durationSec: number;
 	referencePreviewUrl?: string | null;
+	firstFramePreviewUrl?: string | null;
+	lastFramePreviewUrl?: string | null;
 	mentionOptions?: MentionOption[];
 	onValueChange: (value: string) => void;
 	onSubmit: () => void;
@@ -53,26 +58,60 @@ interface CreationComposerProps {
 	onResolutionChange: (resolution: ResolutionId) => void;
 	onDurationChange: (durationSec: number) => void;
 	onReferenceSelect?: (file: File | null) => void;
+	onFirstFrameSelect?: (file: File | null) => void;
+	onLastFrameSelect?: (file: File | null) => void;
 	onSpeechTranscript?: (text: string) => void;
 	onSpeechInterimChange?: (text: string) => void;
 }
 
-function ConfigPill({
-	children,
-	className,
-	...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+interface ReferenceUploadSlotProps {
+	label: string;
+	previewUrl?: string | null;
+	required?: boolean;
+	optional?: boolean;
+	disabled?: boolean;
+	onSelect?: (file: File | null) => void;
+}
+
+function ReferenceUploadSlot({ label, previewUrl = null, required = false, optional = false, disabled = false, onSelect }: ReferenceUploadSlotProps) {
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
 	return (
-		<button
-			type="button"
-			className={cn(
-				"inline-flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-card/70 px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent/60",
-				className,
+		<div className="flex flex-col gap-1">
+			<button
+				type="button"
+				onClick={() => fileInputRef.current?.click()}
+				disabled={disabled}
+				className={cn(
+					"relative flex size-[76px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed bg-muted/50 text-[11px] font-medium text-muted-foreground transition-colors hover:border-border hover:bg-accent/40",
+					required && !previewUrl ? "border-amber-500/50" : "border-border/60",
+					disabled && "pointer-events-none opacity-50",
+				)}
+			>
+				{previewUrl ? (
+					<img src={previewUrl} alt="" className="absolute inset-0 size-full object-cover" />
+				) : (
+					<>
+						<ImagePlus className="size-4" />
+						<span>{label}</span>
+					</>
+				)}
+			</button>
+			{(required || optional) && (
+				<span className="text-center text-[10px] text-muted-foreground">{required ? "Required" : "Optional"}</span>
 			)}
-			{...props}
-		>
-			{children}
-		</button>
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept="image/*,video/*"
+				className="hidden"
+				onChange={(event) => {
+					const file = event.target.files?.[0] ?? null;
+					onSelect?.(file);
+					event.target.value = "";
+				}}
+			/>
+		</div>
 	);
 }
 
@@ -87,6 +126,8 @@ export default function CreationComposer({
 	resolution,
 	durationSec,
 	referencePreviewUrl = null,
+	firstFramePreviewUrl = null,
+	lastFramePreviewUrl = null,
 	mentionOptions = [],
 	onValueChange,
 	onSubmit,
@@ -97,11 +138,12 @@ export default function CreationComposer({
 	onResolutionChange,
 	onDurationChange,
 	onReferenceSelect,
+	onFirstFrameSelect,
+	onLastFrameSelect,
 	onSpeechTranscript,
 	onSpeechInterimChange,
 }: CreationComposerProps) {
 	const inputRef = useRef<HTMLTextAreaElement>(null);
-	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [sttBusy, setSttBusy] = useState(false);
 	const [mentionQuery, setMentionQuery] = useState("");
 	const [mentionOpen, setMentionOpen] = useState(false);
@@ -109,6 +151,10 @@ export default function CreationComposer({
 
 	const selectedModel = CREATION_MODELS.find((model) => model.id === modelId) ?? CREATION_MODELS[0];
 	const selectedMode = CREATION_MODES.find((mode) => mode.id === modeId) ?? CREATION_MODES[0];
+	const usesDualFrames = modeUsesDualFrames(modeId);
+	const requiresReference = modeRequiresReference(modeId);
+	const referenceMissing = requiresReference && !referencePreviewUrl;
+	const submitDisabled = !canSubmit || disabled || isGenerating || !value.trim() || referenceMissing;
 
 	const filteredMentions = useMemo(() => {
 		const query = mentionQuery.trim().toLowerCase();
@@ -192,45 +238,41 @@ export default function CreationComposer({
 	}
 
 	return (
-		<section className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+		<section className="mx-auto flex w-full max-w-3xl flex-col gap-5">
 			<div className="text-center">
-				<p className="text-sm text-muted-foreground">Start creating with</p>
-				<h2 className="text-xl font-semibold text-foreground sm:text-2xl">
+				<p className="text-xs tracking-wide text-muted-foreground uppercase">Start creating with</p>
+				<h2 className="mt-1 text-xl font-semibold text-foreground sm:text-2xl">
 					<span className="text-accent-blue">AI Video</span>
 				</h2>
 			</div>
 
-			<div className="rounded-[28px] border border-border/70 bg-card/75 p-3 shadow-lg backdrop-blur-md sm:p-4">
-				<div className="flex gap-3">
-					<button
-						type="button"
-						onClick={() => fileInputRef.current?.click()}
-						disabled={disabled}
-						className={cn(
-							"relative flex size-[72px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed border-border/80 bg-muted/40 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent/40",
-							disabled && "pointer-events-none opacity-50",
-						)}
-					>
-						{referencePreviewUrl ? (
-							<img src={referencePreviewUrl} alt="" className="absolute inset-0 size-full object-cover" />
-						) : (
-							<>
-								<ImagePlus className="size-4" />
-								<span>Reference</span>
-							</>
-						)}
-					</button>
-					<input
-						ref={fileInputRef}
-						type="file"
-						accept="image/*,video/*"
-						className="hidden"
-						onChange={(event) => {
-							const file = event.target.files?.[0] ?? null;
-							onReferenceSelect?.(file);
-							event.target.value = "";
-						}}
-					/>
+			<div className="rounded-[32px] border border-border/40 bg-secondary/95 p-4 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.72)] backdrop-blur-xl sm:p-5">
+				<div className="flex gap-3.5">
+					{usesDualFrames ? (
+						<div className="flex shrink-0 gap-2">
+							<ReferenceUploadSlot
+								label="First"
+								previewUrl={firstFramePreviewUrl}
+								disabled={disabled}
+								onSelect={onFirstFrameSelect}
+							/>
+							<ReferenceUploadSlot
+								label="Last"
+								previewUrl={lastFramePreviewUrl}
+								disabled={disabled}
+								onSelect={onLastFrameSelect}
+							/>
+						</div>
+					) : (
+						<ReferenceUploadSlot
+							label="Reference"
+							previewUrl={referencePreviewUrl}
+							required={requiresReference}
+							optional={!requiresReference}
+							disabled={disabled}
+							onSelect={onReferenceSelect}
+						/>
+					)}
 
 					<div className="relative min-w-0 flex-1">
 						<textarea
@@ -245,7 +287,7 @@ export default function CreationComposer({
 							disabled={disabled || sttBusy}
 							rows={3}
 							className={cn(
-								"min-h-[88px] w-full resize-none bg-transparent text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+								"min-h-[92px] w-full resize-none bg-transparent px-0.5 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground/80",
 								(disabled || sttBusy) && "cursor-not-allowed opacity-50",
 							)}
 						/>
@@ -276,7 +318,7 @@ export default function CreationComposer({
 					</div>
 				</div>
 
-				<div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+				<div className="mt-4 flex flex-wrap items-center gap-1.5 rounded-2xl bg-muted/35 p-1.5 ring-1 ring-border/25">
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<ConfigPill disabled={disabled}>
@@ -411,14 +453,20 @@ export default function CreationComposer({
 						<Button
 							aria-label="Generate"
 							onClick={onSubmit}
-							disabled={!canSubmit || disabled || isGenerating || !value.trim()}
+							disabled={submitDisabled}
 							size="icon-sm"
-							className="rounded-full"
+							className="rounded-full bg-accent-blue text-white shadow-sm hover:bg-accent-blue/90 disabled:bg-muted disabled:text-muted-foreground"
 						>
 							<ArrowUp className="size-5" />
 						</Button>
 					</div>
 				</div>
+
+				{referenceMissing && value.trim() && (
+					<p className="mt-3 text-center text-xs text-amber-600 dark:text-amber-400">
+						Add a reference image or clip to generate in reference-guided mode.
+					</p>
+				)}
 			</div>
 		</section>
 	);

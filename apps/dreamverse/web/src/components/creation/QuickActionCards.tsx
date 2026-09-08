@@ -45,7 +45,7 @@ const QUICK_ACTIONS = [
 
 export default function QuickActionCards() {
 	return (
-		<div className="mx-auto grid w-full max-w-3xl grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+		<div className="mx-auto grid w-full max-w-3xl grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
 			{QUICK_ACTIONS.map((action) => {
 				const Icon = action.icon;
 				return (
@@ -54,14 +54,16 @@ export default function QuickActionCards() {
 						type="button"
 						disabled
 						className={cn(
-							"flex min-h-[88px] flex-col justify-between rounded-2xl border border-border/70 bg-card/60 p-3 text-left opacity-80 transition-colors",
-							action.id === "video" && "border-accent-blue/30 bg-accent-blue/5",
+							"group flex min-h-[74px] flex-col justify-between rounded-xl border border-border/50 bg-secondary/70 p-3 text-left transition-colors hover:border-border hover:bg-secondary/90",
+							action.id === "video" && "border-accent-blue/35 bg-accent-blue/[0.08] ring-1 ring-accent-blue/15",
 						)}
 					>
-						<Icon className={cn("size-4", action.accent)} />
+						<span className={cn("inline-flex size-7 items-center justify-center rounded-lg bg-background/60", action.accent)}>
+							<Icon className="size-3.5" />
+						</span>
 						<span>
 							<span className="block text-sm font-medium text-foreground">{action.label}</span>
-							<span className="block text-xs text-muted-foreground">{action.description}</span>
+							<span className="block text-[11px] text-muted-foreground">{action.description}</span>
 						</span>
 					</button>
 				);
