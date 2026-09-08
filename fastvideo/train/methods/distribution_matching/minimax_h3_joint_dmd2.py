@@ -90,6 +90,33 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
         maximum = .999 if score else 1.0
         return warp_sigma(base, 12., maximum), warp_sigma(base, 3., maximum)
 
+    def _observe(self, label: str, tensors: Any) -> None:
+        if not self.method_config.get("diagnostic_boundaries", False):
+            return
+        stats = []
+        for x in tensors:
+            value = x.detach().float()
+            finite = torch.isfinite(value)
+            stats.append({
+                "shape": list(value.shape),
+                "dtype": str(x.dtype),
+                "finite": bool(finite.all()),
+                "absmax": float(value.abs().max()),
+                "rms": float(value.double().square().mean().sqrt())
+            })
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        root = Path(self.training_config.checkpoint.output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / f"dmd_boundaries_rank{rank}.jsonl").open("a") as stream:
+            stream.write(
+                json.dumps({
+                    "iteration": getattr(self, "_diagnostic_iteration", 0),
+                    "boundary": label,
+                    "tensors": stats
+                }) + "\n")
+        if not all(t["finite"] for t in stats):
+            raise RuntimeError(f"First nonfinite DMD boundary: {label}")
+
     def _predict(self, model: Any, states: Any, sigmas: Any, tb: Any) -> Any:
         flows = model.predict_joint_noise(*states,
                                           1 - sigmas[0],
@@ -97,11 +124,16 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
                                           tb,
                                           conditional=True,
                                           attn_kind="dense")
-        return tuple(clean_estimate(x, flow, s) for x, flow, s in zip(states, flows, sigmas, strict=True))
+        role = next(name for name, candidate in self._role_models.items() if candidate is model)
+        self._observe(f"{role}_flow", flows)
+        estimates = tuple(clean_estimate(x, flow, s) for x, flow, s in zip(states, flows, sigmas, strict=True))
+        self._observe(f"{role}_clean", estimates)
+        return estimates
 
     def single_train_step(self, batch: dict[str, Any], iteration: int) -> Any:
         if not batch.get("prompt_only", False):
             raise ValueError("This DMD pilot requires audited prompt-only batches")
+        self._diagnostic_iteration = iteration
         fresh = self._carry is None
         raw = batch if fresh else self._carry["raw"]
         tb = self.student.prepare_batch(raw, generator=self.cuda_generator, latents_source="zeros")
@@ -113,6 +145,7 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
             rung, states = self._carry["rung"], self._carry["states"]
         grid = torch.tensor([.999, .749, .500, .250, 0.], device=device, dtype=torch.float64)
         sigmas = self._sigmas(grid[rung:rung + 1])
+        self._observe("carried_state", states)
         update_student = self._should_update_student(iteration)
         with torch.set_grad_enabled(update_student):
             generated = self._predict(self.student, states, sigmas, tb)
@@ -124,6 +157,7 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
             torch.randn(x.shape, device=device, dtype=x.dtype, generator=self.cuda_generator) for x in generated)
         with torch.no_grad():
             noised = tuple(mix_state(x.detach(), n, s) for x, n, s in zip(generated, noises, score_sigmas, strict=True))
+        self._observe("score_noised", noised)
         if update_student:
             with torch.no_grad():
                 fake = self._predict(self.critic, noised, score_sigmas, tb)
@@ -136,6 +170,7 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
                                                  g.detach().float()) for p, g in zip(predicted, generated, strict=True))
             context = (1 - score_sigmas[0], tb.attn_metadata)
         total = video_loss + audio_loss
+        self._observe("loss", (video_loss, audio_loss))
         if not torch.isfinite(total):
             raise RuntimeError("Nonfinite joint DMD loss")
         with torch.no_grad():
@@ -170,6 +205,21 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
                  grad_accum_rounds: int = 1) -> None:
         model = self._role_models[outputs["role"]]
         model.backward(loss_map["total_loss"], outputs["context"], grad_accum_rounds=grad_accum_rounds)
+        if self.method_config.get("diagnostic_boundaries", False):
+            bad = [
+                name for name, p in model.transformer.named_parameters()
+                if p.grad is not None and not torch.isfinite(_local_parameter_tensor(p.grad)).all()
+            ]
+            if bad:
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                path = Path(self.training_config.checkpoint.output_dir) / f"dmd_bad_gradient_rank{rank}.json"
+                path.write_text(
+                    json.dumps({
+                        "iteration": self._diagnostic_iteration,
+                        "role": outputs["role"],
+                        "parameters": bad
+                    }))
+                raise RuntimeError(f"Nonfinite {outputs['role']} gradients before clipping/Adam: {bad[:3]}")
 
     def optimizers_schedulers_step(self, iteration: int) -> None:
         name = "student" if self._should_update_student(iteration) else "critic"
@@ -185,6 +235,12 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
                         raise RuntimeError("DMD master weights must be FP32")
                     if local.numel() and len(probes) < 16:
                         probes.append((local, local[:4096].clone()))
+        if self.method_config.get("diagnostic_boundaries", False):
+            gradients = [
+                _local_parameter_tensor(p.grad).detach() for p in model.transformer.parameters() if p.grad is not None
+            ]
+            # Inspect reduced/clipped gradients before Adam can contaminate weights.
+            self._observe(f"{name}_gradients", gradients)
         super().optimizers_schedulers_step(iteration)
         if first:
             changed = sum(int(torch.count_nonzero(x[:b.numel()] != b)) for x, b in probes)

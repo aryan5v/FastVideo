@@ -76,3 +76,17 @@ def test_carried_prompt_and_alternating_optimizer_roles(tmp_path):
     import json
     ids=[json.loads(l)['id'] for l in (tmp_path/'consumed_prompts_rank0.jsonl').read_text().splitlines()]
     assert ids==['1','1','1','1','5']
+
+
+def test_boundary_diagnostic_reports_before_contamination(tmp_path):
+    m=MiniMaxH3JointDMD2Method.__new__(MiniMaxH3JointDMD2Method);torch.nn.Module.__init__(m)
+    m.method_config={'diagnostic_boundaries':True}
+    m.training_config=SimpleNamespace(checkpoint=SimpleNamespace(output_dir=str(tmp_path)))
+    m._diagnostic_iteration=4
+    m._observe('state',[torch.ones(3)])
+    with pytest.raises(RuntimeError,match='critic_flow'):
+        m._observe('critic_flow',[torch.tensor([float('nan')])])
+    import json
+    rows=[json.loads(l) for l in (tmp_path/'dmd_boundaries_rank0.jsonl').read_text().splitlines()]
+    assert rows[0]['tensors'][0]['finite']
+    assert rows[1]['boundary']=='critic_flow' and not rows[1]['tensors'][0]['finite']
