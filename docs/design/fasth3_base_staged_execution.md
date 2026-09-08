@@ -47,3 +47,9 @@ Six focused CPU tests pass for actual-update guards, modality balance, text/padd
 Job6873 was cancelled while pending to include the corrected outlier denominator. Its replacement6875 uses immutable revision d2520f79. Activation extraction/decode job6874 is queued afterok6872 and uses immutable code/recovery-d1f2b3c2. It extracts the activation-selected42 and automatically decodes four samples; the48-example scoring screen is still limited evidence.
 
 Uniform42 speech from6869 now has WER0.0: transcript exactly matches the eight-word expected sentence. Receipt: diagnostics/base-h3-controls/6871-TORCH_SDPA/6869-TORCH_SDPA-wer.json. This is single-clip intelligibility evidence, not audio naturalness or sync certification. Base SDPA speech also WER0.0. Read actual values rather than the diagnostic passed flag whose threshold was100.
+
+## New numerical gate failure
+
+6871 finished panels/ASR but failed its49-call cross-backend endpoint gate: video cosine0.9972312860, relative RMSE0.07606369, versus required0.999. Consequently6875 was cancelled by SLURM before it ran. Recovery is staged but NOT currently training. Do not report a live200-update recovery job.
+
+A new bounded same-state diagnostic, code/same-state-78d4d7f0, compares SDPA and FlashAttention velocities on identical SDPA teacher-prefix states at every interval. This separates local backend mismatch from accumulated trajectory divergence. Its output must be reported separately and must not erase/relabel the failed endpoint gate. If same-state parity passes, review both decoded Base panels and explicitly document whether SDPA-only recovery is interpretable before resubmitting; do not silently weaken the previous gate. User wants actual200-update recovery soon but not false quality claims. Activation extraction/decode6874 remains dependent on corrected scorer6872.
