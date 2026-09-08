@@ -1,0 +1,425 @@
+"use client";
+
+import React, { useMemo, useRef, useState } from "react";
+import { ArrowUp, Box, ChevronDown, Clock, ImagePlus, Monitor, Sparkles, Wand2 } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Slider } from "@/components/ui/slider";
+import SpeechToTextButton from "@/components/SpeechToTextButton";
+import {
+	ASPECT_RATIOS,
+	CREATION_MODELS,
+	CREATION_MODES,
+	RESOLUTIONS,
+	type AspectRatioId,
+	type CreationModeId,
+	type CreationModelId,
+	type MentionOption,
+	type ResolutionId,
+	formatDurationLabel,
+	formatResolutionLabel,
+} from "@/lib/creationConfig";
+import { cn } from "@/lib/utils";
+
+const PROMPT_MAX_LENGTH = 500;
+
+interface CreationComposerProps {
+	value: string;
+	disabled?: boolean;
+	isGenerating?: boolean;
+	canSubmit?: boolean;
+	modelId: CreationModelId;
+	modeId: CreationModeId;
+	aspectRatio: AspectRatioId;
+	resolution: ResolutionId;
+	durationSec: number;
+	referencePreviewUrl?: string | null;
+	mentionOptions?: MentionOption[];
+	onValueChange: (value: string) => void;
+	onSubmit: () => void;
+	onKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+	onModelChange: (modelId: CreationModelId) => void;
+	onModeChange: (modeId: CreationModeId) => void;
+	onAspectRatioChange: (aspectRatio: AspectRatioId) => void;
+	onResolutionChange: (resolution: ResolutionId) => void;
+	onDurationChange: (durationSec: number) => void;
+	onReferenceSelect?: (file: File | null) => void;
+	onSpeechTranscript?: (text: string) => void;
+	onSpeechInterimChange?: (text: string) => void;
+}
+
+function ConfigPill({
+	children,
+	className,
+	...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+	return (
+		<button
+			type="button"
+			className={cn(
+				"inline-flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-card/70 px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-accent/60",
+				className,
+			)}
+			{...props}
+		>
+			{children}
+		</button>
+	);
+}
+
+export default function CreationComposer({
+	value,
+	disabled = false,
+	isGenerating = false,
+	canSubmit = false,
+	modelId,
+	modeId,
+	aspectRatio,
+	resolution,
+	durationSec,
+	referencePreviewUrl = null,
+	mentionOptions = [],
+	onValueChange,
+	onSubmit,
+	onKeyDown,
+	onModelChange,
+	onModeChange,
+	onAspectRatioChange,
+	onResolutionChange,
+	onDurationChange,
+	onReferenceSelect,
+	onSpeechTranscript,
+	onSpeechInterimChange,
+}: CreationComposerProps) {
+	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [sttBusy, setSttBusy] = useState(false);
+	const [mentionQuery, setMentionQuery] = useState("");
+	const [mentionOpen, setMentionOpen] = useState(false);
+	const [mentionStart, setMentionStart] = useState<number | null>(null);
+
+	const selectedModel = CREATION_MODELS.find((model) => model.id === modelId) ?? CREATION_MODELS[0];
+	const selectedMode = CREATION_MODES.find((mode) => mode.id === modeId) ?? CREATION_MODES[0];
+
+	const filteredMentions = useMemo(() => {
+		const query = mentionQuery.trim().toLowerCase();
+		if (!query) return mentionOptions.slice(0, 6);
+		return mentionOptions
+			.filter((option) => option.label.toLowerCase().includes(query) || option.description?.toLowerCase().includes(query))
+			.slice(0, 6);
+	}, [mentionOptions, mentionQuery]);
+
+	function autoResize() {
+		const el = inputRef.current;
+		if (!el) return;
+		el.style.height = "auto";
+		const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22;
+		const maxHeight = lineHeight * 4;
+		el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+		el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+	}
+
+	function updateMentionState(nextValue: string, cursorPosition: number) {
+		const beforeCursor = nextValue.slice(0, cursorPosition);
+		const atIndex = beforeCursor.lastIndexOf("@");
+		if (atIndex === -1 || (atIndex > 0 && !/\s/.test(beforeCursor[atIndex - 1] ?? ""))) {
+			setMentionOpen(false);
+			setMentionStart(null);
+			setMentionQuery("");
+			return;
+		}
+		const query = beforeCursor.slice(atIndex + 1);
+		if (/\s/.test(query)) {
+			setMentionOpen(false);
+			setMentionStart(null);
+			setMentionQuery("");
+			return;
+		}
+		setMentionStart(atIndex);
+		setMentionQuery(query);
+		setMentionOpen(true);
+	}
+
+	function insertMention(option: MentionOption) {
+		if (mentionStart === null) return;
+		const before = value.slice(0, mentionStart);
+		const after = value.slice(inputRef.current?.selectionStart ?? value.length);
+		const mentionText = `@${option.label} `;
+		const nextValue = `${before}${mentionText}${after}`.slice(0, PROMPT_MAX_LENGTH);
+		onValueChange(nextValue);
+		setMentionOpen(false);
+		setMentionStart(null);
+		setMentionQuery("");
+		requestAnimationFrame(() => {
+			const el = inputRef.current;
+			if (!el) return;
+			const cursor = before.length + mentionText.length;
+			el.focus();
+			el.setSelectionRange(cursor, cursor);
+			autoResize();
+		});
+	}
+
+	function handleInputChange(event: React.ChangeEvent<HTMLTextAreaElement>) {
+		const nextValue = event.target.value.slice(0, PROMPT_MAX_LENGTH);
+		onValueChange(nextValue);
+		updateMentionState(nextValue, event.target.selectionStart ?? nextValue.length);
+		requestAnimationFrame(autoResize);
+	}
+
+	function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+		if (mentionOpen && filteredMentions.length > 0) {
+			if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+				event.preventDefault();
+				insertMention(filteredMentions[0]);
+				return;
+			}
+			if (event.key === "Escape") {
+				setMentionOpen(false);
+				return;
+			}
+		}
+		onKeyDown?.(event);
+	}
+
+	return (
+		<section className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+			<div className="text-center">
+				<p className="text-sm text-muted-foreground">Start creating with</p>
+				<h2 className="text-xl font-semibold text-foreground sm:text-2xl">
+					<span className="text-accent-blue">AI Video</span>
+				</h2>
+			</div>
+
+			<div className="rounded-[28px] border border-border/70 bg-card/75 p-3 shadow-lg backdrop-blur-md sm:p-4">
+				<div className="flex gap-3">
+					<button
+						type="button"
+						onClick={() => fileInputRef.current?.click()}
+						disabled={disabled}
+						className={cn(
+							"relative flex size-[72px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed border-border/80 bg-muted/40 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent/40",
+							disabled && "pointer-events-none opacity-50",
+						)}
+					>
+						{referencePreviewUrl ? (
+							<img src={referencePreviewUrl} alt="" className="absolute inset-0 size-full object-cover" />
+						) : (
+							<>
+								<ImagePlus className="size-4" />
+								<span>Reference</span>
+							</>
+						)}
+					</button>
+					<input
+						ref={fileInputRef}
+						type="file"
+						accept="image/*,video/*"
+						className="hidden"
+						onChange={(event) => {
+							const file = event.target.files?.[0] ?? null;
+							onReferenceSelect?.(file);
+							event.target.value = "";
+						}}
+					/>
+
+					<div className="relative min-w-0 flex-1">
+						<textarea
+							ref={inputRef}
+							id="continuation-prompt"
+							aria-label="Continuation prompt"
+							value={value}
+							onChange={handleInputChange}
+							onKeyDown={handleKeyDown}
+							onClick={(event) => updateMentionState(value, event.currentTarget.selectionStart ?? value.length)}
+							placeholder="Describe your video or mention elements with @"
+							disabled={disabled || sttBusy}
+							rows={3}
+							className={cn(
+								"min-h-[88px] w-full resize-none bg-transparent text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+								(disabled || sttBusy) && "cursor-not-allowed opacity-50",
+							)}
+						/>
+						{mentionOpen && filteredMentions.length > 0 && (
+							<div className="absolute left-0 right-0 top-full z-20 mt-2 overflow-hidden rounded-2xl border border-border bg-popover/95 p-1 shadow-xl backdrop-blur-md">
+								<p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Mention</p>
+								{filteredMentions.map((option) => (
+									<button
+										key={option.id}
+										type="button"
+										onMouseDown={(event) => {
+											event.preventDefault();
+											insertMention(option);
+										}}
+										className="flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left hover:bg-accent/70"
+									>
+										<span className="mt-0.5 rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+											{option.kind}
+										</span>
+										<span className="min-w-0">
+											<span className="block truncate text-sm font-medium text-foreground">{option.label}</span>
+											{option.description && <span className="block truncate text-xs text-muted-foreground">{option.description}</span>}
+										</span>
+									</button>
+								))}
+							</div>
+						)}
+					</div>
+				</div>
+
+				<div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<ConfigPill disabled={disabled}>
+								<Sparkles className="size-3.5 text-accent-blue" />
+								AI Video
+								<ChevronDown className="size-3 opacity-60" />
+							</ConfigPill>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="start" className="w-56">
+							<DropdownMenuLabel>Creation type</DropdownMenuLabel>
+							<DropdownMenuSeparator />
+							<DropdownMenuItem disabled>AI Video</DropdownMenuItem>
+							<DropdownMenuItem disabled>AI Image</DropdownMenuItem>
+							<DropdownMenuItem disabled>AI Audio</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<ConfigPill disabled={disabled}>
+								<Box className="size-3.5" />
+								{selectedModel.label}
+								<ChevronDown className="size-3 opacity-60" />
+							</ConfigPill>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="start" className="w-72">
+							<DropdownMenuLabel>Generate with</DropdownMenuLabel>
+							<DropdownMenuSeparator />
+							{CREATION_MODELS.map((model) => (
+								<DropdownMenuItem key={model.id} onClick={() => onModelChange(model.id)} className="flex-col items-start gap-1 py-2.5">
+									<span className="flex items-center gap-2 text-sm font-medium">
+										{model.label}
+										{model.badge && <span className="rounded-full bg-accent-blue/15 px-1.5 py-0.5 text-[10px] text-accent-blue">{model.badge}</span>}
+									</span>
+									<span className="text-xs text-muted-foreground">{model.description}</span>
+								</DropdownMenuItem>
+							))}
+						</DropdownMenuContent>
+					</DropdownMenu>
+
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<ConfigPill disabled={disabled}>
+								<Wand2 className="size-3.5" />
+								{selectedMode.label}
+								<ChevronDown className="size-3 opacity-60" />
+							</ConfigPill>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="start" className="w-64">
+							<DropdownMenuLabel>Reference mode</DropdownMenuLabel>
+							<DropdownMenuSeparator />
+							{CREATION_MODES.map((mode) => (
+								<DropdownMenuItem key={mode.id} onClick={() => onModeChange(mode.id)} className="flex-col items-start gap-1 py-2.5">
+									<span className="text-sm font-medium">{mode.label}</span>
+									<span className="text-xs text-muted-foreground">{mode.description}</span>
+								</DropdownMenuItem>
+							))}
+						</DropdownMenuContent>
+					</DropdownMenu>
+
+					<Popover>
+						<PopoverTrigger asChild>
+							<ConfigPill disabled={disabled}>
+								<Monitor className="size-3.5" />
+								{aspectRatio} {formatResolutionLabel(resolution)}
+							</ConfigPill>
+						</PopoverTrigger>
+						<PopoverContent align="start" className="w-80">
+							<p className="mb-3 text-xs font-medium text-muted-foreground">Aspect ratio</p>
+							<div className="grid grid-cols-3 gap-2">
+								{ASPECT_RATIOS.map((ratio) => (
+									<button
+										key={ratio}
+										type="button"
+										onClick={() => onAspectRatioChange(ratio)}
+										className={cn(
+											"flex flex-col items-center gap-2 rounded-xl border px-2 py-3 text-xs transition-colors",
+											aspectRatio === ratio ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+										)}
+									>
+										<span className={cn("rounded-sm border border-current/40 bg-muted/40", ratio === "9:16" && "h-7 w-4", ratio === "16:9" && "h-4 w-7", ratio === "1:1" && "size-5", ratio === "4:3" && "h-5 w-6", ratio === "3:4" && "h-6 w-5", ratio === "21:9" && "h-3 w-8")} />
+										{ratio}
+									</button>
+								))}
+							</div>
+							<p className="mb-2 mt-4 text-xs font-medium text-muted-foreground">Resolution</p>
+							<div className="flex flex-wrap gap-2">
+								{RESOLUTIONS.map((item) => (
+									<button
+										key={item}
+										type="button"
+										onClick={() => onResolutionChange(item)}
+										className={cn(
+											"rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+											resolution === item ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+										)}
+									>
+										{formatResolutionLabel(item)}
+									</button>
+								))}
+							</div>
+						</PopoverContent>
+					</Popover>
+
+					<Popover>
+						<PopoverTrigger asChild>
+							<ConfigPill disabled={disabled}>
+								<Clock className="size-3.5" />
+								{formatDurationLabel(durationSec)}
+							</ConfigPill>
+						</PopoverTrigger>
+						<PopoverContent align="start" className="w-72">
+							<p className="mb-3 text-xs font-medium text-muted-foreground">Total duration</p>
+							<Slider min={5} max={15} step={5} value={[durationSec]} onValueChange={(values) => onDurationChange(values[0] ?? 5)} />
+							<div className="mt-3 flex items-center justify-between text-[11px] text-muted-foreground">
+								<span>5s</span>
+								<span className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground">{formatDurationLabel(durationSec)}</span>
+								<span>15s</span>
+							</div>
+						</PopoverContent>
+					</Popover>
+
+					<div className="ml-auto flex items-center gap-1.5">
+						{onSpeechTranscript && (
+							<SpeechToTextButton
+								disabled={disabled || isGenerating}
+								onTranscript={onSpeechTranscript}
+								onInterimChange={onSpeechInterimChange}
+								onBusyChange={setSttBusy}
+							/>
+						)}
+						<Button
+							aria-label="Generate"
+							onClick={onSubmit}
+							disabled={!canSubmit || disabled || isGenerating || !value.trim()}
+							size="icon-sm"
+							className="rounded-full"
+						>
+							<ArrowUp className="size-5" />
+						</Button>
+					</div>
+				</div>
+			</div>
+		</section>
+	);
+}

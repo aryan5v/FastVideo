@@ -5,6 +5,14 @@ import { Download, Share2 } from "lucide-react";
 import DevtoolsShell from "@/components/devtools/DevtoolsShell";
 import MonitorPage from "@/components/MonitorPage";
 import ChatBar from "@/components/ChatBar";
+import CreationStudio from "@/components/creation/CreationStudio";
+import {
+	buildMentionOptions,
+	type AspectRatioId,
+	type CreationModeId,
+	type CreationModelId,
+	type ResolutionId,
+} from "@/lib/creationConfig";
 import SessionTimeoutModal from "@/components/SessionTimeoutModal";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
@@ -325,6 +333,12 @@ export default function Page() {
 	const pendingInitialPromptRef = useRef("");
 	const lastArchivedReplayKeyRef = useRef("");
 	const [sidebarOpen, setSidebarOpen] = useState(false);
+	const [creationModelId, setCreationModelId] = useState<CreationModelId>("fast-ltx23");
+	const [creationModeId, setCreationModeId] = useState<CreationModeId>("t2v");
+	const [creationAspectRatio, setCreationAspectRatio] = useState<AspectRatioId>("16:9");
+	const [creationResolution, setCreationResolution] = useState<ResolutionId>("720p");
+	const [creationDurationSec, setCreationDurationSec] = useState(5);
+	const [referencePreviewUrl, setReferencePreviewUrl] = useState<string | null>(null);
 	const [currentThumbnail, setCurrentThumbnail] = useState<string | null>(null);
 	const currentProjectIdRef = useRef("");
 	const currentProjectCreatedAtRef = useRef(0);
@@ -344,6 +358,23 @@ export default function Page() {
 	useEffect(() => {
 		setIsMobileShareCapable(typeof navigator.canShare === "function" && window.matchMedia("(pointer: coarse)").matches);
 	}, []);
+
+	useEffect(() => {
+		return () => {
+			if (referencePreviewUrl) {
+				URL.revokeObjectURL(referencePreviewUrl);
+			}
+		};
+	}, [referencePreviewUrl]);
+
+	const mentionOptions = useMemo(() => buildMentionOptions(storyPresets as Array<{ id?: string; label?: string; description?: string }>), [storyPresets]);
+
+	function handleReferenceSelect(file: File | null) {
+		setReferencePreviewUrl((current) => {
+			if (current) URL.revokeObjectURL(current);
+			return file ? URL.createObjectURL(file) : null;
+		});
+	}
 
 	const videoElRef = useRef<HTMLVideoElement | null>(null);
 	const archivedPlaybackElRef = useRef<HTMLVideoElement | null>(null);
@@ -2641,7 +2672,7 @@ export default function Page() {
 			/>
 			<Header timeLeft={headerTimeLeft} formatTime={formatTime} onToggleSidebar={() => setSidebarOpen((prev) => !prev)} />
 
-			<div className="relative flex flex-1 min-h-0 flex-col justify-center px-4 pb-2 sm:px-6 sm:pb-12">
+			<div className={cn("relative flex flex-1 min-h-0 flex-col", showActiveProject || isViewingMode ? "justify-center px-4 pb-2 sm:px-6 sm:pb-12" : "overflow-hidden")}>
 				{isViewingMode && (
 					<>
 						{viewingSelectedClip && (
@@ -2758,44 +2789,65 @@ export default function Page() {
 						/>
 					</section>
 
-					<AnimatePresence>
-						{!showActiveProject && (
-							<motion.div
-								key="hero-tagline"
-								initial={{ opacity: 0 }}
-								animate={{ opacity: 1 }}
-								exit={{ opacity: 0, transition: { duration: 0.2, ease: "easeIn" } }}
-								transition={{ duration: 0.5, ease: "easeOut" }}
-								className="pointer-events-none absolute inset-x-0 top-0 bottom-1/2 z-10 flex items-center justify-center px-4"
-							>
-								<HeroTagline />
-							</motion.div>
-						)}
-					</AnimatePresence>
-
-					<motion.div layout="position" className="mx-auto w-full max-w-2xl shrink-0" transition={{ type: "spring", stiffness: 200, damping: 25 }}>
-						<ChatBar
-							sessionStarted={sessionStarted as boolean}
-							rewritingSeedPrompts={rewritingSeedPrompts as boolean}
+					{!showActiveProject ? (
+						<CreationStudio
+							value={livePromptDraft as string}
+							disabled={projectResetPending as boolean}
 							isGenerating={loadingAnimation as boolean}
-							storyPresets={storyPresets as any[]}
-							continuationDraft={livePromptDraft as string}
-							canJoinSession={canStartSession}
-							canSubmitContinuation={canSubmitContinuation}
-							sessionExpired={sessionExpired as boolean}
-							sessionNotice={sessionNotice as string}
-							projectResetPending={projectResetPending as boolean}
-							onPresetGenerate={handlePresetGenerate}
-							onContinuationInput={handleLivePromptInput}
-							onContinuationKeydown={handleLivePromptKeydown}
-							onGenerate={joinSession}
-							onSubmitContinuation={submitLivePrompt}
-							onLeave={leaveSession}
-							onStartNewProject={handleStartNewProject}
+							canSubmit={canStartSession}
+							modelId={creationModelId}
+							modeId={creationModeId}
+							aspectRatio={creationAspectRatio}
+							resolution={creationResolution}
+							durationSec={creationDurationSec}
+							referencePreviewUrl={referencePreviewUrl}
+							mentionOptions={mentionOptions}
+							onValueChange={(value) => sessionStore.patch({ livePromptDraft: value })}
+							onSubmit={() => void joinSession()}
+							onKeyDown={handleLivePromptKeydown}
+							onModelChange={setCreationModelId}
+							onModeChange={setCreationModeId}
+							onAspectRatioChange={setCreationAspectRatio}
+							onResolutionChange={setCreationResolution}
+							onDurationChange={setCreationDurationSec}
+							onReferenceSelect={handleReferenceSelect}
 							onSpeechTranscript={handleLivePromptSpeechTranscript}
 							onSpeechInterimChange={handleLivePromptSpeechInterim}
+							onOpenProjects={() => setSidebarOpen(true)}
 						/>
-					</motion.div>
+					) : (
+						<motion.div layout="position" className="mx-auto w-full max-w-2xl shrink-0" transition={{ type: "spring", stiffness: 200, damping: 25 }}>
+							<ChatBar
+								sessionStarted={sessionStarted as boolean}
+								rewritingSeedPrompts={rewritingSeedPrompts as boolean}
+								isGenerating={loadingAnimation as boolean}
+								storyPresets={storyPresets as any[]}
+								continuationDraft={livePromptDraft as string}
+								canJoinSession={canStartSession}
+								canSubmitContinuation={canSubmitContinuation}
+								sessionExpired={sessionExpired as boolean}
+								sessionNotice={sessionNotice as string}
+								projectResetPending={projectResetPending as boolean}
+								onPresetGenerate={handlePresetGenerate}
+								onContinuationInput={handleLivePromptInput}
+								onContinuationKeydown={handleLivePromptKeydown}
+								onGenerate={joinSession}
+								onSubmitContinuation={submitLivePrompt}
+								onLeave={leaveSession}
+								onStartNewProject={handleStartNewProject}
+								onSpeechTranscript={handleLivePromptSpeechTranscript}
+								onSpeechInterimChange={handleLivePromptSpeechInterim}
+							/>
+						</motion.div>
+					)}
+
+					{sessionNotice && !showActiveProject && (
+						<div className="mx-auto mt-2 w-full max-w-3xl px-4">
+							<div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-2.5 text-center text-xs text-rose-700 dark:text-rose-300">
+								{sessionNotice}
+							</div>
+						</div>
+					)}
 				</div>
 			</div>
 		</main>
