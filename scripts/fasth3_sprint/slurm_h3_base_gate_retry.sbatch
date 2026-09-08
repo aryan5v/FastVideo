@@ -51,7 +51,7 @@ export PYTHONDONTWRITEBYTECODE=1 FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=online WANDB_DIR="${AUDIT_ROOT}"
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
-for ATTENTION_BACKEND in TORCH_SDPA FLASH_ATTN; do
+for ATTENTION_BACKEND in FLASH_ATTN; do
 for ITEM in parent; do
   if [[ "${ITEM}" == parent ]]; then MODEL="${PARENT}"; ROLE=unpruned-base-h3; else MODEL="${CONTROL48}"; ROLE=dense-uniform-48b-step0; fi
   OUT="${AUDIT_ROOT}/${ITEM}-${ATTENTION_BACKEND}"
@@ -67,6 +67,11 @@ for ITEM in parent; do
     --expected "Fast video and clear audio arrive together." --output "${OUT}/wer.json" \
     --run-id "base-${ATTENTION_BACKEND}-wer-${SLURM_JOB_ID}" --max-wer 100
 done
+done
+for EXISTING in "${SPRINT_ROOT}/diagnostics/base-h3-controls/6868-TORCH_SDPA/parent-TORCH_SDPA" "${SPRINT_ROOT}/diagnostics/base42-step0/6869-TORCH_SDPA/parent-TORCH_SDPA"; do
+ LABEL=$(basename "$(dirname "${EXISTING}")")
+ "${FFMPEG}" -v error -i "${EXISTING}/00_speech_exact_presenter.mp4" -vn -ac 2 -ar 32000 -c:a pcm_s16le "${AUDIT_ROOT}/${LABEL}-speech.wav"
+ "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/verify_speech_asr.py" --wav "${AUDIT_ROOT}/${LABEL}-speech.wav" --expected "Fast video and clear audio arrive together." --output "${AUDIT_ROOT}/${LABEL}-wer.json" --run-id "retry-${LABEL}-${SLURM_JOB_ID}" --max-wer 100
 done
 CUDA_VISIBLE_DEVICES=0 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/compare_h3_attention_backends.py" \
  --source-checkpoint "${SPRINT_ROOT}/runs/day1-mask/dense24-hard-pilot200-v1/checkpoint-200" \

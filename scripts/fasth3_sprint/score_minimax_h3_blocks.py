@@ -175,7 +175,15 @@ def _loader_args(model_root: Path) -> Any:
 def _load_transformer(model_root: Path, device: torch.device) -> torch.nn.Module:
     from fastvideo.models.loader.component_loader import TransformerLoader
 
-    transformer = TransformerLoader().load(str(model_root / "transformer"), _loader_args(model_root))
+    from fastvideo.attention.selector import _component_attention_backend_scope
+    from fastvideo.platforms import AttentionBackendEnum
+
+    # Direct component loading bypasses PipelineComponentLoader's backend scope.
+    with _component_attention_backend_scope(AttentionBackendEnum.TORCH_SDPA, component="transformer"):
+        transformer = TransformerLoader().load(str(model_root / "transformer"), _loader_args(model_root))
+    resolved = getattr(transformer.config, "_resolved_attention_backend", None)
+    if resolved != AttentionBackendEnum.TORCH_SDPA:
+        raise RuntimeError(f"Scoring requires resolved TORCH_SDPA, got {resolved}")
     return transformer.to(device).eval()
 
 
