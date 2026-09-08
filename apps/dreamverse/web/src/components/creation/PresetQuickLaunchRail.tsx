@@ -5,6 +5,8 @@ import {
 	ArrowUpRight,
 	Blocks,
 	Cat,
+	ChevronLeft,
+	ChevronRight,
 	Dog,
 	Gamepad2,
 	type LucideIcon,
@@ -124,7 +126,7 @@ export default function PresetQuickLaunchRail({
 		(direction: "left" | "right") => {
 			const el = scrollRef.current;
 			if (!el) return;
-			const delta = direction === "left" ? -240 : 240;
+			const delta = direction === "left" ? -248 : 248;
 			el.scrollBy({ left: delta, behavior: "smooth" });
 			window.setTimeout(updateScrollState, 220);
 		},
@@ -222,10 +224,37 @@ export default function PresetQuickLaunchRail({
 		updateScrollState();
 	}, [storyPresets, updateScrollState]);
 
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+
+		const observer = new ResizeObserver(() => updateScrollState());
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, [updateScrollState]);
+
 	if (storyPresets.length === 0) return null;
 
+	const scrollMaskStyle =
+		canScrollLeft && canScrollRight
+			? {
+					maskImage: "linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent)",
+					WebkitMaskImage: "linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent)",
+				}
+			: canScrollLeft
+				? {
+						maskImage: "linear-gradient(to right, transparent, black 24px, black)",
+						WebkitMaskImage: "linear-gradient(to right, transparent, black 24px, black)",
+					}
+				: canScrollRight
+					? {
+							maskImage: "linear-gradient(to right, black, black calc(100% - 24px), transparent)",
+							WebkitMaskImage: "linear-gradient(to right, black, black calc(100% - 24px), transparent)",
+						}
+					: undefined;
+
 	return (
-		<div className={cn("relative mx-auto w-full max-w-3xl transition-opacity duration-200", disabled && "pointer-events-none opacity-40")}>
+		<div className={cn("mx-auto w-full max-w-3xl transition-opacity duration-200", disabled && "pointer-events-none opacity-40")}>
 			<div className="mb-3 flex items-end justify-between gap-3 px-1">
 				<div>
 					<p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Suggested prompts</p>
@@ -234,31 +263,19 @@ export default function PresetQuickLaunchRail({
 				<p className="hidden text-[11px] text-muted-foreground/80 sm:block">Tap a card to generate</p>
 			</div>
 
-			<div className="relative">
-				{canScrollLeft && (
-					<button
-						type="button"
-						aria-label="Scroll suggested prompts left"
-						onClick={() => scrollByAmount("left")}
-						className="absolute left-0 top-1/2 z-10 hidden size-8 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:inline-flex"
-					>
-						<span aria-hidden="true" className="text-sm leading-none">
-							‹
-						</span>
-					</button>
-				)}
-				{canScrollRight && (
-					<button
-						type="button"
-						aria-label="Scroll suggested prompts right"
-						onClick={() => scrollByAmount("right")}
-						className="absolute right-0 top-1/2 z-10 hidden size-8 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:inline-flex"
-					>
-						<span aria-hidden="true" className="text-sm leading-none">
-							›
-						</span>
-					</button>
-				)}
+			<div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 sm:gap-2">
+				<div className="flex w-7 shrink-0 justify-center sm:w-8">
+					{canScrollLeft ? (
+						<button
+							type="button"
+							aria-label="Scroll suggested prompts left"
+							onClick={() => scrollByAmount("left")}
+							className="inline-flex size-7 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:size-8"
+						>
+							<ChevronLeft className="size-4" />
+						</button>
+					) : null}
+				</div>
 
 				<div
 					ref={scrollRef}
@@ -270,8 +287,9 @@ export default function PresetQuickLaunchRail({
 					onPointerCancel={handlePresetPointerUp}
 					onLostPointerCapture={finishPresetDrag}
 					onClickCapture={handlePresetClickCapture}
+					style={scrollMaskStyle}
 					className={cn(
-						"scrollbar-hidden flex gap-3 overflow-x-auto px-1 pb-1 select-none",
+						"scrollbar-hidden flex gap-3 overflow-x-auto overflow-y-visible py-1 select-none",
 						presetRailDragging ? "cursor-grabbing" : "cursor-grab",
 					)}
 				>
@@ -289,37 +307,44 @@ export default function PresetQuickLaunchRail({
 								disabled={disabled}
 								onClick={() => onPresetGenerate(preset.id)}
 								className={cn(
-									"group relative flex w-[232px] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm transition-all duration-200",
-									"hover:-translate-y-1 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/40",
+									"group relative isolate flex h-[11.75rem] w-[13.75rem] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm transition-[border-color,box-shadow,background-color] duration-200",
+									"hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/40",
 									accent.hover,
 								)}
 							>
-								<div className={cn("relative h-[4.75rem] overflow-hidden bg-gradient-to-br px-3.5 py-3", accent.surface)}>
+								<div className={cn("relative h-[4.75rem] shrink-0 overflow-hidden bg-gradient-to-br px-3.5 py-3", accent.surface)}>
 									<span
 										aria-hidden="true"
-										className={cn("absolute -right-4 -top-6 size-24 rounded-full blur-2xl", accent.orb)}
+										className={cn("pointer-events-none absolute -right-4 -top-6 size-24 rounded-full blur-2xl", accent.orb)}
 									/>
-									<div className="relative flex items-start justify-between gap-2">
-										<span className={cn("inline-flex size-9 items-center justify-center rounded-xl border border-white/10 shadow-sm", accent.icon)}>
+									<div className="relative flex min-w-0 items-start justify-between gap-2">
+										<span className={cn("inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-white/10 shadow-sm", accent.icon)}>
 											<Icon className="size-4" />
 										</span>
 										{styleTag && (
-											<span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]", accent.chip)}>
+											<span
+												className={cn(
+													"max-w-[7.25rem] truncate rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]",
+													accent.chip,
+												)}
+											>
 												{styleTag}
 											</span>
 										)}
 									</div>
 								</div>
 
-								<div className="flex flex-1 flex-col gap-2 px-3.5 py-3">
-									<div className="flex items-start justify-between gap-2">
-										<span className="line-clamp-2 min-h-[2.5rem] text-sm font-semibold leading-5 text-foreground">{preset.label}</span>
+								<div className="flex min-h-0 flex-1 flex-col gap-2 px-3.5 py-3">
+									<div className="flex min-w-0 items-start justify-between gap-2">
+										<span className="line-clamp-2 min-h-[2.5rem] flex-1 text-sm font-semibold leading-5 text-foreground">{preset.label}</span>
 										<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/40 bg-background/70 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
 											<ArrowUpRight className="size-3.5" />
 										</span>
 									</div>
-									{preset.description && (
+									{preset.description ? (
 										<span className="line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">{preset.description}</span>
+									) : (
+										<span className="min-h-[2.5rem]" aria-hidden="true" />
 									)}
 									<div className="mt-auto flex items-center justify-between gap-2 pt-1">
 										{sceneCount ? (
@@ -327,7 +352,7 @@ export default function PresetQuickLaunchRail({
 												{sceneCount}
 											</span>
 										) : (
-											<span />
+											<span aria-hidden="true" />
 										)}
 										<span className="text-[10px] font-medium uppercase tracking-[0.12em] text-accent-blue opacity-0 transition-opacity group-hover:opacity-100">
 											Generate
@@ -338,24 +363,20 @@ export default function PresetQuickLaunchRail({
 						);
 					})}
 				</div>
-			</div>
 
-			<div
-				className={cn(
-					"pointer-events-none absolute inset-y-0 left-0 top-[4.5rem] w-10 bg-background transition-opacity duration-150",
-					canScrollLeft ? "opacity-100" : "opacity-0",
-				)}
-				style={{ maskImage: "linear-gradient(to right, black, transparent)", WebkitMaskImage: "linear-gradient(to right, black, transparent)" }}
-				aria-hidden="true"
-			/>
-			<div
-				className={cn(
-					"pointer-events-none absolute inset-y-0 right-0 top-[4.5rem] w-10 bg-background transition-opacity duration-150",
-					canScrollRight ? "opacity-100" : "opacity-0",
-				)}
-				style={{ maskImage: "linear-gradient(to left, black, transparent)", WebkitMaskImage: "linear-gradient(to left, black, transparent)" }}
-				aria-hidden="true"
-			/>
+				<div className="flex w-7 shrink-0 justify-center sm:w-8">
+					{canScrollRight ? (
+						<button
+							type="button"
+							aria-label="Scroll suggested prompts right"
+							onClick={() => scrollByAmount("right")}
+							className="inline-flex size-7 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:size-8"
+						>
+							<ChevronRight className="size-4" />
+						</button>
+					) : null}
+				</div>
+			</div>
 		</div>
 	);
 }
