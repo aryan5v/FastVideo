@@ -4,6 +4,7 @@ import React, { useMemo, useRef, useState } from "react";
 import { ArrowUp, Box, ChevronDown, Clock, Monitor, Sparkles, Wand2 } from "lucide-react";
 
 import ConfigPill from "@/components/creation/ConfigPill";
+import HeroTagline from "@/components/HeroTagline";
 import ReferenceUploadSlot from "@/components/creation/ReferenceUploadSlot";
 import { Button } from "@/components/ui/button";
 import {
@@ -189,9 +190,7 @@ export default function CreationComposer({
 
 	return (
 		<section className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-			<h2 className="text-center text-xl font-semibold text-foreground sm:text-2xl">
-				<span className="text-accent-blue">AI Video</span>
-			</h2>
+			<HeroTagline />
 
 			<div className="rounded-[32px] border border-border/40 bg-secondary/95 p-4 shadow-[0_24px_80px_-32px_rgba(0,0,0,0.72)] backdrop-blur-xl sm:p-5">
 				<div className="flex gap-3.5">

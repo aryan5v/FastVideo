@@ -26,7 +26,7 @@ test.describe('frontend shell', () => {
     const generate = page.getByRole('button', { name: /^generate$/i });
     await expect(generate).toBeVisible({ timeout: 30_000 });
 
-    await expect(page.getByText('AI Video')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('Direct scenes in seconds')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('button', { name: /FastLTX/i }).first()).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('Describe your video or mention elements')).toBeVisible({ timeout: 30_000 });
   });
