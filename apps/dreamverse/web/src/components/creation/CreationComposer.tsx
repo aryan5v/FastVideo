@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useMemo, useRef, useState } from "react";
-import { ArrowUp, Box, ChevronDown, Clock, ImagePlus, Monitor, Sparkles, Wand2 } from "lucide-react";
+import { ArrowUp, Box, ChevronDown, Clock, Monitor, Sparkles, Wand2 } from "lucide-react";
 
 import ConfigPill from "@/components/creation/ConfigPill";
+import ReferenceUploadSlot from "@/components/creation/ReferenceUploadSlot";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -62,57 +63,6 @@ interface CreationComposerProps {
 	onLastFrameSelect?: (file: File | null) => void;
 	onSpeechTranscript?: (text: string) => void;
 	onSpeechInterimChange?: (text: string) => void;
-}
-
-interface ReferenceUploadSlotProps {
-	label: string;
-	previewUrl?: string | null;
-	required?: boolean;
-	optional?: boolean;
-	disabled?: boolean;
-	onSelect?: (file: File | null) => void;
-}
-
-function ReferenceUploadSlot({ label, previewUrl = null, required = false, optional = false, disabled = false, onSelect }: ReferenceUploadSlotProps) {
-	const fileInputRef = useRef<HTMLInputElement>(null);
-
-	return (
-		<div className="flex flex-col gap-1">
-			<button
-				type="button"
-				onClick={() => fileInputRef.current?.click()}
-				disabled={disabled}
-				className={cn(
-					"relative flex size-[76px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed bg-muted/50 text-[11px] font-medium text-muted-foreground transition-colors hover:border-border hover:bg-accent/40",
-					required && !previewUrl ? "border-amber-500/50" : "border-border/60",
-					disabled && "pointer-events-none opacity-50",
-				)}
-			>
-				{previewUrl ? (
-					<img src={previewUrl} alt="" className="absolute inset-0 size-full object-cover" />
-				) : (
-					<>
-						<ImagePlus className="size-4" />
-						<span>{label}</span>
-					</>
-				)}
-			</button>
-			{(required || optional) && (
-				<span className="text-center text-[10px] text-muted-foreground">{required ? "Required" : "Optional"}</span>
-			)}
-			<input
-				ref={fileInputRef}
-				type="file"
-				accept="image/*,video/*"
-				className="hidden"
-				onChange={(event) => {
-					const file = event.target.files?.[0] ?? null;
-					onSelect?.(file);
-					event.target.value = "";
-				}}
-			/>
-		</div>
-	);
 }
 
 export default function CreationComposer({
@@ -248,13 +198,15 @@ export default function CreationComposer({
 					{usesDualFrames ? (
 						<div className="flex shrink-0 gap-2">
 							<ReferenceUploadSlot
-								label="First"
+								label="Asset"
+								sublabel="First"
 								previewUrl={firstFramePreviewUrl}
 								disabled={disabled}
 								onSelect={onFirstFrameSelect}
 							/>
 							<ReferenceUploadSlot
-								label="Last"
+								label="Asset"
+								sublabel="Last"
 								previewUrl={lastFramePreviewUrl}
 								disabled={disabled}
 								onSelect={onLastFrameSelect}
@@ -280,7 +232,7 @@ export default function CreationComposer({
 							onChange={handleInputChange}
 							onKeyDown={handleKeyDown}
 							onClick={(event) => updateMentionState(value, event.currentTarget.selectionStart ?? value.length)}
-							placeholder="Describe your video (@ for presets)"
+							placeholder="Describe your video or mention elements"
 							disabled={disabled || sttBusy}
 							rows={3}
 							className={cn(
@@ -461,7 +413,7 @@ export default function CreationComposer({
 
 				{referenceMissing && value.trim() && (
 					<p className="mt-3 text-center text-xs text-amber-600 dark:text-amber-400">
-						Add a reference image or clip.
+						Add a reference asset to use Omni reference.
 					</p>
 				)}
 			</div>

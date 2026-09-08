@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { buildMentionOptions, formatDurationLabel, formatResolutionLabel, modeRequiresReference, modeUsesDualFrames } from "@/lib/creationConfig";
+import {
+	CREATION_MODELS,
+	buildMentionOptions,
+	formatDurationLabel,
+	formatResolutionLabel,
+	isReferenceMediaFile,
+	modeRequiresReference,
+	modeUsesDualFrames,
+} from "@/lib/creationConfig";
 
 describe("creationConfig", () => {
 	it("formats resolution labels", () => {
@@ -10,6 +18,10 @@ describe("creationConfig", () => {
 
 	it("formats duration labels", () => {
 		expect(formatDurationLabel(5)).toBe("5s");
+	});
+
+	it("excludes H3 from lobby models", () => {
+		expect(CREATION_MODELS.map((model) => model.id)).toEqual(["fast-ltx23", "fast-ltx2"]);
 	});
 
 	it("builds mention options from presets", () => {
@@ -39,5 +51,11 @@ describe("creationConfig", () => {
 		expect(modeRequiresReference("t2v")).toBe(false);
 		expect(modeUsesDualFrames("fl2av")).toBe(true);
 		expect(modeUsesDualFrames("t2v")).toBe(false);
+	});
+
+	it("accepts image and video reference files", () => {
+		expect(isReferenceMediaFile(new File(["x"], "a.png", { type: "image/png" }))).toBe(true);
+		expect(isReferenceMediaFile(new File(["x"], "a.mp4", { type: "video/mp4" }))).toBe(true);
+		expect(isReferenceMediaFile(new File(["x"], "a.txt", { type: "text/plain" }))).toBe(false);
 	});
 });
