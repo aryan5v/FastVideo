@@ -431,3 +431,20 @@ def test_checkpoint_save_routes_only_opted_in_coordination_to_cpu(tmp_path, monk
     assert captured['states'] == {'model': 'original-state'}
     assert captured.get('process_group') is (cpu_group if use_cpu_group else None)
     assert ('process_group' in captured) is use_cpu_group
+
+
+@pytest.mark.parametrize('use_cpu_group', [False, True])
+def test_checkpoint_barrier_honors_cpu_coordination(tmp_path, monkeypatch, use_cpu_group):
+    from types import SimpleNamespace
+    import fastvideo.distributed as distributed
+    import fastvideo.train.utils.checkpoint as checkpoint
+    cpu_group = object()
+    manager = _make_manager(tmp_path, save_steps=1, keep_last=2)
+    manager.config.use_cpu_process_group = use_cpu_group
+    monkeypatch.setattr(distributed, 'get_world_group', lambda: SimpleNamespace(cpu_group=cpu_group))
+    monkeypatch.setattr(checkpoint.dist, 'is_available', lambda: True)
+    monkeypatch.setattr(checkpoint.dist, 'is_initialized', lambda: True)
+    calls = []
+    monkeypatch.setattr(checkpoint.dist, 'barrier', lambda **kw: calls.append(kw))
+    manager._coordination_barrier()
+    assert calls == [{'group': cpu_group if use_cpu_group else None}]

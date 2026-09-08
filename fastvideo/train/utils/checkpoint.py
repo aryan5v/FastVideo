@@ -260,6 +260,11 @@ class CheckpointManager:
         # planning/metadata collectives use this existing all-rank CPU group.
         return {"process_group": get_world_group().cpu_group}
 
+    def _coordination_barrier(self) -> None:
+        if dist.is_available() and dist.is_initialized():
+            group = self._coordination_kwargs().get("process_group")
+            dist.barrier(group=group)
+
     def _build_states(self) -> dict[str, Any]:
         states: dict[str, Any] = self.method.checkpoint_state()
 
@@ -313,7 +318,7 @@ class CheckpointManager:
             )
             self._write_metadata(checkpoint_dir, step)
         dcp.save(states, checkpoint_id=str(dcp_dir), **self._coordination_kwargs())
-        _barrier()
+        self._coordination_barrier()
 
         # Save RNG state AFTER dcp.save so it captures the
         # exact state the continuous run continues with.
@@ -321,7 +326,7 @@ class CheckpointManager:
         # advance the RNG between when DCP captures it and
         # when the save completes.
         self._save_rng_snapshot(checkpoint_dir)
-        _barrier()
+        self._coordination_barrier()
 
         if _rank() == 0 and self._should_preserve(step):
             preserve_checkpoint(
@@ -329,7 +334,7 @@ class CheckpointManager:
                 reason="configured validation or milestone checkpoint",
             )
             logger.info("Preserved checkpoint outside rolling retention: %s", checkpoint_dir)
-        _barrier()
+        self._coordination_barrier()
 
         self._last_saved_step = step
 
@@ -448,7 +453,7 @@ class CheckpointManager:
             logger.info("Explicitly resetting dataloader for a changed dataset; restoring model and optimizer")
         logger.info("Loading Phase 2 checkpoint from %s", resolved)
         dcp.load(states, checkpoint_id=str(resolved / "dcp"), **self._coordination_kwargs())
-        _barrier()
+        self._coordination_barrier()
         logger.info("Checkpoint loaded; resuming from step=%s", step)
         return step
 
@@ -458,7 +463,7 @@ class CheckpointManager:
             return
 
         if _rank() != 0:
-            _barrier()
+            self._coordination_barrier()
             return
 
         output_dir = Path(self.output_dir)
@@ -481,4 +486,4 @@ class CheckpointManager:
             logger.info("Removing old checkpoint (keep_last=%s): %s", keep_last, path)
             shutil.rmtree(path, ignore_errors=True)
 
-        _barrier()
+        self._coordination_barrier()
