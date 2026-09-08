@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #SBATCH --job-name=h3-e0-controls
 #SBATCH --partition=all
 #SBATCH --nodes=1
