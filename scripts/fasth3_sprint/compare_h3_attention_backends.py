@@ -42,6 +42,7 @@ def main() -> None:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--min-cosine", type=float, default=0.999)
+    parser.add_argument("--same-state-flow-parity", action="store_true")
     parser.add_argument("--grid-points", type=int, default=5)
     parser.add_argument("--seed", type=int, default=2026090801)
     args = parser.parse_args()
@@ -67,6 +68,8 @@ def main() -> None:
     base_raw["callbacks"] = {}
     _ensure_distributed()
     maybe_init_distributed_environment_and_model_parallel(1, 1)
+    reference_states = []
+    flow_comparisons = []
     outputs: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     backend_receipts: dict[str, dict[str, object]] = {}
     for backend in ("TORCH_SDPA", "FLASH_ATTN"):
@@ -103,6 +106,10 @@ def main() -> None:
         audio_sigmas = shift_noise_amount(torch.linspace(1, 0, args.grid_points, device=model.device), 3.0)
         with torch.inference_mode():
             for interval in range(args.grid_points - 1):
+                if args.same_state_flow_parity and backend == "FLASH_ATTN":
+                    video = reference_states[interval][0].to(model.device)
+                    audio = reference_states[interval][1].to(model.device)
+                state_copy = (video.detach().cpu(), audio.detach().cpu()) if args.same_state_flow_parity else None
                 vt = (1.0 - video_sigmas[interval]).reshape(1)
                 at = (1.0 - audio_sigmas[interval]).reshape(1)
                 video_flow, audio_flow = model.predict_joint_noise(
@@ -114,6 +121,13 @@ def main() -> None:
                     conditional=True,
                     attn_kind="dense",
                 )
+                if args.same_state_flow_parity:
+                    if backend == "TORCH_SDPA":
+                        reference_states.append((*state_copy, video_flow.detach().cpu(), audio_flow.detach().cpu()))
+                    else:
+                        flow_comparisons.append({"interval": interval,
+                            "video": _metrics(reference_states[interval][2], video_flow.detach().cpu()),
+                            "audio": _metrics(reference_states[interval][3], audio_flow.detach().cpu())})
                 video = _euler_update(video, video_flow, video_sigmas[interval], video_sigmas[interval + 1])
                 audio = _euler_update(audio, audio_flow, audio_sigmas[interval], audio_sigmas[interval + 1])
         outputs[backend] = (video.detach().float().cpu(), audio.detach().float().cpu())
@@ -140,6 +154,13 @@ def main() -> None:
         "audio": audio_metrics,
         "passed": min(video_metrics["cosine"], audio_metrics["cosine"]) >= args.min_cosine,
     }
+    if args.same_state_flow_parity:
+        payload["scope"] = "same-state velocity parity on each of49 teacher-prefix states; small synthetic input"
+        payload["flow_comparisons"] = flow_comparisons
+        payload["passed"] = all(min(row["video"]["cosine"], row["audio"]["cosine"]) >= args.min_cosine
+                                for row in flow_comparisons) and len(flow_comparisons) == args.grid_points - 1
+        payload["video"] = {"minimum_cosine": min(row["video"]["cosine"] for row in flow_comparisons)}
+        payload["audio"] = {"minimum_cosine": min(row["audio"]["cosine"] for row in flow_comparisons)}
     destination = Path(args.output).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
