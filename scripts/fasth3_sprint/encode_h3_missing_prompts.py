@@ -2,6 +2,8 @@
 """Encode missing audited prompts with the pinned H3 conditioning path."""
 import argparse
 import json
+import os
+import wandb
 from pathlib import Path
 import numpy as np
 import pyarrow as pa
@@ -20,6 +22,7 @@ rows = [r for r in rows if r['id'] in missing]
 assert len(rows) == len(missing) == 32
 assert not a.output.exists()
 a.output.mkdir(parents=True)
+run = wandb.init(project='fasth3-14b-2step-qad-sprint', name='missing-prompts-' + os.environ.get('SLURM_JOB_ID', 'local'), config={'model_root': str(a.model_root), 'count': len(rows)})
 embeds = _encode_prompts(a.model_root, tuple(r['prompt'] for r in rows))
 for i, row in enumerate(rows):
     values = embeds[f'multishot_synth_{i:02d}'].numpy()
@@ -29,3 +32,6 @@ for i, row in enumerate(rows):
        'text_embedding_bytes': values.tobytes()}]), a.output / f'{i:03d}.parquet')
 (a.output / 'encoding_receipt.json').write_text(json.dumps({'count': len(rows),
     'model_root': str(a.model_root), 'source_ids': sorted(missing)}, indent=2))
+
+run.log({'data/encoded_prompts': len(rows)})
+run.finish()
