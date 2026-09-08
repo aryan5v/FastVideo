@@ -27,3 +27,13 @@ After controls, candidate comparison and focused tests pass, run two updates wit
 Staged converter now composes original block identities and supports single-file DCP exports; a synthetic test changes42 weights before the34 extraction and verifies those changes survive. Promotion script requires explicit checkpoint-bound quality review. prepare_h3_stage34.py generates a bounded next-stage launcher, but currently inherits the old recovery template: update it to the new recipe before use. Never treat generated configuration as proof the method was implemented or validated.
 
 No BVD, annealed arm, PDD, QAT/QAD or hardware work at this stage. Six-hour follow-up automation is active and should advance actionable work, remain quiet when unchanged, and pause when the comparison is complete or user input is required.
+
+## Step-zero review and backend diagnosis
+
+Uniform42 job6869 completed in8m51s. Local media are in review-artifacts/base42-step0-6869. At frames0/60/120: presenter recognizable but severely discolored/contrasty; motorcycle recognizable initially but absent at frame120; mechanical press replaced by unrelated texture; train transition recognizable with severe saturation. This is not a quality pass. Full motion and audio remain unreviewed; WER pending.
+
+Baseline6868 failed after producing the SDPA panel because ffmpeg was absent from PATH. Retry6871 uses imageio_ffmpeg's resolved executable, generates the missing FLASH_ATTN panel, transcribes existing SDPA and uniform42 speech, and runs backend parity. Immutable code/backend-fix-43c35c37; diagnostics/base-gate-retry-6871.log.
+
+Scoring6870 bypassed PipelineComponentLoader's explicit backend scope by calling TransformerLoader directly: FastVideoArgs.attention_backend alone was not applied and logs showed automatic FlashAttention despite hardcoded SDPA metadata. Preserve this as exploratory evidence, not matched-SDPA ranking. Retry6872 explicitly scopes TORCH_SDPA and asserts the resolved backend; same immutable code, diagnostics/base42-score-sdpa-6872.log. Do not silently combine its partials with6870.
+
+Recovery duration: first2-update numerical proof, then200-update pilot with evaluations at50/100/200 if feasible. Continue to500 only if held-out audio/video improves; review1000/2000 subsequently. Compare elapsed GPU hours, not only updates. A severe regression pauses immediately; two successive flat/degrading held-out evaluations trigger diagnosis rather than automatic extension. Preserve best checkpoints. These are proposed operational gates pending implementation of the new recipe and held-out evaluator, not an already-working automatic training chain.
