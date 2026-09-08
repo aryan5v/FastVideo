@@ -19,7 +19,6 @@ from pathlib import Path
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from fastvideo.configs.models.dits.minimax_h3 import MiniMaxH3Config
 
 INDEX_NAME = "diffusion_pytorch_model.safetensors.index.json"
 MANIFEST_NAME = "block_map_manifest.json"
@@ -65,11 +64,15 @@ def read_block_map(value: str) -> tuple[int, ...]:
 
 
 def validate_block_map(block_map: tuple[int, ...], source_num_layers: int) -> None:
-    MiniMaxH3Config().update_model_arch({
-        "num_layers": len(block_map),
-        "source_num_layers": source_num_layers,
-        "block_map": block_map,
-    })
+    # Keep conversion CPU-only: importing the model config initializes Triton.
+    if source_num_layers <= 0 or not block_map:
+        raise ValueError("Source depth and retained block count must be positive")
+    if any(not isinstance(i, int) or isinstance(i, bool) for i in block_map):
+        raise ValueError("Block indices must be integers")
+    if any(a >= b for a, b in zip(block_map, block_map[1:])):
+        raise ValueError("Block map must be strictly increasing")
+    if block_map[0] < 0 or block_map[-1] >= source_num_layers:
+        raise ValueError("Block map is outside the source depth")
 
 
 def remap_block_key(name: str, source_to_local: dict[int, int]) -> str | None:
@@ -96,9 +99,17 @@ def prune_transformer(
         raise FileExistsError(f"refusing to overwrite non-empty destination: {dst}")
     source_config = json.loads((src / "config.json").read_text())
     source_num_layers = int(source_config["num_layers"])
-    if source_config.get("block_map") is not None or source_config.get("source_num_layers") is not None:
-        raise ValueError("source transformer is already pruned; compose block maps explicitly before conversion")
     validate_block_map(block_map, source_num_layers)
+    parent_map = source_config.get("block_map")
+    original_depth = source_config.get("source_num_layers") or source_num_layers
+    if parent_map is None:
+        if original_depth != source_num_layers:
+            raise ValueError("Pruned source is missing its original block map")
+        parent_map = list(range(source_num_layers))
+    if len(parent_map) != source_num_layers:
+        raise ValueError("Source block map does not match source depth")
+    validate_block_map(tuple(parent_map), original_depth)
+    original_map = [parent_map[i] for i in block_map]
 
     source_index = json.loads((src / INDEX_NAME).read_text())
     source_weight_map: dict[str, str] = source_index["weight_map"]
@@ -133,13 +144,14 @@ def prune_transformer(
     output_config = dict(source_config)
     output_config.update({
         "num_layers": len(block_map),
-        "source_num_layers": source_num_layers,
-        "block_map": list(block_map),
+        "source_num_layers": original_depth,
+        "block_map": original_map,
+        "local_extraction_map": list(block_map),
         "block_map_strategy": strategy,
         "source_checkpoint": source_model,
         "source_revision": source_revision,
     })
-    MiniMaxH3Config().update_model_arch(output_config)
+    validate_block_map(tuple(original_map), original_depth)
     (dst / "config.json").write_text(json.dumps(output_config, indent=2, sort_keys=True) + "\n")
     output_index = {
         "metadata": {"total_size": total_size},
@@ -150,15 +162,16 @@ def prune_transformer(
         if extra.name not in {"config.json", INDEX_NAME, MANIFEST_NAME}:
             shutil.copy2(extra, dst / extra.name)
 
-    map_digest = hashlib.sha256(json.dumps(list(block_map), separators=(",", ":")).encode()).hexdigest()
+    map_digest = hashlib.sha256(json.dumps(original_map, separators=(",", ":")).encode()).hexdigest()
     manifest = {
         "format_version": 1,
         "source_model": source_model,
         "source_revision": source_revision,
         "source_transformer": str(src.resolve()),
-        "source_num_layers": source_num_layers,
+        "source_num_layers": original_depth,
         "num_layers": len(block_map),
-        "block_map": list(block_map),
+        "block_map": original_map,
+        "local_extraction_map": list(block_map),
         "block_map_sha256": map_digest,
         "strategy": strategy,
         "kept_tensor_count": kept_tensors,
