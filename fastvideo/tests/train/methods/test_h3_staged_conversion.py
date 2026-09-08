@@ -18,10 +18,12 @@ def test_two_cuts(tmp_path):
     m.prune_transformer(src,tmp_path/'42',first,**kw)
     # Simulate recovery: the second extraction must preserve these changed weights.
     updated=load_file(tmp_path/'42/weights.safetensors')
-    updated={k:v+100 for k,v in updated.items()};save_file(updated,tmp_path/'42/weights.safetensors')
+    updated={k:v+100 for k,v in updated.items()};save_file(updated,tmp_path/'42/model.safetensors')
+    (tmp_path/'42'/m.INDEX_NAME).unlink()
+    (tmp_path/'42/weights.safetensors').unlink()
     result=m.prune_transformer(tmp_path/'42',tmp_path/'34',second,**kw)
     assert result['block_map']==[first[i] for i in second]
     assert result['source_num_layers']==50
-    actual=load_file(tmp_path/'34/weights.safetensors')
+    actual=load_file(tmp_path/'34/model.safetensors')
     for i,j in enumerate(second):
         assert actual[f'transformer_blocks.{i}.weight'].item()==first[j]+100

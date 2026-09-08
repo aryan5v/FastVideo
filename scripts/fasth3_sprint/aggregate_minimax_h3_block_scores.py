@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--partials", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-shards", type=int, default=16)
+    parser.add_argument("--expected-records", type=int, default=256)
+    parser.add_argument("--allow-incomplete-categories", action="store_true")
     parser.add_argument("--keep-blocks", type=int, default=20)
     parser.add_argument("--wandb-project", default="fasth3-14b-2step-qad-sprint")
     parser.add_argument("--run-id", default="h6-block-score-aggregate")
@@ -86,14 +88,16 @@ def main() -> None:
         sample_ids.extend(str(item) for item in partial["sample_ids"])
         stratum_counts.update({name: int(value) for name, value in partial["stratum_counts"].items()})
         category_counts.update({name: int(value) for name, value in partial["category_counts"].items()})
-    if len(sample_ids) != 256 or len(set(sample_ids)) != 256:
-        raise RuntimeError(f"Expected 256 unique scored examples, got {len(sample_ids)} / {len(set(sample_ids))}")
+    if len(sample_ids) != args.expected_records or len(set(sample_ids)) != args.expected_records:
+        raise RuntimeError(f"Expected {args.expected_records} unique scored examples, got {len(sample_ids)} / {len(set(sample_ids))}")
+    if args.allow_incomplete_categories:
+        categories = {name: rows for name, rows in categories.items() if category_counts[name] > 0}
     if set(category_counts) != set(categories) or any(count <= 0 for count in category_counts.values()):
         raise RuntimeError(f"Category coverage is incomplete: {dict(category_counts)}")
     if set(stratum_counts) != set(strata) or any(count <= 0 for count in stratum_counts.values()):
         raise RuntimeError(f"Noise-stratum coverage is incomplete: {dict(stratum_counts)}")
 
-    overall_mean = _divide(overall, 256)
+    overall_mean = _divide(overall, args.expected_records)
     stratum_mean = {name: _divide(values, stratum_counts[name]) for name, values in strata.items()}
     category_mean = {name: _divide(values, category_counts[name]) for name, values in categories.items()}
     metric_norm = {
@@ -153,7 +157,8 @@ def main() -> None:
         "attention_backend": partials[0]["attention_backend"],
         "calibration_roots": partials[0].get("calibration_roots", []),
         "category_quotas": partials[0].get("category_quotas", {}),
-        "sample_count": 256,
+        "sample_count": args.expected_records,
+        "incomplete_category_screen": args.allow_incomplete_categories,
         "sample_ids": sorted(sample_ids),
         "category_counts": dict(category_counts),
         "stratum_counts": dict(stratum_counts),
@@ -185,7 +190,8 @@ def main() -> None:
         resume="allow",
         job_type="block-score-aggregation",
         config={
-            "sample_count": 256,
+            "sample_count": args.expected_records,
+        "incomplete_category_screen": args.allow_incomplete_categories,
             "source_revision": manifest["source_revision"],
             "source_commit": manifest["source_commit"],
             "attention_backend": manifest["attention_backend"],
@@ -203,7 +209,8 @@ def main() -> None:
         "persistent_manifest": str(manifest_path),
         "activation_block_map": activation_map,
         "uniform_block_map": uniform_map,
-        "sample_count": 256,
+        "sample_count": args.expected_records,
+        "incomplete_category_screen": args.allow_incomplete_categories,
     })
     run.finish()
 

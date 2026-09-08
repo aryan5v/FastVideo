@@ -111,8 +111,14 @@ def prune_transformer(
     validate_block_map(tuple(parent_map), original_depth)
     original_map = [parent_map[i] for i in block_map]
 
-    source_index = json.loads((src / INDEX_NAME).read_text())
-    source_weight_map: dict[str, str] = source_index["weight_map"]
+    if (src / INDEX_NAME).is_file():
+        source_weight_map: dict[str, str] = json.loads((src / INDEX_NAME).read_text())["weight_map"]
+    elif (src / "model.safetensors").is_file():
+        # DCP exports use a single file with no sharded index.
+        with safe_open(src / "model.safetensors", framework="pt", device="cpu") as source_file:
+            source_weight_map = {name: "model.safetensors" for name in source_file.keys()}
+    else:
+        raise FileNotFoundError("Source requires a sharded index or model.safetensors")
     source_to_local = {source: local for local, source in enumerate(block_map)}
     dst.mkdir(parents=True, exist_ok=True)
 
