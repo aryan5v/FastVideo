@@ -2,6 +2,7 @@
 #SBATCH --job-name=h3-a42-dmd4
 #SBATCH --partition=all
 #SBATCH --nodes=2
+#SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
