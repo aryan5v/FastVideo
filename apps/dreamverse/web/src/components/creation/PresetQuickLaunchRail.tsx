@@ -1,7 +1,17 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Film } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	ArrowUpRight,
+	Blocks,
+	Cat,
+	Dog,
+	Gamepad2,
+	type LucideIcon,
+	Newspaper,
+	PartyPopper,
+	Sparkles,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -9,12 +19,75 @@ export interface StoryPresetLike {
 	id: string;
 	label: string;
 	description?: string;
+	segmentCount?: number;
+	styleTag?: string;
 }
 
 interface PresetQuickLaunchRailProps {
 	storyPresets: StoryPresetLike[];
 	disabled?: boolean;
 	onPresetGenerate: (presetId: string) => void;
+}
+
+const PRESET_ACCENTS = [
+	{
+		surface: "from-sky-500/20 via-sky-400/10 to-indigo-500/25",
+		orb: "bg-sky-400/30",
+		icon: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+		chip: "border-sky-400/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+		hover: "hover:border-sky-400/45 hover:shadow-sky-500/15",
+	},
+	{
+		surface: "from-violet-500/20 via-purple-400/10 to-fuchsia-500/25",
+		orb: "bg-violet-400/30",
+		icon: "bg-violet-500/15 text-violet-700 dark:text-violet-300",
+		chip: "border-violet-400/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
+		hover: "hover:border-violet-400/45 hover:shadow-violet-500/15",
+	},
+	{
+		surface: "from-amber-500/20 via-orange-400/10 to-rose-500/25",
+		orb: "bg-amber-400/30",
+		icon: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
+		chip: "border-amber-400/25 bg-amber-500/10 text-amber-800 dark:text-amber-300",
+		hover: "hover:border-amber-400/45 hover:shadow-amber-500/15",
+	},
+	{
+		surface: "from-emerald-500/20 via-teal-400/10 to-cyan-500/25",
+		orb: "bg-emerald-400/30",
+		icon: "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
+		chip: "border-emerald-400/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300",
+		hover: "hover:border-emerald-400/45 hover:shadow-emerald-500/15",
+	},
+	{
+		surface: "from-rose-500/20 via-pink-400/10 to-orange-500/25",
+		orb: "bg-rose-400/30",
+		icon: "bg-rose-500/15 text-rose-700 dark:text-rose-300",
+		chip: "border-rose-400/25 bg-rose-500/10 text-rose-700 dark:text-rose-300",
+		hover: "hover:border-rose-400/45 hover:shadow-rose-500/15",
+	},
+] as const;
+
+const PRESET_META: Record<string, { icon: LucideIcon; styleTag: string }> = {
+	death_star_console_delay_lego_funny: { icon: Blocks, styleTag: "LEGO comedy" },
+	cat_litter_box_clay_custom: { icon: Cat, styleTag: "Stop motion" },
+	boy_walking_dog_park_custom: { icon: Dog, styleTag: "Pixar 3D" },
+	butterfly_wings_dad: { icon: PartyPopper, styleTag: "Warm comedy" },
+	gaming_ban: { icon: Gamepad2, styleTag: "Gaming" },
+	garden_sign: { icon: Sparkles, styleTag: "School comedy" },
+	oil_strike_reporter: { icon: Newspaper, styleTag: "News satire" },
+};
+
+function presetAccent(id: string) {
+	let hash = 0;
+	for (let i = 0; i < id.length; i += 1) {
+		hash = (hash + id.charCodeAt(i) * (i + 1)) % PRESET_ACCENTS.length;
+	}
+	return PRESET_ACCENTS[hash];
+}
+
+function formatSceneCount(segmentCount?: number) {
+	if (!segmentCount || segmentCount <= 0) return null;
+	return segmentCount === 1 ? "1 scene" : `${segmentCount} scenes`;
 }
 
 export default function PresetQuickLaunchRail({
@@ -34,12 +107,29 @@ export default function PresetQuickLaunchRail({
 	});
 	const suppressPresetClickRef = useRef(false);
 
+	const accentByPresetId = useMemo(() => {
+		const map = new Map<string, (typeof PRESET_ACCENTS)[number]>();
+		storyPresets.forEach((preset) => map.set(preset.id, presetAccent(preset.id)));
+		return map;
+	}, [storyPresets]);
+
 	const updateScrollState = useCallback(() => {
 		const el = scrollRef.current;
 		if (!el) return;
 		setCanScrollLeft(el.scrollLeft > 2);
 		setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
 	}, []);
+
+	const scrollByAmount = useCallback(
+		(direction: "left" | "right") => {
+			const el = scrollRef.current;
+			if (!el) return;
+			const delta = direction === "left" ? -240 : 240;
+			el.scrollBy({ left: delta, behavior: "smooth" });
+			window.setTimeout(updateScrollState, 220);
+		},
+		[updateScrollState],
+	);
 
 	const handlePresetWheel = useCallback(
 		(event: React.WheelEvent<HTMLDivElement>) => {
@@ -136,41 +226,123 @@ export default function PresetQuickLaunchRail({
 
 	return (
 		<div className={cn("relative mx-auto w-full max-w-3xl transition-opacity duration-200", disabled && "pointer-events-none opacity-40")}>
-			<div
-				ref={scrollRef}
-				onScroll={updateScrollState}
-				onWheel={handlePresetWheel}
-				onPointerDown={handlePresetPointerDown}
-				onPointerMove={handlePresetPointerMove}
-				onPointerUp={handlePresetPointerUp}
-				onPointerCancel={handlePresetPointerUp}
-				onLostPointerCapture={finishPresetDrag}
-				onClickCapture={handlePresetClickCapture}
-				className={cn(
-					"scrollbar-hidden flex gap-3 overflow-x-auto px-1 select-none",
-					presetRailDragging ? "cursor-grabbing" : "cursor-grab",
-				)}
-			>
-				{storyPresets.map((preset) => (
+			<div className="mb-3 flex items-end justify-between gap-3 px-1">
+				<div>
+					<p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Suggested prompts</p>
+					<p className="mt-1 text-sm text-muted-foreground/90">Curated story starters — pick one to generate instantly.</p>
+				</div>
+				<p className="hidden text-[11px] text-muted-foreground/80 sm:block">Tap a card to generate</p>
+			</div>
+
+			<div className="relative">
+				{canScrollLeft && (
 					<button
-						key={preset.id}
 						type="button"
-						disabled={disabled}
-						onClick={() => onPresetGenerate(preset.id)}
-						className="flex max-w-42 shrink-0 flex-col items-start gap-1.5 rounded-xl border border-input bg-card/80 p-2.5 text-left text-muted-foreground backdrop-blur-sm transition-colors hover:border-slate-400 hover:bg-slate-200/60 hover:text-slate-700 sm:max-w-[215px] sm:flex-row dark:bg-slate-800/80 dark:text-slate-300 dark:hover:border-slate-500 dark:hover:bg-slate-700/50 dark:hover:text-slate-200"
+						aria-label="Scroll suggested prompts left"
+						onClick={() => scrollByAmount("left")}
+						className="absolute left-0 top-1/2 z-10 hidden size-8 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:inline-flex"
 					>
-						<Film className="mt-0.5 size-4 shrink-0 opacity-60" />
-						<span className="flex min-w-0 flex-col gap-1">
-							<span className="line-clamp-1 text-[14px] font-medium">{preset.label}</span>
-							{preset.description && <span className="line-clamp-3 text-xs leading-tight opacity-70 sm:line-clamp-2">{preset.description}</span>}
+						<span aria-hidden="true" className="text-sm leading-none">
+							‹
 						</span>
 					</button>
-				))}
+				)}
+				{canScrollRight && (
+					<button
+						type="button"
+						aria-label="Scroll suggested prompts right"
+						onClick={() => scrollByAmount("right")}
+						className="absolute right-0 top-1/2 z-10 hidden size-8 -translate-y-1/2 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:inline-flex"
+					>
+						<span aria-hidden="true" className="text-sm leading-none">
+							›
+						</span>
+					</button>
+				)}
+
+				<div
+					ref={scrollRef}
+					onScroll={updateScrollState}
+					onWheel={handlePresetWheel}
+					onPointerDown={handlePresetPointerDown}
+					onPointerMove={handlePresetPointerMove}
+					onPointerUp={handlePresetPointerUp}
+					onPointerCancel={handlePresetPointerUp}
+					onLostPointerCapture={finishPresetDrag}
+					onClickCapture={handlePresetClickCapture}
+					className={cn(
+						"scrollbar-hidden flex gap-3 overflow-x-auto px-1 pb-1 select-none",
+						presetRailDragging ? "cursor-grabbing" : "cursor-grab",
+					)}
+				>
+					{storyPresets.map((preset) => {
+						const accent = accentByPresetId.get(preset.id) ?? PRESET_ACCENTS[0];
+						const meta = PRESET_META[preset.id];
+						const Icon = meta?.icon ?? Sparkles;
+						const styleTag = preset.styleTag || meta?.styleTag;
+						const sceneCount = formatSceneCount(preset.segmentCount);
+
+						return (
+							<button
+								key={preset.id}
+								type="button"
+								disabled={disabled}
+								onClick={() => onPresetGenerate(preset.id)}
+								className={cn(
+									"group relative flex w-[232px] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm transition-all duration-200",
+									"hover:-translate-y-1 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/40",
+									accent.hover,
+								)}
+							>
+								<div className={cn("relative h-[4.75rem] overflow-hidden bg-gradient-to-br px-3.5 py-3", accent.surface)}>
+									<span
+										aria-hidden="true"
+										className={cn("absolute -right-4 -top-6 size-24 rounded-full blur-2xl", accent.orb)}
+									/>
+									<div className="relative flex items-start justify-between gap-2">
+										<span className={cn("inline-flex size-9 items-center justify-center rounded-xl border border-white/10 shadow-sm", accent.icon)}>
+											<Icon className="size-4" />
+										</span>
+										{styleTag && (
+											<span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]", accent.chip)}>
+												{styleTag}
+											</span>
+										)}
+									</div>
+								</div>
+
+								<div className="flex flex-1 flex-col gap-2 px-3.5 py-3">
+									<div className="flex items-start justify-between gap-2">
+										<span className="line-clamp-2 min-h-[2.5rem] text-sm font-semibold leading-5 text-foreground">{preset.label}</span>
+										<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/40 bg-background/70 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+											<ArrowUpRight className="size-3.5" />
+										</span>
+									</div>
+									{preset.description && (
+										<span className="line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">{preset.description}</span>
+									)}
+									<div className="mt-auto flex items-center justify-between gap-2 pt-1">
+										{sceneCount ? (
+											<span className="rounded-full border border-border/50 bg-muted/40 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+												{sceneCount}
+											</span>
+										) : (
+											<span />
+										)}
+										<span className="text-[10px] font-medium uppercase tracking-[0.12em] text-accent-blue opacity-0 transition-opacity group-hover:opacity-100">
+											Generate
+										</span>
+									</div>
+								</div>
+							</button>
+						);
+					})}
+				</div>
 			</div>
 
 			<div
 				className={cn(
-					"pointer-events-none absolute inset-y-0 left-0 w-8 bg-background transition-opacity duration-150",
+					"pointer-events-none absolute inset-y-0 left-0 top-[4.5rem] w-10 bg-background transition-opacity duration-150",
 					canScrollLeft ? "opacity-100" : "opacity-0",
 				)}
 				style={{ maskImage: "linear-gradient(to right, black, transparent)", WebkitMaskImage: "linear-gradient(to right, black, transparent)" }}
@@ -178,7 +350,7 @@ export default function PresetQuickLaunchRail({
 			/>
 			<div
 				className={cn(
-					"pointer-events-none absolute inset-y-0 right-0 w-8 bg-background transition-opacity duration-150",
+					"pointer-events-none absolute inset-y-0 right-0 top-[4.5rem] w-10 bg-background transition-opacity duration-150",
 					canScrollRight ? "opacity-100" : "opacity-0",
 				)}
 				style={{ maskImage: "linear-gradient(to left, black, transparent)", WebkitMaskImage: "linear-gradient(to left, black, transparent)" }}

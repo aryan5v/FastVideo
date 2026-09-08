@@ -3,7 +3,6 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { AnimatePresence, motion } from "framer-motion";
 import { Download, Share2 } from "lucide-react";
 import DevtoolsShell from "@/components/devtools/DevtoolsShell";
-import HeroTagline from "@/components/HeroTagline";
 import MonitorPage from "@/components/MonitorPage";
 import ChatBar from "@/components/ChatBar";
 import CreationStudio from "@/components/creation/CreationStudio";
@@ -315,12 +314,13 @@ export default function Page() {
 
 	const lobbyStoryPresets = useMemo(
 		() =>
-			(storyPresets as Array<{ id?: string; label?: string; description?: string }>)
+			(storyPresets as Array<{ id?: string; label?: string; description?: string; segment_prompts?: unknown }>)
 				.filter((preset) => typeof preset.id === "string" && typeof preset.label === "string")
 				.map((preset) => ({
 					id: String(preset.id),
 					label: String(preset.label),
 					description: typeof preset.description === "string" ? preset.description : undefined,
+					segmentCount: Array.isArray(preset.segment_prompts) ? preset.segment_prompts.length : undefined,
 				})),
 		[storyPresets],
 	);
