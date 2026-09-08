@@ -75,3 +75,17 @@ The user accepts modest quality degradation from compression when memory/speed b
 6876 same-state backend diagnostic failed too: minimum video flow cosine0.88150996 on a small synthetic-conditioning input. Cross-backend interchangeability is not established; keep SDPA matched for recovery/evaluation and preserve these diagnostics. Per user instruction this does not block the authorized42 recovery runs.
 
 Paired-data audit reconfirmed526 training records and341 unique captions; the58669 prompt-only embeddings are NOT in these two jobs. Do not imply otherwise. A passing42 candidate can initialize34 from its recovered full-rank weights; approximate34+AdaLNrank16 count remains~13.9B pending actual extraction/conversion and quality validation. Broader prompt supervision, held-out low-precision AdaLN verification and broader evaluation are useful next work; do not mutate live jobs to add them.
+
+## Three-branch expansion authorized
+
+The user approves the presenter perceptually and requests three experiments, preserving activation42 step500. Step500 checkpoint and export are now additionally hard-linked into preserved/activation42-step500-job6878/{checkpoint-500,export-500}; original preservation marker remains. These are separate directory entries sharing storage, not a separate physical backup. Do not overwrite either source or preserved weight files. All new outputs have distinct job directories.
+
+Audio6925 completed: activation42 step0 WER0; step500 WER2/7=0.285714, transcript "Fast video and clear audio are rivaled together." User reports it sounds great. Treat ASR as fallible but report the measured regression; no assertion of across-the-board recovery improvement. More training is an experiment, not a demonstrated remedy.
+
+Three current branches:
+
+-6924 uniform42 resumes step50 toward500 total with fixed CPU checkpoint barriers; eight-hour cap.
+-6926 activation42 resumes the preserved step500 model and optimizer toward1000 total (500 additional updates); eight-hour cap. Immutable code/three-branches-b2607fe2.
+-6927 activation34 pipeline uses that same preserved42 step500 export, not the later1000 endpoint: score all42 blocks on48 calibration examples, retain selected34 including first/last, compose original50-block identities, extract, decode step0, train500 with Base50 teacher and seam locations derived from the actual map, export/decode. Eight-hour cap including selection/conversion/evaluation;192GB CPU memory request. Same immutable code. Output root runs/activation34-recovery/job-6927. Failure in any stage stops dependent work. This is an authorized exploratory34 branch, not a statement that42 passed all former promotion thresholds.
+
+Selected34 training remains full-rank, FP32 masters/BF16 compute, same paired-data objective. AdaLN compression has NOT happened. Preserve stage42-step500 regardless of later outcomes, compare500 versus1000 and34 under the user's modest-degradation tolerance, and choose the best useful candidate instead of assuming later/smaller is better.
