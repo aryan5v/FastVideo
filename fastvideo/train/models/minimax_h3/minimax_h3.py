@@ -71,7 +71,10 @@ class MiniMaxH3Model(ModelBase):
             trainable=trainable,
             attention_backend=attention_backend,
         )
-        if self.attention_backend not in {_DENSE_ATTENTION, _VSA_ATTENTION}:
+        allowed_backends = {_DENSE_ATTENTION, _VSA_ATTENTION}
+        if not trainable:
+            allowed_backends.add(AttentionBackendEnum.FLASH_ATTN)
+        if self.attention_backend not in allowed_backends:
             raise ValueError("MiniMaxH3Model attention_backend must be TORCH_SDPA or VIDEO_SPARSE_ATTN_H3, "
                              f"got {self.attention_backend_name!r}")
         self._attn_kind: Literal["dense", "vsa"] = ("vsa" if self.attention_backend == _VSA_ATTENTION else "dense")

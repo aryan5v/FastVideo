@@ -7,6 +7,7 @@ import argparse
 import copy
 import gc
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -14,10 +15,10 @@ import torch
 from fastvideo.distributed import get_sp_group, maybe_init_distributed_environment_and_model_parallel
 from fastvideo.train.entrypoint.dcp_to_diffusers import _ensure_distributed, _run_config_from_raw
 from fastvideo.train.methods.knowledge_distillation.minimax_h3_recovery import (
-    _deployment_sigmas,
     _euler_update,
 )
 from fastvideo.train.models.minimax_h3 import MiniMaxH3Model
+from fastvideo.train.models.minimax_h3.minimax_h3 import shift_noise_amount
 from fastvideo.train.utils.instantiate import instantiate
 
 
@@ -41,8 +42,11 @@ def main() -> None:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--min-cosine", type=float, default=0.999)
+    parser.add_argument("--grid-points", type=int, default=5)
     parser.add_argument("--seed", type=int, default=2026090801)
     args = parser.parse_args()
+    if args.grid_points < 2:
+        raise ValueError("At least two grid points are required")
     metadata = json.loads((Path(args.source_checkpoint).resolve() / "metadata.json").read_text())
     base_raw = copy.deepcopy(metadata["config"])
     base_raw["training"]["distributed"].update({
@@ -66,6 +70,7 @@ def main() -> None:
     outputs: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     backend_receipts: dict[str, dict[str, object]] = {}
     for backend in ("TORCH_SDPA", "FLASH_ATTN"):
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = backend
         raw = copy.deepcopy(base_raw)
         teacher = copy.deepcopy(raw["models"]["teacher"])
         teacher.update({
@@ -94,10 +99,10 @@ def main() -> None:
             raise RuntimeError("training wrapper did not create initial noise")
         video = batch.noise.permute(0, 2, 1, 3, 4)
         audio = batch.audio_noise
-        video_sigmas = _deployment_sigmas(5, 12.0, model.device)
-        audio_sigmas = _deployment_sigmas(5, 3.0, model.device)
+        video_sigmas = shift_noise_amount(torch.linspace(1, 0, args.grid_points, device=model.device), 12.0)
+        audio_sigmas = shift_noise_amount(torch.linspace(1, 0, args.grid_points, device=model.device), 3.0)
         with torch.inference_mode():
-            for interval in range(4):
+            for interval in range(args.grid_points - 1):
                 vt = (1.0 - video_sigmas[interval]).reshape(1)
                 at = (1.0 - audio_sigmas[interval]).reshape(1)
                 video_flow, audio_flow = model.predict_joint_noise(
@@ -126,6 +131,9 @@ def main() -> None:
     payload = {
         "model_path": str(Path(args.model_path).resolve()),
         "seed": args.seed,
+        "grid_points": args.grid_points,
+        "transformer_calls": args.grid_points - 1,
+        "scope": "64x64 five-frame synthetic-conditioning endpoint smoke test",
         "minimum_cosine": args.min_cosine,
         "backends": backend_receipts,
         "video": video_metrics,
