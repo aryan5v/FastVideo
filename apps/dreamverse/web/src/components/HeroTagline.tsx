@@ -73,7 +73,7 @@ export default function HeroTagline() {
 	}, []);
 
 	return (
-		<h1 ref={ref} className="text-center text-3xl font-medium text-[#343537] dark:text-[#FAFAFB] sm:text-4xl">
+		<h1 ref={ref} className="text-balance text-center text-3xl font-medium text-[#343537] dark:text-[#FAFAFB] sm:text-4xl">
 			{HERO_TEXT.split(" ").map((word, wi) => (
 				<Fragment key={wi}>
 					{wi > 0 && (

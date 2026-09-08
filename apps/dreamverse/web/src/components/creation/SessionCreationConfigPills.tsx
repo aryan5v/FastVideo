@@ -65,7 +65,7 @@ export default function SessionCreationConfigPills({
 	const isInteractive = !readOnly && !disabled;
 
 	const pillClassName = cn(
-		"h-7 px-2 text-[11px]",
+		"h-9 min-h-9 px-2 text-[11px]",
 		!isInteractive && "pointer-events-none opacity-70",
 	);
 
@@ -153,8 +153,8 @@ export default function SessionCreationConfigPills({
 								type="button"
 								onClick={() => onAspectRatioChange?.(ratio)}
 								className={cn(
-									"flex flex-col items-center gap-2 rounded-xl border px-2 py-3 text-xs transition-colors",
-									aspectRatio === ratio ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+									"studio-control studio-control-press studio-hover-surface flex flex-col items-center gap-2 rounded-xl border px-2 py-3 text-xs",
+									aspectRatio === ratio ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border",
 								)}
 							>
 								<span
@@ -180,8 +180,8 @@ export default function SessionCreationConfigPills({
 								type="button"
 								onClick={() => onResolutionChange?.(item)}
 								className={cn(
-									"rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-									resolution === item ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+									"studio-control studio-control-press studio-hover-surface rounded-full border px-3 py-1.5 text-xs font-medium",
+									resolution === item ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border",
 								)}
 							>
 								{formatResolutionLabel(item)}

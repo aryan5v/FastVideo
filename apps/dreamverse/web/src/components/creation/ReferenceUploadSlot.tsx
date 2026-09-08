@@ -37,6 +37,7 @@ export default function ReferenceUploadSlot({
 		<div className="flex flex-col gap-1">
 			<button
 				type="button"
+				aria-label={[label, sublabel].filter(Boolean).join(" ")}
 				onClick={() => fileInputRef.current?.click()}
 				disabled={disabled}
 				onDragEnter={(event) => {
@@ -62,14 +63,14 @@ export default function ReferenceUploadSlot({
 					handleFile(event.dataTransfer.files?.[0] ?? null);
 				}}
 				className={cn(
-					"relative flex size-[76px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed bg-muted/50 px-1 text-center text-[11px] font-medium text-muted-foreground transition-colors hover:border-border hover:bg-accent/40",
+					"studio-control studio-control-press studio-hover-surface relative flex size-[76px] shrink-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border border-dashed bg-muted/50 px-1 text-center text-[11px] font-medium text-muted-foreground",
 					required && !previewUrl ? "border-amber-500/50" : "border-border/60",
 					dragActive && "border-accent-blue bg-accent-blue/10 ring-2 ring-accent-blue/30",
 					disabled && "pointer-events-none opacity-50",
 				)}
 			>
 				{previewUrl ? (
-					<img src={previewUrl} alt="" className="absolute inset-0 size-full object-cover" />
+					<img src={previewUrl} alt="" className="studio-media-outline absolute inset-0 size-full object-cover" />
 				) : (
 					<>
 						<ImagePlus className="size-4" />

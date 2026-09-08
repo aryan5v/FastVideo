@@ -37,35 +37,35 @@ const PRESET_ACCENTS = [
 		orb: "bg-sky-400/30",
 		icon: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
 		chip: "border-sky-400/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
-		hover: "hover:border-sky-400/45 hover:shadow-sky-500/15",
+		hover: "hover-capable:hover:border-sky-400/45 hover-capable:hover:shadow-sky-500/15",
 	},
 	{
 		surface: "from-violet-500/20 via-purple-400/10 to-fuchsia-500/25",
 		orb: "bg-violet-400/30",
 		icon: "bg-violet-500/15 text-violet-700 dark:text-violet-300",
 		chip: "border-violet-400/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
-		hover: "hover:border-violet-400/45 hover:shadow-violet-500/15",
+		hover: "hover-capable:hover:border-violet-400/45 hover-capable:hover:shadow-violet-500/15",
 	},
 	{
 		surface: "from-amber-500/20 via-orange-400/10 to-rose-500/25",
 		orb: "bg-amber-400/30",
 		icon: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
 		chip: "border-amber-400/25 bg-amber-500/10 text-amber-800 dark:text-amber-300",
-		hover: "hover:border-amber-400/45 hover:shadow-amber-500/15",
+		hover: "hover-capable:hover:border-amber-400/45 hover-capable:hover:shadow-amber-500/15",
 	},
 	{
 		surface: "from-emerald-500/20 via-teal-400/10 to-cyan-500/25",
 		orb: "bg-emerald-400/30",
 		icon: "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
 		chip: "border-emerald-400/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300",
-		hover: "hover:border-emerald-400/45 hover:shadow-emerald-500/15",
+		hover: "hover-capable:hover:border-emerald-400/45 hover-capable:hover:shadow-emerald-500/15",
 	},
 	{
 		surface: "from-rose-500/20 via-pink-400/10 to-orange-500/25",
 		orb: "bg-rose-400/30",
 		icon: "bg-rose-500/15 text-rose-700 dark:text-rose-300",
 		chip: "border-rose-400/25 bg-rose-500/10 text-rose-700 dark:text-rose-300",
-		hover: "hover:border-rose-400/45 hover:shadow-rose-500/15",
+		hover: "hover-capable:hover:border-rose-400/45 hover-capable:hover:shadow-rose-500/15",
 	},
 ] as const;
 
@@ -257,20 +257,20 @@ export default function PresetQuickLaunchRail({
 		<div className={cn("mx-auto w-full max-w-3xl transition-opacity duration-200", disabled && "pointer-events-none opacity-40")}>
 			<div className="mb-3 flex items-end justify-between gap-3 px-1">
 				<div>
-					<p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Suggested prompts</p>
-					<p className="mt-1 text-sm text-muted-foreground/90">Curated story starters — pick one to generate instantly.</p>
+					<p className="text-xs font-medium text-muted-foreground">Suggested prompts</p>
+					<p className="text-pretty mt-1 text-sm leading-5 text-muted-foreground/90">Curated story starters. Select one to generate instantly.</p>
 				</div>
-				<p className="hidden text-[11px] text-muted-foreground/80 sm:block">Tap a card to generate</p>
+				<p className="hidden text-[11px] text-muted-foreground/80 sm:block">Select a card to generate</p>
 			</div>
 
 			<div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 sm:gap-2">
-				<div className="flex w-7 shrink-0 justify-center sm:w-8">
+				<div className="flex w-9 shrink-0 justify-center">
 					{canScrollLeft ? (
 						<button
 							type="button"
 							aria-label="Scroll suggested prompts left"
 							onClick={() => scrollByAmount("left")}
-							className="inline-flex size-7 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:size-8"
+							className="studio-control studio-control-press inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm hover-capable:hover:text-foreground"
 						>
 							<ChevronLeft className="size-4" />
 						</button>
@@ -307,8 +307,8 @@ export default function PresetQuickLaunchRail({
 								disabled={disabled}
 								onClick={() => onPresetGenerate(preset.id)}
 								className={cn(
-									"group relative isolate flex h-[11.75rem] w-[13.75rem] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm transition-[border-color,box-shadow,background-color] duration-200",
-									"hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/40",
+									"group studio-control studio-control-press relative isolate flex h-[11.75rem] w-[13.75rem] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm",
+									"hover-capable:hover:shadow-md",
 									accent.hover,
 								)}
 							>
@@ -337,12 +337,12 @@ export default function PresetQuickLaunchRail({
 								<div className="flex min-h-0 flex-1 flex-col gap-2 px-3.5 py-3">
 									<div className="flex min-w-0 items-start justify-between gap-2">
 										<span className="line-clamp-2 min-h-[2.5rem] flex-1 text-sm font-semibold leading-5 text-foreground">{preset.label}</span>
-										<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/40 bg-background/70 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+										<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/40 bg-background/70 text-muted-foreground opacity-0 transition-opacity hover-capable:group-hover:opacity-100">
 											<ArrowUpRight className="size-3.5" />
 										</span>
 									</div>
 									{preset.description ? (
-										<span className="line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">{preset.description}</span>
+										<span className="text-pretty line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">{preset.description}</span>
 									) : (
 										<span className="min-h-[2.5rem]" aria-hidden="true" />
 									)}
@@ -354,7 +354,7 @@ export default function PresetQuickLaunchRail({
 										) : (
 											<span aria-hidden="true" />
 										)}
-										<span className="text-[10px] font-medium uppercase tracking-[0.12em] text-accent-blue opacity-0 transition-opacity group-hover:opacity-100">
+										<span className="text-[10px] font-medium uppercase tracking-[0.12em] text-accent-blue opacity-0 transition-opacity hover-capable:group-hover:opacity-100">
 											Generate
 										</span>
 									</div>
@@ -364,13 +364,13 @@ export default function PresetQuickLaunchRail({
 					})}
 				</div>
 
-				<div className="flex w-7 shrink-0 justify-center sm:w-8">
+				<div className="flex w-9 shrink-0 justify-center">
 					{canScrollRight ? (
 						<button
 							type="button"
 							aria-label="Scroll suggested prompts right"
 							onClick={() => scrollByAmount("right")}
-							className="inline-flex size-7 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm transition hover:text-foreground sm:size-8"
+							className="studio-control studio-control-press inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm hover-capable:hover:text-foreground"
 						>
 							<ChevronRight className="size-4" />
 						</button>

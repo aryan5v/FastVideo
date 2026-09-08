@@ -235,7 +235,7 @@ export default function CreationComposer({
 							disabled={disabled || sttBusy}
 							rows={3}
 							className={cn(
-								"min-h-[92px] w-full resize-none bg-transparent px-0.5 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground/80",
+								"min-h-[92px] w-full resize-none bg-transparent px-0.5 text-base leading-6 text-foreground outline-none placeholder:text-muted-foreground/80 sm:text-sm",
 								(disabled || sttBusy) && "cursor-not-allowed opacity-50",
 							)}
 						/>
@@ -250,7 +250,7 @@ export default function CreationComposer({
 											event.preventDefault();
 											insertMention(option);
 										}}
-										className="flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left hover:bg-accent/70"
+										className="studio-control studio-hover-surface flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left"
 									>
 										<span className="mt-0.5 rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
 											{option.kind}
@@ -343,8 +343,8 @@ export default function CreationComposer({
 										type="button"
 										onClick={() => onAspectRatioChange(ratio)}
 										className={cn(
-											"flex flex-col items-center gap-2 rounded-xl border px-2 py-3 text-xs transition-colors",
-											aspectRatio === ratio ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+											"studio-control studio-control-press studio-hover-surface flex flex-col items-center gap-2 rounded-xl border px-2 py-3 text-xs",
+											aspectRatio === ratio ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border",
 										)}
 									>
 										<span className={cn("rounded-sm border border-current/40 bg-muted/40", ratio === "9:16" && "h-7 w-4", ratio === "16:9" && "h-4 w-7", ratio === "1:1" && "size-5", ratio === "4:3" && "h-5 w-6", ratio === "3:4" && "h-6 w-5", ratio === "21:9" && "h-3 w-8")} />
@@ -360,8 +360,8 @@ export default function CreationComposer({
 										type="button"
 										onClick={() => onResolutionChange(item)}
 										className={cn(
-											"rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-											resolution === item ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border hover:bg-accent/50",
+											"studio-control studio-control-press studio-hover-surface rounded-full border px-3 py-1.5 text-xs font-medium",
+											resolution === item ? "border-accent-blue bg-accent-blue/10 text-foreground" : "border-border",
 										)}
 									>
 										{formatResolutionLabel(item)}
@@ -402,8 +402,8 @@ export default function CreationComposer({
 							aria-label="Generate"
 							onClick={onSubmit}
 							disabled={submitDisabled}
-							size="icon-sm"
-							className="rounded-full bg-accent-blue text-white shadow-sm hover:bg-accent-blue/90 disabled:bg-muted disabled:text-muted-foreground"
+							size="icon"
+							className="studio-control-press rounded-full bg-accent-blue text-white shadow-sm hover-capable:hover:bg-accent-blue/90 disabled:bg-muted disabled:text-muted-foreground"
 						>
 							<ArrowUp className="size-5" />
 						</Button>
@@ -411,8 +411,8 @@ export default function CreationComposer({
 				</div>
 
 				{referenceMissing && value.trim() && (
-					<p className="mt-3 text-center text-xs text-amber-600 dark:text-amber-400">
-						Add a reference asset to use Omni reference.
+					<p className="mt-3 text-center text-xs leading-5 text-amber-700 dark:text-amber-400">
+						Upload a reference asset to use Omni reference mode.
 					</p>
 				)}
 			</div>
