@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildMentionOptions, formatDurationLabel, formatResolutionLabel } from "@/lib/creationConfig";
+import { buildMentionOptions, formatDurationLabel, formatResolutionLabel, modeRequiresReference, modeUsesDualFrames } from "@/lib/creationConfig";
 
 describe("creationConfig", () => {
 	it("formats resolution labels", () => {
@@ -32,5 +32,12 @@ describe("creationConfig", () => {
 				description: undefined,
 			},
 		]);
+	});
+
+	it("derives mode-specific reference requirements", () => {
+		expect(modeRequiresReference("ref2av")).toBe(true);
+		expect(modeRequiresReference("t2v")).toBe(false);
+		expect(modeUsesDualFrames("fl2av")).toBe(true);
+		expect(modeUsesDualFrames("t2v")).toBe(false);
 	});
 });
