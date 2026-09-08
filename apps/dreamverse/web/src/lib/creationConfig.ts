@@ -4,7 +4,7 @@ export type CreationModelId = "fast-ltx2" | "fast-ltx23";
 
 export type AspectRatioId = "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
 
-export type ResolutionId = "720p" | "1080p" | "4k";
+export type ResolutionId = "480p" | "720p" | "1080p" | "4k";
 
 export interface CreationModeOption {
 	id: CreationModeId;
@@ -48,7 +48,7 @@ export const CREATION_MODELS: CreationModelOption[] = [
 
 export const ASPECT_RATIOS: AspectRatioId[] = ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"];
 
-export const RESOLUTIONS: ResolutionId[] = ["720p", "1080p", "4k"];
+export const RESOLUTIONS: ResolutionId[] = ["480p", "720p", "1080p", "4k"];
 
 export const DURATION_MARKS = [5, 10, 15] as const;
 

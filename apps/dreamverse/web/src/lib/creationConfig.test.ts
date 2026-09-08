@@ -12,6 +12,7 @@ import {
 
 describe("creationConfig", () => {
 	it("formats resolution labels", () => {
+		expect(formatResolutionLabel("480p")).toBe("480P");
 		expect(formatResolutionLabel("720p")).toBe("720P");
 		expect(formatResolutionLabel("4k")).toBe("4K");
 	});
