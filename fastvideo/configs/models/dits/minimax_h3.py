@@ -60,6 +60,7 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
     time_embed_hidden_dim: int = 5376
     time_embed_dim: int = 2688
     adaln_rank: int | None = None
+    pdd_steps: int | None = None
     rope_freq_dim: int = 16
     rope_theta: float = 10000.0
     norm_eps: float = 1e-5
@@ -68,6 +69,8 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.pdd_steps not in (None, 32):
+            raise ValueError("The compact H3 PDD adapter supports grid32 only")
         if self.num_layers <= 0:
             raise ValueError(f"MiniMax H3 num_layers must be positive, got {self.num_layers}.")
         if self.source_num_layers is not None and self.source_num_layers <= 0:

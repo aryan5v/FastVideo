@@ -106,6 +106,18 @@ class MiniMaxH3DenoisingStage(PipelineStage):
 
         self.scheduler.set_timesteps(batch.num_inference_steps, device=device)
         self.audio_scheduler.set_timesteps(batch.num_inference_steps, device=device)
+        pdd_steps = getattr(self.transformer, "pdd_steps", None)
+        if pdd_steps is not None:
+            if pdd_steps != 32 or batch.num_inference_steps != 5:
+                raise ValueError("Compact grid32 PDD requires exactly5 grid points /4 transformer calls")
+            if layout.num_condition_video_rows or layout.num_condition_audio_rows:
+                raise ValueError("Compact PDD sampler supports text-only joint generation")
+            from fastvideo.layers.minimax_h3_pdd import pdd_sigmas
+            for scheduler, shift in ((self.scheduler, 12.), (self.audio_scheduler, 3.)):
+                scheduler.set_timesteps(device=device, sigmas=pdd_sigmas(device, shift)[::8])
+            # Training starts from sigma0 * epsilon, not unit epsilon.
+            batch.latents = batch.latents * .999
+            batch.audio_latents = batch.audio_latents * .999
         video_timesteps = self.scheduler.timesteps
         audio_timesteps = self.audio_scheduler.timesteps
         if video_timesteps is None or audio_timesteps is None:
@@ -198,6 +210,10 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                             video_indices=video_indices,
                             audio_indices=audio_indices,
                             text_indices=text_indices,
+                            **({
+                                "pdd_head_window": (8 * index, 8 * (index + 1)),
+                                "pdd_fuse": True
+                            } if pdd_steps else {}),
                         )
 
                     video_start = layout.num_condition_video_rows

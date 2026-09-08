@@ -443,6 +443,7 @@ class MiniMaxH3Model(ModelBase):
         cfg_uncond: dict[str, Any] | None = None,
         attn_kind: Literal["dense", "vsa"] = "dense",
         block_execution_mask: tuple[bool, ...] | None = None,
+        pdd_head_window: tuple[int, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pack arbitrary joint states and return noise-minus-clean flows."""
         if not conditional or cfg_uncond is not None:
@@ -493,9 +494,25 @@ class MiniMaxH3Model(ModelBase):
                 audio_indices=layout.audio_indices.to(device),
                 text_indices=layout.text_indices.to(device),
                 block_execution_mask=block_execution_mask,
+                **({
+                    "pdd_head_window": pdd_head_window
+                } if pdd_head_window is not None else {}),
             )
 
         _, _, num_video_latents, latent_height, latent_width = video_bcthw.shape
+        if pdd_head_window is not None:
+            count = pdd_head_window[1] - pdd_head_window[0]
+            # Split (head, C, patch...) BEFORE unpatchify; stereo audio rows
+            # stay in their original order. Never fold heads into stereo axes.
+            videos = video_velocity.chunk(count, dim=-1)
+            audios = audio_velocity.chunk(count, dim=-1)
+            return (
+                -torch.stack([
+                    unpatchify_video_tokens(v, num_video_latents, latent_height, latent_width, _VIDEO_LATENT_CHANNELS,
+                                            self.transformer.patch_size).permute(0, 2, 1, 3, 4) for v in videos
+                ]),
+                -torch.stack([unpack_audio_tokens(a[0], num_audio_latents)[None] for a in audios]),
+            )
         video_prediction = unpatchify_video_tokens(
             video_velocity,
             num_video_latents,

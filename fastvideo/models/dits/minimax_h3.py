@@ -22,6 +22,7 @@ from fastvideo.distributed.communication_op import (
 from fastvideo.distributed.parallel_state import get_sp_world_size, model_parallel_is_initialized
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.mlp import MLP
+from fastvideo.layers.minimax_h3_pdd import H3PDDLinear, pdd_sigmas
 from fastvideo.layers.quantization import QuantizationConfig
 from fastvideo.layers.visual_embedding import Timesteps
 from fastvideo.logger import init_logger
@@ -717,16 +718,18 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             prefix=f"{config.prefix}.norm_out",
             apply_silu=self.adaln_rank is None,
         )
-        self.proj_out = ReplicatedLinear(
+        self.pdd_steps = arch.pdd_steps
+        output_linear = H3PDDLinear if self.pdd_steps else ReplicatedLinear
+        self.proj_out = output_linear(
             arch.hidden_size,
-            video_patch_dim,
+            video_patch_dim * (self.pdd_steps or 1),
             bias=True,
             quant_config=config.quant_config,
             prefix=f"{config.prefix}.proj_out",
         )
-        self.audio_proj_out = ReplicatedLinear(
+        self.audio_proj_out = output_linear(
             arch.hidden_size,
-            arch.audio_in_channels,
+            arch.audio_in_channels * (self.pdd_steps or 1),
             bias=True,
             quant_config=config.quant_config,
             prefix=f"{config.prefix}.audio_proj_out",
@@ -867,6 +870,8 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
         block_execution_mask: tuple[bool, ...] | None = None,
+        pdd_head_window: tuple[int, int] | None = None,
+        pdd_fuse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict video and audio velocities from one caller-defined packed layout."""
         if block_execution_mask is not None:
@@ -938,8 +943,21 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             temb,
             local_timestep_indices,
         ).to(self.proj_out.weight.dtype)
-        video_output, _ = self.proj_out(packed_hidden_states)
-        audio_output, _ = self.audio_proj_out(packed_hidden_states)
+        if getattr(self, "pdd_steps", None):
+            if pdd_head_window is None:
+                raise ValueError("PDD checkpoints require an explicit head window and PDD sampler")
+            start, end = pdd_head_window
+            weights = [None, None]
+            if pdd_fuse:
+                grids = [pdd_sigmas(packed_hidden_states.device, shift) for shift in (12., 3.)]
+                weights = [(g[start+1:end+1] - g[start:end]) for g in grids]
+            video_output, _ = self.proj_out(packed_hidden_states, start=start, end=end, weights=weights[0])
+            audio_output, _ = self.audio_proj_out(packed_hidden_states, start=start, end=end, weights=weights[1])
+        else:
+            if pdd_head_window is not None or pdd_fuse:
+                raise ValueError("Single-head H3 cannot execute PDD")
+            video_output, _ = self.proj_out(packed_hidden_states)
+            audio_output, _ = self.audio_proj_out(packed_hidden_states)
         if sp_world_size > 1:
             video_output = sequence_model_parallel_all_gather_with_unpad(video_output, original_seq_len, dim=1)
             audio_output = sequence_model_parallel_all_gather_with_unpad(audio_output, original_seq_len, dim=1)
