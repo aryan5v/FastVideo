@@ -39,3 +39,11 @@ def test_perfect_match_zero_and_teacher_outlier_excluded():
     with torch.no_grad():
         student[:, 0, 0] = -10000
     assert loss(student, teacher, layout, group, .001).item() == 0
+
+
+def test_masked_outlier_does_not_suppress_normal_token_loss():
+    teacher = torch.ones(1, 300, 2)
+    teacher[:, 0, 0] = 10000
+    student = teacher.clone() + 1
+    layout = SimpleNamespace(video_indices=torch.arange(299), audio_indices=torch.tensor([299]))
+    torch.testing.assert_close(loss(student, teacher, layout, group, .001), torch.tensor(2.))

@@ -54,11 +54,13 @@ def _seam_loss(student: torch.Tensor, teacher: torch.Tensor, layout: Any, group:
         rms = (stats[0] / stats[1]).clamp_min(floor).sqrt()
         # Exclude extreme teacher activations; do not clamp the student gradient.
         mask = target.abs() <= 10 * rms
-        count = mask.sum().float()
+        kept = torch.stack((mask.sum().float(), (target.square() * mask).sum()))
         if group.world_size > 1:
-            dist.all_reduce(count, group=group.device_group)
+            dist.all_reduce(kept, group=group.device_group)
+        # Excluded outliers must not dominate the normalization denominator.
+        energy = (kept[1] / kept[0].clamp_min(1)).clamp_min(floor)
         error = ((prediction - target).square() * mask).sum()
-        terms.append(error * group.world_size / count.clamp_min(1) / rms.square())
+        terms.append(error * group.world_size / kept[0].clamp_min(1) / energy)
     return torch.stack(terms).sum()
 
 
