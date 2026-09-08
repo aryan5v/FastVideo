@@ -9,11 +9,12 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--template', type=Path, required=True)
 p.add_argument('--student', type=Path, required=True)
 p.add_argument('--output', type=Path, required=True)
+p.add_argument('--depth', type=int, choices=[34,42], default=42)
 a = p.parse_args()
 arch = json.loads((a.student / 'transformer/config.json').read_text())
 blocks = arch['block_map']
-if len(blocks) != 42 or arch['source_num_layers'] != 50:
-    raise ValueError('Expected a Base-derived42-block checkpoint')
+if len(blocks) != a.depth or arch['source_num_layers'] != 50:
+    raise ValueError(f'Expected a Base-derived{a.depth}-block checkpoint')
 seams = [i for i in range(1, len(blocks)) if blocks[i] > blocks[i-1]+1]
 if not seams:
     raise ValueError('No pruning seams found')
