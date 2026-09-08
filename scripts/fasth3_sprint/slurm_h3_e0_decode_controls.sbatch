@@ -8,7 +8,7 @@
 set -euo pipefail
 export SLURM_EXPORT_ENV=ALL
 export SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
-CODE_ROOT="${SLURM_SUBMIT_DIR:?SLURM_SUBMIT_DIR is required}"
+CODE_ROOT="${PWD:?batch working directory is required}"
 export CODE_ROOT
 
 require_file() {
