@@ -31,6 +31,11 @@ import {
 	buildRewritePromptWindowSnapshotFromPrompts,
 	normalizePromptWindowSnapshot,
 } from "@/lib/prompts/promptWindowSnapshot";
+import {
+	buildCreationInitPayload,
+	parseEchoedCreationConfig,
+	validateCreationInputs,
+} from "@/lib/creationPayload";
 import rawPresets from "@/lib/storyPresetsData";
 import { cn } from "@/lib/utils";
 import { createWebSocketConnection, detachAndCloseWebSocket } from "@/lib/ws/client";
@@ -240,6 +245,9 @@ export default function Page() {
 	const [ttffValueMs, setTtffValueMs] = useState<number | null>(null);
 	const ttffIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 	const pendingInitialPromptRef = useRef("");
+	const referenceFileRef = useRef<File | null>(null);
+	const firstFrameFileRef = useRef<File | null>(null);
+	const lastFrameFileRef = useRef<File | null>(null);
 	const lastArchivedReplayKeyRef = useRef("");
 	const [sidebarOpen, setSidebarOpen] = useState(false);
 	const [creationModelId, setCreationModelId] = useState<CreationModelId>("fast-ltx23");
@@ -299,14 +307,17 @@ export default function Page() {
 	}
 
 	function handleReferenceSelect(file: File | null) {
+		referenceFileRef.current = file;
 		setPreviewUrl(setReferencePreviewUrl, file);
 	}
 
 	function handleFirstFrameSelect(file: File | null) {
+		firstFrameFileRef.current = file;
 		setPreviewUrl(setFirstFramePreviewUrl, file);
 	}
 
 	function handleLastFrameSelect(file: File | null) {
+		lastFrameFileRef.current = file;
 		setPreviewUrl(setLastFramePreviewUrl, file);
 	}
 
@@ -1739,33 +1750,43 @@ export default function Page() {
 		resetPlaybackState();
 	}
 
-	function buildProjectInitPayload(type: "session_init_v2" | "project_init_v1") {
+	async function buildProjectInitPayload(type: "session_init_v2" | "project_init_v1") {
 		const segmentPrompts = getSessionInitPrompts();
 		setSeedPrompts(segmentPrompts);
+		const creationPayload = await buildCreationInitPayload({
+			modelId: creationModelId,
+			modeId: creationModeId,
+			aspectRatio: creationAspectRatio,
+			resolution: creationResolution,
+			durationSec: creationDurationSec,
+			referenceFile: referenceFileRef.current,
+			firstFrameFile: firstFrameFileRef.current,
+			lastFrameFile: lastFrameFileRef.current,
+		});
 		return {
 			type,
 			preset_id: getInitialPresetId(),
 			preset_label: getInitialPresetLabel(),
 			curated_prompts: segmentPrompts,
 			initial_rollout_prompt: normalizeInitialPrompt(pendingInitialPromptRef.current),
-			initial_image: null,
 			single_clip_mode: false,
 			enhancement_enabled: sessionStore.get().enhancementEnabled,
 			auto_extension_enabled: sessionStore.get().autoExtensionEnabled,
 			loop_generation_enabled: sessionStore.get().loopGenerationEnabled,
+			...creationPayload,
 		};
 	}
 
-	function sendSessionInitMessage() {
+	async function sendSessionInitMessage() {
 		const ws = wsRef.current;
 		if (!ws) return;
-		ws.send(JSON.stringify(buildProjectInitPayload("session_init_v2")));
+		ws.send(JSON.stringify(await buildProjectInitPayload("session_init_v2")));
 	}
 
-	function sendProjectInitMessage() {
+	async function sendProjectInitMessage() {
 		const ws = wsRef.current;
 		if (!ws || ws.readyState !== WebSocket.OPEN) return;
-		ws.send(JSON.stringify(buildProjectInitPayload("project_init_v1")));
+		ws.send(JSON.stringify(await buildProjectInitPayload("project_init_v1")));
 	}
 
 	function sendEndProjectKeepSession() {
@@ -1802,6 +1823,9 @@ export default function Page() {
 			return;
 		}
 		const normalizedEvent = normalizeSocketMessage(decoded.data);
+		if (decoded.data?.type === "gpu_assigned" || decoded.data?.type === "ltx2_stream_start") {
+			applyEchoedCreationConfig(decoded.data);
+		}
 		await applyNormalizedSocketEvent(normalizedEvent, {
 			sessionStore,
 			promptWindowStore,
@@ -1844,7 +1868,12 @@ export default function Page() {
 				onOpen: () => {
 					opened = true;
 					sessionStore.patch({ connected: true, connecting: false });
-					sendSessionInitMessage();
+					void sendSessionInitMessage().catch((error) => {
+						console.error("Failed to send session init payload:", error);
+						recoverFailedSessionStart(
+							error instanceof Error ? error.message : "Failed to prepare session settings.",
+						);
+					});
 				},
 				onMessage: (event: MessageEvent) => {
 					wsMessageQueueRef.current = wsMessageQueueRef.current
@@ -1927,6 +1956,14 @@ export default function Page() {
 		});
 	}
 
+	function applyEchoedCreationConfig(data: unknown) {
+		const echoed = parseEchoedCreationConfig(data);
+		if (!echoed) {
+			return;
+		}
+		setSessionCreationConfig(echoed);
+	}
+
 	function beginProjectLocally({ force = false } = {}) {
 		if (!force && !canStartSession) return;
 		if (sessionStore.get().sessionStarted || sessionStore.get().projectResetPending) return false;
@@ -1990,13 +2027,29 @@ export default function Page() {
 	}
 
 	async function joinSession({ force = false } = {}) {
+		const validationError = validateCreationInputs({
+			modeId: creationModeId,
+			referenceFile: referenceFileRef.current,
+			firstFrameFile: firstFrameFileRef.current,
+			lastFrameFile: lastFrameFileRef.current,
+		});
+		if (validationError) {
+			showPreSessionNotice(validationError);
+			return;
+		}
+
 		if (
 			wsRef.current
 			&& wsRef.current.readyState === WebSocket.OPEN
 			&& sessionStore.get().connected
 		) {
 			if (!beginProjectLocally({ force })) return;
-			sendProjectInitMessage();
+			try {
+				await sendProjectInitMessage();
+			} catch (error) {
+				console.error("Failed to send project init payload:", error);
+				showPreSessionNotice(error instanceof Error ? error.message : "Failed to prepare session settings.");
+			}
 			return;
 		}
 		showPreSessionNotice("");
@@ -2018,7 +2071,12 @@ export default function Page() {
 			&& wsRef.current.readyState === WebSocket.OPEN
 			&& sessionStore.get().connected
 		) {
-			sendProjectInitMessage();
+			try {
+				await sendProjectInitMessage();
+			} catch (error) {
+				console.error("Failed to send project init payload:", error);
+				showPreSessionNotice(error instanceof Error ? error.message : "Failed to prepare session settings.");
+			}
 			return;
 		}
 		connectWebSocket();
