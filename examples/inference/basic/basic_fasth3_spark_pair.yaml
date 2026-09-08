@@ -26,6 +26,8 @@ generator:
       text_encoder: true
       vae: true
       pin_cpu_memory: true
+      # lazy_module_load owns component deferral on Spark. h3_sequential_load is
+      # the H3-only fallback when lazy is off (--no-lazy-module-load).
       lazy_module_load: true
     compile:
       enabled: false
@@ -38,7 +40,6 @@ generator:
       inference_torch_compile: true
       vae_parallel_decode: true
       vae_parallel_decode_strategy: gather
-      h3_sequential_load: true
 request:
   prompt: >-
     A wide cinematic shot of an alpine meadow at sunrise, pale pink mountain
