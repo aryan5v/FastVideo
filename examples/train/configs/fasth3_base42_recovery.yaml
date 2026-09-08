@@ -16,12 +16,17 @@ method:
   _target_: fastvideo.train.methods.knowledge_distillation.minimax_h3_base_recovery.MiniMaxH3BaseRecoveryMethod
   denoising_weight: 1.0
   teacher_velocity_weight: 1.0
-  feature_weight: 0.01
+  feature_weight: 1.0
+  teacher_grid_points: 50
   feature_local_block_indices:
-  - 9
-  - 20
-  - 30
-  - 41
+  - 3
+  - 8
+  - 13
+  - 18
+  - 24
+  - 29
+  - 34
+  - 39
   modality_energy_floor: 0.001
 training:
   distributed:
