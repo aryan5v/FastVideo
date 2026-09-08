@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useMemo, useRef, useState } from "react";
-import { ArrowUp, Box, ChevronDown, Clock, Monitor, Sparkles, Wand2 } from "lucide-react";
+import { ArrowUp, Box, ChevronDown, Clock, Monitor, Wand2 } from "lucide-react";
 
 import ConfigPill from "@/components/creation/ConfigPill";
 import HeroTagline from "@/components/HeroTagline";
@@ -267,23 +267,6 @@ export default function CreationComposer({
 				</div>
 
 				<div className="mt-4 flex flex-wrap items-center gap-1.5 rounded-2xl bg-muted/35 p-1.5 ring-1 ring-border/25">
-					<DropdownMenu>
-						<DropdownMenuTrigger asChild>
-							<ConfigPill disabled={disabled}>
-								<Sparkles className="size-3.5 text-accent-blue" />
-								AI Video
-								<ChevronDown className="size-3 opacity-60" />
-							</ConfigPill>
-						</DropdownMenuTrigger>
-						<DropdownMenuContent align="start" className="w-56">
-							<DropdownMenuLabel>Type</DropdownMenuLabel>
-							<DropdownMenuSeparator />
-							<DropdownMenuItem disabled>AI Video</DropdownMenuItem>
-							<DropdownMenuItem disabled>AI Image</DropdownMenuItem>
-							<DropdownMenuItem disabled>AI Audio</DropdownMenuItem>
-						</DropdownMenuContent>
-					</DropdownMenu>
-
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<ConfigPill disabled={disabled}>

@@ -1,19 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-	ArrowUpRight,
-	Blocks,
-	Cat,
-	ChevronLeft,
-	ChevronRight,
-	Dog,
-	Gamepad2,
-	type LucideIcon,
-	Newspaper,
-	PartyPopper,
-	Sparkles,
-} from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -29,67 +17,6 @@ interface PresetQuickLaunchRailProps {
 	storyPresets: StoryPresetLike[];
 	disabled?: boolean;
 	onPresetGenerate: (presetId: string) => void;
-}
-
-const PRESET_ACCENTS = [
-	{
-		surface: "from-sky-500/20 via-sky-400/10 to-indigo-500/25",
-		orb: "bg-sky-400/30",
-		icon: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
-		chip: "border-sky-400/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
-		hover: "hover-capable:hover:border-sky-400/45 hover-capable:hover:shadow-sky-500/15",
-	},
-	{
-		surface: "from-violet-500/20 via-purple-400/10 to-fuchsia-500/25",
-		orb: "bg-violet-400/30",
-		icon: "bg-violet-500/15 text-violet-700 dark:text-violet-300",
-		chip: "border-violet-400/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
-		hover: "hover-capable:hover:border-violet-400/45 hover-capable:hover:shadow-violet-500/15",
-	},
-	{
-		surface: "from-amber-500/20 via-orange-400/10 to-rose-500/25",
-		orb: "bg-amber-400/30",
-		icon: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
-		chip: "border-amber-400/25 bg-amber-500/10 text-amber-800 dark:text-amber-300",
-		hover: "hover-capable:hover:border-amber-400/45 hover-capable:hover:shadow-amber-500/15",
-	},
-	{
-		surface: "from-emerald-500/20 via-teal-400/10 to-cyan-500/25",
-		orb: "bg-emerald-400/30",
-		icon: "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
-		chip: "border-emerald-400/25 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300",
-		hover: "hover-capable:hover:border-emerald-400/45 hover-capable:hover:shadow-emerald-500/15",
-	},
-	{
-		surface: "from-rose-500/20 via-pink-400/10 to-orange-500/25",
-		orb: "bg-rose-400/30",
-		icon: "bg-rose-500/15 text-rose-700 dark:text-rose-300",
-		chip: "border-rose-400/25 bg-rose-500/10 text-rose-700 dark:text-rose-300",
-		hover: "hover-capable:hover:border-rose-400/45 hover-capable:hover:shadow-rose-500/15",
-	},
-] as const;
-
-const PRESET_META: Record<string, { icon: LucideIcon; styleTag: string }> = {
-	death_star_console_delay_lego_funny: { icon: Blocks, styleTag: "LEGO comedy" },
-	cat_litter_box_clay_custom: { icon: Cat, styleTag: "Stop motion" },
-	boy_walking_dog_park_custom: { icon: Dog, styleTag: "Pixar 3D" },
-	butterfly_wings_dad: { icon: PartyPopper, styleTag: "Warm comedy" },
-	gaming_ban: { icon: Gamepad2, styleTag: "Gaming" },
-	garden_sign: { icon: Sparkles, styleTag: "School comedy" },
-	oil_strike_reporter: { icon: Newspaper, styleTag: "News satire" },
-};
-
-function presetAccent(id: string) {
-	let hash = 0;
-	for (let i = 0; i < id.length; i += 1) {
-		hash = (hash + id.charCodeAt(i) * (i + 1)) % PRESET_ACCENTS.length;
-	}
-	return PRESET_ACCENTS[hash];
-}
-
-function formatSceneCount(segmentCount?: number) {
-	if (!segmentCount || segmentCount <= 0) return null;
-	return segmentCount === 1 ? "1 scene" : `${segmentCount} scenes`;
 }
 
 export default function PresetQuickLaunchRail({
@@ -109,12 +36,6 @@ export default function PresetQuickLaunchRail({
 	});
 	const suppressPresetClickRef = useRef(false);
 
-	const accentByPresetId = useMemo(() => {
-		const map = new Map<string, (typeof PRESET_ACCENTS)[number]>();
-		storyPresets.forEach((preset) => map.set(preset.id, presetAccent(preset.id)));
-		return map;
-	}, [storyPresets]);
-
 	const updateScrollState = useCallback(() => {
 		const el = scrollRef.current;
 		if (!el) return;
@@ -126,7 +47,7 @@ export default function PresetQuickLaunchRail({
 		(direction: "left" | "right") => {
 			const el = scrollRef.current;
 			if (!el) return;
-			const delta = direction === "left" ? -248 : 248;
+			const delta = direction === "left" ? -220 : 220;
 			el.scrollBy({ left: delta, behavior: "smooth" });
 			window.setTimeout(updateScrollState, 220);
 		},
@@ -238,39 +159,31 @@ export default function PresetQuickLaunchRail({
 	const scrollMaskStyle =
 		canScrollLeft && canScrollRight
 			? {
-					maskImage: "linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent)",
-					WebkitMaskImage: "linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent)",
+					maskImage: "linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent)",
+					WebkitMaskImage: "linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent)",
 				}
 			: canScrollLeft
 				? {
-						maskImage: "linear-gradient(to right, transparent, black 24px, black)",
-						WebkitMaskImage: "linear-gradient(to right, transparent, black 24px, black)",
+						maskImage: "linear-gradient(to right, transparent, black 20px, black)",
+						WebkitMaskImage: "linear-gradient(to right, transparent, black 20px, black)",
 					}
 				: canScrollRight
 					? {
-							maskImage: "linear-gradient(to right, black, black calc(100% - 24px), transparent)",
-							WebkitMaskImage: "linear-gradient(to right, black, black calc(100% - 24px), transparent)",
+							maskImage: "linear-gradient(to right, black, black calc(100% - 20px), transparent)",
+							WebkitMaskImage: "linear-gradient(to right, black, black calc(100% - 20px), transparent)",
 						}
 					: undefined;
 
 	return (
 		<div className={cn("mx-auto w-full max-w-3xl transition-opacity duration-200", disabled && "pointer-events-none opacity-40")}>
-			<div className="mb-3 flex items-end justify-between gap-3 px-1">
-				<div>
-					<p className="text-xs font-medium text-muted-foreground">Suggested prompts</p>
-					<p className="text-pretty mt-1 text-sm leading-5 text-muted-foreground/90">Curated story starters. Select one to generate instantly.</p>
-				</div>
-				<p className="hidden text-[11px] text-muted-foreground/80 sm:block">Select a card to generate</p>
-			</div>
-
 			<div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 sm:gap-2">
-				<div className="flex w-9 shrink-0 justify-center">
+				<div className="flex w-8 shrink-0 justify-center">
 					{canScrollLeft ? (
 						<button
 							type="button"
 							aria-label="Scroll suggested prompts left"
 							onClick={() => scrollByAmount("left")}
-							className="studio-control studio-control-press inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm hover-capable:hover:text-foreground"
+							className="studio-control studio-control-press inline-flex size-8 items-center justify-center rounded-full text-muted-foreground hover-capable:hover:bg-muted/60 hover-capable:hover:text-foreground"
 						>
 							<ChevronLeft className="size-4" />
 						</button>
@@ -289,88 +202,33 @@ export default function PresetQuickLaunchRail({
 					onClickCapture={handlePresetClickCapture}
 					style={scrollMaskStyle}
 					className={cn(
-						"scrollbar-hidden flex gap-3 overflow-x-auto overflow-y-visible py-1 select-none",
+						"scrollbar-hidden flex gap-2 overflow-x-auto overflow-y-visible py-0.5 select-none",
 						presetRailDragging ? "cursor-grabbing" : "cursor-grab",
 					)}
 				>
-					{storyPresets.map((preset) => {
-						const accent = accentByPresetId.get(preset.id) ?? PRESET_ACCENTS[0];
-						const meta = PRESET_META[preset.id];
-						const Icon = meta?.icon ?? Sparkles;
-						const styleTag = preset.styleTag || meta?.styleTag;
-						const sceneCount = formatSceneCount(preset.segmentCount);
-
-						return (
-							<button
-								key={preset.id}
-								type="button"
-								disabled={disabled}
-								onClick={() => onPresetGenerate(preset.id)}
-								className={cn(
-									"group studio-control studio-control-press relative isolate flex h-[11.75rem] w-[13.75rem] shrink-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/95 text-left shadow-sm backdrop-blur-sm",
-									"hover-capable:hover:shadow-md",
-									accent.hover,
-								)}
-							>
-								<div className={cn("relative h-[4.75rem] shrink-0 overflow-hidden bg-gradient-to-br px-3.5 py-3", accent.surface)}>
-									<span
-										aria-hidden="true"
-										className={cn("pointer-events-none absolute -right-4 -top-6 size-24 rounded-full blur-2xl", accent.orb)}
-									/>
-									<div className="relative flex min-w-0 items-start justify-between gap-2">
-										<span className={cn("inline-flex size-9 shrink-0 items-center justify-center rounded-xl border border-white/10 shadow-sm", accent.icon)}>
-											<Icon className="size-4" />
-										</span>
-										{styleTag && (
-											<span
-												className={cn(
-													"max-w-[7.25rem] truncate rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]",
-													accent.chip,
-												)}
-											>
-												{styleTag}
-											</span>
-										)}
-									</div>
-								</div>
-
-								<div className="flex min-h-0 flex-1 flex-col gap-2 px-3.5 py-3">
-									<div className="flex min-w-0 items-start justify-between gap-2">
-										<span className="line-clamp-2 min-h-[2.5rem] flex-1 text-sm font-semibold leading-5 text-foreground">{preset.label}</span>
-										<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/40 bg-background/70 text-muted-foreground opacity-0 transition-opacity hover-capable:group-hover:opacity-100">
-											<ArrowUpRight className="size-3.5" />
-										</span>
-									</div>
-									{preset.description ? (
-										<span className="text-pretty line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-muted-foreground">{preset.description}</span>
-									) : (
-										<span className="min-h-[2.5rem]" aria-hidden="true" />
-									)}
-									<div className="mt-auto flex items-center justify-between gap-2 pt-1">
-										{sceneCount ? (
-											<span className="rounded-full border border-border/50 bg-muted/40 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-												{sceneCount}
-											</span>
-										) : (
-											<span aria-hidden="true" />
-										)}
-										<span className="text-[10px] font-medium uppercase tracking-[0.12em] text-accent-blue opacity-0 transition-opacity hover-capable:group-hover:opacity-100">
-											Generate
-										</span>
-									</div>
-								</div>
-							</button>
-						);
-					})}
+					{storyPresets.map((preset) => (
+						<button
+							key={preset.id}
+							type="button"
+							disabled={disabled}
+							onClick={() => onPresetGenerate(preset.id)}
+							className="studio-control studio-control-press studio-hover-surface flex w-[12.5rem] shrink-0 flex-col gap-1 rounded-xl border border-border/50 bg-card/70 px-3 py-2.5 text-left"
+						>
+							<span className="line-clamp-1 text-sm font-medium text-foreground">{preset.label}</span>
+							{preset.description && (
+								<span className="text-pretty line-clamp-2 text-xs leading-5 text-muted-foreground">{preset.description}</span>
+							)}
+						</button>
+					))}
 				</div>
 
-				<div className="flex w-9 shrink-0 justify-center">
+				<div className="flex w-8 shrink-0 justify-center">
 					{canScrollRight ? (
 						<button
 							type="button"
 							aria-label="Scroll suggested prompts right"
 							onClick={() => scrollByAmount("right")}
-							className="studio-control studio-control-press inline-flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/95 text-muted-foreground shadow-sm backdrop-blur-sm hover-capable:hover:text-foreground"
+							className="studio-control studio-control-press inline-flex size-8 items-center justify-center rounded-full text-muted-foreground hover-capable:hover:bg-muted/60 hover-capable:hover:text-foreground"
 						>
 							<ChevronRight className="size-4" />
 						</button>

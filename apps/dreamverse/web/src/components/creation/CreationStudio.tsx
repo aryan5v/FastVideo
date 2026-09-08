@@ -58,7 +58,7 @@ export default function CreationStudio({
 		<div className="flex min-h-0 flex-1">
 			<AppNavRail activeSection={activeSection} onOpenProjects={onOpenProjects} />
 			<div className="min-w-0 flex-1 overflow-y-auto">
-				<div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 py-7 sm:px-6 sm:py-8">
+				<div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-7 sm:px-6 sm:py-8">
 					<CreationComposer {...composerProps} isGenerating={isGenerating} />
 					{storyPresets.length > 0 && onPresetGenerate && (
 						<PresetQuickLaunchRail storyPresets={storyPresets} disabled={isGenerating} onPresetGenerate={onPresetGenerate} />
