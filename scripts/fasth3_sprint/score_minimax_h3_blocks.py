@@ -381,7 +381,7 @@ def main() -> None:
 
     if not os.environ.get("WANDB_API_KEY"):
         raise RuntimeError("WANDB_API_KEY is required for block scoring")
-    run_id = f"base-score-{args.source_revision[:8]}-{args.output_dir.name}-{shard_index:02d}-of-{num_shards:02d}"
+    run_id = f"base-score-{args.source_revision[:8]}-{args.output_dir.parent.name}-{args.output_dir.name}-{shard_index:02d}-of-{num_shards:02d}"
     run = wandb.init(
         project=args.wandb_project,
         id=run_id,
