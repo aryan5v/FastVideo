@@ -1,6 +1,6 @@
-# Dense V12 algorithm adapted to compact42, SDPA, SP4/FSDP8, global batch2.
-# 500 alternating phases =400 critic updates +100 student updates, not500 generator updates.
-# Full58669 prompt pool, native geometry; transient carry reuses each prompt for4 phases.
+# Dense V12 algorithm adapted to compact42, SDPA, SP4/FSDP4, global batch1.
+# Full Base critic uses FSDP CPU offload; student and frozen teacher stay on GPU.
+# 500 phases =400 critic updates +100 student updates. All58669 prompts eligible.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
@@ -21,6 +21,7 @@ models:
     enable_gradient_checkpointing_type: full
     attention_backend: TORCH_SDPA
     disable_custom_init_weights: true
+    cpu_offload: true
 method:
   _target_: fastvideo.train.methods.distribution_matching.minimax_h3_joint_dmd2.MiniMaxH3JointDMD2Method
   rollout_mode: simulate
@@ -49,11 +50,11 @@ method:
   fake_score_lr_scheduler: constant
 training:
   distributed:
-    num_gpus: 8
+    num_gpus: 4
     sp_size: 4
     tp_size: 1
     hsdp_replicate_dim: 1
-    hsdp_shard_dim: 8
+    hsdp_shard_dim: 4
     pin_cpu_memory: true
   data:
     data_path: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/data/user-prompts-20260906/index-v2

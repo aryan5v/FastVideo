@@ -92,6 +92,7 @@ def load_module_from_path(
     override_transformer_cls_name: str | None = None,
     transformer_override_safetensor: str | None = None,
     attention_backend: AttentionBackendEnum | str | None = None,
+    cpu_offload: bool = False,
 ) -> torch.nn.Module:
     """Load one pipeline component with its role-scoped attention policy.
 
@@ -104,6 +105,7 @@ def load_module_from_path(
     scoped to this load call.
     """
     fastvideo_args: Any = _make_training_args(training_config, model_path=model_path)
+    fastvideo_args.dit_cpu_offload = cpu_offload
 
     local_model_path = maybe_download_model(model_path)
     # Training loads exactly one component at a time.  Validate that selected

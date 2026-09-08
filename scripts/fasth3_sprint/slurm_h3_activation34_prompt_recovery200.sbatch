@@ -12,7 +12,7 @@ export CODE_ROOT="${PWD:?}"
 export SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
 export OUTPUT_ROOT="${SPRINT_ROOT}/runs/base34-${BRANCH}-recovery/job-${SLURM_JOB_ID}"
 export BASE=/mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
-export STUDENT="${SPRINT_ROOT}/runs/activation34-recovery/job-6928/export-500"
+export STUDENT="${SPRINT_ROOT}/runs/activation34-recovery/job-6944/export-500"
 export BASE_GATE="${SPRINT_ROOT}/diagnostics/base-h3-controls/6871-TORCH_SDPA"
 test -s "${CODE_ROOT}/CODE_COMMIT"
 test -s "${STUDENT}/transformer/model.safetensors"
@@ -29,7 +29,7 @@ export PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=online WANDB_DIR="${OUTPUT_ROOT}"
 export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_NCCL_ENABLE_MONITORING=0
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
-# Submit afterok6928 and6929. Fresh optimizer at recovered34 weights; all58669 prompt IDs are eligible.
+# Submit afterok6944 and6929. Fresh optimizer at recovered34 weights; all58669 prompt IDs are eligible.
 # No paired flow loss on prompt placeholders. Actual consumed IDs are recorded.
 # User authorizes experimental recovery without waiting for external parity/review gates.
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/build_h3_recovery_config.py" --template "${CODE_ROOT}/examples/train/configs/fasth3_base42_recovery.yaml" --student "${STUDENT}" --output "${OUTPUT_ROOT}/config.yaml" --depth 34

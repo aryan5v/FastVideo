@@ -95,3 +95,19 @@ def test_load_transformer_restores_backend_when_loading_fails(
             attention_backend="ATTN_QAT_TRAIN",
         )
     assert _active_component_attention_backend_scope() is None
+
+
+@pytest.mark.parametrize('offload', [False, True])
+def test_role_cpu_offload_reaches_component_loader(monkeypatch, tmp_path, offload):
+    tc = TrainingConfig(distributed=DistributedConfig(hsdp_shard_dim=1), pipeline_config=PipelineConfig())
+    monkeypatch.setattr(moduleloader, 'maybe_download_model', lambda _: str(tmp_path))
+    monkeypatch.setattr(moduleloader, 'verify_model_config_and_directory',
+                        lambda *a, **kw: {'transformer': ('diffusers', 'FakeTransformer')})
+    seen = []
+    def fake_load(**kwargs):
+        seen.append(kwargs['fastvideo_args'].dit_cpu_offload)
+        return torch.nn.Linear(1, 1)
+    monkeypatch.setattr(moduleloader.PipelineComponentLoader, 'load_module', fake_load)
+    moduleloader.load_module_from_path(model_path='fake/model', module_type='transformer', training_config=tc,
+                                       cpu_offload=offload)
+    assert seen == [offload]

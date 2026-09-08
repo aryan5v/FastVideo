@@ -65,6 +65,7 @@ class MiniMaxH3Model(ModelBase):
         enable_gradient_checkpointing_type: str | None = None,
         transformer_override_safetensor: str | None = None,
         attention_backend: AttentionBackendEnum | str | None = AttentionBackendEnum.TORCH_SDPA,
+        cpu_offload: bool = False,
     ) -> None:
         """Validate the single-document T2VA contract and load the transformer."""
         super().__init__(
@@ -100,6 +101,7 @@ class MiniMaxH3Model(ModelBase):
         training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
 
         self._init_from = str(init_from)
+        self._cpu_offload = bool(cpu_offload)
         self.training_config = training_config
         self.transformer = self._load_transformer(
             trainable=trainable,
@@ -135,6 +137,7 @@ class MiniMaxH3Model(ModelBase):
             override_transformer_cls_name=self._transformer_cls_name,
             transformer_override_safetensor=transformer_override_safetensor,
             attention_backend=self.attention_backend,
+            cpu_offload=self._cpu_offload,
         )
         checkpointing_type = (enable_gradient_checkpointing_type
                               or self.training_config.model.enable_gradient_checkpointing_type)

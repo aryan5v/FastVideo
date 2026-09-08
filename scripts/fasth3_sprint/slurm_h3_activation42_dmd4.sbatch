@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=h3-a42-dmd4
 #SBATCH --partition=all
-#SBATCH --nodes=2
-#SBATCH --ntasks=2
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
@@ -51,10 +51,10 @@ from pathlib import Path
 p=Path(sys.argv[1])
 assert (p/'checkpoint-5/dcp/.metadata').is_file()
 for role in ['student','critic']:
- for rank in range(8):
+ for rank in range(4):
   d=json.loads((p/f'dmd_update_{role}_rank{rank}.json').read_text())
   assert d['passed'] and d['changed_probe_elements']>0
-(p/'dmd_smoke_passed.json').write_text(json.dumps({'phases':5,'critic_updates':4,'student_updates':1,'ranks':8}))
+(p/'dmd_smoke_passed.json').write_text(json.dumps({'phases':5,'critic_updates':4,'student_updates':1,'ranks':4}))
 PY
  fi
 done
