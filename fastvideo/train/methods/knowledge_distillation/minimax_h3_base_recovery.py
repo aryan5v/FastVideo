@@ -68,9 +68,12 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
     """Keep paired flow/KD training and verify the first optimizer update."""
 
     def single_train_step(self, batch: dict[str, Any], iteration: int) -> Any:
-        if batch.get("prompt_only", False):
-            raise ValueError("This pilot requires real paired latents for the independent flow loss")
-        tb = self.student.prepare_batch(batch, generator=self.cuda_generator, latents_source="data")
+        prompt_only = bool(batch.get("prompt_only", False))
+        if prompt_only and not self.method_config.get("allow_prompt_only", False):
+            raise ValueError("Prompt-only teacher supervision requires explicit allow_prompt_only")
+        tb = self.student.prepare_batch(batch,
+                                        generator=self.cuda_generator,
+                                        latents_source="zeros" if prompt_only else "data")
         device = self.student.device
         points = int(self.method_config.get("teacher_grid_points", 50))
         if points != 50:
@@ -118,12 +121,15 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         feature = torch.stack(terms).mean()
         kv = _normalized_mse(sv, tv.detach(), energy_floor=self._energy_floor)[2]
         ka = _normalized_mse(sa, ta.detach(), energy_floor=self._energy_floor)[2]
-        # Separate forward on correctly noised real data, at the same sampled time.
-        real_v = (1 - vs[interval]) * tb.latents + vs[interval] * tb.noise.permute(0, 2, 1, 3, 4)
-        real_a = (1 - aus[interval]) * tb.audio_latents + aus[interval] * tb.audio_noise
-        rv, ra = self.student.predict_joint_noise(real_v, real_a, vt, at, tb, conditional=True, attn_kind="dense")
-        dv = _normalized_mse(rv, tb.noise.permute(0, 2, 1, 3, 4) - tb.latents, energy_floor=self._energy_floor)[2]
-        da = _normalized_mse(ra, tb.audio_noise - tb.audio_latents, energy_floor=self._energy_floor)[2]
+        # Placeholder zeros provide geometry only, never a real-data target.
+        dv = da = torch.zeros((), device=device)
+        if not prompt_only:
+            # Separate forward on correctly noised real data, at the same sampled time.
+            real_v = (1 - vs[interval]) * tb.latents + vs[interval] * tb.noise.permute(0, 2, 1, 3, 4)
+            real_a = (1 - aus[interval]) * tb.audio_latents + aus[interval] * tb.audio_noise
+            rv, ra = self.student.predict_joint_noise(real_v, real_a, vt, at, tb, conditional=True, attn_kind="dense")
+            dv = _normalized_mse(rv, tb.noise.permute(0, 2, 1, 3, 4) - tb.latents, energy_floor=self._energy_floor)[2]
+            da = _normalized_mse(ra, tb.audio_noise - tb.audio_latents, energy_floor=self._energy_floor)[2]
         total = self._teacher_velocity_weight * (kv + ka) + self._feature_weight * feature + self._denoising_weight * (
             dv + da)
         losses = {
@@ -136,7 +142,15 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         }
         if any(not torch.isfinite(value).all() for value in losses.values()):
             raise RuntimeError("Nonfinite Base recovery loss")
-        return losses, {"_fv_backward": (vt, tb.attn_metadata)}, {"teacher_prefix_interval": interval}
+        from fastvideo.train.utils.h3_prompt_coverage import record_prompt_use
+        coverage = record_prompt_use(self, batch, iteration)
+        return losses, {
+            "_fv_backward": (vt, tb.attn_metadata)
+        }, {
+            "teacher_prefix_interval": interval,
+            "prompt_only": int(prompt_only),
+            **coverage
+        }
 
     def optimizers_schedulers_step(self, iteration: int) -> None:
         if getattr(self, "_base_update_verified", False):

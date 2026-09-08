@@ -38,8 +38,9 @@ class MiniMaxH3PromptIndexDataset(Dataset):
     def __init__(self, root: str, *, seed: int = 0):
         path = Path(root)
         receipt = json.loads((path / 'receipt.json').read_text())
-        if receipt.get('metadata_match_complete') is not True:
-            raise ValueError('Prompt cache index has not passed complete metadata matching')
+        if (receipt.get('metadata_match_complete') is not True
+                or receipt.get('embedding_values_validated') is not True):
+            raise ValueError('Prompt cache index has not passed complete metadata and value validation')
         raw_index = (path / 'prompt_index.jsonl').read_bytes()
         if hashlib.sha256(raw_index).hexdigest() != receipt['index_sha256']:
             raise ValueError('Prompt index checksum mismatch')
@@ -56,7 +57,9 @@ class MiniMaxH3PromptIndexDataset(Dataset):
     def __getitem__(self, index):
         record = self.records[index]
         ref = record['embedding']
-        row = pq.ParquetFile(ref['parquet']).read_row_group(ref['row_group']).to_pylist()[ref['row']]
+        row = pq.ParquetFile(ref['parquet']).read_row_group(ref['row_group'], columns=[
+            'id', 'caption', 'text_embedding_shape', 'text_embedding_dtype', 'text_embedding_bytes'
+        ]).slice(ref['row'], 1).to_pylist()[0]
         if row['id'] != ref['cached_id'] or row['caption'] != record['prompt']:
             raise ValueError('Cached embedding identity changed after indexing')
         embed = decode_embedding(row)
