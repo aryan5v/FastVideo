@@ -23,7 +23,7 @@ test ! -e "${DEST}"
 test ! -e "${OUTPUT_ROOT}"
 mkdir -p "${OUTPUT_ROOT}"
 srun --export=ALL --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
- --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan \
+ --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan,/mnt/lustre/vlm-shared:/mnt/lustre/vlm-shared:ro \
  --container-workdir="${CODE_ROOT}" bash -lc '
 set -euo pipefail
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env

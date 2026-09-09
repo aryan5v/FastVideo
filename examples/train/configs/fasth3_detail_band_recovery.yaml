@@ -35,7 +35,7 @@ method:
   low_sigma_interval_fraction: 0.5
   low_sigma_interval_count: 12
   student_state_probability: 0.0
-  modality_grad_probe_every: 50
+  modality_grad_probe_every: 0
   allow_prompt_only: false
 training:
   distributed:
