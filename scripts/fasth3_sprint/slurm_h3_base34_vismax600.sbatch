@@ -39,7 +39,6 @@ PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
  --training.loop.max_train_steps 600 \
  --training.checkpoint.training_state_checkpointing_steps 100 \
  --training.checkpoint.preserve_every_steps 100 \
- --training.checkpoint.preserve_steps 100 200 300 400 500 600 \
  --method.allow_prompt_only true --method.denoising_weight 0.0 \
  --method.low_sigma_interval_fraction 0.75 \
  --training.data.data_path "${SPRINT_ROOT}/data/user-prompts-20260906/index-v2" \
