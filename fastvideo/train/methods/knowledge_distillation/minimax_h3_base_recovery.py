@@ -175,7 +175,14 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         aus = shift_noise_amount(base, 3.0)
         video = tb.noise.permute(0, 2, 1, 3, 4)
         audio = tb.audio_noise
-        use_student_prefix = self._shared_choice(10_000) < round(self._student_state_probability * 10_000)
+        if self._student_state_probability <= 0.0:
+            use_student_prefix = False
+        else:
+            if self._interval_generator is None:
+                raise RuntimeError("interval generator is not initialized")
+            use_student_prefix = int(torch.randint(
+                0, 10_000, (), device=self.student.device, generator=self._interval_generator
+            ).item()) < round(self._student_state_probability * 10_000)
         # Prefix states are integrated without gradient; the source model is
         # configurable so a coherent student can train on its own trajectory.
         prefix_model = self.student if use_student_prefix else self.teacher
