@@ -185,6 +185,10 @@ def test_seam_helper_matches_known_maps() -> None:
     "slurm_h3_detail_band_recovery.sbatch",
     "slurm_h3_base34_recut.sbatch",
     "slurm_h3_base34_from42_recut.sbatch",
+    "slurm_h3_base34_dmd4.sbatch",
+    "slurm_h3_base_five_panel.sbatch",
+    "slurm_h3_base34_r16_panel.sbatch",
+    "slurm_h3_speech_lift.sbatch",
 ])
 def test_launcher_scripts_parse(launcher: str) -> None:
     # An apostrophe inside an srun bash -lc '...' block silently ends the
