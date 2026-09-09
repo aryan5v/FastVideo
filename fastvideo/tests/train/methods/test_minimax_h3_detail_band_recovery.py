@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,11 +22,8 @@ def _sampler(low_sigma_fraction: float, low_sigma_count: int, seed: int = 7) -> 
     method._low_sigma_fraction = low_sigma_fraction
     method._low_sigma_count = low_sigma_count
     generator = torch.Generator(device="cpu").manual_seed(seed)
-
-    def shared_choice(upper: int) -> int:
-        return int(torch.randint(0, upper, (1, ), generator=generator).item())
-
-    method._shared_choice = shared_choice  # type: ignore[method-assign]
+    method._interval_generator = generator
+    method.student = SimpleNamespace(device=torch.device("cpu"))
     method.method_config = {"teacher_grid_points": 50}
     method._video_velocity_weight = 1.0
     method._audio_velocity_weight = 1.0
@@ -134,3 +132,10 @@ def test_detail_band_34_config_targets_release_candidate_seams() -> None:
     assert student["init_from"].endswith("runs/activation34-prompt58k-recovery/job-6972/export-200")
     assert cfg["training"]["loop"]["max_train_steps"] == 300
     assert cfg["training"]["checkpoint"]["preserve_every_steps"] >= 150
+
+
+def test_base_recovery_defines_shared_choice() -> None:
+    # Regression: interval sampling crashed at the first update (jobs
+    # 7000-7002) when the policy RNG was missing from the base class.
+    assert callable(getattr(MiniMaxH3BaseRecoveryMethod, "_sample_interval", None))
+    assert callable(getattr(MiniMaxH3BaseRecoveryMethod, "on_train_start", None))

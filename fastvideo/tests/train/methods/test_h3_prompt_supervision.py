@@ -45,8 +45,10 @@ def run_step(tmp_path, prompt_only, allowed=True):
         _student_feature_indices=[0], _teacher_feature_indices=[0], _energy_floor=.001,
         _teacher_velocity_weight=1., _feature_weight=1., _denoising_weight=1.,
         _video_velocity_weight=1., _audio_velocity_weight=1., _student_state_probability=0.,
-        _grad_probe_every=0, _audio_seam_weight=1., _sample_interval=lambda points: (3, 0),
-        _shared_choice=lambda upper: 0, _probe_modality_grad_share=lambda kv, ka: {},
+        _grad_probe_every=0, _audio_seam_weight=1.,
+        _interval_generator=torch.Generator().manual_seed(3),
+        _sample_interval=lambda points: (3, 0),
+        _probe_modality_grad_share=lambda kv, ka: {},
         training_config=SimpleNamespace(checkpoint=SimpleNamespace(output_dir=str(tmp_path))))
     batch={'prompt_only': prompt_only, 'info_list':[{'id':'held-example'}]}
     result=ns['single_train_step'](method,batch,1)
