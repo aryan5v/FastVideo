@@ -178,3 +178,19 @@ def test_seam_helper_matches_known_maps() -> None:
     activation42 = [0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 17, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
                     33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
     assert module.seams_for_block_map(activation42) == [7, 11, 13, 14]
+
+
+@pytest.mark.parametrize("launcher", [
+    "slurm_h3_detail_band_recovery.sbatch",
+    "slurm_h3_base34_recut.sbatch",
+    "slurm_h3_base34_from42_recut.sbatch",
+])
+def test_launcher_scripts_parse(launcher: str) -> None:
+    # An apostrophe inside an srun bash -lc '...' block silently ends the
+    # quoting and runs container commands on the login shell (jobs 7035/7036).
+    import shutil
+    import subprocess
+    if shutil.which("bash") is None:
+        pytest.skip("bash unavailable")
+    path = _REPO_ROOT / "scripts" / "fasth3_sprint" / launcher
+    subprocess.run(["bash", "-n", str(path)], check=True)

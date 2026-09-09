@@ -55,7 +55,7 @@ case "${ARM}" in
                  --training.data.data_path "${SPRINT_ROOT}/data/user-prompts-20260906/index-v2") ;;
 esac
 # Re-derive seams from the actual student block map so a re-cut checkpoint can
-# never train against another map's seam indices.
+# never train against seam indices belonging to a different map.
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/build_h3_recovery_config.py" \
  --template "${CONFIG}" --student "${STUDENT}" --depth "${STAGE}" \
  --output "${OUTPUT_ROOT}/config.yaml"
