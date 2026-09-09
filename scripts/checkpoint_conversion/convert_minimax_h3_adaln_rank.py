@@ -123,7 +123,7 @@ def main() -> None:
         if not single.exists():
             raise SystemExit(f"{src} has neither {INDEX_NAME} nor model.safetensors")
         with safe_open(str(single), framework="pt") as handle:
-            index_map = {key: "model.safetensors" for key in handle.keys()}
+            index_map = {key: "model.safetensors" for key in handle}
 
     basis, u = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
 
