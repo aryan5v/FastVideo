@@ -163,8 +163,9 @@ def profile_environment(args: argparse.Namespace) -> dict[str, str | None]:
     silently change the advertised profile.
     """
     use_vsa = _uses_vsa(args)
+    dense_backend = getattr(args, "attention_backend", None) or "FLASH_ATTN"
     return {
-        "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3" if use_vsa else "FLASH_ATTN",
+        "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3" if use_vsa else dense_backend,
         "FASTVIDEO_VSA_SM100A": "1" if use_vsa and args.vsa_kernel == "sm100a" else "0",
         "FASTVIDEO_VSA_CUTEDSL": "0",
         # A non-empty output path enables the diagnostic probe.
@@ -223,8 +224,9 @@ def validate_profile_dependencies(args: argparse.Namespace) -> None:
 
 def build_generator_config(args: argparse.Namespace) -> GeneratorConfig:
     use_vsa = _uses_vsa(args)
+    dense_backend = getattr(args, "attention_backend", None) or "FLASH_ATTN"
     experimental: dict[str, object] = {
-        "attention_backend": "VIDEO_SPARSE_ATTN_H3" if use_vsa else "FLASH_ATTN",
+        "attention_backend": "VIDEO_SPARSE_ATTN_H3" if use_vsa else dense_backend,
         "inference_torch_compile": args.inference_torch_compile,
         "vae_parallel_decode": args.parallel_vae,
         "vae_parallel_decode_strategy": "gather",

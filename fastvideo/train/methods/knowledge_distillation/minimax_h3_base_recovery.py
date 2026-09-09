@@ -36,7 +36,12 @@ def _capture_tokens(model: Any, indices: Any) -> Any:
             handle.remove()
 
 
-def _seam_loss(student: torch.Tensor, teacher: torch.Tensor, layout: Any, group: Any, floor: float) -> torch.Tensor:
+def _seam_loss(student: torch.Tensor,
+               teacher: torch.Tensor,
+               layout: Any,
+               group: Any,
+               floor: float,
+               audio_weight: float = 1.0) -> torch.Tensor:
     if student.shape != teacher.shape:
         raise ValueError("Teacher/student token alignment differs")
     local_rows = student.shape[1]
@@ -60,12 +65,77 @@ def _seam_loss(student: torch.Tensor, teacher: torch.Tensor, layout: Any, group:
         # Excluded outliers must not dominate the normalization denominator.
         energy = (kept[1] / kept[0].clamp_min(1)).clamp_min(floor)
         error = ((prediction - target).square() * mask).sum()
-        terms.append(error * group.world_size / kept[0].clamp_min(1) / energy)
+        weight = audio_weight if indices is layout.audio_indices else 1.0
+        terms.append(weight * error * group.world_size / kept[0].clamp_min(1) / energy)
     return torch.stack(terms).sum()
 
 
 class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
-    """Keep paired flow/KD training and verify the first optimizer update."""
+    """Keep paired flow/KD training and verify the first optimizer update.
+
+    Detail-band controls (audit 2026-09-08): the shift-12/shift-3 warping of the
+    50-point deployment grid leaves only ~2/49 video and ~4/49 audio training
+    intervals below sigma 0.2, i.e. the intervals that create edge sharpness and
+    audio brightness are barely trained. ``low_sigma_interval_fraction`` re-
+    balances the draw without changing the solver. ``video_velocity_weight`` /
+    ``audio_velocity_weight`` fix the ~5x loss-magnitude imbalance that let
+    video outvote audio at every step, and ``student_state_probability``
+    restores exposure to the student's own prefix states once the student is
+    coherent (teacher-prefix-only training is pure exposure bias).
+    """
+
+    def __init__(self, *, cfg: Any, role_models: dict[str, Any]) -> None:
+        super().__init__(cfg=cfg, role_models=role_models)
+        mcfg = self.method_config
+        self._low_sigma_fraction = float(mcfg.get("low_sigma_interval_fraction", 0.0))
+        self._low_sigma_count = int(mcfg.get("low_sigma_interval_count", 12))
+        self._video_velocity_weight = float(mcfg.get("video_velocity_weight", self._teacher_velocity_weight))
+        self._audio_velocity_weight = float(mcfg.get("audio_velocity_weight", self._teacher_velocity_weight))
+        self._student_state_probability = float(mcfg.get("student_state_probability", 0.0))
+        self._grad_probe_every = int(mcfg.get("modality_grad_probe_every", 0))
+        if self._grad_probe_every < 0:
+            raise ValueError("method.modality_grad_probe_every must be >= 0")
+        self._audio_seam_weight = float(mcfg.get("audio_seam_weight", 1.0))
+        if self._audio_seam_weight <= 0.0:
+            raise ValueError("method.audio_seam_weight must be > 0")
+        self._validate_controls()
+
+    def _validate_controls(self) -> None:
+        if not 0.0 <= self._low_sigma_fraction <= 1.0:
+            raise ValueError("method.low_sigma_interval_fraction must be in [0, 1]")
+        if not 1 <= self._low_sigma_count <= int(self.method_config.get("teacher_grid_points", 50)) - 2:
+            raise ValueError("method.low_sigma_interval_count must be in [1, teacher_grid_points - 2]")
+        if not 0.0 <= self._student_state_probability <= 1.0:
+            raise ValueError("method.student_state_probability must be in [0, 1]")
+        for name in ("video_velocity_weight", "audio_velocity_weight"):
+            if getattr(self, f"_{name}") < 0.0:
+                raise ValueError(f"method.{name} must be non-negative")
+
+    def _sample_interval(self, points: int) -> tuple[int, int]:
+        """Return (interval, low_sigma_flag) with SP-consistent RNG."""
+        low = self._shared_choice(10_000) < round(self._low_sigma_fraction * 10_000)
+        if low:
+            offset = self._shared_choice(self._low_sigma_count)
+            return points - 1 - self._low_sigma_count + offset, 1
+        return self._shared_choice(points - 1), 0
+
+    def _probe_modality_grad_share(self, kv: torch.Tensor, ka: torch.Tensor) -> dict[str, float]:
+        """Measure how much of the KD gradient signal each modality actually drives."""
+        probe = [p for p in self.student.transformer.parameters() if p.requires_grad and p.numel() >= 1_000_000][:8]
+        if not probe:
+            return {}
+        norms = []
+        for term in (kv, ka):
+            grads = torch.autograd.grad(term, probe, retain_graph=True, allow_unused=True)
+            norms.append(math.sqrt(sum(float(g.detach().float().pow(2).sum()) for g in grads if g is not None)))
+        total = norms[0] + norms[1]
+        if total <= 0.0:
+            return {}
+        return {
+            "audio_grad_share": norms[1] / total,
+            "video_grad_norm": norms[0],
+            "audio_grad_norm": norms[1],
+        }
 
     def single_train_step(self, batch: dict[str, Any], iteration: int) -> Any:
         prompt_only = bool(batch.get("prompt_only", False))
@@ -78,19 +148,19 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         points = int(self.method_config.get("teacher_grid_points", 50))
         if points != 50:
             raise ValueError("Base pilot requires the full 50-grid-point teacher schedule")
-        choice = torch.randint(points - 1, (1, ), device=device, generator=self.cuda_generator)
-        if dist.is_initialized():
-            dist.broadcast(choice, src=self.student.sp_group.ranks[0], group=self.student.sp_group.device_group)
-        interval = int(choice.item())
+        interval, low_sigma = self._sample_interval(points)
         base = torch.linspace(1, 0, points, device=device)
         vs = shift_noise_amount(base, 12.0)
         aus = shift_noise_amount(base, 3.0)
         video = tb.noise.permute(0, 2, 1, 3, 4)
         audio = tb.audio_noise
-        # Only frozen teacher prefixes are integrated. No student rollout graph.
+        use_student_prefix = self._shared_choice(10_000) < round(self._student_state_probability * 10_000)
+        # Prefix states are integrated without gradient; the source model is
+        # configurable so a coherent student can train on its own trajectory.
+        prefix_model = self.student if use_student_prefix else self.teacher
         with torch.no_grad():
             for i in range(interval):
-                fv, fa = self.teacher.predict_joint_noise(video,
+                fv, fa = prefix_model.predict_joint_noise(video,
                                                           audio, (1 - vs[i]).reshape(1), (1 - aus[i]).reshape(1),
                                                           tb,
                                                           conditional=True,
@@ -108,7 +178,8 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
 
             def hook(_module: Any, _inputs: Any, output: torch.Tensor, index: int = original_index) -> None:
                 terms.append(
-                    _seam_loss(output, targets[index], tb.minimax_h3_layout, self.student.sp_group, self._energy_floor))
+                    _seam_loss(output, targets[index], tb.minimax_h3_layout, self.student.sp_group,
+                               self._energy_floor, self._audio_seam_weight))
 
             handles.append(self.student.transformer.transformer_blocks[local_index].register_forward_hook(hook))
         try:
@@ -130,8 +201,8 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
             rv, ra = self.student.predict_joint_noise(real_v, real_a, vt, at, tb, conditional=True, attn_kind="dense")
             dv = _normalized_mse(rv, tb.noise.permute(0, 2, 1, 3, 4) - tb.latents, energy_floor=self._energy_floor)[2]
             da = _normalized_mse(ra, tb.audio_noise - tb.audio_latents, energy_floor=self._energy_floor)[2]
-        total = self._teacher_velocity_weight * (kv + ka) + self._feature_weight * feature + self._denoising_weight * (
-            dv + da)
+        total = (self._video_velocity_weight * kv + self._audio_velocity_weight * ka +
+                 self._feature_weight * feature + self._denoising_weight * (dv + da))
         losses = {
             "total_loss": total,
             "video_velocity_kd": kv,
@@ -144,11 +215,19 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
             raise RuntimeError("Nonfinite Base recovery loss")
         from fastvideo.train.utils.h3_prompt_coverage import record_prompt_use
         coverage = record_prompt_use(self, batch, iteration)
+        probe: dict[str, float] = {}
+        if self._grad_probe_every and iteration % self._grad_probe_every == 0:
+            probe = self._probe_modality_grad_share(kv, ka)
         return losses, {
             "_fv_backward": (vt, tb.attn_metadata)
         }, {
             "teacher_prefix_interval": interval,
+            "low_sigma_interval": low_sigma,
+            "student_prefix": int(use_student_prefix),
+            "video_velocity_weight": self._video_velocity_weight,
+            "audio_velocity_weight": self._audio_velocity_weight,
             "prompt_only": int(prompt_only),
+            **probe,
             **coverage
         }
 

@@ -22,7 +22,7 @@ def make_method(tmp_path, update=True, dtype=torch.float32):
     namespace = dict(MiniMaxH3RecoveryMethod=Base, torch=torch, dist=dist, Path=Path,
                      json=json, math=math, Any=Any, _local_parameter_tensor=lambda p: p)
     exec(compile(ast.Module(body=[cls], type_ignores=[]), str(path), 'exec'), namespace)
-    method = namespace['MiniMaxH3BaseRecoveryMethod']()
+    method = namespace['MiniMaxH3BaseRecoveryMethod'].__new__(namespace['MiniMaxH3BaseRecoveryMethod'])
     model = torch.nn.Linear(2, 2, dtype=dtype)
     method.student = SimpleNamespace(transformer=model)
     method.training_config = SimpleNamespace(checkpoint=SimpleNamespace(output_dir=str(tmp_path)))

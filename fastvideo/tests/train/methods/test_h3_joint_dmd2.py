@@ -57,6 +57,7 @@ def test_carried_prompt_and_alternating_optimizer_roles(tmp_path):
     m.method_config={'generator_update_interval':5}
     m.training_config=SimpleNamespace(checkpoint=SimpleNamespace(output_dir=str(tmp_path)))
     m.cuda_generator=torch.Generator().manual_seed(99);m._carry=None
+    m._denom_floor_ratio=0.05;m._sanitize_nonfinite_grads=False
     m._student_optimizer=torch.optim.SGD(m.student.transformer.parameters(),lr=.01)
     m._critic_optimizer=torch.optim.SGD(m.critic.transformer.parameters(),lr=.01)
     for iteration in range(1,6):

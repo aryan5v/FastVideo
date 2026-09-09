@@ -41,10 +41,24 @@ def advance_ode(state: torch.Tensor, clean: torch.Tensor, sigma: torch.Tensor,
     return ((1 - next_sigma.double()) * clean.double() + next_sigma.double() * eps).to(state.dtype)
 
 
-def distribution_loss(generated: torch.Tensor, fake: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+def distribution_loss(generated: torch.Tensor,
+                      fake: torch.Tensor,
+                      real: torch.Tensor,
+                      denom_floor_ratio: float = 0.05,
+                      grad_cap: float = 100.0) -> torch.Tensor:
+    """DMD direction with a scale-relative denominator floor.
+
+    The audit (2026-09-08) traced jobs 6951/6953 to the absolute ``+ 1e-6``
+    floor: when the critic is scored on near-clean states at warped low
+    sigmas, ``mean|generated - real|`` can fall below it and the direction
+    explodes into nonfinite critic gradients (first reported on
+    ``context_embedder.weight``). Floor at a fraction of the generated scale
+    and cap the direction instead.
+    """
     with torch.no_grad():
-        denom = (generated.float() - real.float()).abs().mean() + 1e-6
-        grad = (fake.float() - real.float()) / denom
+        scale = generated.float().abs().mean().clamp_min(1e-4)
+        denom = (generated.float() - real.float()).abs().mean().clamp_min(float(denom_floor_ratio) * scale)
+        grad = ((fake.float() - real.float()) / denom).clamp(-float(grad_cap), float(grad_cap))
         # Fail on broken numerics instead of hiding NaNs with nan_to_num.
         if not torch.isfinite(grad).all():
             raise RuntimeError("Nonfinite joint DMD direction")
@@ -69,6 +83,8 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
             raise ValueError("Require four critic phases per generator phase")
         self._carry: Any = None
         self._verified_roles: set[str] = set()
+        self._denom_floor_ratio = float(self.method_config.get("dmd_denom_floor_ratio", 0.05))
+        self._sanitize_nonfinite_grads = bool(self.method_config.get("sanitize_nonfinite_grads", False))
 
     def _parse_score_timestep_bounds(self) -> tuple[int, int]:
         return (1, 999)
@@ -162,7 +178,8 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
             with torch.no_grad():
                 fake = self._predict(self.critic, noised, score_sigmas, tb)
                 real = self._predict(self.teacher, noised, score_sigmas, tb)
-            video_loss, audio_loss = (distribution_loss(g, f, r) for g, f, r in zip(generated, fake, real, strict=True))
+            video_loss, audio_loss = (distribution_loss(g, f, r, self._denom_floor_ratio)
+                                      for g, f, r in zip(generated, fake, real, strict=True))
             context = (1 - sigmas[0], tb.attn_metadata)
         else:
             predicted = self._predict(self.critic, noised, score_sigmas, tb)
@@ -205,6 +222,18 @@ class MiniMaxH3JointDMD2Method(DMD2Method):
                  grad_accum_rounds: int = 1) -> None:
         model = self._role_models[outputs["role"]]
         model.backward(loss_map["total_loss"], outputs["context"], grad_accum_rounds=grad_accum_rounds)
+        if self._sanitize_nonfinite_grads:
+            sanitized = 0
+            for p in model.transformer.parameters():
+                if p.grad is not None and not torch.isfinite(_local_parameter_tensor(p.grad)).all():
+                    p.grad.detach().nan_to_num_(0.0, posinf=0.0, neginf=0.0)
+                    sanitized += 1
+            if sanitized:
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                path = Path(self.training_config.checkpoint.output_dir) / f"dmd_sanitized_grad_rank{rank}.jsonl"
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"iteration": self._diagnostic_iteration, "role": outputs["role"],
+                                             "sanitized": sanitized}) + "\n")
         if self.method_config.get("diagnostic_boundaries", False):
             bad = [
                 name for name, p in model.transformer.named_parameters()

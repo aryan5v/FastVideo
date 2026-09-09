@@ -22,7 +22,7 @@ def run_step(tmp_path, prompt_only, allowed=True):
     ns = dict(Any=Any, torch=torch, dist=dist, _capture_tokens=capture,
               shift_noise_amount=lambda x, shift: x,
               _euler_update=lambda x, flow, a, b: x + (b-a)*flow,
-              _seam_loss=lambda pred, target, group, floor, energy: pred.square().mean(),
+              _seam_loss=lambda *args, **kw: args[0].square().mean(),
               _normalized_mse=lambda p,t,**kw: (None,None,(p-t).square().mean()))
     exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), 'exec'), ns)
     block = torch.nn.Linear(1, 1)
@@ -44,6 +44,9 @@ def run_step(tmp_path, prompt_only, allowed=True):
         method_config={'allow_prompt_only': allowed}, cuda_generator=torch.Generator().manual_seed(1),
         _student_feature_indices=[0], _teacher_feature_indices=[0], _energy_floor=.001,
         _teacher_velocity_weight=1., _feature_weight=1., _denoising_weight=1.,
+        _video_velocity_weight=1., _audio_velocity_weight=1., _student_state_probability=0.,
+        _grad_probe_every=0, _audio_seam_weight=1., _sample_interval=lambda points: (3, 0),
+        _shared_choice=lambda upper: 0, _probe_modality_grad_share=lambda kv, ka: {},
         training_config=SimpleNamespace(checkpoint=SimpleNamespace(output_dir=str(tmp_path))))
     batch={'prompt_only': prompt_only, 'info_list':[{'id':'held-example'}]}
     result=ns['single_train_step'](method,batch,1)
