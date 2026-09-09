@@ -27,10 +27,10 @@ export OUTPUT_ROOT="${SPRINT_ROOT}/runs/base${STAGE}-detail-band/job-${SLURM_JOB
 export REFERENCE="${SPRINT_ROOT}/diagnostics/base-h3-controls/6871-TORCH_SDPA"
 if [[ "${STAGE}" == "34" ]]; then
   export CONFIG="${CODE_ROOT}/examples/train/configs/fasth3_detail_band_recovery34.yaml"
-  export STUDENT="${SPRINT_ROOT}/runs/activation34-prompt58k-recovery/job-6972/export-200"
+  export STUDENT="${STUDENT_OVERRIDE:-${SPRINT_ROOT}/runs/activation34-prompt58k-recovery/job-6972/export-200}"
 else
   export CONFIG="${CODE_ROOT}/examples/train/configs/fasth3_detail_band_recovery.yaml"
-  export STUDENT="${SPRINT_ROOT}/preserved/activation42-step500-job6878/export-500"
+  export STUDENT="${STUDENT_OVERRIDE:-${SPRINT_ROOT}/preserved/activation42-step500-job6878/export-500}"
 fi
 test -s "${CODE_ROOT}/CODE_COMMIT"
 test -s "${STUDENT}/transformer/block_map_manifest.json"
@@ -54,8 +54,13 @@ case "${ARM}" in
   C) EXTRA_ARGS+=(--method.allow_prompt_only true --method.denoising_weight 0.0
                  --training.data.data_path "${SPRINT_ROOT}/data/user-prompts-20260906/index-v2") ;;
 esac
+# Re-derive seams from the actual student block map so a re-cut checkpoint can
+# never train against another map's seam indices.
+"${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/build_h3_recovery_config.py" \
+ --template "${CONFIG}" --student "${STUDENT}" --depth "${STAGE}" \
+ --output "${OUTPUT_ROOT}/config.yaml"
 "${PY}" -m torch.distributed.run --standalone --nproc_per_node=4 -m fastvideo.train.entrypoint.train \
-  --config "${CONFIG}" \
+  --config "${OUTPUT_ROOT}/config.yaml" \
   --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
   --training.tracker.run_name "base${STAGE}-detail-band-${ARM}-${SLURM_JOB_ID}" \
   "${EXTRA_ARGS[@]}"

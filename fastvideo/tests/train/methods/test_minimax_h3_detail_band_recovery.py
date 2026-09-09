@@ -139,3 +139,42 @@ def test_base_recovery_defines_shared_choice() -> None:
     # 7000-7002) when the policy RNG was missing from the base class.
     assert callable(getattr(MiniMaxH3BaseRecoveryMethod, "_sample_interval", None))
     assert callable(getattr(MiniMaxH3BaseRecoveryMethod, "on_train_start", None))
+
+
+def _selector():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "select_h3_block_map", _REPO_ROOT / "scripts" / "fasth3_sprint" / "select_h3_block_map.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_recut_selector_enforces_structure_and_audio_veto() -> None:
+    module = _selector()
+    blended = [0.1 * i for i in range(50)]  # importance rises with depth
+    audio = [0.0] * 50
+    audio[44] = 1.0  # audio-critical late block must survive
+    block_map = module.select_map(blended, audio, 34)
+    removed = [i for i in range(50) if i not in block_map]
+    assert len(block_map) == 34
+    assert 44 not in removed and 49 not in removed and set(range(4)) & set(removed) == set()
+    assert sum(1 for i in removed if i >= 31) >= 4
+    run = 0
+    for index in range(50):
+        run = run + 1 if index in removed else 0
+        assert run <= 2
+
+
+def test_seam_helper_matches_known_maps() -> None:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "seams_for_block_map", _REPO_ROOT / "scripts" / "fasth3_sprint" / "seams_for_block_map.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    activation34 = [0, 1, 2, 3, 5, 12, 14, 17, 20, 22, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+                    40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+    assert module.seams_for_block_map(activation34) == [4, 5, 6, 7, 8, 9, 10, 15]
+    activation42 = [0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 17, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+                    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+    assert module.seams_for_block_map(activation42) == [7, 11, 13, 14]
