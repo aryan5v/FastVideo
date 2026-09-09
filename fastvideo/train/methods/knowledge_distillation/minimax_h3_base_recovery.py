@@ -244,11 +244,11 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         from fastvideo.train.utils.h3_prompt_coverage import record_prompt_use
         coverage = record_prompt_use(self, batch, iteration)
         probe: dict[str, float] = {}
-        if self._grad_probe_every and iteration % self._grad_probe_every == 0:
-            # autograd.grad re-enters the FSDP all-gather sequence out of band
-            # and deadlocks sharded runs (job 7011); only unsharded pilots probe.
-            if int(self.training_config.distributed.hsdp_shard_dim) <= 1:
-                probe = self._probe_modality_grad_share(kv, ka)
+        # autograd.grad re-enters the FSDP all-gather sequence out of band and
+        # deadlocks sharded runs (job 7011); only unsharded pilots probe.
+        if (self._grad_probe_every and iteration % self._grad_probe_every == 0
+                and int(self.training_config.distributed.hsdp_shard_dim) <= 1):
+            probe = self._probe_modality_grad_share(kv, ka)
         return losses, {
             "_fv_backward": (vt, tb.attn_metadata)
         }, {
