@@ -123,6 +123,19 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
             if getattr(self, f"_{name}") < 0.0:
                 raise ValueError(f"method.{name} must be non-negative")
 
+    def _consensus(self, value: int) -> int:
+        """Broadcast a policy draw so every SP/FSDP rank takes the same path.
+
+        Jobs 7011/7039 deadlocked at step 0 because the isolated interval RNG
+        let ranks integrate different teacher-prefix lengths, desynchronizing
+        the sharded collectives. The stream stays isolated for noise purposes;
+        the *decision* must be unanimous.
+        """
+        tensor = torch.tensor([value], device=self.student.device, dtype=torch.int64)
+        if int(self.training_config.distributed.sp_size) > 1:
+            self.student.sp_group.broadcast(tensor, src=0)
+        return int(tensor.item())
+
     def _sample_interval(self, points: int) -> tuple[int, int]:
         """Return (interval, low_sigma_flag) with SP-consistent RNG."""
         if self._interval_generator is None:
@@ -137,8 +150,8 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         uniform = int(torch.randint(0, points - 1, (), device=self.student.device,
                                    generator=self._interval_generator).item())
         if low:
-            return points - 1 - self._low_sigma_count + offset, 1
-        return uniform, 0
+            return self._consensus(points - 1 - self._low_sigma_count + offset), 1
+        return self._consensus(uniform), 0
 
     def _probe_modality_grad_share(self, kv: torch.Tensor, ka: torch.Tensor) -> dict[str, float]:
         """Measure how much of the KD gradient signal each modality actually drives."""
@@ -180,9 +193,10 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         else:
             if self._interval_generator is None:
                 raise RuntimeError("interval generator is not initialized")
-            use_student_prefix = int(torch.randint(
-                0, 10_000, (), device=self.student.device, generator=self._interval_generator
-            ).item()) < round(self._student_state_probability * 10_000)
+            use_student_prefix = self._consensus(int(
+                int(torch.randint(0, 10_000, (), device=self.student.device,
+                                  generator=self._interval_generator).item())
+                < round(self._student_state_probability * 10_000)))
         # Prefix states are integrated without gradient; the source model is
         # configurable so a coherent student can train on its own trajectory.
         prefix_model = self.student if use_student_prefix else self.teacher

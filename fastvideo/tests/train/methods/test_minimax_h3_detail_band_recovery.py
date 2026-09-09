@@ -24,6 +24,7 @@ def _sampler(low_sigma_fraction: float, low_sigma_count: int, seed: int = 7) -> 
     generator = torch.Generator(device="cpu").manual_seed(seed)
     method._interval_generator = generator
     method.student = SimpleNamespace(device=torch.device("cpu"))
+    method.training_config = SimpleNamespace(distributed=SimpleNamespace(sp_size=1))
     method.method_config = {"teacher_grid_points": 50}
     method._video_velocity_weight = 1.0
     method._audio_velocity_weight = 1.0
