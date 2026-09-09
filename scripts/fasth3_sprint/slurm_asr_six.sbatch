@@ -17,7 +17,7 @@ srun --export=ALL --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
 set -euo pipefail
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env
 R=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
-for n in base 7048 r16 7101 6972 6988; do
+for n in ${ASR_NAMES:-base 7048 r16 7101 6972 6988}; do
   /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python "${CODE_ROOT}/scripts/fasth3_sprint/verify_speech_asr.py" \
     --wav "${R}/asr-wavs/${n}.wav" \
     --expected "Fast video and clear audio arrive together." \
