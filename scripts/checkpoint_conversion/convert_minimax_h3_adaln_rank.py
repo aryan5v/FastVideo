@@ -114,7 +114,16 @@ def fit_basis(src: Path, index: dict[str, str], rank: int, grid: int,
 def main() -> None:
     args = parse_args()
     src, dst = Path(args.src), Path(args.dst)
-    index_map = json.loads((src / INDEX_NAME).read_text())["weight_map"]
+    index_path = src / INDEX_NAME
+    if index_path.exists():
+        index_map = json.loads(index_path.read_text())["weight_map"]
+    else:
+        # dcp_to_diffusers writes a single shard for compact students; support it.
+        single = src / "model.safetensors"
+        if not single.exists():
+            raise SystemExit(f"{src} has neither {INDEX_NAME} nor model.safetensors")
+        with safe_open(str(single), framework="pt") as handle:
+            index_map = {key: "model.safetensors" for key in handle.keys()}
 
     basis, u = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
 
