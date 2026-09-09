@@ -96,9 +96,21 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         if self._grad_probe_every < 0:
             raise ValueError("method.modality_grad_probe_every must be >= 0")
         self._audio_seam_weight = float(mcfg.get("audio_seam_weight", 1.0))
+        # Keep interval-policy randomness separate from the CUDA generator
+        # used for prompt noise. This makes control/audio-policy A/B runs
+        # consume identical noise for the same prompt sequence.
+        self._interval_generator: torch.Generator | None = None
         if self._audio_seam_weight <= 0.0:
             raise ValueError("method.audio_seam_weight must be > 0")
         self._validate_controls()
+
+    def on_train_start(self) -> None:
+        super().on_train_start()
+        seed = int(self.training_config.data.seed or 0)
+        rank = int(self.student.sp_group.rank_in_group)
+        self._interval_generator = torch.Generator(device=self.student.device).manual_seed(
+            seed + 0x5A17 + rank
+        )
 
     def _validate_controls(self) -> None:
         if not 0.0 <= self._low_sigma_fraction <= 1.0:
@@ -113,11 +125,20 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
 
     def _sample_interval(self, points: int) -> tuple[int, int]:
         """Return (interval, low_sigma_flag) with SP-consistent RNG."""
-        low = self._shared_choice(10_000) < round(self._low_sigma_fraction * 10_000)
+        if self._interval_generator is None:
+            raise RuntimeError("interval generator is not initialized")
+        # Draw all policy values on the isolated stream so policy changes do
+        # not perturb the matched prompt-noise stream. The uniform arm still
+        # consumes the low-sigma offset draw for exact A/B alignment.
+        low = int(torch.randint(0, 10_000, (), device=self.student.device,
+                               generator=self._interval_generator).item()) < round(self._low_sigma_fraction * 10_000)
+        offset = int(torch.randint(0, self._low_sigma_count, (), device=self.student.device,
+                                  generator=self._interval_generator).item())
+        uniform = int(torch.randint(0, points - 1, (), device=self.student.device,
+                                   generator=self._interval_generator).item())
         if low:
-            offset = self._shared_choice(self._low_sigma_count)
             return points - 1 - self._low_sigma_count + offset, 1
-        return self._shared_choice(points - 1), 0
+        return uniform, 0
 
     def _probe_modality_grad_share(self, kv: torch.Tensor, ka: torch.Tensor) -> dict[str, float]:
         """Measure how much of the KD gradient signal each modality actually drives."""
