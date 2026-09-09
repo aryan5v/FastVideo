@@ -3,6 +3,7 @@
 #SBATCH --partition=all
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
 # Whisper WER on the exact-speech clip for the current candidate set.
 # CPU-only; runs inside the container so the pinned venv is visible.
