@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grid", type=int, default=4096, help="Timestep samples used to fit the basis.")
     p.add_argument("--freq-dim", type=int, default=256)
     p.add_argument("--report-only", action="store_true", help="Fit and report error without writing.")
+    p.add_argument("--receipt", type=Path, help="Optional JSON receipt for automated parity gates.")
     return p.parse_args()
 
 
@@ -94,7 +95,7 @@ def load_keys(src: Path, index: dict[str, str], keys: list[str]) -> dict[str, to
 
 
 def fit_basis(src: Path, index: dict[str, str], rank: int, grid: int,
-              freq_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+              freq_dim: int) -> tuple[torch.Tensor, torch.Tensor, float]:
     """Return (V [time_embed_dim, rank], U [grid, time_embed_dim]) in float64."""
     embedder = load_keys(src, index, list(TIME_EMBEDDER_KEYS))
     # t is the DiT's timestep input: scheduler.timesteps = 1 - sigmas, so t in [0, 1].
@@ -108,7 +109,7 @@ def fit_basis(src: Path, index: dict[str, str], rank: int, grid: int,
     _, s, vh = torch.linalg.svd(u, full_matrices=False)
     residual = ((s[rank:]**2).sum() / (s**2).sum()).sqrt()
     print(f"basis: U={tuple(u.shape)} rank={rank} relative residual ||U-U_r||/||U|| = {residual:.3e}")
-    return vh[:rank].T.contiguous(), u
+    return vh[:rank].T.contiguous(), u, float(residual)
 
 
 def main() -> None:
@@ -125,7 +126,7 @@ def main() -> None:
         with safe_open(str(single), framework="pt") as handle:
             index_map = {key: "model.safetensors" for key in handle}
 
-    basis, u = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
+    basis, u, residual = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
 
     # Worst-case induced error on the actual modulation outputs.
     worst = 0.0
@@ -138,7 +139,21 @@ def main() -> None:
         scale = max(scale, ref.abs().max().item())
     print(f"modulation error over all projections: max|err|={worst:.3e} "
           f"(|Wu|max={scale:.3f}, relative={worst / scale:.3e})")
+    receipt = {
+        "schema_version": 1,
+        "source": str(src.resolve()),
+        "destination": None if args.report_only else str(dst.resolve()),
+        "rank": args.rank,
+        "grid_points": args.grid,
+        "basis_relative_residual": residual,
+        "modulation_max_abs_error": worst,
+        "modulation_reference_absmax": scale,
+        "modulation_relative_max_error": worst / scale,
+    }
     if args.report_only:
+        if args.receipt:
+            args.receipt.parent.mkdir(parents=True, exist_ok=True)
+            args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
         return
 
     dst.mkdir(parents=True, exist_ok=True)
@@ -180,6 +195,14 @@ def main() -> None:
     print(f"\nparameters: {total_before / 1e9:.3f}B -> {total_after / 1e9:.3f}B "
           f"({100 * (1 - total_after / total_before):.1f}% removed)")
     print(f"bf16 footprint: {total_before * 2 / 1e9:.1f} GB -> ~{total_after * 2 / 1e9:.1f} GB")
+    receipt.update({
+        "parameters_before": total_before,
+        "parameters_after": total_after,
+        "fraction_removed": 1 - total_after / total_before,
+    })
+    if args.receipt:
+        args.receipt.parent.mkdir(parents=True, exist_ok=True)
+        args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
 
 
 if __name__ == "__main__":

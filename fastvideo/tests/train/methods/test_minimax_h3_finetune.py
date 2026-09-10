@@ -178,6 +178,28 @@ def test_h3_uniform_parameter_dtype_uses_fsdp_dtype() -> None:
     assert parameter_dtype == torch.bfloat16
 
 
+def test_h3_factorized_training_uses_uniform_fsdp_dtype() -> None:
+    """Verify folded AdaLN weights can retain FP32 recovery masters."""
+    config = MiniMaxH3Config(uniform_parameter_dtype=True)
+    config.arch_config.adaln_rank = 16
+    model = cast(
+        MiniMaxH3Transformer3DModel,
+        SimpleNamespace(
+            config=config,
+            adaln_rank=16,
+            _keep_in_fp32_modules=MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
+        ),
+    )
+
+    for name in ("transformer_blocks.0.adaln_proj.linear.weight", "adaln_basis.weight"):
+        parameter_dtype = MiniMaxH3Transformer3DModel._get_parameter_dtype(
+            model,
+            name,
+            torch.float32,
+        )
+        assert parameter_dtype == torch.float32
+
+
 def test_h3_materializes_rotary_frequencies_on_loader_device() -> None:
     """Verify that checkpoint loading moves analytic rotary state to the model device."""
     model = cast(

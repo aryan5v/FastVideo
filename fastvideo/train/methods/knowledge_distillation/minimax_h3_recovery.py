@@ -400,6 +400,9 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
         self._grid_points = int(method.get("deployment_grid_points", 5))
         self._student_state_probability = float(method.get("student_state_probability", 0.5))
         self._trajectory_weight = float(method.get("trajectory_weight", 1.0))
+        self._video_trajectory_weight = float(method.get("video_trajectory_weight", 1.0))
+        self._audio_trajectory_weight = float(method.get("audio_trajectory_weight", 1.0))
+        self._teacher_substeps_per_interval = int(method.get("teacher_substeps_per_interval", 1))
         self._require_fp32_master = bool(method.get("require_fp32_master", True))
         self._optimizer_update_verified = False
         self._layer_update_baselines: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
@@ -409,6 +412,10 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             raise ValueError("student_state_probability must be in [0, 1]")
         if self._trajectory_weight <= 0.0:
             raise ValueError("trajectory_weight must be > 0")
+        if self._video_trajectory_weight <= 0.0 or self._audio_trajectory_weight <= 0.0:
+            raise ValueError("video/audio trajectory weights must be > 0")
+        if self._teacher_substeps_per_interval < 1:
+            raise ValueError("teacher_substeps_per_interval must be >= 1")
         if self._teacher_attn_kind != self._student_attn_kind:
             raise ValueError("four-call recovery requires dense->dense or VSA->VSA")
         if self._require_fp32_master:
@@ -591,6 +598,52 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
     def _predict_student_joint_noise(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
         return self.student.predict_joint_noise(*args, **kwargs)
 
+    def _integrate_teacher_interval(
+        self,
+        batch: Any,
+        interval: int,
+        state_video: torch.Tensor,
+        state_audio: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return Base-H3's fine-integrated update over one deployment interval.
+
+        A four-call Euler interval is too wide for the teacher's point velocity
+        to be a faithful transition target. Subdividing the *base* schedule and
+        applying the modality shifts to every substep preserves the released
+        video/audio clock while teaching the student's one call to approximate
+        the teacher's integrated endpoint.
+        """
+        base_grid = torch.linspace(1.0, 0.0, self._grid_points, device=self.student.device, dtype=torch.float64)
+        fine_base = torch.linspace(
+            float(base_grid[interval]),
+            float(base_grid[interval + 1]),
+            self._teacher_substeps_per_interval + 1,
+            device=self.student.device,
+            dtype=torch.float64,
+        )
+        fine_video_sigmas = shift_noise_amount(fine_base, 12.0)
+        fine_audio_sigmas = shift_noise_amount(fine_base, 3.0)
+        video = state_video.detach()
+        audio = state_audio.detach()
+        with torch.no_grad():
+            for step in range(self._teacher_substeps_per_interval):
+                video_time = (1.0 - fine_video_sigmas[step]).reshape(1)
+                audio_time = (1.0 - fine_audio_sigmas[step]).reshape(1)
+                video_flow, audio_flow = self.teacher.predict_joint_noise(
+                    video,
+                    audio,
+                    video_time,
+                    audio_time,
+                    batch,
+                    conditional=True,
+                    attn_kind=self._teacher_attn_kind,
+                )
+                video = _euler_update(
+                    video, video_flow, fine_video_sigmas[step], fine_video_sigmas[step + 1])
+                audio = _euler_update(
+                    audio, audio_flow, fine_audio_sigmas[step], fine_audio_sigmas[step + 1])
+        return (video - state_video).detach(), (audio - state_audio).detach()
+
     def single_train_step(
         self,
         batch: dict[str, Any],
@@ -659,24 +712,18 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
                 attn_kind=self._student_attn_kind,
             )
 
-        teacher_video_update = (_euler_update(
+        teacher_video_update, teacher_audio_update = self._integrate_teacher_interval(
+            training_batch,
+            interval,
             state_video,
-            teacher_video,
-            video_sigmas[interval],
-            video_sigmas[interval + 1],
-        ) - state_video).detach()
+            state_audio,
+        )
         student_video_update = _euler_update(
             state_video,
             student_video,
             video_sigmas[interval],
             video_sigmas[interval + 1],
         ) - state_video
-        teacher_audio_update = (_euler_update(
-            state_audio,
-            teacher_audio,
-            audio_sigmas[interval],
-            audio_sigmas[interval + 1],
-        ) - state_audio).detach()
         student_audio_update = _euler_update(
             state_audio,
             student_audio,
@@ -728,8 +775,10 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             )
             feature_terms.append(normalized)
         feature_loss = torch.stack(feature_terms).mean()
-        trajectory_loss = (self._video_interval_weights[interval] * norm_update_video +
-                           self._audio_interval_weights[interval] * norm_update_audio)
+        trajectory_loss = (
+            self._video_trajectory_weight * self._video_interval_weights[interval] * norm_update_video
+            + self._audio_trajectory_weight * self._audio_interval_weights[interval] * norm_update_audio
+        )
         denoising_loss = norm_real_video + norm_real_audio
         total_loss = (self._trajectory_weight * trajectory_loss + self._denoising_weight * denoising_loss +
                       self._feature_weight * feature_loss)
@@ -750,6 +799,7 @@ class MiniMaxH3FourCallRecoveryMethod(MiniMaxH3RecoveryMethod):
             "trajectory/student_state": float(use_student_state),
             "trajectory/video_interval_weight": self._video_interval_weights[interval],
             "trajectory/audio_interval_weight": self._audio_interval_weights[interval],
+            "trajectory/teacher_substeps": self._teacher_substeps_per_interval,
         }
         attn_metadata = (training_batch.attn_metadata_vsa
                          if self._student_attn_kind == "vsa" else training_batch.attn_metadata)
