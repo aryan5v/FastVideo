@@ -17,16 +17,18 @@ export SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
 case "${LANE}" in
   A)
     export STUDENT="${SPRINT_ROOT}/release-candidates/20b-backbone-r768-job6929-v1"
-    export OUTPUT_ROOT="${SPRINT_ROOT}/runs/release20b-folded-long-v1"
-    export RUN_ID=release20b-folded-long-v1 TOTAL_TARGET=5000
+    DEFAULT_RUN_ID=release20b-folded-long-v1
+    export TOTAL_TARGET=5000
     ;;
   B)
     export STUDENT="${SPRINT_ROOT}/release-candidates/14b-backbone-r16-job7048-v1"
-    export OUTPUT_ROOT="${SPRINT_ROOT}/runs/release14b-folded-long-v1"
-    export RUN_ID=release14b-folded-long-v1 TOTAL_TARGET=6000
+    DEFAULT_RUN_ID=release14b-folded-long-v1
+    export TOTAL_TARGET=6000
     ;;
   *) echo "LANE must be A or B" >&2; exit 2 ;;
 esac
+export RUN_ID="${RELEASE_RUN_ID_OVERRIDE:-${DEFAULT_RUN_ID}}"
+export OUTPUT_ROOT="${SPRINT_ROOT}/runs/${RUN_ID}"
 if (( FROM_STEP < 0 || TO_STEP <= FROM_STEP || TO_STEP > TOTAL_TARGET )); then
   echo "invalid phase ${FROM_STEP}->${TO_STEP} for target ${TOTAL_TARGET}" >&2
   exit 2
@@ -73,9 +75,8 @@ exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m torch.distributed.run \
   --training.distributed.hsdp_replicate_dim "${DP_REPLICAS}" \
   --training.loop.gradient_accumulation_steps "${GRAD_ACCUMULATION}" \
   --training.loop.max_train_steps "${TO_STEP}" \
-  --training.optimizer.lr_scheduler constant --training.optimizer.lr_warmup_steps 0 \
   --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
-  --training.checkpoint.training_state_checkpointing_steps 999999 \
+  --training.checkpoint.training_state_checkpointing_steps 50 \
   --training.tracker.run_name "${RUN_ID}" "${resume_args[@]}"
 '
 test -s "${OUTPUT_ROOT}/checkpoint-${TO_STEP}/metadata.json"
