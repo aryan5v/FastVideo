@@ -1,6 +1,7 @@
 # Long folded-backbone recovery. The launcher binds the exact selected student
-# and pruning seams, then scales to four DP replicas x four accumulation rounds
-# (global effective batch 16) over the audio-stratified 58k prompt corpus.
+# and pruning seams. The production launcher uses three DP replicas x four
+# accumulation rounds (global effective batch 12) over the audio-stratified
+# 58k prompt corpus; the in-file topology remains a 16-GPU reference maximum.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
@@ -64,7 +65,7 @@ training:
     use_cpu_process_group: true
     checkpoints_total_limit: 3
     preserve_every_steps: 0
-    preserve_steps: [100, 250, 500, 1000, 2000, 4000, 6000]
+    preserve_steps: [100, 250, 500, 1000, 2000, 4000, 5000, 6000]
     resume_from_checkpoint: ''
   tracker:
     trackers: [wandb]
