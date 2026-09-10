@@ -2,6 +2,11 @@
 # and pruning seams. The production launcher uses three DP replicas x four
 # accumulation rounds (global effective batch 12) over the audio-stratified
 # 58k prompt corpus; the in-file topology remains a 16-GPU reference maximum.
+# Keep high-step recovery on Base-teacher prefix states. The controlled 7045 /
+# 7046 comparison showed that 25% student prefixes from a half-recovered 6972
+# parent crushed audio brightness and voicing. Few-call inference-state
+# exposure is handled later by DMD2/PDD, after the backbone clears quality
+# gates, rather than teaching this recovery run to imitate its own errors.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
@@ -28,7 +33,7 @@ method:
   modality_energy_floor: 0.001
   low_sigma_interval_fraction: 0.5
   low_sigma_interval_count: 12
-  student_state_probability: 0.25
+  student_state_probability: 0.0
   modality_grad_probe_every: 0
   allow_prompt_only: true
 training:
