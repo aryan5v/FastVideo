@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=h3-release-long
 #SBATCH --partition=all
-#SBATCH --nodes=3
-#SBATCH --ntasks=3
+#SBATCH --nodes=4
+#SBATCH --ntasks=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --time=24:00:00
