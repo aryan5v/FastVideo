@@ -19,7 +19,7 @@ export CODE_ROOT="${PWD:?}"
 export SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
 export STUDENT="${SPRINT_ROOT}/release-candidates/14B-4C-FAST-BRANCH-v0"
 export OUTPUT_ROOT="${SPRINT_ROOT}/runs/release14b-4c-aware-recovery-v1"
-test -s "${STUDENT}/FROZEN_MANIFEST.json"
+test -s "${STUDENT}/RECOVERY_ADMISSION.json"
 test -s "${STUDENT}/production_media_parity.json"
 test -s "${STUDENT}/training-config.yaml"
 mkdir -p "${OUTPUT_ROOT}"

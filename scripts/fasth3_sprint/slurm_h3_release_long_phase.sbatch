@@ -31,7 +31,7 @@ if (( FROM_STEP < 0 || TO_STEP <= FROM_STEP || TO_STEP > TOTAL_TARGET )); then
   echo "invalid phase ${FROM_STEP}->${TO_STEP} for target ${TOTAL_TARGET}" >&2
   exit 2
 fi
-test -s "${STUDENT}/FROZEN_MANIFEST.json"
+test -s "${STUDENT}/RECOVERY_ADMISSION.json"
 test -s "${STUDENT}/production_media_parity.json"
 test -s "${STUDENT}/training-config.yaml"
 if (( FROM_STEP > 0 )); then

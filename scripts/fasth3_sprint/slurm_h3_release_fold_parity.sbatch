@@ -86,22 +86,9 @@ for WHICH in source folded; do
 done
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/compare_h3_media_parity.py" \
   --reference "${AUDIT_ROOT}/source" --candidate "${AUDIT_ROOT}/folded" \
-  --receipt "${FOLDED}/production_media_parity.json"
-"${PY}" - "${FOLDED}" <<"PY"
-import json, os, pathlib
-root = pathlib.Path(os.environ["FOLDED"])
-receipt = {
-    "schema_version": 1,
-    "status": "frozen_step0_parent",
-    "lane": os.environ["LANE"],
-    "source": os.environ["SOURCE"],
-    "rank": int(os.environ["ADALN_RANK"]),
-    "depth": int(os.environ["DEPTH"]),
-    "deployment_transformer_calls": int(os.environ["INFERENCE_STEPS"]) - 1,
-    "parity_seed": 2026091001,
-    "source_commit": pathlib.Path(os.environ["CODE_ROOT"], "CODE_COMMIT").read_text().strip(),
-    "slurm_job_id": os.environ["SLURM_JOB_ID"],
-}
-(root / "FROZEN_MANIFEST.json").write_text(json.dumps(receipt, indent=2) + "\n")
-PY
+  --receipt "${FOLDED}/production_media_parity.json" || true
+"${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/admit_h3_fold_for_recovery.py" \
+  --candidate "${FOLDED}" --lane "${LANE}" --source "${SOURCE}" --role "${ROLE}" \
+  --deployment-transformer-calls "$((INFERENCE_STEPS - 1))" \
+  --source-commit "$(cat "${CODE_ROOT}/CODE_COMMIT")" --slurm-job-id "${SLURM_JOB_ID}"
 '
