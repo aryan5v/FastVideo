@@ -1,0 +1,32 @@
+[
+  {
+    "id": "speech_exact_chef",
+    "category": "exact_speech",
+    "prompt": "(S1) In a bright home kitchen, a chef looks straight at the camera and says <d>[English] Fold the eggs gently and taste before you salt.</d> A pot simmers behind her with soft bubbling and no music.",
+    "expected_audio": "Exact intelligible English sentence with visible lip motion plus gentle simmering."
+  },
+  {
+    "id": "music_vinyl_orbit",
+    "category": "music",
+    "prompt": "Close-up of a vinyl record spinning on a turntable in a dim listening room; warm analog jazz with double bass and brushed drums fills the room while the camera slowly orbits the platter.",
+    "expected_audio": "Continuous analog jazz with audible bass string articulation and brush texture on drums."
+  },
+  {
+    "id": "sfx_rain_tin_roof",
+    "category": "sound_event",
+    "prompt": "Heavy rain hammers a tin roof over a porch swing; each droplet burst is crisp and close while thunder rolls in the distance and the wooden swing creaks in stereo.",
+    "expected_audio": "Dense rain impacts with bright transients, distant thunder, and stereo creaks."
+  },
+  {
+    "id": "motion_kitesurf_carve",
+    "category": "large_motion",
+    "prompt": "A kite surfer carves hard across choppy bay water while the camera dives alongside; spray hisses off the board edge, the sail flaps and snaps in the wind, and gulls cry overhead.",
+    "expected_audio": "Water spray hiss, sail flap and snap, and gull cries synchronized to the carve."
+  },
+  {
+    "id": "multishot_train_diner",
+    "category": "multiple_shots",
+    "prompt": "Two-shot scene: (shot 1) commuter train doors slide open with a pneumatic hiss and a station chime; (shot 2) cut to a diner interior where a waitress calls out an order while a grill sizzles.",
+    "expected_audio": "Door hiss and chime in shot 1, spoken call-out and grill sizzle in shot 2."
+  }
+]
