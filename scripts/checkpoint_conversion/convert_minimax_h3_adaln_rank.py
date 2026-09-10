@@ -124,7 +124,9 @@ def main() -> None:
         if not single.exists():
             raise SystemExit(f"{src} has neither {INDEX_NAME} nor model.safetensors")
         with safe_open(str(single), framework="pt") as handle:
-            index_map = {key: "model.safetensors" for key in handle}
+            # `safe_open` is not itself iterable in the cluster's pinned
+            # safetensors build; `.keys()` works across both old and new APIs.
+            index_map = {key: "model.safetensors" for key in handle.keys()}
 
     basis, u, residual = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
 
