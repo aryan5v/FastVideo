@@ -75,6 +75,7 @@ exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m torch.distributed.run \
   --training.distributed.hsdp_replicate_dim "${DP_REPLICAS}" \
   --training.loop.gradient_accumulation_steps "${GRAD_ACCUMULATION}" \
   --training.loop.max_train_steps "${TO_STEP}" \
+  --method.student_state_probability 0.0 \
   --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
   --training.checkpoint.training_state_checkpointing_steps 50 \
   --training.tracker.run_name "${RUN_ID}" "${resume_args[@]}"
