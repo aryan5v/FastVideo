@@ -42,9 +42,13 @@ mkdir -p "${OUTPUT_ROOT}" "${OUTPUT_ROOT}/tracker" "${SPRINT_ROOT}/caches/triton
 mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 export MASTER_ADDR="${nodes[0]}" MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
 export TOTAL_GPUS="$((SLURM_JOB_NUM_NODES * 4))"
-(( TOTAL_GPUS == 12 )) || { echo "release recovery requires exactly 12 GPUs" >&2; exit 4; }
+export DP_REPLICAS="${SLURM_JOB_NUM_NODES}"
+(( 12 % DP_REPLICAS == 0 )) || { echo "node count must divide effective batch 12" >&2; exit 4; }
+export GRAD_ACCUMULATION="$((12 / DP_REPLICAS))"
+(( TOTAL_GPUS == DP_REPLICAS * 4 )) || { echo "expected four GPUs per node" >&2; exit 4; }
 
-srun --export=ALL --kill-on-bad-exit=1 --nodes=3 --ntasks=3 --ntasks-per-node=1 \
+srun --export=ALL --kill-on-bad-exit=1 --nodes="${SLURM_JOB_NUM_NODES}" \
+  --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
   --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
   --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan,/mnt/lustre/vlm-shared:/mnt/lustre/vlm-shared:ro \
   --container-workdir="${CODE_ROOT}" bash -lc '
@@ -62,10 +66,12 @@ if (( FROM_STEP > 0 )); then
   resume_args=(--training.checkpoint.resume_from_checkpoint "${OUTPUT_ROOT}/checkpoint-${FROM_STEP}")
 fi
 exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m torch.distributed.run \
-  --nnodes 3 --nproc_per_node 4 --node_rank "${SLURM_PROCID}" \
+  --nnodes "${SLURM_JOB_NUM_NODES}" --nproc_per_node 4 --node_rank "${SLURM_PROCID}" \
   --rdzv_backend c10d --rdzv_endpoint "${MASTER_ADDR}:${MASTER_PORT}" \
   -m fastvideo.train.entrypoint.train --config "${STUDENT}/training-config.yaml" \
-  --training.distributed.num_gpus 12 --training.distributed.hsdp_replicate_dim 3 \
+  --training.distributed.num_gpus "${TOTAL_GPUS}" \
+  --training.distributed.hsdp_replicate_dim "${DP_REPLICAS}" \
+  --training.loop.gradient_accumulation_steps "${GRAD_ACCUMULATION}" \
   --training.loop.max_train_steps "${TO_STEP}" \
   --training.optimizer.lr_scheduler constant --training.optimizer.lr_warmup_steps 0 \
   --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
@@ -80,7 +86,8 @@ root = pathlib.Path(os.environ["OUTPUT_ROOT"])
 receipt = {
   "lane": os.environ["LANE"], "from_step": int(os.environ["FROM_STEP"]),
   "to_step": int(os.environ["TO_STEP"]), "slurm_job_id": os.environ["SLURM_JOB_ID"],
-  "sp_size": 4, "data_parallel_replicas": 3, "gradient_accumulation": 4,
+  "sp_size": 4, "data_parallel_replicas": int(os.environ["DP_REPLICAS"]),
+  "gradient_accumulation": int(os.environ["GRAD_ACCUMULATION"]),
   "effective_global_batch": 12, "cumulative_prompt_exposures": 12 * int(os.environ["TO_STEP"]),
 }
 (root / f"phase-{os.environ['FROM_STEP']}-{os.environ['TO_STEP']}.json").write_text(json.dumps(receipt, indent=2)+"\n")
