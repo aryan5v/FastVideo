@@ -16,19 +16,19 @@ case "${LANE}" in
   A)
     export SOURCE="${SPRINT_ROOT}/runs/base42-prompt58k-recovery/job-6929/export-200"
     export FOLDED="${SPRINT_ROOT}/release-candidates/20b-backbone-r768-job6929-v1"
-    export RANK=768 DEPTH=42 INFERENCE_STEPS=50 ROLE=20b-backbone-r768
+    export ADALN_RANK=768 DEPTH=42 INFERENCE_STEPS=50 ROLE=20b-backbone-r768
     export TEMPLATE="${CODE_ROOT}/examples/train/configs/fasth3_release_long_recovery.yaml"
     ;;
   B)
     export SOURCE="${SPRINT_ROOT}/runs/base34-recut-detail-band/job-7048/export-200"
     export FOLDED="${SPRINT_ROOT}/release-candidates/14b-backbone-r16-job7048-v1"
-    export RANK=16 DEPTH=34 INFERENCE_STEPS=50 ROLE=14b-backbone-r16
+    export ADALN_RANK=16 DEPTH=34 INFERENCE_STEPS=50 ROLE=14b-backbone-r16
     export TEMPLATE="${CODE_ROOT}/examples/train/configs/fasth3_release_long_recovery.yaml"
     ;;
   C)
     export SOURCE="${SPRINT_ROOT}/runs/base34-recut-dmd4/job-7102/export-500"
     export FOLDED="${SPRINT_ROOT}/release-candidates/14B-4C-FAST-BRANCH-v0"
-    export RANK=16 DEPTH=34 INFERENCE_STEPS=5 ROLE=14b-4c-fast-r16
+    export ADALN_RANK=16 DEPTH=34 INFERENCE_STEPS=5 ROLE=14b-4c-fast-r16
     export TEMPLATE="${CODE_ROOT}/examples/train/configs/fasth3_14b_four_call_recovery.yaml"
     ;;
   *) echo "LANE must be A, B, or C" >&2; exit 2 ;;
@@ -51,7 +51,7 @@ export PYTHONDONTWRITEBYTECODE=1 FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDE
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_NCCL_ENABLE_MONITORING=0
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
 "${PY}" "${CODE_ROOT}/scripts/checkpoint_conversion/convert_minimax_h3_adaln_rank.py" \
-  --src "${SOURCE}/transformer" --dst "${FOLDED}/transformer" --rank "${RANK}" \
+  --src "${SOURCE}/transformer" --dst "${FOLDED}/transformer" --rank "${ADALN_RANK}" \
   --receipt "${FOLDED}/factorization_receipt.json"
 for component in "${SOURCE}"/*; do
   name="$(basename "${component}")"
@@ -95,7 +95,7 @@ receipt = {
     "status": "frozen_step0_parent",
     "lane": os.environ["LANE"],
     "source": os.environ["SOURCE"],
-    "rank": int(os.environ["RANK"]),
+    "rank": int(os.environ["ADALN_RANK"]),
     "depth": int(os.environ["DEPTH"]),
     "deployment_transformer_calls": int(os.environ["INFERENCE_STEPS"]) - 1,
     "parity_seed": 2026091001,
