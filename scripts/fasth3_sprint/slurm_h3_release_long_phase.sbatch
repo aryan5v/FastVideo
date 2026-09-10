@@ -41,16 +41,33 @@ if (( FROM_STEP > 0 )); then
   test -d "${OUTPUT_ROOT}/checkpoint-${FROM_STEP}/dcp"
 fi
 mkdir -p "${OUTPUT_ROOT}" "${OUTPUT_ROOT}/tracker" "${SPRINT_ROOT}/caches/triton/${RUN_ID}"
-mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+het_size="${SLURM_HET_SIZE:-0}"
+nodes=()
+srun_allocation_args=()
+if (( het_size > 0 )); then
+  (( het_size == 4 )) || { echo "expected four heterogeneous node components" >&2; exit 4; }
+  for ((group = 0; group < het_size; group++)); do
+    variable="SLURM_JOB_NODELIST_HET_GROUP_${group}"
+    mapfile -t group_nodes < <(scontrol show hostnames "${!variable}")
+    (( ${#group_nodes[@]} == 1 )) || { echo "each heterogeneous component must own one node" >&2; exit 4; }
+    nodes+=("${group_nodes[0]}")
+  done
+  export ALLOC_NODES="${het_size}"
+  srun_allocation_args=(--het-group="0-$((het_size - 1))")
+else
+  mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+  export ALLOC_NODES="${SLURM_JOB_NUM_NODES}"
+  srun_allocation_args=(--nodes="${ALLOC_NODES}")
+fi
 export MASTER_ADDR="${nodes[0]}" MASTER_PORT="$((20000 + SLURM_JOB_ID % 30000))"
-export TOTAL_GPUS="$((SLURM_JOB_NUM_NODES * 4))"
-export DP_REPLICAS="${SLURM_JOB_NUM_NODES}"
+export TOTAL_GPUS="$((ALLOC_NODES * 4))"
+export DP_REPLICAS="${ALLOC_NODES}"
 (( 12 % DP_REPLICAS == 0 )) || { echo "node count must divide effective batch 12" >&2; exit 4; }
 export GRAD_ACCUMULATION="$((12 / DP_REPLICAS))"
 (( TOTAL_GPUS == DP_REPLICAS * 4 )) || { echo "expected four GPUs per node" >&2; exit 4; }
 
-srun --export=ALL --kill-on-bad-exit=1 --nodes="${SLURM_JOB_NUM_NODES}" \
-  --ntasks="${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 \
+srun --export=ALL --kill-on-bad-exit=1 "${srun_allocation_args[@]}" \
+  --ntasks="${ALLOC_NODES}" --ntasks-per-node=1 \
   --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
   --container-mounts=/mnt/nfs/vlm-aryan:/mnt/nfs/vlm-aryan,/mnt/lustre/vlm-shared:/mnt/lustre/vlm-shared:ro \
   --container-workdir="${CODE_ROOT}" bash -lc '
@@ -68,7 +85,7 @@ if (( FROM_STEP > 0 )); then
   resume_args=(--training.checkpoint.resume_from_checkpoint "${OUTPUT_ROOT}/checkpoint-${FROM_STEP}")
 fi
 exec /mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python -m torch.distributed.run \
-  --nnodes "${SLURM_JOB_NUM_NODES}" --nproc_per_node 4 --node_rank "${SLURM_PROCID}" \
+  --nnodes "${ALLOC_NODES}" --nproc_per_node 4 --node_rank "${SLURM_PROCID}" \
   --rdzv_backend c10d --rdzv_endpoint "${MASTER_ADDR}:${MASTER_PORT}" \
   -m fastvideo.train.entrypoint.train --config "${STUDENT}/training-config.yaml" \
   --training.distributed.num_gpus "${TOTAL_GPUS}" \
