@@ -280,6 +280,9 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         if getattr(self, "_base_update_verified", False):
             super().optimizers_schedulers_step(iteration)
             return
+        applied_learning_rates = [float(group["lr"]) for group in self._student_optimizer.param_groups]
+        if any(not math.isfinite(lr) or lr < 0.0 for lr in applied_learning_rates):
+            raise RuntimeError(f"Base recovery has invalid learning rates: {applied_learning_rates}")
         probes: list[tuple[torch.Tensor, torch.Tensor]] = []
         for parameter in self.student.transformer.parameters():
             if parameter.requires_grad:
@@ -303,6 +306,12 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
         ]
         if not states or any(v.dtype != torch.float32 for v in states):
             raise RuntimeError("Base recovery requires populated FP32 Adam moments")
+        # Linear warmup initializes AdamW at exactly zero learning rate.  That
+        # first optimizer call intentionally populates the FP32 moments without
+        # changing parameters; verify the update on the first *nonzero* LR
+        # call instead of rejecting a correct warmup schedule at step zero.
+        if not any(lr > 0.0 for lr in applied_learning_rates):
+            return
         if changed == 0 or not math.isfinite(delta_sq) or delta_sq <= 0:
             raise RuntimeError("Base recovery did not produce a finite nonzero update")
         rank = dist.get_rank() if dist.is_initialized() else 0
@@ -312,7 +321,7 @@ class MiniMaxH3BaseRecoveryMethod(MiniMaxH3RecoveryMethod):
             "rank": rank,
             "changed_probe_elements": changed,
             "delta_l2": delta_sq**0.5,
-            "learning_rates": [float(g["lr"]) for g in self._student_optimizer.param_groups]
+            "learning_rates": applied_learning_rates
         }
         root = Path(self.training_config.checkpoint.output_dir)
         root.mkdir(parents=True, exist_ok=True)
