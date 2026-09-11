@@ -40,11 +40,14 @@ export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_NCCL_ENABLE_MONITORING=0
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
 
-# FP32 load preserves the folded AdaLN basis through export. Inference reloads
-# the export in a fresh process, which is also the end-to-end format check.
+# Materialize directly in the BF16 deployment precision used by the benchmark. The
+# single-process exporter otherwise constructs both the 20.14B student and
+# full teacher in FP32 and exceeds one H200; the accepted job-6929 export used
+# this same BF16 path. Inference reloads the export in a fresh process, which
+# is also the end-to-end format check.
 "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
   --checkpoint "${CHECKPOINT}" --output-dir "${EXPORT}" \
-  --role student --load-precision fp32
+  --role student --load-precision bf16
 
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/run_baseline_matrix.py" \
   --model-path "${EXPORT}" \
