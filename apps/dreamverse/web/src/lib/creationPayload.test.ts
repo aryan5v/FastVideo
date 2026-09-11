@@ -36,7 +36,7 @@ describe("creationPayload", () => {
 				type: "gpu_assigned",
 				creation_config: {
 					model_id: "fast-ltx2",
-					creation_mode: "ref2av",
+					generation_mode: "ref2va",
 					aspect_ratio: "9:16",
 					resolution: "480p",
 					duration_sec: 10,

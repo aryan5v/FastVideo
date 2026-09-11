@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from dreamverse._deps import require_dreamverse_runtime_deps
 from dreamverse.config import FRONTEND_STATIC_DIR_CANDIDATES, GENERATION_SEGMENT_CAP
-from dreamverse.session_creation_config import parse_session_creation_config, validate_creation_mode_assets
+from dreamverse.session_creation_config import parse_session_creation_config, validate_generation_mode_assets
 from dreamverse.session_init_image import cleanup_session_init_image, persist_session_init_image
 
 LATENCY_MS = 200
@@ -362,8 +362,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         try:
             session_creation_config = parse_session_creation_config(init_data)
-            validate_creation_mode_assets(
-                session_creation_config.creation_mode,
+            validate_generation_mode_assets(
+                session_creation_config.generation_mode,
                 has_initial_image=session_init_image is not None,
                 has_last_frame_image=session_last_frame_image is not None,
             )
@@ -568,8 +568,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
             try:
                 session_creation_config = parse_session_creation_config(payload)
-                validate_creation_mode_assets(
-                    session_creation_config.creation_mode,
+                validate_generation_mode_assets(
+                    session_creation_config.generation_mode,
                     has_initial_image=session_init_image is not None,
                     has_last_frame_image=session_last_frame_image is not None,
                 )

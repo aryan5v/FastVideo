@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from fastapi import WebSocket, WebSocketDisconnect
 from dreamverse.gpu_pool import GPUSlot
 from dreamverse.session_init_image import cleanup_session_init_image, persist_session_init_image
-from dreamverse.session_creation_config import parse_session_creation_config, validate_creation_mode_assets
+from dreamverse.session_creation_config import parse_session_creation_config, validate_generation_mode_assets
 from dreamverse.worker_ipc import MediaChunk, MediaComplete, MediaInit
 
 from dreamverse.config import (
@@ -253,8 +253,8 @@ class SessionController:
             try:
                 session_creation_config = parse_session_creation_config(init_data)
                 session_generation_segment_cap = session_creation_config.generation_segment_cap
-                validate_creation_mode_assets(
-                    session_creation_config.creation_mode,
+                validate_generation_mode_assets(
+                    session_creation_config.generation_mode,
                     has_initial_image=session_init_image is not None,
                     has_last_frame_image=session_last_frame_image is not None,
                 )
@@ -283,7 +283,7 @@ class SessionController:
             if session_creation_config is not None:
                 print(f"Client {client_id[:8]} creation config: "
                       f"model={session_creation_config.model_id}, "
-                      f"mode={session_creation_config.creation_mode}, "
+                      f"mode={session_creation_config.generation_mode}, "
                       f"size={session_creation_config.frame_width}x{session_creation_config.frame_height}, "
                       f"duration={session_creation_config.duration_sec}s, "
                       f"segment_cap={session_creation_config.generation_segment_cap}")
@@ -556,8 +556,8 @@ class SessionController:
                 try:
                     session_creation_config = parse_session_creation_config(payload)
                     session_generation_segment_cap = session_creation_config.generation_segment_cap
-                    validate_creation_mode_assets(
-                        session_creation_config.creation_mode,
+                    validate_generation_mode_assets(
+                        session_creation_config.generation_mode,
                         has_initial_image=session_init_image is not None,
                         has_last_frame_image=session_last_frame_image is not None,
                     )

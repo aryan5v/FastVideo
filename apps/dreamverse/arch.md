@@ -321,8 +321,8 @@ creation config and echoes the resolved values back on `gpu_assigned` and
 
 Incoming fields on `session_init_v2` and `project_init_v1`:
 
+- `generation_mode`: `t2va`, `fl2va`, or `ref2va` (canonical upstream IDs from #1834)
 - `model_id`: `fast-ltx2` or `fast-ltx23`
-- `creation_mode`: `t2v`, `fl2av`, or `ref2av`
 - `aspect_ratio`: one of `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`
 - `resolution`: one of `480p`, `720p`, `1080p`, `4k`
 - `duration_sec`: `5`, `10`, or `15`
@@ -334,8 +334,8 @@ Echoed `creation_config` includes the resolved frame size,
 
 Mode validation:
 
-- `ref2av` requires `initial_image`
-- `fl2av` requires both `initial_image` and `last_frame_image`
+- `ref2va` requires `initial_image`
+- `fl2va` requires both `initial_image` and `last_frame_image`
 
 Per-step generation uses the resolved `frame_width`, `frame_height`, and
 `num_frames` from the session creation config.

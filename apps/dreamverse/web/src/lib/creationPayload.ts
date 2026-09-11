@@ -4,9 +4,9 @@ import type {
 	CreationModelId,
 	ResolutionId,
 } from "@/lib/creationConfig";
+import { fromGenerationMode, type GenerationMode } from "@/lib/generationMode";
 
 const LOBBY_MODEL_IDS = new Set<CreationModelId>(["fast-ltx2", "fast-ltx23"]);
-const CREATION_MODE_IDS = new Set<CreationModeId>(["t2v", "fl2av", "ref2av"]);
 const ASPECT_RATIO_IDS = new Set<AspectRatioId>(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
 const RESOLUTION_IDS = new Set<ResolutionId>(["480p", "720p", "1080p", "4k"]);
 const DURATION_SEC_VALUES = new Set([5, 10, 15]);
@@ -30,7 +30,6 @@ export interface InitialImagePayload {
 
 export interface CreationInitPayload {
 	model_id: string;
-	creation_mode: CreationModeId;
 	aspect_ratio: string;
 	resolution: string;
 	duration_sec: number;
@@ -127,8 +126,9 @@ export function parseEchoedCreationConfig(data: unknown): EchoedSessionCreationC
 	const modelId = typeof config.model_id === "string" && LOBBY_MODEL_IDS.has(config.model_id as CreationModelId)
 		? (config.model_id as CreationModelId)
 		: null;
-	const modeId = typeof config.creation_mode === "string" && CREATION_MODE_IDS.has(config.creation_mode as CreationModeId)
-		? (config.creation_mode as CreationModeId)
+	const generationMode = typeof config.generation_mode === "string" ? config.generation_mode as GenerationMode : null;
+	const modeId = generationMode === "t2va" || generationMode === "fl2va" || generationMode === "ref2va"
+		? fromGenerationMode(generationMode)
 		: null;
 	const aspectRatio = typeof config.aspect_ratio === "string" && ASPECT_RATIO_IDS.has(config.aspect_ratio as AspectRatioId)
 		? (config.aspect_ratio as AspectRatioId)
@@ -164,7 +164,6 @@ export async function buildCreationInitPayload(input: {
 	const images = await resolveCreationImages(input);
 	return {
 		model_id: input.modelId,
-		creation_mode: input.modeId,
 		aspect_ratio: input.aspectRatio,
 		resolution: input.resolution,
 		duration_sec: input.durationSec,

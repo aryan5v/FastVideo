@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from dreamverse.config import FRAME_HEIGHT, FRAME_WIDTH, GENERATION_SEGMENT_CAP, MODEL_REGISTRY, NUM_FRAMES
 
 LOBBY_MODEL_IDS = frozenset({"fast-ltx2", "fast-ltx23"})
-SUPPORTED_CREATION_MODES = frozenset({"t2v", "fl2av", "ref2av"})
+SUPPORTED_GENERATION_MODES = frozenset({"t2va", "fl2va", "ref2va"})
 SUPPORTED_ASPECT_RATIOS = frozenset({"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"})
 SUPPORTED_RESOLUTIONS = frozenset({"480p", "720p", "1080p", "4k"})
 SEGMENT_DURATION_SEC = 5
@@ -14,7 +14,7 @@ SEGMENT_DURATION_SEC = 5
 @dataclass(frozen=True)
 class SessionCreationConfig:
     model_id: str
-    creation_mode: str
+    generation_mode: str
     aspect_ratio: str
     resolution: str
     duration_sec: int
@@ -26,7 +26,7 @@ class SessionCreationConfig:
     def as_dict(self) -> dict[str, object]:
         return {
             "model_id": self.model_id,
-            "creation_mode": self.creation_mode,
+            "generation_mode": self.generation_mode,
             "aspect_ratio": self.aspect_ratio,
             "resolution": self.resolution,
             "duration_sec": self.duration_sec,
@@ -85,9 +85,9 @@ def parse_session_creation_config(payload: dict[str, object]) -> SessionCreation
     raw_model_id = str(payload.get("model_id") or "").strip()
     model_id = raw_model_id if raw_model_id in LOBBY_MODEL_IDS else "fast-ltx23"
 
-    creation_mode = str(payload.get("creation_mode") or "t2v").strip()
-    if creation_mode not in SUPPORTED_CREATION_MODES:
-        raise ValueError(f"Unsupported creation_mode: {creation_mode}")
+    generation_mode = str(payload.get("generation_mode") or "t2va").strip()
+    if generation_mode not in SUPPORTED_GENERATION_MODES:
+        raise ValueError(f"Unsupported generation_mode: {generation_mode}")
 
     aspect_ratio = str(payload.get("aspect_ratio") or "16:9").strip()
     if aspect_ratio not in SUPPORTED_ASPECT_RATIOS:
@@ -110,7 +110,7 @@ def parse_session_creation_config(payload: dict[str, object]) -> SessionCreation
     frame_width, frame_height = resolve_frame_size(aspect_ratio, resolution)
     return SessionCreationConfig(
         model_id=model_id,
-        creation_mode=creation_mode,
+        generation_mode=generation_mode,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
         duration_sec=duration_sec,
@@ -121,13 +121,13 @@ def parse_session_creation_config(payload: dict[str, object]) -> SessionCreation
     )
 
 
-def validate_creation_mode_assets(
-    creation_mode: str,
+def validate_generation_mode_assets(
+    generation_mode: str,
     *,
     has_initial_image: bool,
     has_last_frame_image: bool,
 ) -> None:
-    if creation_mode == "ref2av" and not has_initial_image:
-        raise ValueError("Omni reference mode requires a reference image.")
-    if creation_mode == "fl2av" and (not has_initial_image or not has_last_frame_image):
-        raise ValueError("First and last frame mode requires both frame images.")
+    if generation_mode == "ref2va" and not has_initial_image:
+        raise ValueError("Ref2VA mode requires a reference image.")
+    if generation_mode == "fl2va" and (not has_initial_image or not has_last_frame_image):
+        raise ValueError("FL2VA mode requires both frame images.")
