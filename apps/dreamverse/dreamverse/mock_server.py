@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from dreamverse._deps import require_dreamverse_runtime_deps
 from dreamverse.config import FRONTEND_STATIC_DIR_CANDIDATES, GENERATION_SEGMENT_CAP
+from dreamverse.creation_capabilities import LOBBY_CREATION_CAPABILITIES
 from dreamverse.session_creation_config import parse_session_creation_config, validate_generation_mode_assets
 from dreamverse.session_init_image import cleanup_session_init_image, persist_session_init_image
 
@@ -224,6 +225,11 @@ async def prompt_system_config():
         "rewrite_model": "mock-rewrite-model",
         "rewrite_temperature": 0.0,
     }
+
+
+@app.get("/creation-capabilities")
+async def creation_capabilities():
+    return LOBBY_CREATION_CAPABILITIES.as_dict()
 
 
 @app.get("/curated-presets")

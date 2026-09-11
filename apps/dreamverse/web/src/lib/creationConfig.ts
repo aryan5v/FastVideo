@@ -28,8 +28,11 @@ export interface MentionOption {
 
 export const CREATION_MODES: CreationModeOption[] = [
 	{ id: "t2v", label: "Text to video", description: "Generate from a text prompt" },
-	{ id: "fl2av", label: "First and last frame", description: "Upload two assets as keyframes" },
-	{ id: "ref2av", label: "Omni reference", description: "Guide generation with a reference asset" },
+	{ id: "ref2av", label: "Image to video", description: "Guide the first segment with a reference image" },
+];
+
+export const UNSUPPORTED_CREATION_MODES: CreationModeOption[] = [
+	{ id: "fl2av", label: "First and last frame", description: "Coming soon on FastLTX models" },
 ];
 
 export const CREATION_MODELS: CreationModelOption[] = [
@@ -48,11 +51,13 @@ export const CREATION_MODELS: CreationModelOption[] = [
 
 export const ASPECT_RATIOS: AspectRatioId[] = ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"];
 
-export const RESOLUTIONS: ResolutionId[] = ["480p", "720p", "1080p", "4k"];
+export const RESOLUTIONS: ResolutionId[] = ["480p", "720p", "1080p"];
+
+export const UNSUPPORTED_RESOLUTIONS: ResolutionId[] = ["4k"];
 
 export const DURATION_MARKS = [5, 10, 15] as const;
 
-export const REFERENCE_ACCEPT = "image/*,video/*";
+export const REFERENCE_ACCEPT = "image/png,image/jpeg,image/webp";
 
 export function formatResolutionLabel(resolution: ResolutionId): string {
 	return resolution === "4k" ? "4K" : resolution.toUpperCase();
@@ -71,7 +76,7 @@ export function modeUsesDualFrames(modeId: CreationModeId): boolean {
 }
 
 export function isReferenceMediaFile(file: File): boolean {
-	return file.type.startsWith("image/") || file.type.startsWith("video/");
+	return file.type === "image/png" || file.type === "image/jpeg" || file.type === "image/webp";
 }
 
 export function buildMentionOptions(storyPresets: Array<{ id?: string; label?: string; description?: string }>): MentionOption[] {

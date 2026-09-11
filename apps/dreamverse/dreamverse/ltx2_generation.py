@@ -460,7 +460,6 @@ class LTX2GenerationBackend:
         num_frames: int | None = None,
     ) -> StepResult:
         """Execute one generation step; snapshot state for the next segment."""
-        del frame_width, frame_height, num_frames
         timings: dict = {}
 
         prompt = self._inject_style_trigger(prompt)

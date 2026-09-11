@@ -44,9 +44,31 @@ def test_duration_sec_to_segment_cap_respects_global_cap():
     assert duration_sec_to_segment_cap(15, global_cap=2) == 2
 
 
+def test_parse_session_creation_config_rejects_fl2va():
+    with pytest.raises(ValueError, match="FL2VA"):
+        parse_session_creation_config(
+            {
+                "generation_mode": "fl2va",
+                "aspect_ratio": "16:9",
+                "resolution": "720p",
+                "duration_sec": 5,
+            },
+        )
+
+
+def test_parse_session_creation_config_rejects_4k():
+    with pytest.raises(ValueError, match="Unsupported resolution"):
+        parse_session_creation_config(
+            {
+                "generation_mode": "t2va",
+                "aspect_ratio": "16:9",
+                "resolution": "4k",
+                "duration_sec": 5,
+            },
+        )
+
+
 def test_validate_generation_mode_assets():
     validate_generation_mode_assets("t2va", has_initial_image=False, has_last_frame_image=False)
     with pytest.raises(ValueError, match="Ref2VA"):
         validate_generation_mode_assets("ref2va", has_initial_image=False, has_last_frame_image=False)
-    with pytest.raises(ValueError, match="FL2VA"):
-        validate_generation_mode_assets("fl2va", has_initial_image=True, has_last_frame_image=False)

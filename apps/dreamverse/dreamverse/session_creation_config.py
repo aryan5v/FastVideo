@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from dreamverse.config import FRAME_HEIGHT, FRAME_WIDTH, GENERATION_SEGMENT_CAP, MODEL_REGISTRY, NUM_FRAMES
+from dreamverse.creation_capabilities import validate_lobby_creation_config
 
-LOBBY_MODEL_IDS = frozenset({"fast-ltx2", "fast-ltx23"})
+LTX_LOBBY_MODEL_IDS = frozenset({"fast-ltx2", "fast-ltx23"})
 SUPPORTED_GENERATION_MODES = frozenset({"t2va", "fl2va", "ref2va"})
 SUPPORTED_ASPECT_RATIOS = frozenset({"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"})
 SUPPORTED_RESOLUTIONS = frozenset({"480p", "720p", "1080p", "4k"})
@@ -83,7 +84,7 @@ def duration_sec_to_segment_cap(duration_sec: int, *, global_cap: int = GENERATI
 
 def parse_session_creation_config(payload: dict[str, object]) -> SessionCreationConfig:
     raw_model_id = str(payload.get("model_id") or "").strip()
-    model_id = raw_model_id if raw_model_id in LOBBY_MODEL_IDS else "fast-ltx23"
+    model_id = raw_model_id if raw_model_id in LTX_LOBBY_MODEL_IDS else "fast-ltx23"
 
     generation_mode = str(payload.get("generation_mode") or "t2va").strip()
     if generation_mode not in SUPPORTED_GENERATION_MODES:
@@ -103,6 +104,14 @@ def parse_session_creation_config(payload: dict[str, object]) -> SessionCreation
         raise ValueError("duration_sec must be an integer.") from exc
     if duration_sec not in {5, 10, 15}:
         raise ValueError("duration_sec must be 5, 10, or 15.")
+
+    validate_lobby_creation_config(
+        model_id=model_id,
+        generation_mode=generation_mode,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        duration_sec=duration_sec,
+    )
 
     if model_id not in MODEL_REGISTRY:
         raise ValueError(f"Unsupported model_id: {model_id}")
@@ -129,5 +138,3 @@ def validate_generation_mode_assets(
 ) -> None:
     if generation_mode == "ref2va" and not has_initial_image:
         raise ValueError("Ref2VA mode requires a reference image.")
-    if generation_mode == "fl2va" and (not has_initial_image or not has_last_frame_image):
-        raise ValueError("FL2VA mode requires both frame images.")

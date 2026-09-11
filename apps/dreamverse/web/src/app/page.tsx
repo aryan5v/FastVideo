@@ -33,9 +33,15 @@ import {
 	normalizePromptWindowSnapshot,
 } from "@/lib/prompts/promptWindowSnapshot";
 import {
+	DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	clampLobbySelectionToCapabilities,
+	parseLobbyCreationCapabilities,
+	validateLobbyCreationSelection,
+	type LobbyCreationCapabilities,
+} from "@/lib/creationCapabilities";
+import {
 	buildCreationInitPayload,
 	parseEchoedCreationConfig,
-	validateCreationInputs,
 } from "@/lib/creationPayload";
 import rawPresets from "@/lib/storyPresetsData";
 import { cn } from "@/lib/utils";
@@ -256,6 +262,9 @@ export default function Page() {
 	const [creationAspectRatio, setCreationAspectRatio] = useState<AspectRatioId>("16:9");
 	const [creationResolution, setCreationResolution] = useState<ResolutionId>("720p");
 	const [creationDurationSec, setCreationDurationSec] = useState(5);
+	const [lobbyCapabilities, setLobbyCapabilities] = useState<LobbyCreationCapabilities>(
+		DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	);
 	const [sessionCreationConfig, setSessionCreationConfig] = useState<SessionCreationConfig>({
 		modelId: "fast-ltx23",
 		modeId: "t2v",
@@ -515,6 +524,49 @@ export default function Page() {
 	useEffect(() => {
 		setRuntimeReady(true);
 	}, []);
+
+	function applyLobbyCapabilities(capabilities: LobbyCreationCapabilities) {
+		setLobbyCapabilities(capabilities);
+		const clamped = clampLobbySelectionToCapabilities({
+			capabilities,
+			modelId: creationModelId,
+			modeId: creationModeId,
+			aspectRatio: creationAspectRatio,
+			resolution: creationResolution,
+			durationSec: creationDurationSec,
+		});
+		setCreationModelId(clamped.modelId);
+		setCreationModeId(clamped.modeId);
+		setCreationAspectRatio(clamped.aspectRatio);
+		setCreationResolution(clamped.resolution);
+		setCreationDurationSec(clamped.durationSec);
+	}
+
+	useEffect(() => {
+		if (!runtimeReady) return;
+		let cancelled = false;
+		void fetch("/creation-capabilities", {
+			headers: { Accept: "application/json" },
+			cache: "no-store",
+		})
+			.then(async (response) => {
+				if (!response.ok) return DEFAULT_LOBBY_CREATION_CAPABILITIES;
+				return parseLobbyCreationCapabilities(await response.json());
+			})
+			.then((capabilities) => {
+				if (!cancelled) {
+					applyLobbyCapabilities(capabilities);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					applyLobbyCapabilities(DEFAULT_LOBBY_CREATION_CAPABILITIES);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [runtimeReady]);
 
 	useEffect(() => {
 		if (!runtimeReady || initializedRef.current) return;
@@ -2029,8 +2081,13 @@ export default function Page() {
 	}
 
 	async function joinSession({ force = false } = {}) {
-		const validationError = validateCreationInputs({
+		const validationError = validateLobbyCreationSelection({
+			capabilities: lobbyCapabilities,
+			modelId: creationModelId,
 			modeId: creationModeId,
+			aspectRatio: creationAspectRatio,
+			resolution: creationResolution,
+			durationSec: creationDurationSec,
 			referenceFile: referenceFileRef.current,
 			firstFrameFile: firstFrameFileRef.current,
 			lastFrameFile: lastFrameFileRef.current,
@@ -2825,6 +2882,7 @@ export default function Page() {
 							lastFramePreviewUrl={lastFramePreviewUrl}
 							mentionOptions={mentionOptions}
 							storyPresets={lobbyStoryPresets}
+							capabilities={lobbyCapabilities}
 							onValueChange={(value) => sessionStore.patch({ livePromptDraft: value })}
 							onSubmit={() => void joinSession()}
 							onKeyDown={handleLivePromptKeydown}
@@ -2855,6 +2913,7 @@ export default function Page() {
 								sessionNotice={sessionNotice as string}
 								projectResetPending={projectResetPending as boolean}
 								sessionCreationConfig={sessionCreationConfig}
+								configPillsReadOnly
 								onSessionModelChange={(modelId) => setSessionCreationConfig((current) => ({ ...current, modelId }))}
 								onSessionModeChange={(modeId) => setSessionCreationConfig((current) => ({ ...current, modeId }))}
 								onSessionAspectRatioChange={(aspectRatio) => setSessionCreationConfig((current) => ({ ...current, aspectRatio }))}
