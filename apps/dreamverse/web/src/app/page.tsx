@@ -13,6 +13,7 @@ import {
 	type CreationModelId,
 	type ResolutionId,
 } from "@/lib/creationConfig";
+import { toGenerationMode } from "@/lib/generationMode";
 import type { SessionCreationConfig } from "@/components/creation/SessionCreationConfigPills";
 import SessionTimeoutModal from "@/components/SessionTimeoutModal";
 import Sidebar from "@/components/Sidebar";
@@ -1744,6 +1745,7 @@ export default function Page() {
 		setSeedPrompts(segmentPrompts);
 		return {
 			type,
+			generation_mode: toGenerationMode(creationModeId),
 			preset_id: getInitialPresetId(),
 			preset_label: getInitialPresetLabel(),
 			curated_prompts: segmentPrompts,
