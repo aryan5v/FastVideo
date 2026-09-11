@@ -21,8 +21,8 @@ describe("creationConfig", () => {
 		expect(formatDurationLabel(5)).toBe("5s");
 	});
 
-	it("excludes H3 from lobby models", () => {
-		expect(CREATION_MODELS.map((model) => model.id)).toEqual(["fast-ltx23", "fast-ltx2"]);
+	it("includes all Dreamverse lobby models", () => {
+		expect(CREATION_MODELS.map((model) => model.id)).toEqual(["fast-ltx23", "fast-ltx2", "fast-h3"]);
 	});
 
 	it("builds mention options from presets", () => {

@@ -44,6 +44,21 @@ def test_duration_sec_to_segment_cap_respects_global_cap():
     assert duration_sec_to_segment_cap(15, global_cap=2) == 2
 
 
+def test_parse_session_creation_config_accepts_fast_h3():
+    config = parse_session_creation_config(
+        {
+            "model_id": "fast-h3",
+            "generation_mode": "t2va",
+            "aspect_ratio": "16:9",
+            "resolution": "720p",
+            "duration_sec": 10,
+        },
+    )
+    assert config.model_id == "fast-h3"
+    assert config.generation_mode == "t2va"
+    assert config.generation_segment_cap == 2
+
+
 def test_parse_session_creation_config_rejects_fl2va():
     with pytest.raises(ValueError, match="FL2VA"):
         parse_session_creation_config(

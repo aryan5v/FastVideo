@@ -1,6 +1,6 @@
 export type CreationModeId = "t2v" | "fl2av" | "ref2av";
 
-export type CreationModelId = "fast-ltx2" | "fast-ltx23";
+export type CreationModelId = "fast-ltx2" | "fast-ltx23" | "fast-h3";
 
 export type AspectRatioId = "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
 
@@ -46,6 +46,11 @@ export const CREATION_MODELS: CreationModelOption[] = [
 		id: "fast-ltx2",
 		label: "FastLTX 2",
 		description: "FastLTX 2 for streaming",
+	},
+	{
+		id: "fast-h3",
+		label: "FastH3",
+		description: "MiniMax H3 with VSA data-free adapter",
 	},
 ];
 

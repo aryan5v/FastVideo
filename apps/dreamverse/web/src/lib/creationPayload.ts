@@ -6,7 +6,7 @@ import type {
 } from "@/lib/creationConfig";
 import { fromGenerationMode, type GenerationMode } from "@/lib/generationMode";
 
-const LOBBY_MODEL_IDS = new Set<CreationModelId>(["fast-ltx2", "fast-ltx23"]);
+const LOBBY_MODEL_IDS = new Set<CreationModelId>(["fast-ltx2", "fast-ltx23", "fast-h3"]);
 const ASPECT_RATIO_IDS = new Set<AspectRatioId>(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
 const RESOLUTION_IDS = new Set<ResolutionId>(["480p", "720p", "1080p", "4k"]);
 const DURATION_SEC_VALUES = new Set([5, 10, 15]);

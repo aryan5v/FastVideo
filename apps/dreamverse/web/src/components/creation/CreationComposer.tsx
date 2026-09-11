@@ -36,9 +36,10 @@ import {
 	formatResolutionLabel,
 } from "@/lib/creationConfig";
 import {
-	DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	DEFAULT_LOBBY_CAPABILITIES_BUNDLE,
 	isSupportedCreationMode,
 	isSupportedResolution,
+	resolveModelCapabilities,
 	unsupportedModeNotice,
 	type LobbyCreationCapabilities,
 } from "@/lib/creationCapabilities";
@@ -103,7 +104,7 @@ export default function CreationComposer({
 	onLastFrameSelect,
 	onSpeechTranscript,
 	onSpeechInterimChange,
-	capabilities = DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	capabilities = resolveModelCapabilities(DEFAULT_LOBBY_CAPABILITIES_BUNDLE, modelId),
 }: CreationComposerProps) {
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const [sttBusy, setSttBusy] = useState(false);

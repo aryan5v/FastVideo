@@ -1,44 +1,53 @@
 import { describe, expect, it } from "vitest";
 
 import {
-	DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	DEFAULT_LOBBY_CAPABILITIES_BUNDLE,
 	clampLobbySelectionToCapabilities,
-	parseLobbyCreationCapabilities,
+	parseLobbyCapabilitiesBundle,
+	resolveModelCapabilities,
 	validateLobbyCreationSelection,
 } from "@/lib/creationCapabilities";
 
 describe("creationCapabilities", () => {
-	it("parses backend capability payloads", () => {
-		expect(
-			parseLobbyCreationCapabilities({
-				model_ids: ["fast-ltx2"],
-				generation_modes: ["t2va"],
-				resolutions: ["480p", "720p"],
-				duration_sec: [5, 10],
-			}),
-		).toMatchObject({
-			model_ids: ["fast-ltx2"],
-			generation_modes: ["t2va"],
-			resolutions: ["480p", "720p"],
-			duration_sec: [5, 10],
+	it("parses backend capability payloads with per-model caps", () => {
+		const bundle = parseLobbyCapabilitiesBundle({
+			model_ids: ["fast-ltx2", "fast-h3"],
+			models: {
+				"fast-ltx2": {
+					generation_modes: ["t2va"],
+					resolutions: ["480p", "720p"],
+					duration_sec: [5, 10],
+				},
+				"fast-h3": {
+					generation_modes: ["t2va", "ref2va"],
+					aspect_ratios: ["16:9"],
+					resolutions: ["720p"],
+				},
+			},
 		});
+		expect(bundle.model_ids).toEqual(["fast-ltx2", "fast-h3"]);
+		expect(bundle.models["fast-h3"]?.aspect_ratios).toEqual(["16:9"]);
 	});
 
-	it("clamps unsupported lobby selections to supported defaults", () => {
+	it("includes fast-h3 in default lobby models", () => {
+		expect(DEFAULT_LOBBY_CAPABILITIES_BUNDLE.model_ids).toContain("fast-h3");
+	});
+
+	it("clamps unsupported lobby selections to model-specific defaults", () => {
 		expect(
 			clampLobbySelectionToCapabilities({
-				capabilities: DEFAULT_LOBBY_CREATION_CAPABILITIES,
-				modelId: "fast-ltx23",
+				capabilities: resolveModelCapabilities(DEFAULT_LOBBY_CAPABILITIES_BUNDLE, "fast-h3"),
+				modelId: "fast-h3",
 				modeId: "fl2av",
-				aspectRatio: "16:9",
+				aspectRatio: "9:16",
 				resolution: "4k",
 				durationSec: 99,
 			}),
 		).toEqual({
-			modelId: "fast-ltx23",
+			modelId: "fast-h3",
 			modeId: "t2v",
 			aspectRatio: "16:9",
-			resolution: "480p",
+			resolution: "720p",
 			durationSec: 5,
 		});
 	});
@@ -46,7 +55,7 @@ describe("creationCapabilities", () => {
 	it("rejects unsupported generation modes with a clear message", () => {
 		expect(
 			validateLobbyCreationSelection({
-				capabilities: DEFAULT_LOBBY_CREATION_CAPABILITIES,
+				capabilities: resolveModelCapabilities(DEFAULT_LOBBY_CAPABILITIES_BUNDLE, "fast-ltx23"),
 				modelId: "fast-ltx23",
 				modeId: "fl2av",
 				aspectRatio: "16:9",
@@ -56,10 +65,10 @@ describe("creationCapabilities", () => {
 		).toMatch(/FL2VA/i);
 	});
 
-	it("rejects unsupported resolutions", () => {
+	it("rejects unsupported resolutions for ltx models", () => {
 		expect(
 			validateLobbyCreationSelection({
-				capabilities: DEFAULT_LOBBY_CREATION_CAPABILITIES,
+				capabilities: resolveModelCapabilities(DEFAULT_LOBBY_CAPABILITIES_BUNDLE, "fast-ltx23"),
 				modelId: "fast-ltx23",
 				modeId: "t2v",
 				aspectRatio: "16:9",

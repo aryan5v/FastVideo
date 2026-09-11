@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from dreamverse.config import FRAME_HEIGHT, FRAME_WIDTH, GENERATION_SEGMENT_CAP, MODEL_REGISTRY, NUM_FRAMES
 from dreamverse.creation_capabilities import validate_lobby_creation_config
 
-LTX_LOBBY_MODEL_IDS = frozenset({"fast-ltx2", "fast-ltx23"})
+LTX_LOBBY_MODEL_IDS = frozenset(MODEL_REGISTRY.keys())
 SUPPORTED_GENERATION_MODES = frozenset({"t2va", "fl2va", "ref2va"})
 SUPPORTED_ASPECT_RATIOS = frozenset({"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"})
 SUPPORTED_RESOLUTIONS = frozenset({"480p", "720p", "1080p", "4k"})

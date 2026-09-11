@@ -33,11 +33,12 @@ import {
 	normalizePromptWindowSnapshot,
 } from "@/lib/prompts/promptWindowSnapshot";
 import {
-	DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	DEFAULT_LOBBY_CAPABILITIES_BUNDLE,
 	clampLobbySelectionToCapabilities,
-	parseLobbyCreationCapabilities,
+	parseLobbyCapabilitiesBundle,
+	resolveModelCapabilities,
 	validateLobbyCreationSelection,
-	type LobbyCreationCapabilities,
+	type LobbyCapabilitiesBundle,
 } from "@/lib/creationCapabilities";
 import {
 	buildCreationInitPayload,
@@ -262,8 +263,12 @@ export default function Page() {
 	const [creationAspectRatio, setCreationAspectRatio] = useState<AspectRatioId>("16:9");
 	const [creationResolution, setCreationResolution] = useState<ResolutionId>("720p");
 	const [creationDurationSec, setCreationDurationSec] = useState(5);
-	const [lobbyCapabilities, setLobbyCapabilities] = useState<LobbyCreationCapabilities>(
-		DEFAULT_LOBBY_CREATION_CAPABILITIES,
+	const [lobbyCapabilitiesBundle, setLobbyCapabilitiesBundle] = useState<LobbyCapabilitiesBundle>(
+		DEFAULT_LOBBY_CAPABILITIES_BUNDLE,
+	);
+	const activeModelCapabilities = useMemo(
+		() => resolveModelCapabilities(lobbyCapabilitiesBundle, creationModelId),
+		[lobbyCapabilitiesBundle, creationModelId],
 	);
 	const [sessionCreationConfig, setSessionCreationConfig] = useState<SessionCreationConfig>({
 		modelId: "fast-ltx23",
@@ -525,11 +530,27 @@ export default function Page() {
 		setRuntimeReady(true);
 	}, []);
 
-	function applyLobbyCapabilities(capabilities: LobbyCreationCapabilities) {
-		setLobbyCapabilities(capabilities);
+	function applyLobbyCapabilitiesBundle(bundle: LobbyCapabilitiesBundle) {
+		setLobbyCapabilitiesBundle(bundle);
 		const clamped = clampLobbySelectionToCapabilities({
-			capabilities,
+			capabilities: resolveModelCapabilities(bundle, creationModelId),
 			modelId: creationModelId,
+			modeId: creationModeId,
+			aspectRatio: creationAspectRatio,
+			resolution: creationResolution,
+			durationSec: creationDurationSec,
+		});
+		setCreationModelId(clamped.modelId);
+		setCreationModeId(clamped.modeId);
+		setCreationAspectRatio(clamped.aspectRatio);
+		setCreationResolution(clamped.resolution);
+		setCreationDurationSec(clamped.durationSec);
+	}
+
+	function handleCreationModelChange(modelId: CreationModelId) {
+		const clamped = clampLobbySelectionToCapabilities({
+			capabilities: resolveModelCapabilities(lobbyCapabilitiesBundle, modelId),
+			modelId,
 			modeId: creationModeId,
 			aspectRatio: creationAspectRatio,
 			resolution: creationResolution,
@@ -550,17 +571,17 @@ export default function Page() {
 			cache: "no-store",
 		})
 			.then(async (response) => {
-				if (!response.ok) return DEFAULT_LOBBY_CREATION_CAPABILITIES;
-				return parseLobbyCreationCapabilities(await response.json());
+				if (!response.ok) return DEFAULT_LOBBY_CAPABILITIES_BUNDLE;
+				return parseLobbyCapabilitiesBundle(await response.json());
 			})
-			.then((capabilities) => {
+			.then((bundle) => {
 				if (!cancelled) {
-					applyLobbyCapabilities(capabilities);
+					applyLobbyCapabilitiesBundle(bundle);
 				}
 			})
 			.catch(() => {
 				if (!cancelled) {
-					applyLobbyCapabilities(DEFAULT_LOBBY_CREATION_CAPABILITIES);
+					applyLobbyCapabilitiesBundle(DEFAULT_LOBBY_CAPABILITIES_BUNDLE);
 				}
 			});
 		return () => {
@@ -2082,7 +2103,7 @@ export default function Page() {
 
 	async function joinSession({ force = false } = {}) {
 		const validationError = validateLobbyCreationSelection({
-			capabilities: lobbyCapabilities,
+			capabilities: activeModelCapabilities,
 			modelId: creationModelId,
 			modeId: creationModeId,
 			aspectRatio: creationAspectRatio,
@@ -2882,11 +2903,11 @@ export default function Page() {
 							lastFramePreviewUrl={lastFramePreviewUrl}
 							mentionOptions={mentionOptions}
 							storyPresets={lobbyStoryPresets}
-							capabilities={lobbyCapabilities}
+							capabilities={activeModelCapabilities}
 							onValueChange={(value) => sessionStore.patch({ livePromptDraft: value })}
 							onSubmit={() => void joinSession()}
 							onKeyDown={handleLivePromptKeydown}
-							onModelChange={setCreationModelId}
+							onModelChange={handleCreationModelChange}
 							onModeChange={setCreationModeId}
 							onAspectRatioChange={setCreationAspectRatio}
 							onResolutionChange={setCreationResolution}

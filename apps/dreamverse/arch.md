@@ -322,7 +322,7 @@ creation config and echoes the resolved values back on `gpu_assigned` and
 Incoming fields on `session_init_v2` and `project_init_v1`:
 
 - `generation_mode`: `t2va`, `fl2va`, or `ref2va` (canonical upstream IDs from #1834)
-- `model_id`: `fast-ltx2` or `fast-ltx23`
+- `model_id`: `fast-ltx2`, `fast-ltx23`, or `fast-h3`
 - `aspect_ratio`: one of `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`
 - `resolution`: one of `480p`, `720p`, `1080p`, `4k`
 - `duration_sec`: `5`, `10`, or `15`
