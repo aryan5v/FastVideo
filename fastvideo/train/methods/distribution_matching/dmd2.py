@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from fastvideo.train.methods.base import TrainingMethod, LogScalar
@@ -201,6 +204,7 @@ class DMD2Method(TrainingMethod):
                 student_ctx,
                 grad_accum_rounds=grad_accum_rounds,
             )
+            self._assert_finite_gradients("student", self.student)
             return
 
         critic_ctx = backward_ctx.get("critic_ctx")
@@ -211,6 +215,27 @@ class DMD2Method(TrainingMethod):
             critic_ctx,
             grad_accum_rounds=grad_accum_rounds,
         )
+        self._assert_finite_gradients("critic", self.critic)
+
+    @staticmethod
+    def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        return getattr(tensor, "_local_tensor", tensor)
+
+    @classmethod
+    def _assert_finite_gradients(cls, role: str, model: ModelBase) -> None:
+        """Abort on numerical corruption instead of applying a partial update."""
+        bad: list[str] = []
+        for name, parameter in model.transformer.named_parameters():
+            if parameter.grad is None:
+                continue
+            if not bool(torch.isfinite(cls._local_tensor(parameter.grad)).all()):
+                bad.append(name)
+                if len(bad) == 8:
+                    break
+        if bad:
+            raise RuntimeError(
+                f"Nonfinite {role} gradients before clipping/Adam: {bad}"
+            )
 
     # TrainingMethod override: get_optimizers
     def get_optimizers(
@@ -238,6 +263,66 @@ class DMD2Method(TrainingMethod):
         if self._should_update_student(iteration):
             return {"student": self.student.transformer}
         return {"critic": self.critic.transformer}
+
+    def optimizers_schedulers_step(self, iteration: int) -> None:
+        """Prove the first critic and student Adam updates are finite FP32."""
+        role = "student" if self._should_update_student(iteration) else "critic"
+        model = self.student if role == "student" else self.critic
+        optimizer = self.get_optimizers(iteration)[0]
+        verified = getattr(self, "_verified_optimizer_roles", set())
+        first = role not in verified
+        probes: list[tuple[torch.Tensor, torch.Tensor]] = []
+        if first:
+            for parameter in model.transformer.parameters():
+                if not parameter.requires_grad:
+                    continue
+                local = self._local_tensor(parameter).detach().reshape(-1)
+                if local.dtype != torch.float32:
+                    raise RuntimeError(
+                        f"DMD2 {role} master weights must be FP32, got {local.dtype}"
+                    )
+                if local.numel() and len(probes) < 16:
+                    probes.append((local, local[:4096].clone()))
+
+        super().optimizers_schedulers_step(iteration)
+
+        if first:
+            changed = sum(
+                int(torch.count_nonzero(current[:before.numel()] != before))
+                for current, before in probes
+            )
+            moments = [
+                self._local_tensor(value)
+                for state in optimizer.state.values()
+                for key, value in state.items()
+                if key in {"exp_avg", "exp_avg_sq"} and torch.is_tensor(value)
+            ]
+            if (
+                not probes
+                or changed == 0
+                or not moments
+                or any(value.dtype != torch.float32 for value in moments)
+                or any(not bool(torch.isfinite(value).all()) for value in moments)
+                or any(
+                    not bool(torch.isfinite(current[:before.numel()]).all())
+                    for current, before in probes
+                )
+            ):
+                raise RuntimeError(f"No finite FP32 Adam update for {role}")
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            root = Path(self.training_config.checkpoint.output_dir)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / f"dmd2_update_{role}_rank{rank}.json").write_text(
+                json.dumps({
+                    "role": role,
+                    "iteration": iteration,
+                    "changed_probe_elements": changed,
+                    "passed": True,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            verified.add(role)
+            self._verified_optimizer_roles = verified
 
     def _parse_rollout_mode(self, ) -> Literal["simulate", "data_latent"]:
         """Parse how DMD2 obtains the latent point used for rollout.
@@ -1677,11 +1762,13 @@ class DMD2Method(TrainingMethod):
         for name, modality in slices:
             gen_m = generator_pred_x0[:, modality].float()
             with torch.no_grad():
-                # Keep the VSD weight stable for low-precision or degenerate
-                # teacher residuals.
                 real_m = real_cfg_x0[:, modality].float()
                 denom = (gen_m - real_m).abs().mean() + 1e-6
-                grad = torch.nan_to_num((faker_x0[:, modality].float() - real_m) / denom)
+                grad = (faker_x0[:, modality].float() - real_m) / denom
+                if not bool(torch.isfinite(grad).all()):
+                    raise RuntimeError(
+                        f"Nonfinite DMD2 distribution direction for {name}"
+                    )
             loss_m = 0.5 * F.mse_loss(gen_m, (gen_m - grad).detach())
             loss = loss + self._modality_weight(name) * loss_m
             if emit_modality_metrics:
