@@ -14,8 +14,13 @@ set -euo pipefail
 : "${MASTER_PORT:?Resolve MASTER_PORT on the SLURM host before entering the container}"
 
 NNODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-4}}"
+PRODUCTION_TARGET="${PRODUCTION_TARGET:-1000}"
 if [[ "${NNODES}" -ne 4 ]]; then
   echo "Expected four SLURM nodes, got ${NNODES}" >&2
+  exit 2
+fi
+if [[ "${PRODUCTION_TARGET}" -lt 100 || "$((PRODUCTION_TARGET % 100))" -ne 0 ]]; then
+  echo "PRODUCTION_TARGET must be a multiple of 100 and at least 100, got ${PRODUCTION_TARGET}" >&2
   exit 2
 fi
 export NNODES
@@ -166,4 +171,4 @@ test -e "${OUTPUT_ROOT}/.phase5-passed"
 # Continue uninterrupted after the contract smoke. Validation and immutable
 # checkpoints are produced every 100 phases (20 student updates); selection
 # is based on those checkpoints rather than assuming phase 1,000 is best.
-train_phase 1000 100 100 "${OUTPUT_ROOT}/checkpoint-5" "$((MASTER_PORT + 1))" release20b-dmd2-v12-production
+train_phase "${PRODUCTION_TARGET}" 100 100 "${OUTPUT_ROOT}/checkpoint-5" "$((MASTER_PORT + 1))" release20b-dmd2-v12-production
