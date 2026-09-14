@@ -285,6 +285,8 @@ def convert(
     from fastvideo.distributed import (
         maybe_init_distributed_environment_and_model_parallel, )
     from fastvideo.train.utils.builder import build_from_config
+    from fastvideo.train.utils.instantiate import instantiate
+    from fastvideo.training.checkpointing_utils import ModelWrapper
     from fastvideo.train.utils.checkpoint import (
         CheckpointManager,
         _resolve_resume_checkpoint,
@@ -333,16 +335,23 @@ def convert(
     tc.distributed.hsdp_replicate_dim = 1
     tc.distributed.hsdp_shard_dim = 1
 
-    # -- Build model (loads pretrained weights + FSDP) --
-    _, method, _, _ = build_from_config(cfg)
-
-    # -- Load DCP weights into the model --
-    states = method.checkpoint_state()
     if weights_only:
-        # Export needs only module weights; optimizer states (a full fp32
-        # second-moment tensor per trainable role) can double GPU memory and
-        # force structure-matching between the shim and checkpoint optimizers.
-        states = {k: v for k, v in states.items() if k.startswith("roles.")}
+        # A role-only export must not construct unrelated roles or initialize
+        # the training dataloader.  Large DMD2 checkpoints otherwise load the
+        # full teacher and critic merely to restore one student transformer,
+        # which can OOM and also makes export depend on stale dataset paths.
+        if role not in cfg.models:
+            raise KeyError(f"Role {role!r} is not present in the checkpoint config")
+        model = instantiate(cfg.models[role], training_config=tc)
+        if model.transformer is None:
+            raise ValueError(f"Role {role!r} has no transformer to export")
+        states = {f"roles.{role}.transformer": ModelWrapper(model.transformer)}
+    else:
+        # Full-state export retains the legacy behavior for callers that need
+        # method-managed optimizer or multi-role state.
+        _, method, _, _ = build_from_config(cfg)
+        states = method.checkpoint_state()
+        model = method._role_models[role]
     logger.info(
         "Loading DCP checkpoint from %s",
         resolved,
@@ -350,7 +359,6 @@ def convert(
     dcp.load(states, checkpoint_id=str(dcp_dir))
 
     # -- Export to diffusers format --
-    model = method._role_models[role]
     base_model_path = str(tc.model_path)
     if not base_model_path:
         raise ValueError("Cannot determine base_model_path from "
