@@ -1,12 +1,14 @@
 #!/bin/bash
 # Compute-node payload for a four-node / 16-GPU Release-20B DMD2 V12 pilot.
 # Run as one top-level srun task per four-GPU node. The payload first proves
-# four critic updates and one student update, then resumes to 25 student
-# updates (125 phases) for the first full audio/video promotion gate.
+# four critic updates and one student update, then resumes in the same
+# allocation to 1,000 phases. Intermediate checkpoints are promotion gates,
+# not stop/requeue boundaries.
 set -euo pipefail
 
 : "${CODE_ROOT:?Set CODE_ROOT to the immutable execution checkout}"
 : "${SELECTED_PARENT:?Set SELECTED_PARENT to the gated BF16 parent export}"
+: "${TEACHER_PARENT:?Set TEACHER_PARENT to the full base H3 checkpoint}"
 : "${OUTPUT_BASE:?Set OUTPUT_BASE to a fresh DMD2 namespace}"
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
@@ -18,6 +20,8 @@ test -s "${CODE_ROOT}/CODE_COMMIT"
 test -s "${CONFIG_PATH}"
 test -s "${SELECTED_PARENT}/transformer/config.json"
 test -s "${SELECTED_PARENT}/transformer/model.safetensors"
+test -s "${TEACHER_PARENT}/transformer/config.json"
+test -s "${TEACHER_PARENT}/transformer/model.safetensors"
 
 if [[ "${SLURM_PROCID}" == "0" ]]; then
   test ! -e "${OUTPUT_ROOT}"
@@ -72,16 +76,16 @@ from fastvideo.train.utils.config import load_run_config
 path, parent, output = sys.argv[1:]
 cfg = load_run_config(path, [
     "--models.student.init_from", parent,
-    "--models.critic.init_from", parent,
     "--training.checkpoint.output_dir", output,
 ])
 assert cfg.training.distributed.num_gpus == 16
 assert cfg.training.distributed.sp_size == 4
 assert cfg.training.distributed.hsdp_shard_dim == 16
-assert cfg.training.loop.gradient_accumulation_steps == 8
+assert cfg.training.loop.gradient_accumulation_steps == 16
 assert cfg.method["generator_update_interval"] == 5
 assert cfg.method["dmd_denoising_steps"] == [999, 749, 500, 250]
 assert cfg.method["fake_score_loss_space"] == "x0"
+assert cfg.models["critic"]["init_from"] != parent
 PY
   touch "${OUTPUT_ROOT}/.preflight-passed"
 fi
@@ -104,7 +108,8 @@ train_phase() {
     --rdzv_endpoint "${MASTER_ADDR}:${port}" \
     -m fastvideo.train.entrypoint.train --config "${CONFIG_PATH}" \
     --models.student.init_from "${SELECTED_PARENT}" \
-    --models.critic.init_from "${SELECTED_PARENT}" \
+    --models.teacher.init_from "${TEACHER_PARENT}" \
+    --models.critic.init_from "${TEACHER_PARENT}" \
     --training.loop.max_train_steps "${target}" \
     --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
     --training.checkpoint.training_state_checkpointing_steps "${checkpoint_every}" \
@@ -152,7 +157,7 @@ for _ in $(seq 1 180); do
 done
 test -e "${OUTPUT_ROOT}/.phase5-passed"
 
-# Stop at the first quality gate: 125 phases = 25 student updates and about
-# 1,000 newly adopted prompts over four DP groups. Validation writes five
-# audio-bearing four-call MP4s and an immutable BF16 student checkpoint.
-train_phase 125 125 125 "${OUTPUT_ROOT}/checkpoint-5" "$((MASTER_PORT + 1))" release20b-dmd2-v12-gate25
+# Continue uninterrupted after the contract smoke. Validation and immutable
+# checkpoints are produced every 100 phases (20 student updates); selection
+# is based on those checkpoints rather than assuming phase 1,000 is best.
+train_phase 1000 100 100 "${OUTPUT_ROOT}/checkpoint-5" "$((MASTER_PORT + 1))" release20b-dmd2-v12-production

@@ -166,6 +166,29 @@ def test_h3_default_parameter_dtype_keeps_compute_boundaries_fp32() -> None:
     ) == torch.bfloat16
 
 
+def test_h3_folded_adaln_keeps_fp32_training_master() -> None:
+    """Rank-reduced AdaLN must not silently demote an FP32 training load."""
+    model = cast(
+        MiniMaxH3Transformer3DModel,
+        SimpleNamespace(
+            config=MiniMaxH3Config(uniform_parameter_dtype=False),
+            adaln_rank=768,
+            _keep_in_fp32_modules=MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
+        ),
+    )
+
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "transformer_blocks.0.adaln_proj.linear.weight",
+        torch.float32,
+    ) == torch.float32
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "transformer_blocks.0.adaln_proj.linear.weight",
+        torch.bfloat16,
+    ) == torch.bfloat16
+
+
 def test_h3_materializes_rotary_frequencies_on_loader_device() -> None:
     """Verify that checkpoint loading moves analytic rotary state to the model device."""
     model = cast(

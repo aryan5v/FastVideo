@@ -566,13 +566,12 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
     def _get_parameter_dtype(self, name: str, default_dtype: torch.dtype) -> torch.dtype:
         """Keep the released input, timestep, and output projections in FP32.
 
-        Factorized AdaLN uses FP16; BF16 is ~1.7x worse there.
+        Folded AdaLN parameters follow the enclosing FSDP policy.  In
+        particular, an FP32 training load must keep them as FP32 optimizer
+        masters; pinning the folded weights to FP16 here quantizes every
+        small Adam update before the next forward.  Release checkpoints are
+        still exported in BF16, matching the validated 42-block parent.
         """
-        # Rank-reduced AdaLN stays FP16 even in uniform mode. The FSDP loader
-        # rejects those ungrouped mixed parameters for training.
-        if getattr(self, "adaln_rank", None) is not None and (
-                ".adaln_proj." in name or name.startswith(("norm_out.linear.", "adaln_basis."))):
-            return torch.float16
         if self.config.uniform_parameter_dtype:
             return default_dtype
         return torch.float32 if name.split(".", 1)[0] in self._keep_in_fp32_modules else default_dtype
@@ -637,14 +636,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             prefix=f"{config.prefix}.time_embedder",
         )
         self.adaln_rank: int | None = arch.adaln_rank
-        if self.adaln_rank is not None and config.uniform_parameter_dtype:
-            raise ValueError(
-                "Rank-reduced AdaLN checkpoints (adaln_rank set) cannot be trained: "
-                "uniform_parameter_dtype needs one dtype for every trainable "
-                "parameter, but factorized AdaLN weights are pinned to FP16 "
-                "(BF16 reconstructs them ~1.7x worse). Fine-tune the full-rank "
-                "checkpoint instead, then re-fit the basis with "
-                "scripts/checkpoint_conversion/convert_minimax_h3_adaln_rank.py.")
         adaln_dim = self.adaln_rank or arch.time_embed_dim
         self.adaln_basis = ReplicatedLinear(
             arch.time_embed_dim,
