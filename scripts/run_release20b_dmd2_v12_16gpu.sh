@@ -21,7 +21,7 @@ test -s "${CONFIG_PATH}"
 test -s "${SELECTED_PARENT}/transformer/config.json"
 test -s "${SELECTED_PARENT}/transformer/model.safetensors"
 test -s "${TEACHER_PARENT}/transformer/config.json"
-test -s "${TEACHER_PARENT}/transformer/model.safetensors"
+test -s "${TEACHER_PARENT}/transformer/diffusion_pytorch_model.safetensors.index.json"
 
 if [[ "${SLURM_PROCID}" == "0" ]]; then
   test ! -e "${OUTPUT_ROOT}"
