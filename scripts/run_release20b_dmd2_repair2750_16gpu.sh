@@ -22,7 +22,11 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
   export HF_HOME=/mnt/nfs/vlm-aryan/hf-cache
   export PYTHONDONTWRITEBYTECODE=1
   cd "${CODE_ROOT}"
-  "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
+  # The export runs on rank 0 only.  Override the inherited four-task SLURM
+  # rendezvous for this command so it cannot wait forever for absent ranks.
+  env RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 \
+    MASTER_ADDR=127.0.0.1 MASTER_PORT="${EXPORT_MASTER_PORT:-31975}" \
+    "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
     --checkpoint "${DMD_CHECKPOINT}" \
     --output-dir "${REPAIR_PARENT}" \
     --role student --weights-only --link-base
