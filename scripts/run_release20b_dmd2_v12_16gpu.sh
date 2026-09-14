@@ -13,6 +13,13 @@ set -euo pipefail
 : "${MASTER_ADDR:?Resolve MASTER_ADDR on the SLURM host before entering the container}"
 : "${MASTER_PORT:?Resolve MASTER_PORT on the SLURM host before entering the container}"
 
+NNODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-4}}"
+if [[ "${NNODES}" -ne 4 ]]; then
+  echo "Expected four SLURM nodes, got ${NNODES}" >&2
+  exit 2
+fi
+export NNODES
+
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 CONFIG_PATH="${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml"
 OUTPUT_ROOT="${OUTPUT_BASE}/job-${SLURM_JOB_ID}"
@@ -102,7 +109,7 @@ train_phase() {
     resume_args=(--training.checkpoint.resume_from_checkpoint "${resume}")
   fi
   "${PY}" -m torch.distributed.run \
-    --nnodes "${SLURM_JOB_NUM_NODES}" --nproc_per_node 4 \
+    --nnodes "${NNODES}" --nproc_per_node 4 \
     --node_rank "${SLURM_PROCID}" --rdzv_backend c10d \
     --rdzv_endpoint "${MASTER_ADDR}:${port}" \
     -m fastvideo.train.entrypoint.train --config "${CONFIG_PATH}" \
@@ -122,10 +129,10 @@ touch "${OUTPUT_ROOT}/.phase5-node-${SLURM_PROCID}"
 
 if [[ "${SLURM_PROCID}" == "0" ]]; then
   for _ in $(seq 1 180); do
-    [[ "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${SLURM_JOB_NUM_NODES}" ]] && break
+    [[ "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${NNODES}" ]] && break
     sleep 5
   done
-  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${SLURM_JOB_NUM_NODES}"
+  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${NNODES}"
   test -s "${OUTPUT_ROOT}/checkpoint-5/dcp/.metadata"
   test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_critic_rank*.json' | wc -l)" -eq 16
   test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_student_rank*.json' | wc -l)" -eq 16
