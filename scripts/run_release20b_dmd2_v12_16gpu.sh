@@ -66,6 +66,10 @@ export TORCH_NCCL_ENABLE_MONITORING=0
 # allocations.  Ordinary NCCL collectives are slower only at startup scale and
 # avoid losing an otherwise healthy four-node allocation to a transport fault.
 export NCCL_NVLS_ENABLE=0
+# The Slinky rack-2 trays have also produced CUDA error 400 while creating
+# NCCL's direct P2P transport.  The established H3 launchers disable this
+# path and use the stable shared-memory/network transports instead.
+export NCCL_P2P_DISABLE=1
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false

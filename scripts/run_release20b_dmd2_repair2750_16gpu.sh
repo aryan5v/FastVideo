@@ -9,6 +9,7 @@ set -euo pipefail
 : "${REPAIR_PARENT:?}"
 : "${OUTPUT_BASE:?}"
 : "${TEACHER_PARENT:?}"
+: "${EXPORT_BASE_PARENT:?}"
 : "${MASTER_ADDR:?}"
 : "${MASTER_PORT:?}"
 
@@ -22,6 +23,11 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
   export HF_HOME=/mnt/nfs/vlm-aryan/hf-cache
   export PYTHONDONTWRITEBYTECODE=1
   cd "${CODE_ROOT}"
+  export_config="/tmp/release20b-dmd2-export-${SLURM_JOB_ID}.yaml"
+  sed "s|__SELECTED_PARENT__|${EXPORT_BASE_PARENT}|g" \
+    "${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml" \
+    > "${export_config}"
+  ! grep -q '__SELECTED_PARENT__' "${export_config}"
   # The export runs on rank 0 only.  Override the inherited four-task SLURM
   # rendezvous for this command so it cannot wait forever for absent ranks.
   env RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 \
@@ -29,7 +35,7 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
     "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
     --checkpoint "${DMD_CHECKPOINT}" \
     --output-dir "${REPAIR_PARENT}" \
-    --config "${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml" \
+    --config "${export_config}" \
     --role student --weights-only --link-base
   test -s "${REPAIR_PARENT}/transformer/model.safetensors"
   test -s "${REPAIR_PARENT}/transformer/config.json"
