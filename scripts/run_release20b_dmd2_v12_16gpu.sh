@@ -10,6 +10,8 @@ set -euo pipefail
 : "${SELECTED_PARENT:?Set SELECTED_PARENT to the gated BF16 parent export}"
 : "${TEACHER_PARENT:?Set TEACHER_PARENT to the full base H3 checkpoint}"
 : "${OUTPUT_BASE:?Set OUTPUT_BASE to a fresh DMD2 namespace}"
+: "${MASTER_ADDR:?Resolve MASTER_ADDR on the SLURM host before entering the container}"
+: "${MASTER_PORT:?Resolve MASTER_PORT on the SLURM host before entering the container}"
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 CONFIG_PATH="${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml"
@@ -34,9 +36,6 @@ else
   test -d "${OUTPUT_ROOT}"
 fi
 
-mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
-MASTER_ADDR="${nodes[0]}"
-MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"
 export MASTER_ADDR MASTER_PORT
 
 source /mnt/nfs/vlm-aryan/fasth3-33b-20260806/secrets.env

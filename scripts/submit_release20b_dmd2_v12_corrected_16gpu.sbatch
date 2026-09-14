@@ -12,10 +12,12 @@
 set -uo pipefail
 
 SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
-CODE_ROOT=${SPRINT_ROOT}/code/release20b-dmd2-v12-corrected-v1
+CODE_ROOT=${SPRINT_ROOT}/code/release20b-dmd2-v12-corrected-v2
 SELECTED_PARENT=${SPRINT_ROOT}/runs/release20b-folded-long-4k-v3/dmd-parent-step750-complete-v1
 TEACHER_PARENT=${SPRINT_ROOT}/release-candidates/base-h3-teacher-complete-v1
-OUTPUT_BASE=${SPRINT_ROOT}/runs/release20b-dmd2-v12-corrected-c4-parent750-v1
+OUTPUT_BASE=${SPRINT_ROOT}/runs/release20b-dmd2-v12-corrected-c4-parent750-v2
+MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
+MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"
 
 set +e
 srun \
@@ -32,6 +34,8 @@ srun \
   TEACHER_PARENT="${TEACHER_PARENT}" \
   OUTPUT_BASE="${OUTPUT_BASE}" \
   SPRINT_ROOT="${SPRINT_ROOT}" \
+  MASTER_ADDR="${MASTER_ADDR}" \
+  MASTER_PORT="${MASTER_PORT}" \
   bash "${CODE_ROOT}/scripts/run_release20b_dmd2_v12_16gpu.sh"
 payload_rc=$?
 set -e
