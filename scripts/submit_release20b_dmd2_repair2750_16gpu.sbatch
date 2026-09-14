@@ -12,7 +12,7 @@
 set -uo pipefail
 
 SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
-CODE_ROOT=${SPRINT_ROOT}/code/release20b-dmd2-v12-corrected-v5
+CODE_ROOT=${SPRINT_ROOT}/code/release20b-dmd2-v12-corrected-v6
 OLD_RUN=${SPRINT_ROOT}/runs/release20b-dmd2-v15-dense-c4-parent750-16gpu-cpu-fp32master-v1/job-8255
 DMD_CHECKPOINT=${OLD_RUN}/checkpoint-2750
 REPAIR_PARENT=${OLD_RUN}/repair-parent-step2750-student-only-v1

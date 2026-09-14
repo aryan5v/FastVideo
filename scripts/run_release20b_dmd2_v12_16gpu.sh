@@ -62,6 +62,10 @@ export FASTVIDEO_FA4=0
 export FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ENABLE_MONITORING=0
+# NVLS has intermittently failed during communicator creation on these GB200
+# allocations.  Ordinary NCCL collectives are slower only at startup scale and
+# avoid losing an otherwise healthy four-node allocation to a transport fault.
+export NCCL_NVLS_ENABLE=0
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false

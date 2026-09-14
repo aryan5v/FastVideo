@@ -29,6 +29,7 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
     "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
     --checkpoint "${DMD_CHECKPOINT}" \
     --output-dir "${REPAIR_PARENT}" \
+    --config "${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml" \
     --role student --weights-only --link-base
   test -s "${REPAIR_PARENT}/transformer/model.safetensors"
   test -s "${REPAIR_PARENT}/transformer/config.json"
