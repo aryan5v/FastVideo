@@ -21,6 +21,9 @@ import torch.nn.functional as F
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.quantization import QuantizationConfig
 from fastvideo.models.dits.minimax_h3_hybrid.layout import HybridSequenceLayout
+from fastvideo.models.dits.minimax_h3_hybrid.parallel import HeadShard, Phase, install_phase_dump
+
+install_phase_dump()
 
 DELTA_RULES = ("sana_scaled", "vdn_solve", "vdn_scaled")
 SHORT_CONV_TARGETS = ("q", "k", "v")
@@ -137,10 +140,19 @@ class OutputGate(nn.Module):
         self.record_diagnostics = False
         self.latest_diagnostics: dict[str, torch.Tensor] = {}
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, head_shard: HeadShard | None = None) -> torch.Tensor:
         projected = hidden_states if self.down is None else self.down(hidden_states)[0]
         gate, _ = self.up(projected)
-        gate = torch.sigmoid(gate).view(-1, self.num_heads, self.head_dim or 1)
+        gate = torch.sigmoid(gate)
+        per_head = self.head_dim or 1
+        if head_shard is not None:
+            # The head axis is the last, contiguous, and laid out as
+            # ``head * per_head + channel``; keep only this rank's slice.
+            gate = gate.narrow(-1, head_shard.start * per_head, head_shard.local_heads * per_head)
+            heads = head_shard.local_heads
+        else:
+            heads = self.num_heads
+        gate = gate.view(-1, heads, per_head)
         if self.training and self.record_diagnostics:
             detached = gate.detach().float()
             self.latest_diagnostics = {
@@ -171,13 +183,25 @@ class FrameKDAAlpha(nn.Module):
                        (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp(min=1e-4)
         self.dt_bias = nn.Parameter(dt + torch.log(-torch.expm1(-dt)))
 
-    def forward(self, frame_mean: torch.Tensor) -> torch.Tensor:
+    def forward(self, frame_mean: torch.Tensor, head_shard: HeadShard | None = None) -> torch.Tensor:
+        heads = self.num_heads if head_shard is None else head_shard.local_heads
         with torch.autocast(device_type=frame_mean.device.type, enabled=False):
             delta = F.linear(frame_mean.float(), self.down.weight.float())
-            delta = F.linear(delta, self.up.weight.float())
-            delta = delta + self.dt_bias.float()
-            scale = torch.exp(self.A_log.float())[:, None]
-            delta = delta.view(-1, self.num_heads, self.head_dim)
+            up_weight = self.up.weight.float()
+            dt_bias = self.dt_bias.float()
+            a_log = self.A_log.float()
+            if head_shard is not None:
+                # up/dt_bias are indexed by ``head * head_dim + channel``; A_log is
+                # one scalar per head.  Slice both to this rank's heads.
+                lo = head_shard.start * self.head_dim
+                width = head_shard.local_heads * self.head_dim
+                up_weight = up_weight.narrow(0, lo, width)
+                dt_bias = dt_bias.narrow(0, lo, width)
+                a_log = a_log.narrow(0, head_shard.start, head_shard.local_heads)
+            delta = F.linear(delta, up_weight)
+            delta = delta + dt_bias
+            scale = torch.exp(a_log)[:, None]
+            delta = delta.view(-1, heads, self.head_dim)
             return torch.exp(-scale * F.softplus(delta))
 
 
@@ -198,24 +222,36 @@ class LinearAttentionSepConv(nn.Module):
             setattr(self, f"{name}_sp", spatial)
             setattr(self, f"{name}_tm", temporal)
 
-    def apply_conv(self, proj: str, tokens: torch.Tensor, num_frames: int, frame_size: tuple[int, int]) -> torch.Tensor:
+    def apply_conv(self,
+                   proj: str,
+                   tokens: torch.Tensor,
+                   num_frames: int,
+                   frame_size: tuple[int, int],
+                   head_shard: HeadShard | None = None) -> torch.Tensor:
         if proj not in self.targets:
             return tokens
         heads, head_dim = tokens.shape[-2], tokens.shape[-1]
         grid_h, grid_w = frame_size
         channels = heads * head_dim
+        # Depthwise conv: the channel axis is the fused ``head * head_dim +
+        # channel`` axis, so a head slice is a plain channel slice of the weights.
+        weight_sp = getattr(self, f"{proj}_sp").weight
+        weight_tm = getattr(self, f"{proj}_tm").weight
+        if head_shard is not None:
+            lo = head_shard.start * head_dim
+            weight_sp = weight_sp.narrow(0, lo, channels)
+            weight_tm = weight_tm.narrow(0, lo, channels)
         volume = tokens.reshape(num_frames, grid_h, grid_w, channels).permute(0, 3, 1, 2)
-        volume = F.conv2d(volume, getattr(self, f"{proj}_sp").weight, padding=self.KERNEL // 2, groups=channels)
+        volume = F.conv2d(volume, weight_sp, padding=self.KERNEL // 2, groups=channels)
         frames = volume.permute(0, 2, 3, 1).reshape(num_frames, grid_h * grid_w, channels)
-        weight_t = getattr(self, f"{proj}_tm").weight.squeeze(1).to(frames.dtype)
-        pad = self.KERNEL // 2
-        padded = F.pad(frames, (0, 0, 0, 0, pad, pad))
-        out = None
-        for tap in range(self.KERNEL):
-            part = padded[tap:tap + num_frames] * weight_t[:, tap].view(1, 1, -1)
-            out = part if out is None else out + part
-        assert out is not None
-        return out.reshape(-1, heads, head_dim)
+        weight_t = weight_tm.squeeze(1).to(frames.dtype)
+        # The same 5-tap depthwise correlation the explicit tap loop performed, as
+        # one conv1d: out[f] = sum_k pad(f + k - 2) * w[k]. The loop issued five
+        # launches and five full-size temporaries per projection per layer.
+        taps = frames.permute(1, 2, 0)  # [tokens, channels, frames]
+        taps = F.conv1d(taps, weight_t.view(channels, 1, self.KERNEL),
+                        padding=self.KERNEL // 2, groups=channels)
+        return taps.permute(2, 0, 1).reshape(-1, heads, head_dim)
 
 
 def _activate_features(tokens: torch.Tensor, l2norm: bool) -> torch.Tensor:
@@ -282,6 +318,23 @@ def _factor_sana(alpha: torch.Tensor, matrix_a: torch.Tensor, matrix_b: torch.Te
     return transition, injection
 
 
+_IDENTITY_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+
+
+def _identity_for(size: int, device: torch.device) -> torch.Tensor:
+    """Cached FP32 identity, keyed on (size, device).
+
+    The delta-rule solve needs an identity every layer; building it with
+    ``torch.eye`` each time is a launch per layer for a request-static tensor.
+    """
+    key = (size, str(device))
+    cached = _IDENTITY_CACHE.get(key)
+    if cached is None:
+        cached = torch.eye(size, device=device, dtype=torch.float32)
+        _IDENTITY_CACHE[key] = cached
+    return cached
+
+
 def _factor_vdn(
     alpha: torch.Tensor,
     matrix_a: torch.Tensor,
@@ -293,13 +346,16 @@ def _factor_vdn(
     scale = (1.0 / tokens_per_frame) if scaled else 1.0
     sqrt_scale = scale**0.5 if scaled else 1.0
     matrix_a32 = matrix_a.float() * scale
-    eye = torch.eye(matrix_a32.shape[-1], device=matrix_a32.device, dtype=torch.float32).expand_as(matrix_a32)
+    # One identity per (device, head_dim) instead of a fresh [F, H, d, d] FP32
+    # tensor every layer: cholesky_solve below needs it materialized, and it is
+    # request-static.  Keyed on shape so a different head_dim cannot collide.
+    eye = _identity_for(matrix_a32.shape[-1], matrix_a32.device)
     chol = torch.linalg.cholesky(matrix_a32 + eye)
     if diagnostics is not None:
         chol_diag = chol.detach().diagonal(dim1=-2, dim2=-1).abs().clamp_min(1e-12)
         diagnostics["cholesky_diag_min"] = chol_diag.amin()
         diagnostics["cholesky_condition_proxy"] = (chol_diag.amax() / chol_diag.amin()).square()
-    inverse = torch.cholesky_solve(eye.contiguous(), chol)
+    inverse = torch.cholesky_solve(eye.expand_as(matrix_a32).contiguous(), chol)
     transition = alpha.float().unsqueeze(-1) * inverse
     injection = (matrix_b.float() * sqrt_scale) @ inverse
     # The recurrent state is numerically sensitive.  Keep both factors in
@@ -332,7 +388,18 @@ def factor_delta(
 
 def run_scans(transitions: torch.Tensor, injections: torch.Tensor,
               text_state: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bidirectional frame scans. transitions/injections: [F, H, d, d] / [F, H, d, d]."""
+    """Bidirectional frame scans. transitions/injections: [F, H, d, d] / [F, H, d, d].
+
+    Kept as the sequential recurrence on purpose.  A Hillis-Steele doubling scan
+    computes the same result in ceil(log2 F) batched steps and measured 178 ms/NFE
+    against this loop, but it forms A = T_0 @ ... @ T_{F-1} as one composite and
+    applies the incoming text state through that product.  For these delta-rule
+    transitions (inverses of frame Gram matrices) that composite is far worse
+    conditioned than the incrementally-updated state: it broke head-shard
+    equivalence (0.95 relative error) on real model parameters while still
+    matching on random ones.  This is a state-sensitive FP32 path and the
+    reassociation is not free, so the sequential form stays.
+    """
     start = torch.zeros_like(injections[0]) if text_state is None else text_state.to(injections.dtype)
     # Do not use baddbmm(out=...). PyTorch forbids out= kernels when any
     # operand requires gradients, which is exactly the hybrid-training path.
@@ -439,12 +506,24 @@ class BidirectionalLinearBranch(nn.Module):
         self.record_diagnostics = False
         self.latest_diagnostics: dict[str, torch.Tensor] = {}
 
-    def _write_strength(self, hidden_states: torch.Tensor, token_count: int) -> torch.Tensor:
-        logits = self.beta_proj(hidden_states)[0]
+    def _write_strength(self,
+                        hidden_states: torch.Tensor,
+                        token_count: int,
+                        head_shard: HeadShard | None = None) -> torch.Tensor:
+        if head_shard is None:
+            logits = self.beta_proj(hidden_states)[0]
+            log_scale = self.write_log_scale
+        else:
+            # ``beta_proj`` maps hidden -> one logit per head and has no bias, so
+            # the rank's slice is a row slice of its weight plus the matching
+            # ``write_log_scale`` entries.  The learned per-layer/per-head scale
+            # and the runtime tokens-per-frame adjustment are preserved.
+            logits = F.linear(hidden_states, head_shard.narrow(self.beta_proj.weight, 0))
+            log_scale = head_shard.narrow(self.write_log_scale, 0)
         if self.delta_rule == "vdn_solve":
             return scaled_exponential_write_strength(
                 logits,
-                self.write_log_scale,
+                log_scale,
                 head_dim=self.head_dim,
                 token_count=token_count,
             )
@@ -488,12 +567,14 @@ class BidirectionalLinearBranch(nn.Module):
         qkv_raw: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         layout: HybridSequenceLayout,
         use_conv: bool,
+        head_shard: HeadShard | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         outs = []
         for proj, tokens in zip(("q", "k", "v"), qkv_raw, strict=True):
             if use_conv and self.short_conv is not None:
                 tokens = self.short_conv.apply_conv(proj, tokens, layout.num_frames,
-                                                    (layout.frame_height, layout.frame_width))
+                                                    (layout.frame_height, layout.frame_width),
+                                                    head_shard=head_shard)
             outs.append(_activate_features(tokens, l2norm=proj != "v"))
         return outs[0], outs[1], outs[2]
 
@@ -501,15 +582,18 @@ class BidirectionalLinearBranch(nn.Module):
         self,
         text_x: torch.Tensor,
         text_qkv: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        head_shard: HeadShard | None = None,
     ) -> torch.Tensor:
+        heads = self.num_heads if head_shard is None else head_shard.local_heads
         length = text_qkv[1].shape[0]
         key = _activate_features(text_qkv[1], l2norm=True)
         value = _activate_features(text_qkv[2], l2norm=False)
-        key = key.view(1, length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        value = value.view(1, length, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        gamma = self._write_strength(text_x, length).view(1, length, self.num_heads).permute(0, 2, 1)
+        key = key.view(1, length, heads, self.head_dim).permute(0, 2, 1, 3)
+        value = value.view(1, length, heads, self.head_dim).permute(0, 2, 1, 3)
+        gamma = self._write_strength(text_x, length, head_shard=head_shard)
+        gamma = gamma.view(1, length, heads).permute(0, 2, 1)
         matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
-        ones = torch.ones(1, self.num_heads, self.head_dim, device=matrix_a.device, dtype=matrix_a.dtype)
+        ones = torch.ones(1, heads, self.head_dim, device=matrix_a.device, dtype=matrix_a.dtype)
         _, injection = factor_delta(self.delta_rule, ones, matrix_a, matrix_b, length)
         return TEXT_STATE_SCALE * injection[0]
 
@@ -522,9 +606,17 @@ class BidirectionalLinearBranch(nn.Module):
         skip_ends: bool = False,
         text_hidden: torch.Tensor | None = None,
         text_qkv: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        head_shard: HeadShard | None = None,
     ) -> torch.Tensor:
-        """video_hidden: [F*S, hidden] -> gated, RMSNormed readout [F*S, H*d]."""
-        query, key, value = self._features(qkv_raw, layout, use_conv=True)
+        """video_hidden: [F*S, hidden] -> gated, RMSNormed readout [F*S, H*d].
+
+        ``head_shard`` runs the branch on one rank's head slice under sequence
+        parallelism.  Everything below is per-head, so the slice is carried by
+        narrowing the per-head parameters and reshaping with ``heads`` heads.
+        """
+        heads = self.num_heads if head_shard is None else head_shard.local_heads
+        with Phase("L1_features_conv"):
+            query, key, value = self._features(qkv_raw, layout, use_conv=True, head_shard=head_shard)
         scan_frames = layout.num_frames
         if skip_ends and layout.num_frames > 2:
             per = layout.tokens_per_frame
@@ -534,38 +626,47 @@ class BidirectionalLinearBranch(nn.Module):
             bounds = [(lo - 1, hi - 1) for lo, hi in bounds[1:-1]]
 
         per_frame = layout.tokens_per_frame
-        query = query.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        key = key.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        value = value.view(scan_frames, per_frame, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        gamma = self._write_strength(video_hidden, per_frame)
-        gamma = gamma.view(scan_frames, per_frame, self.num_heads).permute(0, 2, 1)
-        frame_mean = video_hidden.view(scan_frames, per_frame, -1).mean(dim=1)
-        alpha = self.alpha(frame_mean)
-        matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
+        query = query.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
+        key = key.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
+        value = value.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
+        with Phase("L2_write_strength"):
+            gamma = self._write_strength(video_hidden, per_frame, head_shard=head_shard)
+            gamma = gamma.view(scan_frames, per_frame, heads).permute(0, 2, 1)
+        with Phase("L3_alpha"):
+            frame_mean = video_hidden.view(scan_frames, per_frame, -1).mean(dim=1)
+            alpha = self.alpha(frame_mean, head_shard=head_shard)
+        with Phase("L4_frame_statistics"):
+            matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
         solver_diagnostics: dict[str, torch.Tensor] | None = {} if self.record_diagnostics else None
-        transitions, injections = factor_delta(
-            self.delta_rule,
-            alpha,
-            matrix_a,
-            matrix_b,
-            per_frame,
-            diagnostics=solver_diagnostics,
-        )
+        with Phase("L5_factor_delta_solve"):
+            transitions, injections = factor_delta(
+                self.delta_rule,
+                alpha,
+                matrix_a,
+                matrix_b,
+                per_frame,
+                diagnostics=solver_diagnostics,
+            )
         if solver_diagnostics is not None:
             self._record_diagnostics(gamma, matrix_a, transitions, injections, solver_diagnostics)
         text_state = None
         if self.enable_text_state and text_hidden is not None and text_qkv is not None:
-            text_state = self._text_state(text_hidden, text_qkv)
-        prefix, suffix = run_scans(transitions, injections, text_state)
-        state = gather_linear_state(prefix, suffix, alpha, bounds, text_state=text_state)
+            with Phase("L6_text_state"):
+                text_state = self._text_state(text_hidden, text_qkv, head_shard=head_shard)
+        with Phase("L7_run_scans"):
+            prefix, suffix = run_scans(transitions, injections, text_state)
+        with Phase("L8_gather_state"):
+            state = gather_linear_state(prefix, suffix, alpha, bounds, text_state=text_state)
         # readout: q @ state^T -> [F, H, S, d]
-        readout = torch.matmul(query.float(), state.transpose(-1, -2)).to(query.dtype)
-        readout = self.norm(readout)
-        gate = self.output_gate(video_hidden).view(scan_frames, per_frame, self.num_heads,
-                                                   self.head_dim).permute(0, 2, 1, 3)
-        gated = (readout * gate).permute(0, 2, 1, 3).reshape(-1, self.num_heads * self.head_dim)
+        with Phase("L9_readout_matmul"):
+            readout = torch.matmul(query.float(), state.transpose(-1, -2)).to(query.dtype)
+            readout = self.norm(readout)
+        with Phase("L10_gate_reshape"):
+            gate = self.output_gate(video_hidden, head_shard=head_shard)
+            gate = gate.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
+            gated = (readout * gate).permute(0, 2, 1, 3).reshape(-1, heads * self.head_dim)
         if skip_ends and layout.num_frames > 2:
-            full = gated.new_zeros(layout.num_frames * per_frame, self.num_heads * self.head_dim)
+            full = gated.new_zeros(layout.num_frames * per_frame, heads * self.head_dim)
             full[per_frame:-per_frame] = gated
             return full
         return gated
