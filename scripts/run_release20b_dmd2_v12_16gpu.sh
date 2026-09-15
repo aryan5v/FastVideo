@@ -46,6 +46,12 @@ test -s "${SELECTED_PARENT}/transformer/model.safetensors"
 test -s "${TEACHER_PARENT}/transformer/config.json"
 test -s "${TEACHER_PARENT}/transformer/diffusion_pytorch_model.safetensors.index.json"
 
+# SLURM/Pyxis falls back to /tmp because this cluster account has no
+# /home/vlm-aryan.  Validation manifests in the release config are intentionally
+# repository-relative, so pin the process working directory to the immutable
+# checkout before either preflight or training starts.
+cd "${CODE_ROOT}"
+
 if [[ "${NODE_RANK}" == "0" ]]; then
   test ! -e "${OUTPUT_ROOT}"
   mkdir -p "${OUTPUT_ROOT}"
