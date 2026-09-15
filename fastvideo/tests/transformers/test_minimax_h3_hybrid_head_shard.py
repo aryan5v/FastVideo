@@ -203,6 +203,76 @@ def test_head_sharded_matches_replicated(world_size):
         assert rel < 2e-2, f"rank {rank}: mean relative error {rel:.4e} too large"
 
 
+def _eager_scan(transitions, injections, start):
+    """The original sequential recurrence this scan replaced."""
+    prefix = []
+    state = start
+    for frame in range(transitions.shape[0]):
+        state = torch.baddbmm(injections[frame], state, transitions[frame])
+        prefix.append(state)
+    suffix = []
+    state = start
+    for frame in range(transitions.shape[0] - 1, -1, -1):
+        state = torch.baddbmm(injections[frame], state, transitions[frame])
+        suffix.append(state)
+    return torch.stack(prefix), torch.stack(list(reversed(suffix)))
+
+
+@pytest.mark.parametrize("frames", [1, 2, 3, 5, 8, 29, 31])
+@pytest.mark.parametrize("with_text_state", [False, True])
+def test_parallel_scan_matches_eager_recurrence(frames, with_text_state):
+    """The Hillis-Steele scan must reproduce the sequential recurrence.
+
+    Non-power-of-two frame counts and the text-state start are both covered:
+    the doubling scan pads implicitly through cat, and the start state is
+    applied through every prefix rather than only the first.
+    """
+    from fastvideo.models.dits.minimax_h3_hybrid.linear import run_scans
+
+    torch.manual_seed(7)
+    heads, dim = 3, 4
+    transitions = torch.randn(frames, heads, dim, dim, dtype=torch.float32)
+    injections = torch.randn(frames, heads, dim, dim, dtype=torch.float32)
+    start = torch.randn(heads, dim, dim, dtype=torch.float32) if with_text_state else None
+
+    want_prefix, want_suffix = _eager_scan(
+        transitions, injections, torch.zeros_like(injections[0]) if start is None else start)
+    got_prefix, got_suffix = run_scans(transitions, injections, start)
+
+    assert got_prefix.shape == want_prefix.shape
+    assert got_suffix.shape == want_suffix.shape
+    for name, got, want in (("prefix", got_prefix, want_prefix), ("suffix", got_suffix, want_suffix)):
+        scale = want.abs().mean().clamp_min(1e-3)
+        rel = (got - want).abs().mean() / scale
+        assert rel < 1e-4, f"{name}: relative error {rel:.3e} (frames={frames})"
+
+
+def test_parallel_scan_prefix_is_causal_and_suffix_is_anticausal():
+    """Guard against a scan that silently computes the wrong direction."""
+    from fastvideo.models.dits.minimax_h3_hybrid.linear import run_scans
+
+    torch.manual_seed(11)
+    frames, heads, dim = 6, 2, 3
+    transitions = torch.randn(frames, heads, dim, dim, dtype=torch.float32) * 0.1
+    injections = torch.randn(frames, heads, dim, dim, dtype=torch.float32)
+    prefix, suffix = run_scans(transitions, injections, None)
+
+    # S_f depends on frames 0..f, so a change at the LAST frame may only move the
+    # last prefix entry.  Symmetrically the suffix at f depends on frames f..F-1,
+    # so a change at the FIRST frame may only move the first suffix entry.
+    alt_last = injections.clone()
+    alt_last[-1] += 1.0
+    prefix2, _ = run_scans(transitions, alt_last, None)
+    assert not torch.allclose(prefix2[-1], prefix[-1]), "last prefix ignored its own frame"
+    assert torch.allclose(prefix2[:-1], prefix[:-1], atol=1e-5), "prefix leaked forward in time"
+
+    alt_first = injections.clone()
+    alt_first[0] += 1.0
+    _, suffix2 = run_scans(transitions, alt_first, None)
+    assert not torch.allclose(suffix2[0], suffix[0]), "first suffix ignored its own frame"
+    assert torch.allclose(suffix2[1:], suffix[1:], atol=1e-5), "suffix leaked backward in time"
+
+
 def test_simulated_exchange_is_exact_inverse():
     """The stand-ins must compose to the identity, or the tests above prove nothing."""
     x = torch.randn(1, 6, 8, 4)

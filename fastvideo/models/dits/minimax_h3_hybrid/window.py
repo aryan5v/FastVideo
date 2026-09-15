@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from fastvideo.models.dits.minimax_h3_hybrid.layout import HybridSequenceLayout
+from fastvideo.models.dits.minimax_h3_hybrid.parallel import Phase
 
 _ANCHOR_MODES = ("none", "columns", "rows", "both")
 
@@ -250,12 +251,13 @@ def window_softmax(
     global_index = plan.global_index
 
     if global_index.numel():
-        # CUDA autocast may return BF16 SDPA output for FP32 residual-stream
-        # inputs. Preserve the caller-visible query dtype while satisfying
-        # index_put's exact source/destination dtype requirement.
-        gathered = query.index_select(0, global_index)
-        attended = _sdpa(gathered, key, value, scale).to(out.dtype)
-        out.index_copy_(0, global_index, attended)
+        with Phase("W1_global_sdpa"):
+            # CUDA autocast may return BF16 SDPA output for FP32 residual-stream
+            # inputs. Preserve the caller-visible query dtype while satisfying
+            # index_put's exact source/destination dtype requirement.
+            gathered = query.index_select(0, global_index)
+            attended = _sdpa(gathered, key, value, scale).to(out.dtype)
+            out.index_copy_(0, global_index, attended)
 
     per_frame = plan.tokens_per_frame
     video_start, video_end = plan.video_start, plan.video_end
@@ -265,19 +267,21 @@ def window_softmax(
 
     # One packed K/V buffer per call: [global rows][video rows]. Building it once
     # lets every rectangle gather with a single index_select.
-    if global_index.numel():
-        k_buffer = torch.cat([key.index_select(0, global_index), video_key], dim=0)
-        v_buffer = torch.cat([value.index_select(0, global_index), video_value], dim=0)
-    else:
-        k_buffer, v_buffer = video_key, video_value
+    with Phase("W2_build_kv_buffer"):
+        if global_index.numel():
+            k_buffer = torch.cat([key.index_select(0, global_index), video_key], dim=0)
+            v_buffer = torch.cat([value.index_select(0, global_index), video_value], dim=0)
+        else:
+            k_buffer, v_buffer = video_key, video_value
 
     video_out = torch.empty_like(video_query)
-    for group in plan.groups:
-        q_rows = video_query.index_select(0, group.query_index)
-        k_rows = k_buffer.index_select(0, group.key_index)
-        v_rows = v_buffer.index_select(0, group.key_index)
-        attended = _sdpa(q_rows, k_rows, v_rows, scale).to(video_out.dtype)
-        video_out.index_copy_(0, group.query_index, attended)
+    with Phase("W3_group_sdpa"):
+        for group in plan.groups:
+            q_rows = video_query.index_select(0, group.query_index)
+            k_rows = k_buffer.index_select(0, group.key_index)
+            v_rows = v_buffer.index_select(0, group.key_index)
+            attended = _sdpa(q_rows, k_rows, v_rows, scale).to(video_out.dtype)
+            video_out.index_copy_(0, group.query_index, attended)
 
     # ``out`` is [rows, H, d]; the video block is the same rank-3 shape, so it
     # assigns directly.  (Assigning a rank-4 view here silently broadcasts the

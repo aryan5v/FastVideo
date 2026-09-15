@@ -21,7 +21,9 @@ import torch.nn.functional as F
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.quantization import QuantizationConfig
 from fastvideo.models.dits.minimax_h3_hybrid.layout import HybridSequenceLayout
-from fastvideo.models.dits.minimax_h3_hybrid.parallel import HeadShard
+from fastvideo.models.dits.minimax_h3_hybrid.parallel import HeadShard, Phase, install_phase_dump
+
+install_phase_dump()
 
 DELTA_RULES = ("sana_scaled", "vdn_solve", "vdn_scaled")
 SHORT_CONV_TARGETS = ("q", "k", "v")
@@ -386,7 +388,18 @@ def factor_delta(
 
 def run_scans(transitions: torch.Tensor, injections: torch.Tensor,
               text_state: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bidirectional frame scans. transitions/injections: [F, H, d, d] / [F, H, d, d]."""
+    """Bidirectional frame scans. transitions/injections: [F, H, d, d] / [F, H, d, d].
+
+    Kept as the sequential recurrence on purpose.  A Hillis-Steele doubling scan
+    computes the same result in ceil(log2 F) batched steps and measured 178 ms/NFE
+    against this loop, but it forms A = T_0 @ ... @ T_{F-1} as one composite and
+    applies the incoming text state through that product.  For these delta-rule
+    transitions (inverses of frame Gram matrices) that composite is far worse
+    conditioned than the incrementally-updated state: it broke head-shard
+    equivalence (0.95 relative error) on real model parameters while still
+    matching on random ones.  This is a state-sensitive FP32 path and the
+    reassociation is not free, so the sequential form stays.
+    """
     start = torch.zeros_like(injections[0]) if text_state is None else text_state.to(injections.dtype)
     # Do not use baddbmm(out=...). PyTorch forbids out= kernels when any
     # operand requires gradients, which is exactly the hybrid-training path.
@@ -602,7 +615,8 @@ class BidirectionalLinearBranch(nn.Module):
         narrowing the per-head parameters and reshaping with ``heads`` heads.
         """
         heads = self.num_heads if head_shard is None else head_shard.local_heads
-        query, key, value = self._features(qkv_raw, layout, use_conv=True, head_shard=head_shard)
+        with Phase("L1_features_conv"):
+            query, key, value = self._features(qkv_raw, layout, use_conv=True, head_shard=head_shard)
         scan_frames = layout.num_frames
         if skip_ends and layout.num_frames > 2:
             per = layout.tokens_per_frame
@@ -615,33 +629,42 @@ class BidirectionalLinearBranch(nn.Module):
         query = query.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
         key = key.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
         value = value.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
-        gamma = self._write_strength(video_hidden, per_frame, head_shard=head_shard)
-        gamma = gamma.view(scan_frames, per_frame, heads).permute(0, 2, 1)
-        frame_mean = video_hidden.view(scan_frames, per_frame, -1).mean(dim=1)
-        alpha = self.alpha(frame_mean, head_shard=head_shard)
-        matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
+        with Phase("L2_write_strength"):
+            gamma = self._write_strength(video_hidden, per_frame, head_shard=head_shard)
+            gamma = gamma.view(scan_frames, per_frame, heads).permute(0, 2, 1)
+        with Phase("L3_alpha"):
+            frame_mean = video_hidden.view(scan_frames, per_frame, -1).mean(dim=1)
+            alpha = self.alpha(frame_mean, head_shard=head_shard)
+        with Phase("L4_frame_statistics"):
+            matrix_a, matrix_b = frame_statistics(key, value, gamma, a_fp32=self.a_fp32)
         solver_diagnostics: dict[str, torch.Tensor] | None = {} if self.record_diagnostics else None
-        transitions, injections = factor_delta(
-            self.delta_rule,
-            alpha,
-            matrix_a,
-            matrix_b,
-            per_frame,
-            diagnostics=solver_diagnostics,
-        )
+        with Phase("L5_factor_delta_solve"):
+            transitions, injections = factor_delta(
+                self.delta_rule,
+                alpha,
+                matrix_a,
+                matrix_b,
+                per_frame,
+                diagnostics=solver_diagnostics,
+            )
         if solver_diagnostics is not None:
             self._record_diagnostics(gamma, matrix_a, transitions, injections, solver_diagnostics)
         text_state = None
         if self.enable_text_state and text_hidden is not None and text_qkv is not None:
-            text_state = self._text_state(text_hidden, text_qkv, head_shard=head_shard)
-        prefix, suffix = run_scans(transitions, injections, text_state)
-        state = gather_linear_state(prefix, suffix, alpha, bounds, text_state=text_state)
+            with Phase("L6_text_state"):
+                text_state = self._text_state(text_hidden, text_qkv, head_shard=head_shard)
+        with Phase("L7_run_scans"):
+            prefix, suffix = run_scans(transitions, injections, text_state)
+        with Phase("L8_gather_state"):
+            state = gather_linear_state(prefix, suffix, alpha, bounds, text_state=text_state)
         # readout: q @ state^T -> [F, H, S, d]
-        readout = torch.matmul(query.float(), state.transpose(-1, -2)).to(query.dtype)
-        readout = self.norm(readout)
-        gate = self.output_gate(video_hidden, head_shard=head_shard)
-        gate = gate.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
-        gated = (readout * gate).permute(0, 2, 1, 3).reshape(-1, heads * self.head_dim)
+        with Phase("L9_readout_matmul"):
+            readout = torch.matmul(query.float(), state.transpose(-1, -2)).to(query.dtype)
+            readout = self.norm(readout)
+        with Phase("L10_gate_reshape"):
+            gate = self.output_gate(video_hidden, head_shard=head_shard)
+            gate = gate.view(scan_frames, per_frame, heads, self.head_dim).permute(0, 2, 1, 3)
+            gated = (readout * gate).permute(0, 2, 1, 3).reshape(-1, heads * self.head_dim)
         if skip_ends and layout.num_frames > 2:
             full = gated.new_zeros(layout.num_frames * per_frame, heads * self.head_dim)
             full[per_frame:-per_frame] = gated

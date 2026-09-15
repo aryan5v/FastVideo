@@ -20,9 +20,76 @@ sharding can be unit-tested on one process without a distributed group.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
+
+# Env-gated CUDA-event phase timing, shared by attention.py and linear.py.
+# torch.profiler cannot attribute the DiT here: FastVideo runs it in spawned
+# worker processes, so parent-process record_function hooks never reach them, and
+# an atexit key_averages dump lands after teardown when the table is gone.  Both
+# attempts returned zero kernels.  Timers placed in the model code run wherever
+# the model runs, which sidesteps that entirely.  Off unless requested.
+PHASE_TIMING = bool(os.environ.get("FASTVIDEO_HYBRID_PHASE_TIMING"))
+_PHASE_TOTALS: dict[str, float] = {}
+_PHASE_COUNTS: dict[str, int] = {}
+
+
+class Phase:
+    """Record CUDA time for one labelled region, accumulated process-wide."""
+
+    __slots__ = ("label", "start", "end")
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.start = None
+        self.end = None
+
+    def __enter__(self):
+        if PHASE_TIMING:
+            self.start = torch.cuda.Event(enable_timing=True)
+            self.end = torch.cuda.Event(enable_timing=True)
+            self.start.record()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if PHASE_TIMING and self.start is not None:
+            self.end.record()
+            # Synchronize so the elapsed time is real rather than an estimate.
+            torch.cuda.synchronize()
+            _PHASE_TOTALS[self.label] = _PHASE_TOTALS.get(self.label, 0.0) + self.start.elapsed_time(self.end)
+            _PHASE_COUNTS[self.label] = _PHASE_COUNTS.get(self.label, 0) + 1
+
+
+def phase_report() -> dict[str, dict[str, float]]:
+    """Accumulated per-phase CUDA time, in ms."""
+    return {
+        label: {"ms": round(total, 3), "calls": _PHASE_COUNTS[label]}
+        for label, total in sorted(_PHASE_TOTALS.items(), key=lambda kv: -kv[1])
+    }
+
+
+def install_phase_dump() -> None:
+    """Write the phase report at process exit when timing is enabled."""
+    if not PHASE_TIMING:
+        return
+    import atexit
+    import json
+
+    @atexit.register
+    def _dump() -> None:  # pragma: no cover - diagnostics only
+        try:
+            path = os.environ.get("FASTVIDEO_HYBRID_PHASE_TIMING")
+            if not path:
+                return
+            payload = phase_report()
+            payload["_pid"] = os.getpid()
+            payload["_total_ms"] = round(sum(v["ms"] for k, v in payload.items() if not k.startswith("_")), 3)
+            with open(path, "a") as handle:
+                handle.write(json.dumps(payload) + "\n")
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
