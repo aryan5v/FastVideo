@@ -119,7 +119,8 @@ class MiniMaxH3Model(ModelBase):
         if str(training_config.data.preprocessed_data_type) not in ("t2va", "text_only"):
             raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type "
                              "'t2va' or 'text_only'")
-        if trainable and construction_precision not in (None, training_config.dit_precision):
+        configured_precision = str(getattr(training_config, "dit_precision", "fp32"))
+        if trainable and construction_precision not in (None, configured_precision):
             raise ValueError("A trainable MiniMaxH3 role cannot override construction_precision; "
                              "FP32 optimizer masters must follow training.dit_precision")
 
