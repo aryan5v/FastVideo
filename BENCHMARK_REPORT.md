@@ -135,6 +135,46 @@ Two bugs the tests caught, both of which would otherwise have shipped silently:
    mis-broadcasts `head_dim` rather than raising, so only the pre-existing window
    tests exposed it.
 
+## 4b. The 1-second target, and why hybrid-attention work cannot reach it
+
+Target stated: **1 s for a 5-second clip** (124 frames @ 24 fps ~= 5.17 s).
+
+Measured stage breakdown for VSA in the same allocation:
+
+```
+conditioning 318 ms | latent prep 27 ms | DENOISING 3349 ms | VAE decode 2323 ms | audio 160 ms
+```
+
+So 1 s means either 1 s of denoising (**0.25 s per DiT evaluation**, vs VSA's
+0.837) or 1 s end-to-end (**7.9x** on the whole pipeline, which additionally
+requires the 2.32 s VAE decode to collapse).
+
+**The denoising form of the target is unreachable from hybrid attention, by a
+simple bound.** VSA and hybrid share an identical backbone — MLP, AdaLN, norms,
+residual stream — and that backbone is already correctly sharded under VSA. VSA's
+*entire* denoise is 3.349 s, so:
+
+```
+backbone <= 3.349 s          (attention cost cannot be negative)
+hybrid_total = backbone + hybrid_attention >= backbone
+hybrid_total <= 1 s   =>   backbone <= 1 s   =>   backbone >= 3.4x faster than VSA's
+```
+
+Even a *free* hybrid attention leaves the backbone's full cost intact. Reaching
+1 s therefore requires making the shared DiT backbone roughly **3.4x faster than
+VSA's current best** — i.e. whole-model FP8/quantization, fusion and compilation
+work. That is a different project from this one, and it is where the remaining
+budget should go if 1 s is the real goal.
+
+For completeness: FP8 is a modest lever even on its own terms, because
+`torch._scaled_mm` accelerates the *projections* while the dominant window
+**attention** runs through SDPA and stays BF16. Also, the guarded shape-support
+fallback described in the task brief is **not present** in either checkout — I
+checked both (`git status` and `git diff` on `fp8_config.py` in the primary
+worktree are clean; the only untracked file is a launch script). It would have to
+be written from scratch: `torch._scaled_mm` needs M/N/K multiples of 16, and the
+hybrid's sharded token axis is not guaranteed to be.
+
 ## 5. Before/after
 
 | setting | GPUs | precision | frames | DiT calls | warm E2E | denoise | s/NFE | video |
@@ -153,16 +193,29 @@ were deprioritized below the 4-GPU gate, which was not reached.
 
 ## 6. Kernel-launch count and profiler breakdown
 
-**Not captured.** The profiler harness (`scripts/submitted/profile_hybrid.py`,
-which wraps the hot hybrid call sites in `torch.profiler.record_function` and
-dumps a chrome trace plus `key_averages.json`) is written, reviewed and installed,
-but its job lost a race with my own file installation — it started at 16:50:31 and
-imported `linear.py` before the 16:51 rename that added `head_shard`, so it died on
-`OutputGate.forward() got an unexpected keyword argument`. It was not re-run.
+**Not captured, and the harness has a design flaw worth recording.**
+
+The first profiler job lost a race with my own file installation (started 16:50:31,
+imported `linear.py` before the 16:51 rename that added `head_shard`, died on
+`OutputGate.forward() got an unexpected keyword argument`).
+
+The second run (job 9097) executed cleanly and its *timing* half is valid —
+`timed_denoise_s = 8.154`, `timed_s_per_nfe = 2.039`, consistent with the
+benchmark's 7.992 s. But its *attribution* half captured nothing:
+`total_kernel_launches = 0` and `by_label` contains only the outer
+`hyb:dit_forward_total` range.
+
+**Root cause: FastVideo executes the model in spawned worker processes**
+(`multiproc_executor`, visible as `(Worker pid=1901)` in the logs). The
+`torch.profiler.record_function` wrappers are installed by monkeypatching module
+attributes in the *parent* process, so they never reach the workers that actually
+run the DiT. A working version needs the hooks installed inside each worker — e.g.
+a `sitecustomize.py` on `PYTHONPATH` that installs them at interpreter start and
+dumps its own trace at exit.
 
 **The bottleneck ranking in §7 is therefore inferred from the committed source and
-from the measured deltas, not from a captured trace.** It should be confirmed with
-a trace before acting on tiers 2-4.
+from measured deltas, not from a captured trace.** Confirm with a worker-side
+trace before acting on tiers 2-4.
 
 ## 7. Remaining bottlenecks, ranked
 
