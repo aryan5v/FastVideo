@@ -1,8 +1,8 @@
 #!/bin/bash
-# Compute-node payload for a four-node / 16-GPU Release-20B DMD2 V12 pilot.
+# Compute-node payload for a Release-20B DMD2 V12 run.
 # Run as one top-level srun task per four-GPU node. The payload first proves
 # four critic updates and one student update, then resumes in the same
-# allocation to 1,000 phases. Intermediate checkpoints are promotion gates,
+# allocation to the requested target. Intermediate checkpoints are promotion gates,
 # not stop/requeue boundaries.
 set -euo pipefail
 
@@ -15,15 +15,17 @@ set -euo pipefail
 
 NNODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-4}}"
 PRODUCTION_TARGET="${PRODUCTION_TARGET:-1000}"
-if [[ "${NNODES}" -ne 4 ]]; then
-  echo "Expected four SLURM nodes, got ${NNODES}" >&2
+NUM_GPUS="$((NNODES * 4))"
+if [[ "${NUM_GPUS}" -ne 16 && "${NUM_GPUS}" -ne 32 ]]; then
+  echo "Expected 16 or 32 GPUs at four GPUs per node, got ${NUM_GPUS}" >&2
   exit 2
 fi
 if [[ "${PRODUCTION_TARGET}" -lt 100 || "$((PRODUCTION_TARGET % 100))" -ne 0 ]]; then
   echo "PRODUCTION_TARGET must be a multiple of 100 and at least 100, got ${PRODUCTION_TARGET}" >&2
   exit 2
 fi
-export NNODES
+GRAD_ACCUM="$((256 / NUM_GPUS))"
+export NNODES NUM_GPUS GRAD_ACCUM
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 CONFIG_PATH="${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml"
@@ -88,19 +90,23 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
     "${CODE_ROOT}/fastvideo/tests/train/methods/test_dmd2_vsd_normalizer.py" \
     "${CODE_ROOT}/fastvideo/tests/train/methods/test_minimax_h3_dmd2.py" \
     | tee "${OUTPUT_ROOT}/preflight-pytest.log"
-  "${PY}" - "${CONFIG_PATH}" "${SELECTED_PARENT}" "${OUTPUT_ROOT}" <<'PY'
+  "${PY}" - "${CONFIG_PATH}" "${SELECTED_PARENT}" "${OUTPUT_ROOT}" "${NUM_GPUS}" "${GRAD_ACCUM}" <<'PY'
 import sys
 from fastvideo.train.utils.config import load_run_config
 
-path, parent, output = sys.argv[1:]
+path, parent, output, num_gpus, grad_accum = sys.argv[1:]
+num_gpus, grad_accum = int(num_gpus), int(grad_accum)
 cfg = load_run_config(path, [
     "--models.student.init_from", parent,
     "--training.checkpoint.output_dir", output,
+    "--training.distributed.num_gpus", str(num_gpus),
+    "--training.distributed.hsdp_shard_dim", str(num_gpus),
+    "--training.loop.gradient_accumulation_steps", str(grad_accum),
 ])
-assert cfg.training.distributed.num_gpus == 16
+assert cfg.training.distributed.num_gpus == num_gpus
 assert cfg.training.distributed.sp_size == 4
-assert cfg.training.distributed.hsdp_shard_dim == 16
-assert cfg.training.loop.gradient_accumulation_steps == 16
+assert cfg.training.distributed.hsdp_shard_dim == num_gpus
+assert cfg.training.loop.gradient_accumulation_steps == grad_accum
 assert cfg.method["generator_update_interval"] == 5
 assert cfg.method["dmd_denoising_steps"] == [999, 749, 500, 250]
 assert cfg.method["fake_score_loss_space"] == "x0"
@@ -129,6 +135,9 @@ train_phase() {
     --models.student.init_from "${SELECTED_PARENT}" \
     --models.teacher.init_from "${TEACHER_PARENT}" \
     --models.critic.init_from "${TEACHER_PARENT}" \
+    --training.distributed.num_gpus "${NUM_GPUS}" \
+    --training.distributed.hsdp_shard_dim "${NUM_GPUS}" \
+    --training.loop.gradient_accumulation_steps "${GRAD_ACCUM}" \
     --training.loop.max_train_steps "${target}" \
     --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
     --training.checkpoint.training_state_checkpointing_steps "${checkpoint_every}" \
@@ -147,23 +156,24 @@ if [[ "${SLURM_PROCID}" == "0" ]]; then
   done
   test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${NNODES}"
   test -s "${OUTPUT_ROOT}/checkpoint-5/dcp/.metadata"
-  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_critic_rank*.json' | wc -l)" -eq 16
-  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_student_rank*.json' | wc -l)" -eq 16
-  "${PY}" - "${OUTPUT_ROOT}" <<'PY'
+  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_critic_rank*.json' | wc -l)" -eq "${NUM_GPUS}"
+  test "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name 'dmd2_update_student_rank*.json' | wc -l)" -eq "${NUM_GPUS}"
+  "${PY}" - "${OUTPUT_ROOT}" "${NUM_GPUS}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+num_gpus = int(sys.argv[2])
 receipts = sorted(root.glob("dmd2_update_*_rank*.json"))
 payloads = [json.loads(path.read_text()) for path in receipts]
-assert len(payloads) == 32
+assert len(payloads) == 2 * num_gpus
 assert all(row["passed"] and row["changed_probe_elements"] > 0 for row in payloads)
 (root / "dmd2_smoke_passed.json").write_text(json.dumps({
     "phases": 5,
     "critic_updates": 4,
     "student_updates": 1,
-    "ranks": 16,
+    "ranks": num_gpus,
     "finite_fp32_updates": True,
 }, indent=2) + "\n")
 PY
