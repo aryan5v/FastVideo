@@ -130,6 +130,19 @@ class HybridAttention(nn.Module):
         ) if enable_softmax_gate else None)
         # Receipt for the dispatch tests: records which SP route actually ran.
         self.last_sp_route: str | None = None
+        self._route_logged: set[str] = set()
+
+    def _record_route(self, route: str) -> None:
+        """Set the receipt and log each distinct route once per module.
+
+        A silent fall back to the replicated route would otherwise be invisible,
+        so the first use of each route is reported.  The message also carries the
+        head-sharded route's exact head slice.
+        """
+        self.last_sp_route = route
+        if route not in self._route_logged:
+            self._route_logged.add(route)
+            logger.info("MiniMax-H3 hybrid attention SP route: %s", route)
 
     def project_qkv(
         self,
@@ -240,7 +253,7 @@ class HybridAttention(nn.Module):
         sp_world_size = get_sp_world_size() if model_parallel_is_initialized() else 1
         shard = self._head_shard(sp_world_size)
         if shard is None:
-            self.last_sp_route = "replicated"
+            self._record_route(f"replicated:sp{sp_world_size}")
             return self._forward_replicated(
                 attn,
                 hidden_states,
@@ -250,7 +263,7 @@ class HybridAttention(nn.Module):
                 apply_norm_rope,
                 sp_world_size,
             )
-        self.last_sp_route = f"head_sharded:{shard.describe()}"
+        self._record_route(f"head_sharded:{shard.describe()}")
         return self._forward_head_sharded(
             attn,
             hidden_states,
@@ -350,11 +363,13 @@ class HybridAttention(nn.Module):
         # The per-head parameter maps read the *full* token axis.  Their FLOPs are
         # ~1% of the layer, so gathering the activations for them is cheaper than
         # exchanging each projected scalar.
-        full = sequence_model_parallel_all_gather_with_unpad(hidden_states, original_seq_len, dim=1)
+        with _Phase("01_allgather_hidden"):
+            full = sequence_model_parallel_all_gather_with_unpad(hidden_states, original_seq_len, dim=1)
         full_rope = None
         if rotary_emb is not None:
-            cos = sequence_model_parallel_all_gather_with_unpad(rotary_emb[0], original_seq_len, dim=0)
-            sin = sequence_model_parallel_all_gather_with_unpad(rotary_emb[1], original_seq_len, dim=0)
+            with _Phase("02_allgather_rope"):
+                cos = sequence_model_parallel_all_gather_with_unpad(rotary_emb[0], original_seq_len, dim=0)
+                sin = sequence_model_parallel_all_gather_with_unpad(rotary_emb[1], original_seq_len, dim=0)
             full_rope = (cos, sin)
 
         # The all-to-all runs over the *padded* local length, so the exchanged
@@ -364,54 +379,63 @@ class HybridAttention(nn.Module):
         seq_pad = padded_full - original_seq_len
 
         # QKV on the local shard, then Ulysses to (full sequence, local heads).
-        query_raw, key_raw, value_raw = self.project_qkv(attn, hidden_states)
-        query_raw = _unpad_seq(all_to_all_heads(query_raw), original_seq_len)
-        key_raw = _unpad_seq(all_to_all_heads(key_raw), original_seq_len)
-        value_raw = _unpad_seq(all_to_all_heads(value_raw), original_seq_len)
+        with _Phase("03_qkv_project_local"):
+            query_raw, key_raw, value_raw = self.project_qkv(attn, hidden_states)
+        with _Phase("04_a2a_qkv"):
+            query_raw = _unpad_seq(all_to_all_heads(query_raw), original_seq_len)
+            key_raw = _unpad_seq(all_to_all_heads(key_raw), original_seq_len)
+            value_raw = _unpad_seq(all_to_all_heads(value_raw), original_seq_len)
 
         # QK-norm and RoPE are per head and per token, so applying them after the
         # exchange is equivalent to applying them before it.
-        query, key = apply_norm_rope(query_raw, key_raw, full_rope)
+        with _Phase("05_norm_rope"):
+            query, key = apply_norm_rope(query_raw, key_raw, full_rope)
 
         bounds = window_bounds(layout.num_frames, self.window_radius, self.window_chunk)
         full_cover = windows_cover_all_frames(bounds, layout.num_frames)
         linear_active = not full_cover
 
-        softmax_heads = self._softmax_output(
-            attn,
-            full,
-            query,
-            key,
-            value_raw,
-            layout,
-            bounds,
-            full_cover,
-            head_shard=shard,
-        )
+        with _Phase("06_window_softmax"):
+            softmax_heads = self._softmax_output(
+                attn,
+                full,
+                query,
+                key,
+                value_raw,
+                layout,
+                bounds,
+                full_cover,
+                head_shard=shard,
+            )
         # Back to (local sequence, all heads) so to_out runs on the local shard.
         # Re-pad first: the reverse all-to-all expects the padded token axis.
-        softmax_local = all_to_all_heads_back(_pad_seq(softmax_heads, seq_pad))
-        flat = softmax_local.flatten(2, 3).type_as(hidden_states)
-        out, _ = attn.to_out(flat)
+        with _Phase("07_a2a_back_softmax"):
+            softmax_local = all_to_all_heads_back(_pad_seq(softmax_heads, seq_pad))
+        with _Phase("08_to_out"):
+            flat = softmax_local.flatten(2, 3).type_as(hidden_states)
+            out, _ = attn.to_out(flat)
 
         if linear_active:
             # The linear readout covers only the generated-video rows.  Place it
             # into a zeroed padded token space so the reverse exchange carries it
             # back to the right local rows; rows outside video stay zero, and
             # to_out_linear maps a zero row to a zero row.
-            readout = self._linear_readout(
-                full,
-                (query_raw, key_raw, value_raw),
-                layout,
-                bounds,
-                shard=shard,
-            )
+            with _Phase("09_linear_branch"):
+                readout = self._linear_readout(
+                    full,
+                    (query_raw, key_raw, value_raw),
+                    layout,
+                    bounds,
+                    shard=shard,
+                )
             readout_full = hidden_states.new_zeros((1, padded_full, local_heads, self.head_dim))
             # The branch returns the readout flattened over heads, ready for
             # to_out_linear; the exchange needs it back in [rows, heads, d].
             readout_full[0, layout.video_start:layout.video_end] = readout.view(-1, local_heads, self.head_dim)
-            readout_local = all_to_all_heads_back(readout_full)
-            projected, _ = self.to_out_linear(readout_local.flatten(2, 3).type_as(hidden_states))
+            with _Phase("10_a2a_back_linear"):
+                readout_local = all_to_all_heads_back(readout_full)
+            with _Phase("11_to_out_linear"):
+                projected, _ = self.to_out_linear(readout_local.flatten(2, 3).type_as(hidden_states))
             out = out + projected
         return out
 
@@ -446,6 +470,68 @@ class HybridAttention(nn.Module):
             text_qkv=text_qkv,
             head_shard=shard,
         )
+
+
+# Env-gated phase timing.  A torch.profiler trace cannot see the DiT because it
+# runs in spawned workers, and event timing inside the module is both cheaper and
+# immune to that: it runs wherever the model runs.  Off unless requested.
+_PHASE_TIMING = bool(__import__("os").environ.get("FASTVIDEO_HYBRID_PHASE_TIMING"))
+_PHASE_TOTALS: dict[str, float] = {}
+_PHASE_COUNTS: dict[str, int] = {}
+
+
+class _Phase:
+    """Record CUDA time for one labelled region, accumulated process-wide."""
+
+    __slots__ = ("label", "start", "end")
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.start = None
+        self.end = None
+
+    def __enter__(self):
+        if _PHASE_TIMING:
+            self.start = torch.cuda.Event(enable_timing=True)
+            self.end = torch.cuda.Event(enable_timing=True)
+            self.start.record()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if _PHASE_TIMING and self.start is not None:
+            self.end.record()
+            # Synchronize so the elapsed time is real rather than an estimate.
+            torch.cuda.synchronize()
+            _PHASE_TOTALS[self.label] = _PHASE_TOTALS.get(self.label, 0.0) + self.start.elapsed_time(self.end)
+            _PHASE_COUNTS[self.label] = _PHASE_COUNTS.get(self.label, 0) + 1
+
+
+def phase_report() -> dict[str, dict[str, float]]:
+    """Accumulated per-phase CUDA time, in ms."""
+    return {
+        label: {"ms": round(total, 3), "calls": _PHASE_COUNTS[label]}
+        for label, total in sorted(_PHASE_TOTALS.items(), key=lambda kv: -kv[1])
+    }
+
+
+if _PHASE_TIMING:
+    import atexit as _atexit
+    import json as _json
+    import os as _os
+
+    @_atexit.register
+    def _dump_phase_report() -> None:  # pragma: no cover - diagnostics only
+        try:
+            path = _os.environ.get("FASTVIDEO_HYBRID_PHASE_TIMING")
+            if not path:
+                return
+            payload = phase_report()
+            payload["_pid"] = _os.getpid()
+            payload["_total_ms"] = round(sum(v["ms"] for k, v in payload.items() if not k.startswith("_")), 3)
+            with open(path, "a") as handle:
+                handle.write(_json.dumps(payload) + "\n")
+        except Exception:
+            pass
 
 
 def _is_quantized(module: nn.Module) -> bool:
