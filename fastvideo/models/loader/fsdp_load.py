@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from torch.distributed import DeviceMesh, init_device_mesh
 from torch.distributed._tensor import distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.fsdp import (CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard)
 from torch.nn.modules.module import _IncompatibleKeys
 
@@ -29,6 +30,48 @@ from fastvideo.models.loader.weight_utils import safetensors_weights_iterator
 from fastvideo.utils import set_mixed_precision_policy, is_pin_memory_available
 
 logger = init_logger(__name__)
+
+
+def _dtensor_from_cpu_full_tensor(
+    full_tensor: torch.Tensor,
+    meta_sharded_param: DTensor,
+    device: torch.device,
+    target_dtype: torch.dtype,
+) -> DTensor | None:
+    """Materialize only this rank's DTensor shard on CUDA.
+
+    The checkpoint iterator already yields CPU tensors. Moving the complete
+    tensor to every GPU before ``distribute_tensor`` creates an avoidable
+    full-tensor H2D peak (about 1 GiB for H3's largest matrices), which can
+    OOM a multi-role DMD2 process even though the final local shards fit.
+    Replicate+Shard meshes can be sliced exactly on CPU and reconstructed as
+    a DTensor from the local piece. Unknown placements retain the established
+    full-tensor fallback.
+    """
+    coordinate = meta_sharded_param.device_mesh.get_coordinate()
+    if coordinate is None:
+        return None
+    local = full_tensor
+    for mesh_dim, placement in enumerate(meta_sharded_param.placements):
+        if isinstance(placement, Replicate):
+            continue
+        if not isinstance(placement, Shard):
+            return None
+        chunks = torch.tensor_split(
+            local,
+            int(meta_sharded_param.device_mesh.size(mesh_dim)),
+            dim=int(placement.dim),
+        )
+        local = chunks[int(coordinate[mesh_dim])]
+    local = local.contiguous().to(device=device, dtype=target_dtype)
+    return DTensor.from_local(
+        local,
+        meta_sharded_param.device_mesh,
+        meta_sharded_param.placements,
+        run_check=False,
+        shape=meta_sharded_param.shape,
+        stride=meta_sharded_param.stride(),
+    )
 
 
 def _mixed_precision_module_groups(
@@ -667,16 +710,25 @@ def load_model_from_full_model_state_dict(
                 # In cases where parts of the model aren't sharded, some parameters will be plain tensors.
                 sharded_tensor = full_tensor
         else:
-            full_tensor = full_tensor.to(device=device, dtype=target_dtype)
-            # Every rank read the identical full tensor from the checkpoint, so
-            # each can slice its own shard locally; the default src_data_rank=0
-            # scatters from rank 0 and throws away the other ranks' copies.
-            sharded_tensor = distribute_tensor(
-                full_tensor,
-                meta_sharded_param.device_mesh,
-                meta_sharded_param.placements,
-                src_data_rank=None,
-            )
+            sharded_tensor = None
+            if full_tensor.device.type == "cpu" and isinstance(meta_sharded_param, DTensor):
+                sharded_tensor = _dtensor_from_cpu_full_tensor(
+                    full_tensor,
+                    meta_sharded_param,
+                    device,
+                    target_dtype,
+                )
+            if sharded_tensor is None:
+                full_tensor = full_tensor.to(device=device, dtype=target_dtype)
+                # Every rank read the identical full tensor from the checkpoint,
+                # so each can slice its own shard locally; src_data_rank=None
+                # avoids a redundant rank-zero scatter.
+                sharded_tensor = distribute_tensor(
+                    full_tensor,
+                    meta_sharded_param.device_mesh,
+                    meta_sharded_param.placements,
+                    src_data_rank=None,
+                )
             if cpu_offload:
                 sharded_tensor = sharded_tensor.cpu()
         if target_param_name in named_buffers:
