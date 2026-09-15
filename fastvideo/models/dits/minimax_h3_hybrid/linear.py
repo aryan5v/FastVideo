@@ -243,14 +243,13 @@ class LinearAttentionSepConv(nn.Module):
         volume = F.conv2d(volume, weight_sp, padding=self.KERNEL // 2, groups=channels)
         frames = volume.permute(0, 2, 3, 1).reshape(num_frames, grid_h * grid_w, channels)
         weight_t = weight_tm.squeeze(1).to(frames.dtype)
-        pad = self.KERNEL // 2
-        padded = F.pad(frames, (0, 0, 0, 0, pad, pad))
-        out = None
-        for tap in range(self.KERNEL):
-            part = padded[tap:tap + num_frames] * weight_t[:, tap].view(1, 1, -1)
-            out = part if out is None else out + part
-        assert out is not None
-        return out.reshape(-1, heads, head_dim)
+        # The same 5-tap depthwise correlation the explicit tap loop performed, as
+        # one conv1d: out[f] = sum_k pad(f + k - 2) * w[k]. The loop issued five
+        # launches and five full-size temporaries per projection per layer.
+        taps = frames.permute(1, 2, 0)  # [tokens, channels, frames]
+        taps = F.conv1d(taps, weight_t.view(channels, 1, self.KERNEL),
+                        padding=self.KERNEL // 2, groups=channels)
+        return taps.permute(2, 0, 1).reshape(-1, heads, head_dim)
 
 
 def _activate_features(tokens: torch.Tensor, l2norm: bool) -> torch.Tensor:
@@ -317,6 +316,23 @@ def _factor_sana(alpha: torch.Tensor, matrix_a: torch.Tensor, matrix_b: torch.Te
     return transition, injection
 
 
+_IDENTITY_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+
+
+def _identity_for(size: int, device: torch.device) -> torch.Tensor:
+    """Cached FP32 identity, keyed on (size, device).
+
+    The delta-rule solve needs an identity every layer; building it with
+    ``torch.eye`` each time is a launch per layer for a request-static tensor.
+    """
+    key = (size, str(device))
+    cached = _IDENTITY_CACHE.get(key)
+    if cached is None:
+        cached = torch.eye(size, device=device, dtype=torch.float32)
+        _IDENTITY_CACHE[key] = cached
+    return cached
+
+
 def _factor_vdn(
     alpha: torch.Tensor,
     matrix_a: torch.Tensor,
@@ -328,13 +344,16 @@ def _factor_vdn(
     scale = (1.0 / tokens_per_frame) if scaled else 1.0
     sqrt_scale = scale**0.5 if scaled else 1.0
     matrix_a32 = matrix_a.float() * scale
-    eye = torch.eye(matrix_a32.shape[-1], device=matrix_a32.device, dtype=torch.float32).expand_as(matrix_a32)
+    # One identity per (device, head_dim) instead of a fresh [F, H, d, d] FP32
+    # tensor every layer: cholesky_solve below needs it materialized, and it is
+    # request-static.  Keyed on shape so a different head_dim cannot collide.
+    eye = _identity_for(matrix_a32.shape[-1], matrix_a32.device)
     chol = torch.linalg.cholesky(matrix_a32 + eye)
     if diagnostics is not None:
         chol_diag = chol.detach().diagonal(dim1=-2, dim2=-1).abs().clamp_min(1e-12)
         diagnostics["cholesky_diag_min"] = chol_diag.amin()
         diagnostics["cholesky_condition_proxy"] = (chol_diag.amax() / chol_diag.amin()).square()
-    inverse = torch.cholesky_solve(eye.contiguous(), chol)
+    inverse = torch.cholesky_solve(eye.expand_as(matrix_a32).contiguous(), chol)
     transition = alpha.float().unsqueeze(-1) * inverse
     injection = (matrix_b.float() * sqrt_scale) @ inverse
     # The recurrent state is numerically sensitive.  Keep both factors in
