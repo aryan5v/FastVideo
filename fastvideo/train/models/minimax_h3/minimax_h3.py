@@ -89,6 +89,7 @@ class MiniMaxH3Model(ModelBase):
         enable_gradient_checkpointing_type: str | None = None,
         transformer_override_safetensor: str | None = None,
         attention_backend: AttentionBackendEnum | str | None = AttentionBackendEnum.TORCH_SDPA,
+        construction_precision: str | None = None,
     ) -> None:
         """Validate the single-document T2VA contract and load the transformer."""
         super().__init__(
@@ -118,8 +119,12 @@ class MiniMaxH3Model(ModelBase):
         if str(training_config.data.preprocessed_data_type) not in ("t2va", "text_only"):
             raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type "
                              "'t2va' or 'text_only'")
+        if trainable and construction_precision not in (None, training_config.dit_precision):
+            raise ValueError("A trainable MiniMaxH3 role cannot override construction_precision; "
+                             "FP32 optimizer masters must follow training.dit_precision")
 
         self._init_from = str(init_from)
+        self._construction_precision = construction_precision
         self.training_config = training_config
         self.transformer = self._load_transformer(
             trainable=trainable,
@@ -151,6 +156,7 @@ class MiniMaxH3Model(ModelBase):
             override_transformer_cls_name=self._transformer_cls_name,
             transformer_override_safetensor=transformer_override_safetensor,
             attention_backend=self.attention_backend,
+            construction_precision=self._construction_precision,
         )
         checkpointing_type = (enable_gradient_checkpointing_type
                               or self.training_config.model.enable_gradient_checkpointing_type)

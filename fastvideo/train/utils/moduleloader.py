@@ -110,6 +110,7 @@ def load_module_from_path(
     override_transformer_cls_name: str | None = None,
     transformer_override_safetensor: str | None = None,
     attention_backend: AttentionBackendEnum | str | None = None,
+    construction_precision: str | None = None,
     pre_fsdp_transform: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
 ) -> torch.nn.Module:
     """Load one pipeline component with its role-scoped attention policy.
@@ -123,6 +124,12 @@ def load_module_from_path(
     scoped to this load call.
     """
     fastvideo_args: Any = _make_training_args(training_config, model_path=model_path)
+    original_dit_precision = fastvideo_args.pipeline_config.dit_precision
+    if construction_precision is not None:
+        # A frozen role does not need FP32 optimizer masters. Its FSDP forward
+        # already casts parameters to BF16, so constructing/storing that role
+        # in BF16 removes memory with no change to the actual teacher compute.
+        fastvideo_args.pipeline_config.dit_precision = str(construction_precision)
 
     local_model_path = maybe_download_model(model_path)
     config = verify_model_config_and_directory(local_model_path)
@@ -170,13 +177,18 @@ def load_module_from_path(
     # Attention implementations are bound while transformer layers are
     # constructed. Scope the override to this one role so student,
     # teacher, and critic can use independent backends in one process.
-    with attention_context:
-        module = PipelineComponentLoader.load_module(
-            module_name=module_type,
-            component_model_path=component_path,
-            transformers_or_diffusers=(transformers_or_diffusers),
-            fastvideo_args=fastvideo_args,
-        )
+    try:
+        with attention_context:
+            module = PipelineComponentLoader.load_module(
+                module_name=module_type,
+                component_model_path=component_path,
+                transformers_or_diffusers=(transformers_or_diffusers),
+                fastvideo_args=fastvideo_args,
+            )
+    finally:
+        # _make_training_args intentionally shares the resolved pipeline
+        # config. Do not leak a role-local construction choice to later roles.
+        fastvideo_args.pipeline_config.dit_precision = original_dit_precision
 
     if not isinstance(module, torch.nn.Module):
         raise TypeError(f"Loaded {module_type!r} is not a "

@@ -12,6 +12,10 @@ models:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
     init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
     trainable: false
+    # The frozen teacher has no optimizer masters. FSDP already evaluates it
+    # in BF16, so BF16 construction is numerically identical at forward time
+    # and avoids retaining an unnecessary FP32 copy on every rank.
+    construction_precision: bf16
     disable_custom_init_weights: true
     attention_backend: TORCH_SDPA
   critic:
