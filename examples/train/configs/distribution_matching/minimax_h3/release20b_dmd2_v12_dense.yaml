@@ -85,8 +85,8 @@ training:
     lr_warmup_steps: 0
   loop:
     max_train_steps: 1000
-    # Four DP groups x batch one x accumulation sixteen = V12's global batch
-    # 64, despite using 16 rather than 32 GPUs.
+    # The runner overrides this to eight on the original 32-GPU V12 topology,
+    # preserving the recipe's global batch of 64.
     gradient_accumulation_steps: 16
   checkpoint:
     output_dir: __OUTPUT_DIR__
@@ -99,7 +99,9 @@ training:
     checkpointing_start_step: 100
     # Preserve intermediate peaks for the AV gate instead of assuming the
     # last phase is the best phase.
-    checkpoints_total_limit: 20
+    # Smoke plus forty 100-phase gates through phase 4,000. Keep the complete
+    # trajectory so a middle quality peak cannot be pruned before AV review.
+    checkpoints_total_limit: 50
   tracker:
     trackers: [wandb]
     project_name: fasth3-14b-2step-qad-sprint
