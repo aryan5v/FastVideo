@@ -156,6 +156,9 @@ train_phase() {
     --training.checkpoint.training_state_checkpointing_steps "${checkpoint_every}" \
     --training.checkpoint.checkpointing_start_step "${checkpoint_start}" \
     --training.tracker.run_name "${name}-${RUN_ID}" \
+    --callbacks.validation.dataset_file \
+      "${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_validation_five.json" \
+    --callbacks.validation.run_at_start false \
     "${resume_args[@]}"
 }
 
