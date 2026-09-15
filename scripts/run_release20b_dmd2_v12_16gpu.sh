@@ -13,7 +13,10 @@ set -euo pipefail
 : "${MASTER_ADDR:?Resolve MASTER_ADDR on the SLURM host before entering the container}"
 : "${MASTER_PORT:?Resolve MASTER_PORT on the SLURM host before entering the container}"
 
-NNODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-4}}"
+NNODES="${NNODES:-${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-4}}}"
+NODE_RANK_BASE="${NODE_RANK_BASE:-0}"
+NODE_RANK="$((NODE_RANK_BASE + SLURM_PROCID))"
+RUN_ID="${RUN_ID:-${SLURM_JOB_ID}}"
 PRODUCTION_TARGET="${PRODUCTION_TARGET:-1000}"
 NUM_GPUS="$((NNODES * 4))"
 if [[ "${NUM_GPUS}" -ne 16 && "${NUM_GPUS}" -ne 32 ]]; then
@@ -25,11 +28,15 @@ if [[ "${PRODUCTION_TARGET}" -lt 100 || "$((PRODUCTION_TARGET % 100))" -ne 0 ]];
   exit 2
 fi
 GRAD_ACCUM="$((256 / NUM_GPUS))"
-export NNODES NUM_GPUS GRAD_ACCUM
+if [[ "${NODE_RANK}" -lt 0 || "${NODE_RANK}" -ge "${NNODES}" ]]; then
+  echo "Invalid node rank ${NODE_RANK} for ${NNODES} nodes" >&2
+  exit 2
+fi
+export NNODES NODE_RANK RUN_ID NUM_GPUS GRAD_ACCUM
 
 SPRINT_ROOT="${SPRINT_ROOT:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829}"
 CONFIG_PATH="${CODE_ROOT}/examples/train/configs/distribution_matching/minimax_h3/release20b_dmd2_v12_dense.yaml"
-OUTPUT_ROOT="${OUTPUT_BASE}/job-${SLURM_JOB_ID}"
+OUTPUT_ROOT="${OUTPUT_BASE}/job-${RUN_ID}"
 export SPRINT_ROOT CONFIG_PATH OUTPUT_ROOT
 
 test -s "${CODE_ROOT}/CODE_COMMIT"
@@ -39,7 +46,7 @@ test -s "${SELECTED_PARENT}/transformer/model.safetensors"
 test -s "${TEACHER_PARENT}/transformer/config.json"
 test -s "${TEACHER_PARENT}/transformer/diffusion_pytorch_model.safetensors.index.json"
 
-if [[ "${SLURM_PROCID}" == "0" ]]; then
+if [[ "${NODE_RANK}" == "0" ]]; then
   test ! -e "${OUTPUT_ROOT}"
   mkdir -p "${OUTPUT_ROOT}"
 else
@@ -81,7 +88,7 @@ PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
 # Run the exact V12 math/config suite once on the head node. Other node
 # launchers wait for its receipt so a failed unit contract cannot fall through
 # into model loading or consume training steps.
-if [[ "${SLURM_PROCID}" == "0" ]]; then
+if [[ "${NODE_RANK}" == "0" ]]; then
   "${PY}" -m pytest -q \
     "${CODE_ROOT}/fastvideo/tests/train/methods/test_dmd2_fastgen_parity.py" \
     "${CODE_ROOT}/fastvideo/tests/train/methods/test_dmd2_fake_score_loss_space.py" \
@@ -129,7 +136,7 @@ train_phase() {
   fi
   "${PY}" -m torch.distributed.run \
     --nnodes "${NNODES}" --nproc_per_node 4 \
-    --node_rank "${SLURM_PROCID}" --rdzv_backend c10d \
+    --node_rank "${NODE_RANK}" --rdzv_backend c10d \
     --rdzv_endpoint "${MASTER_ADDR}:${port}" \
     -m fastvideo.train.entrypoint.train --config "${CONFIG_PATH}" \
     --models.student.init_from "${SELECTED_PARENT}" \
@@ -142,14 +149,14 @@ train_phase() {
     --training.checkpoint.output_dir "${OUTPUT_ROOT}" \
     --training.checkpoint.training_state_checkpointing_steps "${checkpoint_every}" \
     --training.checkpoint.checkpointing_start_step "${checkpoint_start}" \
-    --training.tracker.run_name "${name}-${SLURM_JOB_ID}" \
+    --training.tracker.run_name "${name}-${RUN_ID}" \
     "${resume_args[@]}"
 }
 
 train_phase 5 5 5 "" "${MASTER_PORT}" release20b-dmd2-v12-smoke
-touch "${OUTPUT_ROOT}/.phase5-node-${SLURM_PROCID}"
+touch "${OUTPUT_ROOT}/.phase5-node-${NODE_RANK}"
 
-if [[ "${SLURM_PROCID}" == "0" ]]; then
+if [[ "${NODE_RANK}" == "0" ]]; then
   for _ in $(seq 1 180); do
     [[ "$(find "${OUTPUT_ROOT}" -maxdepth 1 -name '.phase5-node-*' | wc -l)" -eq "${NNODES}" ]] && break
     sleep 5
