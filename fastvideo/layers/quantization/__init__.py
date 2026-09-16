@@ -3,7 +3,7 @@ from typing import Literal, get_args
 from fastvideo.layers.quantization.base_config import QuantizationConfig
 
 QuantizationMethods = Literal[None, "AbsMaxFP8", "FP8", "NVFP4", "nvfp4_qat", "nvfp4_qat_train", "fp8_qat_train",
-                              "INT8Affine"]
+                              "INT8Affine", "W4A16"]
 
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -58,6 +58,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .nvfp4_qat_train_config import NVFP4QATTrainConfig
     from .fp8_qat_train_config import FP8QATTrainConfig
     from .int8_affine_config import INT8AffineConfig
+    from .w4a16_config import W4A16Config
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "AbsMaxFP8": AbsMaxFP8Config,
@@ -67,6 +68,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "nvfp4_qat_train": NVFP4QATTrainConfig,
         "fp8_qat_train": FP8QATTrainConfig,
         "INT8Affine": INT8AffineConfig,
+        "W4A16": W4A16Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

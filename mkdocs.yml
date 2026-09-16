@@ -197,6 +197,8 @@ nav:
   - Quantization:
     - Quantized Checkpoint Loading: quantization/loader_quant_params.md
     - Affine INT8 for MiniMax-H3: quantization/h3_int8_affine.md
+    - NVFP4 for MiniMax-H3: quantization/h3_nvfp4.md
+    - W4A16 (4-bit weight) for MiniMax-H3: quantization/h3_w4a16.md
   - Utilities:
     - LoRA: utilities/lora.md
     - Debugging: utilities/debugging.md

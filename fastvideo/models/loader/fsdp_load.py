@@ -113,12 +113,13 @@ def _mixed_precision_module_groups(
 
 
 def _maybe_quantize_model(model: nn.Module) -> None:
-    """Quantize NVFP4-, FP8- or INT8-tagged linear layers in-place after weights are loaded.
+    """Quantize NVFP4-, FP8-, INT8- or W4A16-tagged linear layers in-place after weights are loaded.
 
     Walks the module tree once, looking for layers whose ``quant_method``
-    is an :class:`NVFP4QuantizeMethod`, :class:`FP8QuantizeMethod` or
-    :class:`INT8AffineQuantizeMethod` (attached at construction time by the
-    respective ``get_quant_method``). When at least
+    is an :class:`NVFP4QuantizeMethod`, :class:`FP8QuantizeMethod`,
+    :class:`INT8AffineQuantizeMethod` or :class:`W4A16QuantizeMethod`
+    (attached at construction time by the respective ``get_quant_method``).
+    When at least
     one such layer exists, calls the matching conversion function to register
     quantized weight buffers on each targeted layer.
 
@@ -151,6 +152,10 @@ def _maybe_quantize_model(model: nn.Module) -> None:
         INT8AffineQuantizeMethod,
         convert_model_to_int8_affine,
     )
+    from fastvideo.layers.quantization.w4a16_config import (
+        W4A16QuantizeMethod,
+        convert_model_to_w4a16,
+    )
 
     qat_train_attached = 0
     qat_train_skipped = 0
@@ -171,6 +176,10 @@ def _maybe_quantize_model(model: nn.Module) -> None:
         if isinstance(qm, INT8AffineQuantizeMethod):
             logger.info("Converting loaded model weights for INT8 affine linear layers")
             convert_model_to_int8_affine(model)
+            return
+        if isinstance(qm, W4A16QuantizeMethod):
+            logger.info("Converting loaded model weights for W4A16 linear layers")
+            convert_model_to_w4a16(model)
             return
         # QAT-train configs are mutually exclusive with the inference schemes
         # above (one quant_config per model), so when they're active the loop
