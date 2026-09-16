@@ -40,7 +40,9 @@ _ENV_MAX_GB = "FASTVIDEO_WEIGHT_SHARD_CACHE_MAX_GB"
 # every replicate rank writes its own node's copy.
 _ENV_PER_NODE = "FASTVIDEO_WEIGHT_SHARD_CACHE_PER_NODE"
 # Mirrors fsdp_load's zero-init allowance for params absent from checkpoints.
-_ALLOWED_NEW_PARAM_PATTERNS = ("gate_compress", "proj_l")
+# Kept as a literal (not an import) because fsdp_load imports this module; a
+# test asserts the two tuples stay identical so the mirror cannot drift.
+_ALLOWED_NEW_PARAM_PATTERNS = ("gate_compress", "proj_l", "scale_weight", "scale_input")
 _WRITE_MARGIN_BYTES = 5 << 30
 
 
