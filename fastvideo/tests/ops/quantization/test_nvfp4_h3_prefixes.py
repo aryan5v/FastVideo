@@ -150,7 +150,10 @@ def test_module_imports_without_flashinfer(monkeypatch) -> None:
     """The H3 surface must import on hosts with no flashinfer (only the
     kernels fail, at use time)."""
     monkeypatch.setitem(sys.modules, "flashinfer", None)
-    sys.modules.pop("fastvideo.layers.quantization.nvfp4_config", None)
+    # delitem (not a bare pop) so monkeypatch puts the original module object
+    # back on teardown: leaving a re-imported copy in sys.modules would give
+    # later tests a second, non-identical NVFP4Config class.
+    monkeypatch.delitem(sys.modules, "fastvideo.layers.quantization.nvfp4_config", raising=False)
     import importlib
 
     reloaded = importlib.import_module("fastvideo.layers.quantization.nvfp4_config")

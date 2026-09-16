@@ -405,7 +405,7 @@ the hostile-allowlist case, `from_config` round-tripping, the
 import-without-flashinfer contract, and a real `ReplicatedLinear` end-to-end
 attachment check.
 
-`test_nvfp4_sidecar.py` (13 tests) covers the save receipt and size win,
+`test_nvfp4_sidecar.py` (14 tests) covers the save receipt and size win,
 byte-identical restore, restore without flashinfer, restore into a model with
 no dense weights, the retention policy, layer-set/layout/version/shape
 mismatch handling, and the "no NVFP4 layers attached" error that names the
