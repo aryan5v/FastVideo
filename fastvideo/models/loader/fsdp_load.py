@@ -618,6 +618,24 @@ def shard_model(
     fully_shard(model, **root_kwargs)
 
 
+# Parameters the model registers at build time that a checkpoint never carries,
+# so their absence from the incoming state dict is expected rather than a mapping
+# bug. Quantization configs are the common source: a quant linear method creates
+# its own scale tensors while the checkpoint only holds `weight`/`bias`
+# (fastvideo/layers/quantization/absmax_fp8.py registers `scale_weight` and
+# `scale_input`). Scales kept in `persistent=False` buffers — NVFP4, FP8,
+# INT8Affine — never reach `state_dict()` and so need no entry here.
+# `gate_compress` (VSA gate) and `proj_l` (SLA) are likewise built by the
+# attention backend instead of loaded. Anything else in the model but missing
+# from the checkpoint is a real mismatch and still raises below.
+ALLOWED_NEW_PARAM_PATTERNS: tuple[str, ...] = ("gate_compress", "proj_l", "scale_weight", "scale_input")
+
+
+def is_allowed_new_param(param_name: str) -> bool:
+    """Whether ``param_name`` may be zero-initialized instead of loaded."""
+    return any(pattern in param_name for pattern in ALLOWED_NEW_PARAM_PATTERNS)
+
+
 # TODO(PY): device mesh for cfg parallel
 def load_model_from_full_model_state_dict(
     model: FSDPModule | torch.nn.Module,
@@ -741,14 +759,12 @@ def load_model_from_full_model_state_dict(
     if unused_keys:
         logger.warning("Found unloaded parameters in meta state dict: %s", unused_keys)
 
-    # List of allowed parameter name patterns
-    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress", "proj_l"]  # Can be extended as needed
     for new_param_name in unused_keys:
-        if not any(pattern in new_param_name for pattern in ALLOWED_NEW_PARAM_PATTERNS):
+        if not is_allowed_new_param(new_param_name):
             logger.error("Unsupported new parameter: %s. Allowed patterns: %s", new_param_name,
-                         ALLOWED_NEW_PARAM_PATTERNS)
+                         list(ALLOWED_NEW_PARAM_PATTERNS))
             raise ValueError(f"New parameter '{new_param_name}' is not supported. "
-                             f"Currently only parameters containing {ALLOWED_NEW_PARAM_PATTERNS} are allowed.")
+                             f"Currently only parameters containing {list(ALLOWED_NEW_PARAM_PATTERNS)} are allowed.")
         meta_sharded_param = meta_sd.get(new_param_name)
         target_dtype = param_dtype
         dtype_selector = getattr(model, "_get_parameter_dtype", None)

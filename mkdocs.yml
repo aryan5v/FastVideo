@@ -194,6 +194,8 @@ nav:
     - Video Sparse Attention: attention/vsa/index.md
     - Sliding Tile Attention (Archived): attention/sta/index.md
     - Backend Development: contributing/attention_backend.md
+  - Quantization:
+    - Quantized Checkpoint Loading: quantization/loader_quant_params.md
   - Utilities:
     - LoRA: utilities/lora.md
     - Debugging: utilities/debugging.md
