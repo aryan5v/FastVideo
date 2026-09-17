@@ -1,4 +1,3 @@
-# Detail-band recovery for the 34-block student (300 updates from step-0 export).
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

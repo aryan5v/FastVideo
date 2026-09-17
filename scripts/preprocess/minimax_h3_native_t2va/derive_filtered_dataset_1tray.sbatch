@@ -1,5 +1,4 @@
 #!/bin/bash
-# Derive, finalize, and verify the immutable rare-resolution-filtered v3 dataset.
 
 #SBATCH --job-name=h3-native-v3
 #SBATCH --nodes=1

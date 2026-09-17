@@ -1,6 +1,4 @@
 #!/bin/bash
-# One GB200 tray runs four independent native-shape H3 preprocessing workers.
-# Do not submit production workers until a --probe-only job has passed.
 
 #SBATCH --job-name=h3-native-enc
 #SBATCH --nodes=1

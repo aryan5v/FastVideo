@@ -63,7 +63,6 @@ class _Scheme(NamedTuple):
     load: Callable[..., int]
     read_metadata: Callable[[Any], dict[str, Any]]
     path_for: Callable[[Any], str]
-    # The sidecar's error text when a model has no tagged layers at all.
     wiring_hint: str
 
 
@@ -107,9 +106,6 @@ _ALL = (INT8, W4A16)
 _by_name = pytest.mark.parametrize("scheme", _ALL, ids=[s.name for s in _ALL])
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _build(scheme: _Scheme, *, num_blocks: int = 2, seed: int = 0, config=None) -> nn.Module:
@@ -138,8 +134,6 @@ def _build(scheme: _Scheme, *, num_blocks: int = 2, seed: int = 0, config=None) 
         blocks.append(block)
     dit.transformer_blocks = blocks
     root.minimax_h3 = dit
-    # ``create_weights`` allocates uninitialized storage; real values are what
-    # make the codes meaningful (and the manifest's byte counts non-trivial).
     for _, param in root.named_parameters():
         param.data.copy_(torch.randn(param.shape, generator=generator))
     return root
@@ -168,9 +162,6 @@ def _sidecar_of(scheme: _Scheme, model: nn.Module, path) -> str:
     return str(path)
 
 
-# ---------------------------------------------------------------------------
-# (d) Why this function has to exist: state_dict() does not carry the payload
-# ---------------------------------------------------------------------------
 
 
 @_by_name
@@ -190,8 +181,6 @@ def test_state_dict_does_not_carry_the_quantized_buffers(scheme: _Scheme) -> Non
         for buffer_name in scheme.buffers:
             assert buffer_name not in key, f"{key} leaked a non-persistent buffer"
     assert set(keys) == {f"{fqn}.weight" for fqn in _tagged(model)}
-    # Every tagged layer did convert, so it is the persistence flag, not an
-    # empty conversion, that keeps the payload out of the checkpoint.
     for fqn, mod in _tagged(model).items():
         assert getattr(mod, scheme.buffers[0]) is not None, fqn
     assert len(scheme.state_dict(model)) == 4 * len(scheme.buffers)
@@ -205,7 +194,6 @@ def test_sidecar_state_dict_uses_module_fqn_keys_and_cpu_tensors(scheme: _Scheme
 
     assert f"{_Q}::{scheme.buffers[0]}" in state
     assert all(value.device.type == "cpu" for value in state.values())
-    # Only the registered buffers are serialized; nothing else leaks in.
     assert {key.split("::", 1)[1] for key in state} == set(scheme.buffers)
     assert state[f"{_Q}::{scheme.buffers[0]}"].dtype is torch.uint8
     for name in scheme.buffers[1:]:
@@ -228,17 +216,11 @@ def test_int8_codes_are_uint8_because_they_exceed_the_int8_range() -> None:
     codes = linear._int8_affine_codes
     assert codes.dtype is torch.uint8
     assert codes.max().item() == 255
-    # The same bytes read as int8 are a different number: 255 wraps to -1. A
-    # load that accepted int8 codes would dequantize a wrong weight with no
-    # error anywhere, which is why the dtype is asserted rather than cast.
     as_int8 = codes.to(torch.int8)
     assert as_int8.min().item() == -1
     assert not torch.equal(as_int8.to(torch.int64), codes.to(torch.int64))
 
 
-# ---------------------------------------------------------------------------
-# (a) Round trip into a fresh module is bit-identical
-# ---------------------------------------------------------------------------
 
 
 @_by_name
@@ -250,8 +232,6 @@ def test_save_then_load_into_a_fresh_module_is_bit_identical(scheme: _Scheme, tm
     path = tmp_path / "sidecar.safetensors"
     scheme.save(source, path)
 
-    # A different model (different dense weights) restored purely from the
-    # sidecar, with no conversion ever running on it.
     target = _build(scheme, seed=2)
     assert scheme.load(target, path) == 4
     actual = scheme.state_dict(target)
@@ -260,7 +240,6 @@ def test_save_then_load_into_a_fresh_module_is_bit_identical(scheme: _Scheme, tm
     for key, value in expected.items():
         assert actual[key].dtype == value.dtype, key
         assert torch.equal(actual[key], value), f"{key} is not bit-identical (allclose would hide this)"
-    # The dense weights were never touched: the target keeps its own.
     assert not torch.equal(target.minimax_h3.transformer_blocks[0].attn.to_q.weight,
                            source.minimax_h3.transformer_blocks[0].attn.to_q.weight)
 
@@ -300,8 +279,6 @@ def test_w4a16_load_restores_the_logical_weight_shape_attribute(tmp_path) -> Non
     assert getattr(linear, "_w4a16_weight_shape", None) is None
     W4A16.load(target, path)
     assert tuple(linear._w4a16_weight_shape) == (OUT_DIM, IN_DIM)
-    # Without it, apply() could not dequantize: the packed shape (32, 64) does
-    # not encode the logical (32, 128).
     assert linear._w4a16_codes.shape == (OUT_DIM, IN_DIM // 2)
 
 
@@ -333,8 +310,6 @@ def test_save_and_load_with_no_dense_weights_at_all(scheme: _Scheme, tmp_path) -
     actual = scheme.state_dict(target)
     assert set(actual) == set(expected)
     assert all(torch.equal(actual[key], value) for key, value in expected.items())
-    # And the model is actually usable: no dense weight anywhere, yet forward
-    # runs off the restored buffers.
     x = torch.randn(2, IN_DIM, generator=torch.Generator().manual_seed(36))
     with torch.no_grad():
         assert torch.equal(_tagged(target)[_Q](x)[0], _tagged(source)[_Q](x)[0])
@@ -384,7 +359,6 @@ def test_w4a16_codes_preserve_the_low_nibble_first_packing(tmp_path) -> None:
     assert torch.equal(codes, expected)
     assert codes.shape == (OUT_DIM, IN_DIM // 2)
     assert unpacked.shape == (OUT_DIM, IN_DIM)
-    # The unpacked stream is the quantizer's own code stream, not a re-quantize.
     raw, _, _ = w4.w4a16_quantize(weight, group_size=GROUP_SIZE, bits=4)
     assert torch.equal(unpacked, w4._unpack_4bit(raw))
 
@@ -395,9 +369,6 @@ def test_w4a16_codes_preserve_the_low_nibble_first_packing(tmp_path) -> None:
     assert torch.equal(_tagged(target)[_Q]._w4a16_codes, codes)
 
 
-# ---------------------------------------------------------------------------
-# (c) The manifest round-trips
-# ---------------------------------------------------------------------------
 
 
 @_by_name
@@ -413,7 +384,6 @@ def test_manifest_round_trips_scheme_and_layer_inventory(scheme: _Scheme, tmp_pa
     assert manifest["group_size"] == GROUP_SIZE
     assert manifest["bits"] == (8 if scheme is INT8 else 4)
     assert manifest["num_layers"] == 4
-    # The quantized module fqns are the manifest's layer keys.
     assert set(manifest["layers"]) == {_Q, _FF, f"{_BLOCK.format(idx=0)}.ff.fc_in",
                                        f"{_BLOCK.format(idx=1)}.attn.to_q"}
     assert manifest["quant_prefixes"][_Q] == _Q
@@ -425,13 +395,11 @@ def test_manifest_round_trips_scheme_and_layer_inventory(scheme: _Scheme, tmp_pa
     assert entry["bits"] == (8 if scheme is INT8 else 4)
     assert set(entry["tensors"]) == set(scheme.buffers)
 
-    # The declared per-layer shapes are the shapes actually written.
     with safe_open(path, framework="pt", device="cpu") as handle:
         for fqn, layer in manifest["layers"].items():
             for name, shape in layer["tensors"].items():
                 assert list(handle.get_tensor(f"{fqn}::{name}").shape) == shape
 
-    # The receipt adds the byte accounting, and the sidecar is the smaller copy.
     assert receipt["num_layers"] == 4
     assert receipt["num_tensors"] == 4 * len(scheme.buffers)
     assert receipt["quantized_bytes"] == sum(t.numel() * t.element_size() for t in scheme.state_dict(model).values())
@@ -460,9 +428,6 @@ def test_extra_metadata_is_merged_into_the_manifest(scheme: _Scheme, tmp_path) -
     assert scheme.read_metadata(path)["source_checkpoint"] == "h3-bf16"
 
 
-# ---------------------------------------------------------------------------
-# (b) Corrupt or foreign payloads are rejected loudly
-# ---------------------------------------------------------------------------
 
 
 @_by_name
@@ -480,7 +445,6 @@ def test_wrong_code_dtype_is_rejected_at_load(scheme: _Scheme, tmp_path) -> None
 
     with pytest.raises(ValueError, match="dtype"):
         scheme.load(_build(scheme, seed=11), bad)
-    # Never downgraded: a wrong-typed code buffer is silent corruption.
     with pytest.raises(ValueError, match="dtype"):
         scheme.load(_build(scheme, seed=11), bad, strict=False)
 
@@ -634,8 +598,6 @@ def test_layer_set_mismatch_strict_and_lenient(scheme: _Scheme, tmp_path, caplog
     with caplog.at_level(logging.WARNING):
         assert scheme.load(bigger, path, strict=False) == 2
     assert any("does not match this model" in record.message for record in caplog.records)
-    # The unmatched layer keeps whatever it had (nothing) rather than becoming
-    # a dense layer with a quant_method attached.
     assert getattr(bigger.minimax_h3.transformer_blocks[1].attn.to_q, scheme.buffers[0], None) is None
 
     wider = _build(scheme, num_blocks=3, seed=28)
@@ -669,9 +631,6 @@ def test_a_model_with_no_tagged_layers_raises_with_the_wiring_hint(scheme: _Sche
         scheme.load(empty, tmp_path / "sidecar.safetensors")
 
 
-# ---------------------------------------------------------------------------
-# Deployment constraints: no GPU, no flashinfer
-# ---------------------------------------------------------------------------
 
 
 @_by_name

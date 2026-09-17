@@ -28,7 +28,6 @@ Usage::
         --src  /path/to/MiniMax-H3/transformer \
         --dst  /path/to/MiniMax-H3-r16/transformer --rank 16
 
-    # then assemble a model dir whose other components point at the original
     ln -s /path/to/MiniMax-H3/{text_encoder,tokenizer,processor,vae,audio_vae,\
 scheduler,audio_scheduler,modular_model_index.json} /path/to/MiniMax-H3-r16/
 
@@ -98,8 +97,6 @@ def fit_basis(src: Path, index: dict[str, str], rank: int, grid: int,
               freq_dim: int) -> tuple[torch.Tensor, torch.Tensor, float]:
     """Return (V [time_embed_dim, rank], U [grid, time_embed_dim]) in float64."""
     embedder = load_keys(src, index, list(TIME_EMBEDDER_KEYS))
-    # t is the DiT's timestep input: scheduler.timesteps = 1 - sigmas, so t in [0, 1].
-    # Condition rows pin t to 0.999 / 1.0, so the endpoint must be included.
     t = torch.linspace(0.0, 1.0, grid, dtype=torch.float64)
     h = timestep_embedding(t, freq_dim)
     h = h @ embedder["time_embedder.linear_1.weight"].double().T + embedder["time_embedder.linear_1.bias"].double()
@@ -119,18 +116,14 @@ def main() -> None:
     if index_path.exists():
         index_map = json.loads(index_path.read_text())["weight_map"]
     else:
-        # dcp_to_diffusers writes a single shard for compact students; support it.
         single = src / "model.safetensors"
         if not single.exists():
             raise SystemExit(f"{src} has neither {INDEX_NAME} nor model.safetensors")
         with safe_open(str(single), framework="pt") as handle:
-            # `safe_open` is not itself iterable in the cluster's pinned
-            # safetensors build; `.keys()` works across both old and new APIs.
             index_map = {key: "model.safetensors" for key in handle.keys()}
 
     basis, u, residual = fit_basis(src, index_map, args.rank, args.grid, args.freq_dim)
 
-    # Worst-case induced error on the actual modulation outputs.
     worst = 0.0
     scale = 0.0
     for key in sorted(k for k in index_map if k.endswith(ADALN_SUFFIX) or k == NORM_OUT_WEIGHT):
@@ -169,7 +162,6 @@ def main() -> None:
                 tensor = f.get_tensor(key)
                 total_before += tensor.numel()
                 if key.endswith(ADALN_SUFFIX) or key == NORM_OUT_WEIGHT:
-                    # [out, time_embed_dim] @ [time_embed_dim, rank] -> [out, rank]
                     tensor = (tensor.double() @ basis).to(torch.float16)
                 tensors[key] = tensor
                 total_after += tensor.numel()
@@ -177,7 +169,6 @@ def main() -> None:
         save_file(tensors, str(dst / shard), metadata={"format": "pt"})
         print(f"wrote {shard} ({len(tensors)} tensors)")
 
-    # ReplicatedLinear stores [out_features, in_features], so the basis is V.T.
     basis_shard = "diffusion_pytorch_model-adaln-basis.safetensors"
     save_file({"adaln_basis.weight": basis.T.to(torch.float16).contiguous()},
               str(dst / basis_shard),

@@ -1,4 +1,3 @@
-# Long folded-backbone recovery on base-teacher prefix states.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

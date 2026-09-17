@@ -96,18 +96,6 @@ _LTX2_NVFP4_LINEAR_PREFIXES = frozenset(f"ltx2.blocks.{block_idx}.{suffix}" for 
                                         for suffix in _LTX2_NVFP4_BLOCK_LINEAR_SUFFIXES) | frozenset(
                                             ("ltx2.adaln_single.linear", ))
 
-# --- MiniMax-H3 layer set -------------------------------------------------
-#
-# H3's DiT (``fastvideo/models/dits/minimax_h3.py``) names its block linears
-# ``{prefix}.transformer_blocks.{i}.{suffix}`` with the default
-# ``prefix="minimax_h3"`` and ``num_layers=50``
-# (``fastvideo/configs/models/dits/minimax_h3.py``). The six suffixes below are
-# the always-dense block linears — attention QKV/out and the SwiGLU FFN — which
-# carry most of H3's parameters. The token refiner, the per-block AdaLN
-# modulation (``adaln_proj.linear``), the patch/audio/context projections and
-# ``norm_out.linear`` are deliberately left dense: they are small, run once per
-# block or once per forward, and quantizing them buys little while adding
-# activation-quantize overhead on every call.
 MINIMAX_H3_DIT_PREFIX = "minimax_h3"
 MINIMAX_H3_NUM_LAYERS = 50
 MINIMAX_H3_BLOCK_LINEAR_SUFFIXES = (
@@ -118,18 +106,10 @@ MINIMAX_H3_BLOCK_LINEAR_SUFFIXES = (
     "ff.fc_in",
     "ff.fc_out",
 )
-# 50 blocks x 6 linears = 300 quantized linears.
 MINIMAX_H3_NVFP4_LINEAR_PREFIXES = frozenset(f"{MINIMAX_H3_DIT_PREFIX}.transformer_blocks.{block_idx}.{suffix}"
                                              for block_idx in range(MINIMAX_H3_NUM_LAYERS)
                                              for suffix in MINIMAX_H3_BLOCK_LINEAR_SUFFIXES)
 
-# Linears that must NEVER be quantized, whatever a caller passes in
-# ``layer_prefixes``. ``attn.to_gate_compress`` is H3's VSA sparse-attention
-# compression gate: H3's own deployment path loads it dense, and the
-# zero-initialized gate is probed structurally in the forward
-# (``MiniMaxH3Attention._gate_active``) to skip a guaranteed-zero branch.
-# Quantizing it would perturb the gate's numerics and defeat the exact-zero
-# skip that keeps the VSA branch free while it is untrained.
 _ALWAYS_EXCLUDED_LINEAR_SUFFIXES = ("attn.to_gate_compress", )
 MINIMAX_H3_NVFP4_EXCLUDED_LINEAR_SUFFIXES = _ALWAYS_EXCLUDED_LINEAR_SUFFIXES
 
@@ -309,9 +289,6 @@ def _nvfp4_quantize(
         x_for_quant = x
         logical_rows = x.shape[0]
     else:
-        # Sequence-parallel can feed either logical rows or row-padded
-        # rows. Normalize to the kernel tile shape for swizzled layouts
-        # so both paths share a stable quantization contract.
         row_tile = 8 if sf_layout == SfLayout.layout_8x4.value else 128
         logical_rows = x.shape[0]
         pad_rows = (-logical_rows) % row_tile
@@ -382,10 +359,6 @@ class NVFP4QuantizeMethod(QuantizeMethodBase):
         self.x_global_sf = torch.tensor(1.0, device="cuda", dtype=torch.float32)
         self.layer_prefix = layer_prefix
         self._is_refine_only_layer = _is_ltx2_refine_only_prefix(layer_prefix)
-        # Set from NVFP4Config.retain_original_weights in get_quant_method:
-        # True = retain every original bf16 weight; None/False (default) =
-        # purge the purgeable set. Refine-only layers are always retained --
-        # the base stage profile runs them dense by deployment contract.
         self._retain_original_weights: bool | None = None
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
@@ -427,16 +400,10 @@ class NVFP4QuantizeMethod(QuantizeMethodBase):
         | None = None,
     ) -> torch.Tensor:
         SfLayout, _, _ = _require_flashinfer()
-        # The original bf16 weight may have been purged after FP4 conversion
-        # (see convert_model_to_nvfp4); the packed FP4 weight keeps the
-        # output dim as its first dimension (only K is packed 2-per-byte).
         weight = getattr(layer, "weight", None)
         out_dim = weight.shape[0] if weight is not None else layer._nvfp4_weight.shape[0]
         original_shape = x.shape
 
-        # Stage-aware profile: keep refine-only FP4 layers in dense mode
-        # during stage-1 denoising so the base path doesn't pay the
-        # quantize/dequantize tax for layers it never touches.
         stage_profile = _get_ltx2_fp4_stage_profile(default="refine")
         if self._is_refine_only_layer and stage_profile == "base":
             if weight is None:
@@ -449,9 +416,6 @@ class NVFP4QuantizeMethod(QuantizeMethodBase):
             return out.view(*original_shape[:-1], out_dim)
         if pre_quantized is not None:
             x_fp4, x_scale, x_global_sf = pre_quantized
-            # FlashInfer fused norm+quant APIs may return 3D tensors for
-            # 3D inputs. mm_fp4 only accepts 2D tensors, so flatten
-            # batch/sequence dims here.
             if x_fp4.dim() > 2:
                 x_fp4 = x_fp4.view(-1, x_fp4.shape[-1])
             if x_scale.dim() > 2:
@@ -515,27 +479,10 @@ class NVFP4Config(QuantizationConfig):
         exclude_prefixes: frozenset[str] | set[str] | list[str] | None = None,
     ):
         super().__init__()
-        # ``base``: stage-1 set (no attn2.to_out, no cross-modal AV
-        # projections). ``refine``: full stage-2 set. LTX-2 streaming only:
-        # other models have no stage split (their ``_is_refine_only_layer`` is
-        # always False, so every quantized layer stays on the FP4 path).
         self.layer_profile = layer_profile
-        # Original bf16 ``layer.weight`` retention after FP4 conversion.
-        # Default (None/False): purge the purgeable originals -- every
-        # always-FP4 layer. Refine-only layers (the cross-modal AV
-        # projections) are ALWAYS retained: the ``base`` stage profile runs
-        # them dense by deployment contract, including the distilled
-        # single-stage deploy. True: retain everything (debugging /
-        # pre-purge behavior).
         self.retain_original_weights = retain_original_weights
-        # Full module paths of the linears to quantize. None -> the LTX-2 set
-        # (unchanged default). Frozen so a config instance is hashable and
-        # cannot be mutated after it has been handed to a model.
         self.layer_prefixes: frozenset[str] = (frozenset(_LTX2_NVFP4_LINEAR_PREFIXES)
                                                if layer_prefixes is None else frozenset(layer_prefixes))
-        # Additional never-quantize patterns (full path or trailing suffix).
-        # Applied on top of ``_ALWAYS_EXCLUDED_LINEAR_SUFFIXES``, which no
-        # caller can override.
         self.exclude_prefixes: frozenset[str] = frozenset(exclude_prefixes) if exclude_prefixes else frozenset()
 
     def is_nvfp4_linear_prefix(self, prefix: str) -> bool:
@@ -590,8 +537,6 @@ class NVFP4Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         from fastvideo.layers.linear import LinearBase
 
-        # Use the superset at build/load time, then switch active subset
-        # dynamically in NVFP4QuantizeMethod.apply based on stage profile.
         if isinstance(layer, LinearBase) and self.is_nvfp4_linear_prefix(prefix):
             method = NVFP4QuantizeMethod(layer_prefix=prefix)
             method._retain_original_weights = self.retain_original_weights
@@ -669,8 +614,6 @@ def _apply_dense_weight_policy(model: torch.nn.Module) -> None:
         if retain:
             retained += 1
         elif isinstance(weight, DTensor):
-            # ponytail: purging FSDP-sharded originals needs per-shard
-            # resharding bookkeeping; skip until a sharded deploy needs it.
             retained += 1
         else:
             purged_bytes += weight.numel() * weight.element_size()
@@ -688,39 +631,8 @@ def _apply_dense_weight_policy(model: torch.nn.Module) -> None:
         )
 
 
-# --- compact NVFP4 checkpoint sidecar -------------------------------------
-#
-# ``convert_model_to_nvfp4`` registers the packed FP4 tensors with
-# ``persistent=False``, so they never enter a ``state_dict`` and a saved
-# checkpoint carries dense bf16 weights plus a load-time quantization pass.
-# A *sidecar* writes those tensors to their own safetensors file, keyed by
-# module path, and restores them without re-running the conversion.
-#
-# Layout contract (must match ``apply`` / ``quantize_input`` /
-# ``convert_model_to_nvfp4`` exactly, or the restored weights are garbage):
-#
-#   ``_nvfp4_weight``        uint8   ``(out_dim, ceil(in_dim / 2))`` — two e2m1
-#                            codes per byte, K packed, N unpacked, exactly as
-#                            ``nvfp4_quantize`` returns it (``apply`` passes
-#                            ``.T`` to ``mm_fp4``).
-#   ``_nvfp4_weight_scale``  uint8   ``(out_dim, ceil(in_dim / 16))`` — e4m3
-#                            block-scale bit patterns, ``SfLayout.layout_128x4``
-#                            with ``do_shuffle=False`` (row-padded to the
-#                            128-row tile by ``_nvfp4_quantize`` and narrowed
-#                            back; the padding is not stored).
-#   ``_weight_global_sf``    bfloat16 scalar — ``(448 * 6) / max|W|``.
-#   ``_nvfp4_alpha``         float32  scalar — ``1 / weight_global_sf`` at fp32
-#                            precision, so it is stored separately rather than
-#                            recomputed from the bf16-rounded global sf.
-#
-# Block size is 16 throughout, and the per-row activation scale
-# ``NVFP4QuantizeMethod.x_global_sf`` is not persisted: it is a constant
-# ``1.0`` on the method (never data-derived), so it must be identical on both
-# sides of a save/load.
 
 NVFP4_SIDECAR_SUFFIX = ".nvfp4.safetensors"
-# Filename used when the sidecar sits inside a checkpoint *directory*; it does
-# not carry the suffix above, which is what a sibling file is named with.
 NVFP4_DIR_SIDECAR_NAME = "nvfp4.safetensors"
 _NVFP4_SIDECAR_FORMAT = "fastvideo.nvfp4"
 _NVFP4_SIDECAR_VERSION = 1
@@ -729,8 +641,6 @@ _NVFP4_SIDECAR_KEY_SEP = "::"
 _NVFP4_SIDECAR_SF_LAYOUT = "layout_128x4"
 _NVFP4_SIDECAR_DO_SHUFFLE = False
 _NVFP4_SIDECAR_BLOCK_SIZE = 16
-# Order matters only for the manifest; every buffer is optional on load so a
-# future format can add tensors without breaking older readers.
 _NVFP4_SIDECAR_BUFFERS = (
     "_nvfp4_weight",
     "_nvfp4_weight_scale",
@@ -758,8 +668,6 @@ def _nvfp4_tagged_modules(model: torch.nn.Module) -> list[tuple[str, torch.nn.Mo
 
 
 def _is_dtensor(tensor: torch.Tensor) -> bool:
-    # Imported lazily: torch.distributed.tensor is not cheap to import and is
-    # absent on some builds.
     try:
         from torch.distributed.tensor import DTensor  # type: ignore
     except ImportError:  # pragma: no cover - depends on the torch build
@@ -827,8 +735,6 @@ def save_nvfp4_checkpoint(
         if weight is not None:
             out_dim, in_dim = int(weight.shape[0]), int(weight.shape[1])
         else:
-            # Dense weight already purged: K = 2 codes/byte (H3's dims are
-            # even, so the ceil in the packed shape is exact).
             out_dim, in_dim = int(packed.shape[0]), int(packed.shape[1]) * 2
         layers[fqn] = [out_dim, in_dim]
         quant_prefixes[fqn] = getattr(qm, "layer_prefix", "") or ""
@@ -956,8 +862,6 @@ def load_nvfp4_checkpoint(
     if int(manifest.get("version", -1)) != _NVFP4_SIDECAR_VERSION:
         raise ValueError(f"Unsupported NVFP4 sidecar version {manifest.get('version')!r} in "
                          f"{os.fspath(path)} (this build reads version {_NVFP4_SIDECAR_VERSION}).")
-    # A layout mismatch is unrecoverable (the packed nibbles would be read with
-    # the wrong swizzle), so it is never downgraded by strict=False.
     expected_layout = {
         "sf_layout": _NVFP4_SIDECAR_SF_LAYOUT,
         "do_shuffle": _NVFP4_SIDECAR_DO_SHUFFLE,
@@ -1035,7 +939,6 @@ def _expected_sidecar_shapes(name: str, out_dim: int, in_dim: int) -> tuple[tupl
         padded_rows = ((out_dim + 127) // 128) * 128
         shapes = {(out_dim, (in_dim + 15) // 16), (padded_rows, (in_dim + 15) // 16)}
         return tuple(sorted(shapes))
-    # The two global scales are scalars produced by conversion.
     return ((), )
 
 

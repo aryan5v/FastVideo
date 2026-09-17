@@ -1,5 +1,4 @@
 #!/bin/bash
-# Seed sweep across checkpoints, step counts, and precisions.
 # Usage: sweep.sh <MODEL> <LABEL> <GRID> <QUANT|none> <SEEDS>
 set -uo pipefail
 MODEL="$1"; LABEL="$2"; STEPS="$3"; QUANT="${4:-none}"; SEEDS="${5:-20260912,4242,777}"
@@ -22,10 +21,6 @@ export FASTVIDEO_DMD_DENOISING_STEPS=999,749,500,250
 QARG=""
 [[ "$QUANT" != "none" && "$QUANT" != "-" ]] && QARG="--transformer-quant $QUANT"
 
-# Three prompts that stress temporal continuity:
-#   gloves    - the reported colour-drift case (three differently-coloured gloves)
-#   dancers   - "no additional performers enter" (explicit subject-persistence test)
-#   tram      - three characters, identity retention under motion
 PROMPTS_JSON=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/sweep_prompts.json
 
 cd "$M"

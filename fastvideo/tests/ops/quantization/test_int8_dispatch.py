@@ -36,8 +36,6 @@ class _FakeLinear(nn.Module):
 class TestInt8Dispatch(unittest.TestCase):
 
     def setUp(self):
-        # The loader imports its conversion hook lazily *inside* the call, so it
-        # binds from the config module each time -- patch the source module.
         self._calls = []
         self._orig = int8_affine_config.convert_model_to_int8_affine
 

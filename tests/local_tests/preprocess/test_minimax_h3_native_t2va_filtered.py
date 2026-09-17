@@ -129,8 +129,6 @@ def test_filtered_validation_summary_distinguishes_holdouts_from_current_members
         {
             "seed": 7,
             "rows": 2,
-            # Two inherited holdout IDs intersect source-a, even though only
-            # one remains in the filtered validation manifest.
             "training_exclusions_by_source": {"source-a": 2},
         },
         retained,

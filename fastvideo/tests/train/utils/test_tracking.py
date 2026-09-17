@@ -107,7 +107,6 @@ def test_build_tracker_logs_loss_dict_with_monkeypatched_wandb(monkeypatch, tmp_
     assert run.init_kwargs["name"] == "dmd2_vsa0_overfit"
     assert run.init_kwargs["config"] == run_config
 
-    # The per-step dict the Trainer logs on rank 0 (DMD2 loss map + metrics).
     metrics = {
         "total_loss": 0.5,
         "generator_loss": 0.25,

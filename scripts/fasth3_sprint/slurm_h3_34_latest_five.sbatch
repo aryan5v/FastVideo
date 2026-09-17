@@ -1,5 +1,4 @@
 #!/bin/bash
-# Convert two preserved 34-block DCP checkpoints and generate the five-prompt panel.
 #SBATCH --job-name=h3-34-latest-five
 #SBATCH --partition=all
 #SBATCH --nodes=1

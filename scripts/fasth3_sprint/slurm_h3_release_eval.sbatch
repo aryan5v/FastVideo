@@ -38,13 +38,6 @@ export PYTHONDONTWRITEBYTECODE=1 WANDB_MODE=online WANDB_DIR="${EVAL_ROOT}"
 export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_NCCL_ENABLE_MONITORING=0
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
-# Keep folded modulation information intact. Blanket BF16 export loses basis
-# precision before the production loader can apply its FP16 AdaLN policy.
-# Do not use same-process strict reload here: conversion loads
-# both the student and Base-H3 teacher from the training metadata, so retaining
-# them while reloading the export exceeds even a 192 GB GPU. The immediately
-# following production inference process reloads the export from disk and is a
-# stronger end-to-end verification because it also generates decoded media.
 "${PY}" -m fastvideo.train.entrypoint.dcp_to_diffusers \
   --checkpoint "${CHECKPOINT}" --output-dir "${EXPORT}" \
   --role student --load-precision fp32

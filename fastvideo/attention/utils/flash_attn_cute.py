@@ -13,36 +13,23 @@ if torch.cuda.is_available():
     try:
         from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
     except ImportError:
-        # flash_attn.cute (FA4) is simply not installed -- expected on builds
-        # without it; callers handle the ImportError (the FASTVIDEO_FA4 gate in
-        # flash_attn.py raises, the FP4 probe treats FA4 as unavailable).
         raise
     except Exception as e:
-        # flash_attn.cute IS installed but failed to import -- almost always an
-        # nvidia-cutlass-dsl (CuTe DSL) version skew, e.g. "module
-        # 'cutlass.cute.core' has no attribute 'ThrMma'" (an AttributeError, not
-        # ImportError). This is fixable by pinning a compatible
-        # nvidia-cutlass-dsl, so warn loudly, then re-raise as ImportError so
-        # callers can handle it uniformly.
         logger.warning(
             "flash_attn.cute (FA4) is installed but failed to import (%r). "
             "This is usually an nvidia-cutlass-dsl version mismatch -- pin a "
             "compatible nvidia-cutlass-dsl to restore FA4.", e)
         raise ImportError(f"flash_attn.cute (FA4) import failed: {e!r}") from e
 else:
-    # This error will be caught in flash_attn.py or flash_attn_no_pad.py
     raise ImportError("flash_attn.cute is only available on CUDA devices; this error must be handled internally")
 
 try:
-    # FA2 serves the calls FA4 cute cannot on pre-sm90 GPUs (backward, GQA).
-    # Optional so FA4-only installs can still import this module.
     from flash_attn import flash_attn_func as _flash_attn_2_func
     from flash_attn import flash_attn_varlen_func as _flash_attn_2_varlen_func
 except ImportError:
     _flash_attn_2_func = None
     _flash_attn_2_varlen_func = None
 
-# Dynamo unwraps functools caches, so keep this cache inside the opaque helper.
 _SM90_OR_NEWER_BY_DEVICE: dict[int, bool] = {}
 
 
@@ -63,11 +50,6 @@ def _use_fa2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
     assert device_id is not None
     if _sm90_or_newer(device_id):
         return False
-    # Pre-sm90 FA4 cute limitations, both served by FA2 (deterministic
-    # capability gate, not a runtime fallback):
-    #   * the backward asserts sm90+ (L40S/sm_89 dies on its arch check);
-    #   * GQA fails CuTeDSL JIT in pack_gqa ("ValueError: Operation creation
-    #     failed", observed on sm_89 with HunyuanGameCraft/LTX2).
     if q.shape[-2] != k.shape[-2]:
         return True
     return torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
@@ -94,9 +76,6 @@ def _flash_attn_cute_forward(
     causal: bool,
     deterministic: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # _flash_attn_fwd returns (out, lse) on its empty-sequence early path but
-    # (out, lse, p, row_max) on the main path at the pinned FA4 cute ref; take
-    # the first two so both arities work.
     out, lse = _flash_attn_fwd(
         q,
         k,
@@ -108,9 +87,6 @@ def _flash_attn_cute_forward(
         softcap=0.0,
         num_splits=1,
         pack_gqa=None,
-        # AOTAutograd executes its compiled forward with detached primals, so
-        # FA4 cannot infer from ``requires_grad`` that backward will need LSE.
-        # Keep the auxiliary tensor explicit in the custom-op contract.
         return_lse=True,
     )[:2]
     return out, lse
@@ -418,13 +394,6 @@ def flash_attn_func(
     return out
 
 
-# ---------------------------------------------------------------------------
-# FP4 (NVFP4 block-scaled) variant
-# ---------------------------------------------------------------------------
-# The FP4 path needs the mSFQ/mSFK scale-factor tensors that the regular
-# wrapper does not expose. We register a separate custom op so that
-# torch.compile can treat the kernel as an opaque boundary (the underlying
-# CuTeDSL kernel uses cuda.CUstream which dynamo cannot trace).
 
 
 @torch.library.custom_op(
@@ -469,8 +438,6 @@ def _flash_attn_cute_fp4_forward_fake(
     causal: bool,
 ) -> torch.Tensor:
     del k, sfq, sfk, softmax_scale, causal
-    # q is FP4 packed: shape (batch, seqlen, nheads, headdim/2). Output is in
-    # V's dtype with full headdim.
     batch, seqlen_q, nheads = q.shape[:3]
     return v.new_empty(batch, seqlen_q, nheads, v.shape[-1])
 

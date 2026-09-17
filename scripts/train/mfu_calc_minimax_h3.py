@@ -54,20 +54,16 @@ Peak: default 2.25e15 FLOP/s = NVIDIA's dense (non-sparse) BF16 peak per
 B200/GB200 GPU. MFU scales inversely with this; pass --peak to change it.
 
 Examples:
-  # v7 VSA-90 production (Triton or CuTe — just remeasure step times):
   python mfu_calc_minimax_h3.py --step-type dmd-critic  --step-time 83.65 \
       --gpus 32 --accum 2 --student-backend vsa --sparsity 0.9
   python mfu_calc_minimax_h3.py --step-type dmd-student --step-time 71.27 \
       --gpus 32 --accum 2 --student-backend vsa --sparsity 0.9
-  # blended 4:1 cadence in one shot:
   python mfu_calc_minimax_h3.py --step-type dmd-blend \
       --step-time-critic 83.65 --step-time-student 71.27 \
       --gpus 32 --accum 2 --student-backend vsa --sparsity 0.9
-  # v6 dense baseline:
   python mfu_calc_minimax_h3.py --step-type dmd-blend \
       --step-time-critic 51.2 --step-time-student 57.75 \
       --gpus 32 --accum 1 --student-backend dense
-  # SFT overfit probe (4 GPUs, SP=4):
   python mfu_calc_minimax_h3.py --step-type sft --step-time 3.823 \
       --gpus 4 --sp 4 --student-backend vsa --sparsity 0.9
 """
@@ -77,7 +73,6 @@ from __future__ import annotations
 import argparse
 import math
 
-# ---------------------------------------------------------------- architecture
 HIDDEN = 5376
 HEADS = 56
 HEAD_DIM = 128
@@ -93,14 +88,12 @@ VIDEO_PATCH_DIM = 24 * 1 * 2 * 2  # in_channels * prod(patch_size)
 AUDIO_IN = 32
 MODALITIES = 3
 
-# Per-token GEMM weight elements in one transformer block (bias-free).
 BLOCK_ATTN_GEMM = 3 * HIDDEN * INNER + INNER * HIDDEN  # q,k,v,out
 BLOCK_FFN_GEMM = HIDDEN * (2 * FFN) + FFN * HIDDEN  # SwiGLU fc_in/fc_out
 BLOCK_GEMM = BLOCK_ATTN_GEMM + BLOCK_FFN_GEMM  # 385,351,680
 GATE_GEMM = HIDDEN * INNER  # to_gate_compress (VSA student only)
 ADALN_GEMM = TIME_EMBED_DIM * 6 * HIDDEN * MODALITIES  # per timestep row
 
-# ------------------------------------------------------------ default sequence
 TEXT_TOKENS = 300  # varies per prompt; ~300 for the VidProM/synth mix
 AUDIO_TOKENS = 414  # 207 audio latents x 2 channel rows @ 124 frames
 VIDEO_GRID = (37, 24, 42)  # latent (37,48,84) patched (1,2,2) @ 768x1344x124
@@ -139,8 +132,6 @@ def attention_pairs(text: int, audio: int, video: int, sparsity: float) -> float
     keep_tiles = max(1, min(math.ceil((1.0 - sparsity) * n_vid_tiles), n_vid_tiles))
     keep_frac = keep_tiles / n_vid_tiles
     prefix = text + audio
-    # prefix queries are always dense; video queries see prefix keys (exempt)
-    # plus keep_frac of the video keys (top-k tiles, sizes ~uniform on average)
     return float(prefix) * s + float(video) * (prefix + keep_frac * video)
 
 
@@ -158,11 +149,7 @@ def forward_flops(
         video = math.prod(VIDEO_GRID)
     s = text + audio + video
     linear = 2.0 * s * (LAYERS * BLOCK_GEMM)
-    # text refiner (2 plain blocks over the text stream only)
     refiner = REFINER_LAYERS * (2.0 * text * BLOCK_GEMM + 4.0 * text * text * INNER)
-    # io projections + embedders + AdaLN tables (~2 timestep rows) — tiny:
-    # proj_out/audio_proj_out run over the whole packed sequence, proj_in and
-    # audio_proj_in over their own modality rows only.
     io = 2.0 * (text * TEXT_DIM * HIDDEN + (video + s) * VIDEO_PATCH_DIM * HIDDEN + (audio + s) * AUDIO_IN * HIDDEN +
                 2 * (FREQ_DIM * TIME_EMBED_HIDDEN + TIME_EMBED_HIDDEN * TIME_EMBED_DIM) + 2 *
                 (LAYERS * ADALN_GEMM + TIME_EMBED_DIM * 2 * HIDDEN))
@@ -190,11 +177,8 @@ def step_flops(
     else:
         f_s = forward_flops(text=text, vsa=True, sparsity=sparsity, gate_active=gate_active)["total"]
     if step_type == "dmd-critic":
-        # 3 no-grad student rollout fwd + critic grad unit (fwd+recompute+bwd)
         parts = {"student_fwd(no-grad)": 3 * f_s, "critic_grad_unit": 4 * dense}
     elif step_type == "dmd-student":
-        # rollout (2 no-grad + 1 grad fwd) + student bwd + recompute
-        # + 1 no-grad critic fwd + 1 no-grad teacher fwd (guidance scale 1)
         parts = {
             "student_fwd(no-grad)": 2 * f_s,
             "student_grad_unit": 4 * f_s,

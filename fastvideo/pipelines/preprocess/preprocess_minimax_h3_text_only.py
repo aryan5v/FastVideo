@@ -171,7 +171,6 @@ def main(args: argparse.Namespace) -> None:
             batch = stage.forward(batch, fastvideo_args)
             if not batch.prompt_embeds:
                 raise RuntimeError(f"MiniMax H3 conditioning returned no embedding for line {global_index}")
-            # float32 to match the training collate's np.frombuffer dtype.
             text_embedding = batch.prompt_embeds[0].squeeze(0).float().cpu().contiguous().numpy()
             records.append(
                 text_only_record_creator(

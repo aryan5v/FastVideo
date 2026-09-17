@@ -51,7 +51,6 @@ export PARENT="${SPRINT_ROOT}/preserved/activation42-step500-job6878/export-500"
  --output-dir "${OUTPUT_ROOT}/media-0" --run-id "activation34-step0-${SLURM_JOB_ID}" \
  --source-commit "$(cat "${CODE_ROOT}/CODE_COMMIT")" --max-prompts 4 --height 480 --width 832 \
  --num-frames 124 --seed 2026082050 --steps 50 --num-gpus 4 --dit-precision bf16 --profile strict --no-fa4 --no-compile --no-upload-videos
-# User authorizes experimental recovery without waiting for external parity/review gates.
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/build_h3_recovery_config.py" --template "${CODE_ROOT}/examples/train/configs/fasth3_base42_recovery.yaml" --student "${STUDENT}" --output "${OUTPUT_ROOT}/config.yaml" --depth 34
 
  "${PY}" -m torch.distributed.run --standalone --nproc_per_node=4 -m fastvideo.train.entrypoint.train \

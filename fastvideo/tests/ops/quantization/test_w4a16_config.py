@@ -40,9 +40,6 @@ def _random_weight(out_dim: int, in_dim: int, *, generator: torch.Generator) -> 
     return torch.randn(out_dim, in_dim, generator=generator) * 0.02
 
 
-# ---------------------------------------------------------------------------
-# Config surface
-# ---------------------------------------------------------------------------
 
 
 def test_config_imports_without_cuda_dependencies():
@@ -51,8 +48,6 @@ def test_config_imports_without_cuda_dependencies():
     assert config.get_name() == "W4A16"
     assert torch.bfloat16 in config.get_supported_act_dtypes()
     assert config.get_config_filenames() == []
-    # Declared contract only -- the reference path is a dense 16-bit GEMM, so
-    # no 4-bit tensor-core class is required to *load* it.
     assert W4A16Config.get_min_capability() >= 70
     assert DEFAULT_BITS == 4
 
@@ -78,9 +73,6 @@ def test_from_config_round_trips_fields():
     assert config.retain_original_weight is False
 
 
-# ---------------------------------------------------------------------------
-# Quantizer round-trip
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("group_size", [32, 64, 128])
@@ -92,8 +84,6 @@ def test_quantize_dequantize_round_trip_within_step_bound(group_size: int):
     codes, scales, zeros = w4a16_quantize(weight, group_size=group_size, bits=4)
     restored = w4a16_dequantize(codes, scales, zeros, group_size=group_size, bits=4, out_shape=weight.shape)
 
-    # The quantizer returns codes in the group layout; the logical weight shape
-    # is the caller's to supply. Codes are packed two-per-byte for bits=4.
     assert codes.dtype == torch.uint8
     assert codes.shape == (weight.shape[0], weight.shape[1] // 2)
     assert scales.shape == (weight.shape[0], weight.shape[1] // group_size)
@@ -101,10 +91,6 @@ def test_quantize_dequantize_round_trip_within_step_bound(group_size: int):
     assert restored.shape == weight.shape
 
     error = (restored - weight).abs()
-    # Bound per group: ``code = round(w / scale + zero)`` is off by at most half
-    # a code, so the reconstruction is off by at most half a step. The zero
-    # point's own rounding is absorbed by that same ``round``, so it does not
-    # widen the bound.
     per_element_bound = (scales.unsqueeze(-1) / 2 + 1e-6)
     assert torch.all(error.reshape(weight.shape[0], -1, group_size) <= per_element_bound)
 
@@ -136,8 +122,6 @@ def test_round_trip_holds_across_activation_dtypes():
         codes, scales, zeros = w4a16_quantize(weight, group_size=group_size, bits=4)
         restored = w4a16_dequantize(codes, scales, zeros, group_size=group_size, bits=4, out_shape=weight.shape)
         error = (restored - weight.float()).abs()
-        # A 16-bit source rounds before quantizing, so the tolerance over the
-        # half-step bound is widened by that dtype's own resolution.
         bound = (scales.unsqueeze(-1) / 2 + 1e-2)
         assert torch.all(error.reshape(weight.shape[0], -1, group_size) <= bound), dtype
 
@@ -194,15 +178,11 @@ def test_nan_does_not_poison_the_group():
     assert torch.isfinite(restored).all()
 
 
-# ---------------------------------------------------------------------------
-# MiniMax-H3 layer selection
-# ---------------------------------------------------------------------------
 
 
 def test_h3_allowlist_is_362_linears():
     config = W4A16Config.for_minimax_h3()
     assert len(config.target_layers) == 362
-    # 50 main blocks x (4 attn + 2 ff + 1 adaln) + 2 refiner blocks x (4 attn + 2 ff)
     assert len(config.target_layers) == 50 * 7 + 2 * 6
     assert len(minimax_h3_w4a16_prefixes()) == 362
 
@@ -307,9 +287,7 @@ def test_get_quant_method_skips_indivisible_and_odd_dims():
     config = W4A16Config(target_layers=["blk.a", "blk.b", "blk.c"], group_size=64)
     assert isinstance(config.get_quant_method(ReplicatedLinear(64, 8, bias=False, prefix="blk.a"), "blk.a"),
                       W4A16QuantizeMethod)
-    # 100 is not divisible by 64 -> dense.
     assert config.get_quant_method(ReplicatedLinear(100, 8, bias=False, prefix="blk.b"), "blk.b") is None
-    # Divisible by group_size but odd -> 4-bit packing impossible -> dense.
     odd = W4A16Config(target_layers=["blk.c"], group_size=5)
     assert odd.get_quant_method(ReplicatedLinear(25, 8, bias=False, prefix="blk.c"), "blk.c") is None
 
@@ -319,9 +297,6 @@ def test_get_quant_method_ignores_non_linear_layers():
     assert config.get_quant_method(nn.RMSNorm(64), "minimax_h3.transformer_blocks.0.attn.norm_q") is None
 
 
-# ---------------------------------------------------------------------------
-# Load-time conversion path
-# ---------------------------------------------------------------------------
 
 
 def _tiny_model(prefix: str, quant_config: W4A16Config, in_dim: int = 64, out_dim: int = 32):
@@ -341,7 +316,6 @@ def test_convert_registers_non_persistent_buffers_and_keeps_weight():
 
     assert linear._w4a16_codes.dtype == torch.uint8
     assert tuple(linear._w4a16_weight_shape) == tuple(linear.weight.shape)
-    # Non-persistent: the quantized payload must not leak into checkpoints.
     assert list(model.state_dict().keys()) == ["linear.weight"]
     assert linear.weight is not None  # retained by default
 
@@ -405,7 +379,6 @@ def test_purging_frees_the_dense_weight_when_opted_in():
     assert linear.weight is None
     assert "linear.weight" not in model.state_dict()
     assert linear._w4a16_codes is not None
-    # apply() must still work off the buffers alone.
     out, _ = linear(torch.randn(2, 64))
     assert out.shape == (2, 32)
 
@@ -437,7 +410,6 @@ def test_bias_is_preserved_on_the_quantized_path():
     convert_model_to_w4a16(model)
     x = torch.randn(3, 64)
     out, out_bias = linear(x)
-    # ``skip_bias_add`` is False, so the bias is folded into the output.
     assert out_bias is None
     reference = F.linear(
         x,

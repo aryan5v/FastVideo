@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Well-known callback names that don't need ``_target_`` in YAML.
 _BUILTIN_CALLBACKS: dict[str, str] = {
     "grad_clip": "fastvideo.train.callbacks.grad_clip.GradNormClipCallback",
     "validation": "fastvideo.train.callbacks.validation.ValidationCallback",
@@ -36,10 +35,6 @@ class Callback:
     training_config: TrainingConfig
     method: TrainingMethod
     _callback_dict: CallbackDict | None
-    # Yaml dict key under which this callback was declared (e.g.
-    # "validation_short").  Set by ``CallbackDict`` after instantiation.
-    # Useful for callbacks that want to disambiguate themselves from
-    # sibling instances in tracker keys, log paths, etc.
     name: str = ""
 
     def on_train_start(

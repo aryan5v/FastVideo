@@ -16,9 +16,6 @@ import torch
 
 from fastvideo.train.callbacks.ema import EMACallback
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 class _Student:
@@ -66,9 +63,6 @@ def _tiny_transformer(*, fill: float = 0.0) -> torch.nn.Module:
     return m
 
 
-# ---------------------------------------------------------------------------
-# A. on_train_start
-# ---------------------------------------------------------------------------
 
 
 class TestOnTrainStart:
@@ -79,7 +73,6 @@ class TestOnTrainStart:
         cb.on_train_start(_Method(transformer), iteration=0)
 
         assert cb.student_ema is not None
-        # Shadow shape matches transformer parameter.
         shadow = cb.student_ema.shadow["weight"]
         assert shadow.shape == transformer.weight.shape
         assert torch.allclose(shadow, transformer.weight.detach().cpu())
@@ -90,16 +83,12 @@ class TestOnTrainStart:
             cb.on_train_start(_Method(transformer=None), iteration=0)
 
 
-# ---------------------------------------------------------------------------
-# B. on_training_step_end (decay math + start_iter gating)
-# ---------------------------------------------------------------------------
 
 
 class TestOnTrainingStepEnd:
 
     def test_no_op_before_train_start(self) -> None:
         cb = EMACallback()
-        # student_ema is None until on_train_start.
         cb.on_training_step_end(_Method(transformer=None), loss_dict={}, iteration=0)
         assert not cb._ema_started
 
@@ -108,12 +97,10 @@ class TestOnTrainingStepEnd:
         cb = EMACallback(decay=0.5, start_iter=10)
         cb.on_train_start(_Method(transformer), iteration=0)
 
-        # Mutate transformer to drift it away from initial shadow.
         with torch.no_grad():
             transformer.weight.fill_(7.0)
 
         cb.on_training_step_end(_Method(transformer), loss_dict={}, iteration=5)
-        # Below start_iter: shadow is untouched, _ema_started False.
         assert not cb._ema_started
         assert torch.allclose(
             cb.student_ema.shadow["weight"],
@@ -138,14 +125,10 @@ class TestOnTrainingStepEnd:
         cb = EMACallback(decay=0.9, start_iter=10)
         cb.on_train_start(_Method(transformer), iteration=0)
 
-        # Drift transformer so that re-init has a visible effect.
         with torch.no_grad():
             transformer.weight.fill_(5.0)
 
         cb.on_training_step_end(_Method(transformer), loss_dict={}, iteration=10)
-        # First active step: shadow is re-initialized from the
-        # current transformer (5.0) and *then* update() applies decay
-        # against the same value, so shadow stays at 5.0.
         assert cb._ema_started
         assert torch.allclose(
             cb.student_ema.shadow["weight"],
@@ -157,10 +140,7 @@ class TestOnTrainingStepEnd:
         cb = EMACallback(decay=0.9, start_iter=0)
         cb.on_train_start(_Method(transformer), iteration=0)
 
-        # Step 0: re-init at 2.0, then update against 2.0 → still 2.0.
         cb.on_training_step_end(_Method(transformer), loss_dict={}, iteration=0)
-        # Step 1: drift transformer to 12.0, expect
-        # shadow = 0.9 * 2.0 + 0.1 * 12.0 = 3.0.
         with torch.no_grad():
             transformer.weight.fill_(12.0)
         cb.on_training_step_end(_Method(transformer), loss_dict={}, iteration=1)
@@ -181,9 +161,6 @@ class TestOnTrainingStepEnd:
         assert any(payload.get("ema/decay") == 0.99 and step == 0 for payload, step in tracker.entries)
 
 
-# ---------------------------------------------------------------------------
-# C. ema_context
-# ---------------------------------------------------------------------------
 
 
 class TestEmaContext:
@@ -191,7 +168,6 @@ class TestEmaContext:
     def test_passthrough_when_inactive(self) -> None:
         transformer = _tiny_transformer(fill=3.0)
         cb = EMACallback()
-        # No on_train_start → student_ema is None.
         with cb.ema_context(transformer) as t:
             assert t is transformer
             assert torch.allclose(t.weight, torch.full((2, 4), 3.0))
@@ -202,10 +178,7 @@ class TestEmaContext:
         method = _Method(transformer)
         cb.on_train_start(method, iteration=0)
 
-        # decay=0 → after one step the shadow == current weights == 1.0.
         cb.on_training_step_end(method, loss_dict={}, iteration=0)
-        # Drift transformer; ema_context should swap shadow (1.0) in
-        # for the duration and restore the post-drift value (9.0).
         with torch.no_grad():
             transformer.weight.fill_(9.0)
 
@@ -215,9 +188,6 @@ class TestEmaContext:
         assert torch.allclose(transformer.weight, torch.full((2, 4), 9.0))
 
 
-# ---------------------------------------------------------------------------
-# D. State dict round-trip
-# ---------------------------------------------------------------------------
 
 
 class TestStateDict:
@@ -237,10 +207,8 @@ class TestStateDict:
         assert "student_ema" in state
         assert state["ema_started"] is True
 
-        # Build a fresh callback and load.
         fresh = EMACallback(decay=0.5, start_iter=0)
         fresh.on_train_start(_Method(_tiny_transformer(fill=0.0)), iteration=0)
-        # Sanity: fresh shadow != saved shadow before load.
         assert not torch.allclose(
             fresh.student_ema.shadow["weight"],
             cb.student_ema.shadow["weight"],
@@ -254,7 +222,6 @@ class TestStateDict:
 
     def test_load_without_student_ema_only_sets_flag(self) -> None:
         cb = EMACallback()
-        # student_ema is None — load must not attempt to assign shadow.
         cb.load_state_dict({"ema_started": True})
         assert cb._ema_started is True
         assert cb.student_ema is None

@@ -31,9 +31,6 @@ from fastvideo.train.utils.checkpoint import (
     _resolve_resume_checkpoint,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_checkpoint_dir(
@@ -113,9 +110,6 @@ def _make_manager(
     )
 
 
-# ---------------------------------------------------------------------------
-# A. _is_stateful predicate
-# ---------------------------------------------------------------------------
 
 
 class _Full:
@@ -181,9 +175,6 @@ def test_unknown_inference_checkpoint_role_raises() -> None:
         TrainingMethod.inference_checkpoint_modules(fake_method, "ema")
 
 
-# ---------------------------------------------------------------------------
-# B. _parse_step_from_dir
-# ---------------------------------------------------------------------------
 
 
 def test_parse_step_valid(tmp_path: Path) -> None:
@@ -199,9 +190,6 @@ def test_parse_step_invalid_raises(tmp_path: Path) -> None:
         _parse_step_from_dir(tmp_path / "not-a-checkpoint")
 
 
-# ---------------------------------------------------------------------------
-# C. _find_latest_checkpoint
-# ---------------------------------------------------------------------------
 
 
 def test_find_latest_returns_none_on_nonexistent_dir(tmp_path: Path) -> None:
@@ -261,7 +249,6 @@ def test_strict_training_checkpoint_requires_complete_publication(
 
 
 def test_find_latest_skips_dirs_without_dcp_subdir(tmp_path: Path) -> None:
-    # checkpoint-10 is "corrupted" — has no dcp/ subdir, must be skipped.
     _make_checkpoint_dir(tmp_path, 10, with_dcp=False)
     _make_checkpoint_dir(tmp_path, 5, with_dcp=True)
     latest = _find_latest_checkpoint(tmp_path)
@@ -270,8 +257,6 @@ def test_find_latest_skips_dirs_without_dcp_subdir(tmp_path: Path) -> None:
 
 
 def test_find_latest_skips_incomplete_dcp_save(tmp_path: Path) -> None:
-    # checkpoint-10 crashed mid-save — dcp/ exists but .metadata (written
-    # last by dcp.save) does not; resuming from it would fail at boot.
     _make_checkpoint_dir(tmp_path, 10, with_metadata=False)
     _make_checkpoint_dir(tmp_path, 5)
     latest = _find_latest_checkpoint(tmp_path)
@@ -289,9 +274,6 @@ def test_find_latest_skips_non_checkpoint_dirs(tmp_path: Path) -> None:
     assert latest.name == "checkpoint-7"
 
 
-# ---------------------------------------------------------------------------
-# D. _resolve_resume_checkpoint
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_latest_with_no_checkpoints_returns_none(tmp_path: Path) -> None:
@@ -374,9 +356,6 @@ def test_resolve_unknown_dir_raises(tmp_path: Path) -> None:
         _resolve_resume_checkpoint(str(bogus), output_dir=str(tmp_path))
 
 
-# ---------------------------------------------------------------------------
-# E. metadata read/write
-# ---------------------------------------------------------------------------
 
 
 def test_write_metadata_roundtrip_with_step(tmp_path: Path) -> None:
@@ -483,14 +462,10 @@ def test_save_publishes_training_complete_after_rng_barrier(
 
 def test_load_metadata_raises_on_missing_file(tmp_path: Path) -> None:
     ckpt_dir = _make_checkpoint_dir(tmp_path, 7)
-    # No metadata.json written.
     with pytest.raises(FileNotFoundError, match="metadata"):
         CheckpointManager.load_metadata(ckpt_dir)
 
 
-# ---------------------------------------------------------------------------
-# F. _cleanup_old_checkpoints (rolling delete)
-# ---------------------------------------------------------------------------
 
 
 def test_cleanup_keep_last_zero_is_noop(tmp_path: Path) -> None:
@@ -558,7 +533,6 @@ def test_strict_cleanup_does_not_count_incomplete_newer_directories(tmp_path: Pa
     for step in (100, 200, 300):
         checkpoint = _make_checkpoint_dir(tmp_path, step)
         _publish_fake_training_checkpoint(checkpoint, step=step)
-    # A failed later save has DCP metadata but no post-RNG publication marker.
     _make_checkpoint_dir(tmp_path, 400)
 
     mgr._cleanup_old_checkpoints()
@@ -570,9 +544,6 @@ def test_strict_cleanup_does_not_count_incomplete_newer_directories(tmp_path: Pa
     ]
 
 
-# ---------------------------------------------------------------------------
-# G. maybe_save gating logic
-# ---------------------------------------------------------------------------
 
 
 def _record_save_calls(mgr: CheckpointManager) -> list[int]:

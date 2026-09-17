@@ -436,10 +436,6 @@ def process_chunk(
     shape = chunk["shape"]
     bucket = f"{shape['width']}x{shape['height']}-{shape['num_frames']}f"
     if failures:
-        # Never publish a partial parquet or a done marker: the recursive
-        # loader would sweep that parquet, and the done marker would make the
-        # transient failure permanent. Preserve evidence outside data/ and
-        # move the claim aside so the whole deterministic chunk can retry.
         failure_path = set_root / "work" / "failures" / f"{chunk_id}.{args.worker_tag}.json"
         write_json(
             failure_path,

@@ -65,7 +65,6 @@ class RunConfig:
         return resolved
 
 
-# ---- parsing helpers (kept for use by methods) ----
 
 
 def _resolve_existing_file(path: str) -> str:
@@ -138,7 +137,6 @@ def parse_betas(raw: Any, *, where: str) -> tuple[float, float]:
                      f"got {type(raw).__name__}")
 
 
-# ---- config convenience helpers ----
 
 
 def require_positive_int(
@@ -264,8 +262,6 @@ def _parse_pipeline_config(
 
     pipeline_raw, dit_arch_overrides = _split_training_dit_arch_overrides(pipeline_raw)
 
-    # Derive model_path from models.student.init_from —
-    # needed by PipelineConfig.from_kwargs.
     model_path: str | None = None
     student_cfg = models.get("student")
     if student_cfg is not None:
@@ -518,17 +514,14 @@ def _cast_value(raw: str) -> Any:
         return False
     if raw.lower() in ("none", "null"):
         return None
-    # Try int
     try:
         return int(raw)
     except ValueError:
         pass
-    # Try float
     try:
         return float(raw)
     except ValueError:
         pass
-    # Try YAML list literal like [1, 2]
     if raw.startswith("[") and raw.endswith("]"):
         try:
             return yaml.safe_load(raw)
@@ -573,13 +566,11 @@ def load_run_config(
         raw = yaml.safe_load(f)
     cfg = _require_mapping(raw, where=path)
 
-    # Apply CLI overrides before building typed config.
     if overrides:
         parsed = _parse_cli_overrides(overrides)
         _apply_overrides(cfg, parsed)
         logger.info("Applied CLI overrides: %s", parsed)
 
-    # --- models ---
     models_raw = _require_mapping(cfg.get("models"), where="models")
     models: dict[str, dict[str, Any]] = {}
     for role, model_cfg_raw in models_raw.items():
@@ -590,23 +581,19 @@ def load_run_config(
                              "'_target_' key")
         models[role_str] = dict(model_cfg)
 
-    # --- method ---
     method_raw = _require_mapping(cfg.get("method"), where="method")
     if "_target_" not in method_raw:
         raise ValueError("method must have a '_target_' key")
     method = dict(method_raw)
 
-    # --- callbacks ---
     callbacks_raw = cfg.get("callbacks", None)
     if callbacks_raw is None:
         callbacks: dict[str, dict[str, Any]] = {}
     else:
         callbacks = _require_mapping(callbacks_raw, where="callbacks")
 
-    # --- pipeline config ---
     pipeline_config = _parse_pipeline_config(cfg, models=models)
 
-    # --- training config ---
     training_raw = _require_mapping(cfg.get("training"), where="training")
     t = dict(training_raw)
     training = _build_training_config(t, models=models, pipeline_config=pipeline_config)

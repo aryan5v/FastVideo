@@ -154,9 +154,6 @@ def _replay_ode_walk(state: torch.Tensor, grid: list[int], hops: int) -> torch.T
     return state
 
 
-# ----------------------------------------------------------------------
-# (1) Slot round-robin and rung progression 0 -> 1 -> 2 -> 3 -> clear
-# ----------------------------------------------------------------------
 
 
 def test_slot_round_robin_and_rung_progression_with_two_slots() -> None:
@@ -172,16 +169,8 @@ def test_slot_round_robin_and_rung_progression_with_two_slots() -> None:
         rungs.append(metrics["rollout_step"])
         forwards_per_call.append(len(student.predict_calls) - before)
 
-    # Offsets: slot 0 -> (0*2+0)%4 = 0, slot 1 -> (0*2+1)%4 = 1. Interleaved
-    # round-robin walks: slot0 = 0,1,2,3,clear,0 and slot1 = 1,2,3,clear,0,1.
     assert rungs == [0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 0.0, 0.0, 1.0]
-    # First-ever fill of each slot pre-walks the whole grid (len-1 forwards)
-    # exactly once; every other call, including post-clear restarts, pays
-    # exactly one generation forward.
     assert forwards_per_call == [4, 4, 1, 1, 1, 1, 1, 1, 1, 1]
-    # Slot 1 cleared after rung 3 (call 5), restarted at rung 0 (call 7),
-    # advanced to rung 1 (call 9) and carries rung 2; slot 0 cleared at
-    # call 6, restarted at call 8, and carries rung 1.
     assert method._carry_slots[0] is not None and method._carry_slots[0]["rung"] == 1
     assert method._carry_slots[1] is not None and method._carry_slots[1]["rung"] == 2
 
@@ -198,17 +187,12 @@ def test_carry_slots_cleared_after_last_rung() -> None:
         rungs.append(metrics["rollout_step"])
         counts.append(len(student.predict_calls) - before)
 
-    # offset (0*1+0)%2 = 0: pre-walk (1 hop) then rung 0; rung 1 finishes the
-    # trajectory; the restart begins at rung 0 with NO stagger pre-walk.
     assert rungs == [0.0, 1.0, 0.0]
     assert counts == [2, 1, 1]
     assert method._carry_slots[0] is not None
     assert method._carry_slots[0]["rung"] == 1
 
 
-# ----------------------------------------------------------------------
-# (2) Staggered starts across (rank, slot) streams
-# ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -225,8 +209,6 @@ def test_stagger_offsets_follow_rank_slot_formula(rank: int, slot: int, expected
     snapshot, rung = method._staggered_start(state, batch, step_list, slot)
 
     assert rung == expected_offset == (rank * 2 + slot) % len(_GRID)
-    # Every rank walks the whole grid regardless of its offset (uniform FSDP
-    # collective count) and only keeps the snapshot at its own rung.
     assert len(student.predict_calls) == len(_GRID) - 1
     assert all(not call["grad_enabled"] for call in student.predict_calls)
     assert all(call["attn_kind"] == "vsa" for call in student.predict_calls)
@@ -252,9 +234,6 @@ def test_native_shape_stagger_is_rank_synchronous(rank: int, slot: int) -> None:
     assert rung == slot
 
 
-# ----------------------------------------------------------------------
-# (3) ODE renoise analytic identity with per-modality shifts (real H3 math)
-# ----------------------------------------------------------------------
 
 
 def _h3_adapter() -> MiniMaxH3DMDModel:
@@ -318,9 +297,6 @@ def test_method_renoise_sde_draws_fresh_noise() -> None:
     torch.testing.assert_close(advanced, 0.5 * pred + 0.5 * noise)
 
 
-# ----------------------------------------------------------------------
-# (4) Mid-walk calls reuse the carried conditioning
-# ----------------------------------------------------------------------
 
 
 def test_mid_walk_reuses_carried_conditioning_and_ignores_fresh_batches() -> None:
@@ -334,27 +310,20 @@ def test_mid_walk_reuses_carried_conditioning_and_ignores_fresh_batches() -> Non
 
     method.single_train_step(batch_a, iteration=0)
     snapshot = student.prepare_calls[0]
-    # The adopted batch is a detached device snapshot, not the loader dict.
     assert snapshot is not batch_a
     torch.testing.assert_close(snapshot["text_embedding"], batch_a["text_embedding"])
     assert snapshot["info_list"] == ["prompt-a"]
 
-    # Rungs 1..3: the fresh loader batches are ignored, the trajectory keeps
-    # the exact snapshot object it set out with.
     for call in range(1, 4):
         method.single_train_step(batch_b, iteration=call)
         assert student.prepare_calls[call] is snapshot
         torch.testing.assert_close(student.prepare_calls[call]["text_embedding"], batch_a["text_embedding"])
 
-    # Rung 3 finished the walk; the next call adopts the new conditioning.
     method.single_train_step(batch_c, iteration=4)
     torch.testing.assert_close(student.prepare_calls[4]["text_embedding"], batch_c["text_embedding"])
     assert student.prepare_calls[4]["info_list"] == ["prompt-c"]
 
 
-# ----------------------------------------------------------------------
-# Phase wiring: one forward per call, critic consumes the carried pred
-# ----------------------------------------------------------------------
 
 
 def test_student_phase_forward_has_grad_and_sets_ctx_and_vis() -> None:
@@ -392,13 +361,10 @@ def test_critic_phase_forward_is_no_grad_and_feeds_carried_pred() -> None:
     main = student.predict_calls[-1]
     assert main["grad_enabled"] is False
     assert main["attn_kind"] == "vsa"
-    # The critic is fit on the same simulated state the student trains on:
-    # it receives this call's prediction rather than rolling its own.
     assert len(critic_preds) == 1
     assert critic_preds[0] is student.last_pred
     assert outputs["_fv_backward"]["critic_ctx"] == "critic-ctx"
     assert outputs["_fv_backward"]["student_ctx"] is None
-    # Both phases advance the trajectory.
     assert method._carry_slots[0] is not None
     assert method._carry_slots[0]["rung"] == 1
     assert "generator_timestep" in student.last_batch.dmd_latent_vis_dict
@@ -413,15 +379,10 @@ def test_carried_advance_state_is_detached_and_matches_ode_math() -> None:
     assert carried is not None
     assert carried["rung"] == 1
     assert not carried["state"].requires_grad
-    # offset 0: the main forward ran on the fresh-noise state drawn from the
-    # seeded generator; replay one ODE hop with the fake student's flow.
     state0 = torch.randn(_LATENT_SHAPE, generator=torch.Generator().manual_seed(0))
     torch.testing.assert_close(carried["state"], _replay_ode_walk(state0, _GRID, 1))
 
 
-# ----------------------------------------------------------------------
-# (6) Knob parsing and validation; default off preserves existing behavior
-# ----------------------------------------------------------------------
 
 
 def _parse_only(
@@ -544,11 +505,9 @@ def test_ode_requires_student_extract_eps() -> None:
 
 
 def test_coverage_guard_rejects_uncovered_rung_phases() -> None:
-    # gcd(4, 2) = 2 phase classes: one stream cannot cover both.
     with pytest.raises(ValueError, match="cannot cover"):
         DMD2Method._validate_rollout_carry_coverage(streams=1, grid_len=4, interval=2)
     DMD2Method._validate_rollout_carry_coverage(streams=2, grid_len=4, interval=2)
-    # The H3 recipe (4-rung grid, interval 5) has gcd 1 and always passes.
     DMD2Method._validate_rollout_carry_coverage(streams=1, grid_len=4, interval=5)
 
 
@@ -566,9 +525,6 @@ def test_native_shape_coverage_does_not_count_rank_staggering() -> None:
         _parse_only(config, streams=(0, 2), native_shape_bucketing=True)
 
 
-# ----------------------------------------------------------------------
-# Integration: full carried steps on the real H3 CPU trio
-# ----------------------------------------------------------------------
 
 
 def _build_carry_trio(monkeypatch: pytest.MonkeyPatch, *, interval: int) -> DMD2Method:
@@ -627,8 +583,6 @@ def test_full_carried_student_step_on_real_h3_trio(monkeypatch: pytest.MonkeyPat
     assert student.transformer.scale.grad is not None
     assert torch.isfinite(student.transformer.scale.grad)
 
-    # Mid-walk call: a new prompt arrives but the student must still be
-    # conditioned on the trajectory's adopted text.
     adopted = _raw_batch(seed=1)
     adopted_text = adopted["text_embedding"][:, :2].to(torch.bfloat16)
     method.single_train_step(_raw_batch(seed=9), iteration=1)

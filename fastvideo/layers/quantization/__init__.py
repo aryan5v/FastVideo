@@ -17,7 +17,6 @@ QuantizationMethods = Literal[
 
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
-# The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
 
 
@@ -60,7 +59,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
-    # lazy import to avoid triggering `torch.compile` too early
     from .absmax_fp8 import AbsMaxFP8Config
     from .fp8_config import FP8Config
     from .nvfp4_config import NVFP4Config
@@ -80,7 +78,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "INT8Affine": INT8AffineConfig,
         "W4A16": W4A16Config,
     }
-    # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
 
     return method_to_config[quantization]

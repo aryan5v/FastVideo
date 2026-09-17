@@ -15,9 +15,6 @@ PROFILE_GROUPS = {
     "speech": {"dialogue_ambience", "narration_ambience"},
     "music": {"music_performance_or_lyrics", "music_driven_montage"},
     "foley": {"asmr_or_detailed_foley"},
-    # The source taxonomy has no explicit AV-sync label. Event-SFX prompts are
-    # the closest evidence-backed proxy because their sound events are tied to
-    # visible actions; the receipt names this limitation instead of hiding it.
     "av_sync_proxy": {"ambience_and_event_sfx_no_speech"},
 }
 
@@ -54,9 +51,6 @@ def main() -> None:
     if any(not pool for pool in pools.values()):
         raise ValueError("one or more required audio strata are empty")
 
-    # Natural rows are retained exactly once. Extra rows are balanced across
-    # the four targeted strata until they represent the requested share of the
-    # augmented epoch.
     boost_count = round(len(records) * args.targeted_fraction / (1.0 - args.targeted_fraction))
     rng = random.Random(args.seed)
     boosted: list[dict] = []

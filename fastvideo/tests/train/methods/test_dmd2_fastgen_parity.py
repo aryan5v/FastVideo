@@ -146,8 +146,6 @@ def test_h3_add_noise_matches_fastgen_fp64_then_cast_for_bfloat16() -> None:
 def test_h3_extract_eps_matches_fastgen_fp64_then_cast_at_low_audio_sigma() -> None:
     model = _h3_adapter()
     clean, noisy = _packed_bfloat16_pair(model)
-    # This is the base-clock value reached from FastGen's lower score bound;
-    # audio sigma is about 0.00125, where early BF16 rounding is amplified.
     timestep = _fastgen_time_shift(torch.tensor([0.001], dtype=torch.float64), 1.0 / 2.4) * _TIMESTEP_SCALE
     sigma_video, sigma_audio = _reference_sigmas(timestep)
     noisy_video, noisy_audio = model.unpack_latents(noisy)

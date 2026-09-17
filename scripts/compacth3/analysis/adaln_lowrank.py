@@ -1,71 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hoc CENTERED-AFFINE low-rank compression of MiniMax-H3's AdaLN timestep
-conditioning, with a mandatory r=768 identity gate.
-
-What is compressed
-------------------
-The deployed checkpoints already carry ``adaln_rank=768``, so their AdaLN path is
-
-    t -> time_proj(t) -> time_embedder(...) -> silu(...) -> adaln_basis(...) = u(t)   [768]
-      then per block i:  m_i(t) = W_i u(t) + b_i          W_i [96768, 768]
-      and the final norm_out: m_o(t) = W_o u(t) + b_o     W_o [10752, 768]
-
-``apply_silu`` is False in this configuration (it is only True for the full-rank
-release), so the AdaLN projections are *affine in u(t)* and the whole family can
-be reparameterized exactly.
-
-This script fits, on a dense 4096-point grid over the usable timestep range
-t in [0, 1] (read from the scheduler: timesteps = 1 - sigmas, shift-warped):
-
-    u(t)  = adaln_basis(silu(time_embedder(time_proj(t))))     (4096, 768)
-    mu    = u.mean(0)                                          (768,)
-    Uc    = u - mu
-    V_r   = top-r right singular vectors of Uc                 (768, r), orthonormal
-
-and produces the compressed model
-
-    z(t)  = V_r.T @ (u(t) - mu)                                (r,)
-    m_i(t) = b'_i + P_i @ z(t),   b'_i = b_i + W_i @ mu,  P_i = W_i @ V_r
-
-Identity:  b'_i + P_i z = b_i + W_i mu + W_i V_r V_r.T (u - mu) = b_i + W_i u
-           + W_i (I - V_r V_r.T) (u - mu).
-So the rank-r reparameterization is exact iff V_r V_r.T (u-mu) == (u-mu) for every
-reachable u, i.e. exactly at r = 768 (the full column space of Uc, since Uc is
-4096x768).
-
-The checkpoint is never modified on disk: the AdaLN path is rewritten in memory
-by swapping the ``adaln_basis`` / ``<block>.adaln_proj.linear`` / ``norm_out.linear``
-modules for folded equivalents, and restored afterwards.
-
-Controls that make the gate meaningful
--------------------------------------
-For every precision mode the script also runs an IDENTITY PATCH control: mu=0,
-V_r=I so the folded weights are bit-identical to the originals and only the module
-*plumbing* changes.  The identity-patch denoiser error is the noise floor; a
-correct r=768 conversion must land on that floor.
-
-Three precision modes are reported:
-  deployed    -- everything as loaded (AdaLN fp16, rest of the model bf16).  This is
-                 the number that actually ships, and it additionally carries the
-                 fp16 rounding of the folded weights.
-  fp32_adaln  -- the AdaLN projections are cast to fp32 on both sides while the
-                 backbone stays bf16.  Isolates the conversion from AdaLN storage
-                 rounding, but NOT from backbone rounding.
-  fp32_all    -- the ENTIRE transformer is cast to fp32.  Regenerated with
-                 --whole-model-fp32.  This is the mode that isolates the ALGEBRA:
-                 with no bf16 rounding in the backbone, a correct r=768 conversion
-                 must reproduce the original to fp32 roundoff.
-
-A bf16 backbone is chaotic at rounding boundaries, so ANY sub-eps change to the
-modulation -- including one produced by folding a basis -- can flip rounded results
-by a full ulp across 42 blocks.  The micro-perturbation control quantifies that
-directly by nudging the ORIGINAL AdaLN weights by a relative 1e-6 / 1e-3 and
-measuring the resulting denoiser drift; the compression's drift must be read
-against it rather than against zero.
-
-Must be a real file on disk (never stdin): FastVideo workers re-execute __main__
-via runpy and a heredoc has no path.
-"""
+"""AdaLN low-rank compression analysis for MiniMax-H3."""
 from __future__ import annotations
 
 import argparse
@@ -92,9 +26,6 @@ N_ROTATIONS = 5
 RANK_LIST = (768, 64, 32, 16, 8, 4, 2)
 DEVICE = "cuda:0"
 
-# The 4-call DMD2 ladder.  method.dmd_denoising_steps = [999, 749, 500, 250] in the
-# checkpoint's own metadata.json; the scheduler warps the normalized ratio through
-# sigma = shift*s / (1 + (shift-1)*s) and t = 1 - sigma.
 LADDER_UNIFORM = (1.0, 0.75, 0.5, 0.25)
 LADDER_METADATA = (0.999, 0.749, 0.5, 0.25)
 NOMINAL_VIDEO = (0.0, 0.027027, 0.076923, 0.2)
@@ -104,9 +35,6 @@ def log(msg: str) -> None:
     print(f"[adaln-lowrank] {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-# ----------------------------------------------------------------------------------
-# error statistics
-# ----------------------------------------------------------------------------------
 def err_stats(approx: torch.Tensor, ref: torch.Tensor, tag: str = "") -> dict:
     """Max / RMS / cosine agreement between two tensors.
 
@@ -142,9 +70,6 @@ def err_stats(approx: torch.Tensor, ref: torch.Tensor, tag: str = "") -> dict:
     return out
 
 
-# ----------------------------------------------------------------------------------
-# checkpoint loading (the proven path)
-# ----------------------------------------------------------------------------------
 def build_fastvideo_args(model_path: str):
     spec = importlib.util.spec_from_file_location("fasth3_harness", HARNESS)
     harness = importlib.util.module_from_spec(spec)
@@ -183,9 +108,6 @@ def load_dit(fastvideo_args, transformer_path: str):
     return model
 
 
-# ----------------------------------------------------------------------------------
-# the modules we rewrite
-# ----------------------------------------------------------------------------------
 def adaln_sites(model):
     """[(name, owning_module, its .linear)]; transformer blocks first, norm_out last."""
     sites = []
@@ -287,9 +209,6 @@ def patched_adaln(model, basis_w, basis_b, block_ws, block_bs, norm_w, norm_b, d
         torch.cuda.empty_cache()
 
 
-# ----------------------------------------------------------------------------------
-# timesteps + the shared coordinate
-# ----------------------------------------------------------------------------------
 def warp(shift: float, s) -> torch.Tensor:
     """t = 1 - shift*s/(1 + (shift-1)*s): the scheduler's flow-shift warp."""
     s = torch.as_tensor(s, dtype=torch.float64)
@@ -354,9 +273,6 @@ def fold_weights(model, V_r, mu):
     return basis_w, basis_b, block_ws, block_bs, norm_w, norm_b
 
 
-# ----------------------------------------------------------------------------------
-# (a)/(d) modulation reconstruction error
-# ----------------------------------------------------------------------------------
 def modulation_errors(model, U, V_r, mu, fold, tag) -> dict:
     """max/mean |m_compressed - m_original| for every AdaLN projection at times U.
 
@@ -402,9 +318,6 @@ def modulation_errors(model, U, V_r, mu, fold, tag) -> dict:
     }
 
 
-# ----------------------------------------------------------------------------------
-# (b)(c) denoiser-output error
-# ----------------------------------------------------------------------------------
 def build_fixed_input(model, seed=1234):
     """A structurally faithful packed layout, built by the pipeline's own builder.
 
@@ -484,9 +397,6 @@ def write(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, indent=1))
 
 
-# ----------------------------------------------------------------------------------
-# gate
-# ----------------------------------------------------------------------------------
 def evaluate_gate(entry: dict, controls: dict, modes, exact_mode: str, shared: dict) -> dict:
     """At r=768 the conversion must be exact.
 
@@ -525,8 +435,6 @@ def evaluate_gate(entry: dict, controls: dict, modes, exact_mode: str, shared: d
                      f"{c['video']['max_abs']:.4e} (rel {c['video']['rel_max']:.4e}), audio "
                      f"{c['audio']['max_abs']:.4e} (rel {c['audio']['rel_max']:.4e})")
 
-        # Sensitivity ceiling for this mode: the largest denoiser drift that
-        # nudging the ORIGINAL AdaLN weights (no compression) already produces.
         ceil_v, ceil_a = 0.0, 0.0
         for rel in MICRO_PERTURB_REL:
             mc = controls.get(f"{mode}_microperturb_{rel:g}")
@@ -546,8 +454,6 @@ def evaluate_gate(entry: dict, controls: dict, modes, exact_mode: str, shared: d
         checks.append((f"b/c_{mode}_within_sensitivity", dv <= bound_v and da <= bound_a))
         if mode == "fp32_all":
             checks.append(("b/c_fp32_all_true_identity", dv <= 1e-3 and da <= 1e-3))
-        # RMS and cosine views must show essential agreement, but only where the
-        # backbone is not itself adding rounding-boundary noise (see mode docstring).
         if mode == "fp32_all":
             checks.append((f"b/c_{mode}_cosine", o["video_min_cosine"] >= 0.999
                            and o["audio_min_cosine"] >= 0.999))
@@ -606,9 +512,6 @@ def evaluate_gate(entry: dict, controls: dict, modes, exact_mode: str, shared: d
             "checks": {n: bool(ok) for n, ok in checks}, "lines": lines}
 
 
-# ----------------------------------------------------------------------------------
-# main
-# ----------------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True)
@@ -650,9 +553,6 @@ def main() -> int:
         log("casting the ENTIRE transformer to fp32")
         model.to(torch.float32)
 
-    # DistributedAttention needs the sequence-parallel group even at sp=1; the
-    # model's own forward guards on model_parallel_is_initialized() but the
-    # attention layer does not.  Same call the H3 tests make.
     from fastvideo.distributed import maybe_init_distributed_environment_and_model_parallel
     maybe_init_distributed_environment_and_model_parallel(1, 1)
     from fastvideo.distributed import get_sp_world_size
@@ -754,11 +654,6 @@ def main() -> int:
     denoise_ts += [(0.5, 0.5), (0.9, 0.3), (0.123, 0.777), (0.999, 0.001)]
     result["denoiser_timesteps"] = [[float(a), float(b)] for a, b in denoise_ts]
 
-    # ---------------- canonical r=768 reparameterization: the REFERENCE ----------------
-    # Everything below compares low-rank models against THIS, not against the
-    # original: both sides then run the same reparameterized code path, so the
-    # original-vs-reparameterized execution delta is removed from the comparison
-    # entirely.  The original is still measured, but only for the r=768 gate.
     with adaln_cast(model, torch.float32):
         U = compute_u(model, grid)
         mu768, V768, sigma = fit_basis(U, 768)
@@ -782,12 +677,6 @@ def main() -> int:
             f"{result['shared_coordinate']['r768_projection_residual']['max_abs']:.4e}")
         del proj, Uc
 
-    # Random ORTHOGONAL rank-768 bases.  At r=768 any orthogonal V spans the same
-    # column space, so V V^T = I and the model's FUNCTION is mathematically
-    # identical -- only the parameterization changes.  These are an exact-function
-    # control: if they scatter as widely as the low ranks, the model is simply
-    # chaotic w.r.t. numerically equivalent AdaLN parameterizations; if they sit
-    # near zero, then a low-rank deviation is real truncation damage.
     rotations = []
     for k in range(N_ROTATIONS):
         g = torch.Generator(device="cpu").manual_seed(1000 + k)
@@ -799,7 +688,6 @@ def main() -> int:
         f"{float((gchk - torch.eye(768, dtype=torch.float64, device=DEVICE)).abs().max()):.3e}")
     del gchk
 
-    # ---------------- per-mode references, identity-patch and sensitivity controls ----------------
     baselines_orig, ref_r768, controls = {}, {}, {}
     for mode in modes:
         with mode_context(model, mode):
@@ -820,7 +708,6 @@ def main() -> int:
                 }
                 if len(baselines_orig[mode][0]) != 2:
                     raise AssertionError(f"expected a 2-tuple, got {len(baselines_orig[mode][0])} outputs")
-            # the canonical r=768 reparameterization == the comparison reference
             with patched_adaln(model, *fold768, dt):
                 ref_r768[mode] = [denoise(model, layout, latents, audio_latents, prompt, vt, at, cvt, cat, k)
                                   for k, (vt, at) in enumerate(denoise_ts)]
@@ -842,8 +729,6 @@ def main() -> int:
             del ctrl
             torch.cuda.empty_cache()
 
-            # Sensitivity ceiling: drift from nudging the ORIGINAL AdaLN weights,
-            # with no compression at all.
             gg = torch.Generator(device="cpu").manual_seed(7)
             for rel in MICRO_PERTURB_REL:
                 pw = [w * (1.0 + rel * torch.randn(w.shape, generator=gg).to(w.device)) for w in sw]
@@ -867,7 +752,6 @@ def main() -> int:
             torch.cuda.empty_cache()
         log(f"[{mode}] identity-patch floor: video {full[0]['max_abs']:.4e}, audio {fau[0]['max_abs']:.4e}")
 
-    # ---------------- configuration sweep ----------------
     with adaln_cast(model, torch.float32):
         V_low = {r: fit_basis(U, r)[1] for r in ranks if r != 768}
 
@@ -1038,9 +922,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # os._exit skips interpreter finalization: a single-process nccl process
-    # group can otherwise block at exit, which in a batch job means sitting on
-    # the allocation until the wall-clock limit.
     _rc = main()
     sys.stdout.flush()
     sys.stderr.flush()

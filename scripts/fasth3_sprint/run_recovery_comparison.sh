@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Export recovered H3 students and run the locked four-call comparison matrix.
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
@@ -163,10 +162,6 @@ generate_showcase() {
     --no-upload-videos
 }
 
-# Same prompt, seed, resolution, frame count, and decode path. Base H3 uses its
-# native 50-call quality schedule; FastH3 V1 and both recovered students use the
-# released four-call schedule. This is a quality-ceiling comparison, not an
-# equal-compute benchmark.
 generate_showcase \
   "${BASE_H3}" base-h3-native-50-call dense 51 \
   h36-showcase-base-h3-native50
@@ -180,8 +175,6 @@ generate_showcase \
   "${EXPORT_ROOT}/vsa-activation-step200-raw" recovered-14b-vsa-step200-4-call vsa 5 \
   h36-showcase-14b-vsa-step200-4call
 
-# Continue with the full locked recovered-student matrices after the four
-# showcase outputs are safely persisted.
 generate_recovery_matrix dense dense
 generate_recovery_matrix vsa vsa
 

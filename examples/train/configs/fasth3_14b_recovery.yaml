@@ -1,4 +1,3 @@
-# FastH3 20-block four-call BF16 recovery.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
@@ -40,8 +39,6 @@ training:
     num_latent_t: 37
     num_height: 512
     num_width: 896
-    # 37 H3 video latents represent 124 frames and require 207 audio latents.
-    # Existing 37/200 artifacts must be recached; the model rejects them.
     num_frames: 124
 
   optimizer:

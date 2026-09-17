@@ -110,7 +110,6 @@ def _colour_drift(v):
         wx = (xx + fl[..., 0]).astype(np.float32)
         wy = (yy + fl[..., 1]).astype(np.float32)
         warped = cv2.remap(a, wx, wy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        # Lab is closer to perceptual colour than RGB
         la = cv2.cvtColor(warped, cv2.COLOR_RGB2LAB).astype("float32")
         lb = cv2.cvtColor(b, cv2.COLOR_RGB2LAB).astype("float32")
         res.append(float(np.abs(la - lb).mean()))

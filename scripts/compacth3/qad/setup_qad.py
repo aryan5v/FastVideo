@@ -17,7 +17,6 @@ M = pathlib.Path("/mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831/repo
 SPRINT = pathlib.Path("/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829")
 RUN = SPRINT / "runs/release20b-dmd2-v12-corrected-c4-parent750-32gpu-4000-v3/job-paired8972-8975-4000-v3"
 
-# --- 1. FFN layer-name fix --------------------------------------------------
 qc = M / "fastvideo/layers/quantization/nvfp4_qat_config.py"
 t = qc.read_text(); orig = t
 if '"ff.fc_in"' in t:
@@ -33,7 +32,6 @@ else:
     qc.write_text(t)
     print("layer list: added ff.fc_in / ff.fc_out for H3")
 
-# --- 2. build the QAD yaml from the DMD2 run's own metadata ------------------
 meta = json.loads((RUN / "checkpoint-1400/metadata.json").read_text())
 c = meta["config"]
 
@@ -53,8 +51,6 @@ qad = {
             "trainable": True,
             "enable_gradient_checkpointing_type": "full",
             "attention_backend": y("models.student.attention_backend", "TORCH_SDPA"),
-            # THE QAD KNOB: FP4 forward + full-precision backward (STE).
-            # No weight conversion, so FSDP sharding/checkpointing stay dense-identical.
             "quant_config": "nvfp4_qat_train",
         },
         "teacher": {
@@ -73,7 +69,6 @@ qad = {
         "rollout_sample_type": y("method.rollout_sample_type"),
         "generator_update_interval": y("method.generator_update_interval"),
         "real_score_guidance_scale": y("method.real_score_guidance_scale"),
-        # 4-call ladder, unchanged from the parent run
         "dmd_denoising_steps": y("method.dmd_denoising_steps"),
         "min_timestep_ratio": y("method.min_timestep_ratio"),
         "max_timestep_ratio": y("method.max_timestep_ratio"),
@@ -119,7 +114,6 @@ out.parent.mkdir(parents=True, exist_ok=True)
 
 import yaml
 header = """# NVFP4 QAD for the 42-block four-call DMD2 student (checkpoint-1400).
-# Student uses nvfp4_qat_train; audio_proj_in/out stay bf16.
 """
 out.write_text(header + yaml.safe_dump(qad, sort_keys=False))
 print("wrote", out)

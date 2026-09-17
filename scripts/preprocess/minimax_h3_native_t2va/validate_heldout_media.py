@@ -42,8 +42,6 @@ def probe(row: dict[str, Any]) -> dict[str, Any]:
             "audio_channels": int(audio.channels),
         }
     if actual["num_frames"] <= 0:
-        # These producer MP4s carry exact stream frame counts. Refuse a future
-        # container that would require an expensive/ambiguous inferred count.
         raise ValueError(f"{row['sample_id']}: container has no indexed video frame count")
     expected = {
         "width": int(row["width"]),

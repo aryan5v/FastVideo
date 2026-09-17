@@ -175,7 +175,6 @@ class ValidationCallback(Callback):
         self.output_dir = (str(output_dir) if output_dir is not None else None)
         self.sampling_timesteps = ([int(s) for s in sampling_timesteps] if sampling_timesteps is not None else None)
         self.overlay_actions = self._coerce_bool(overlay_actions)
-        # Validation-only action amplification for world model; training keeps raw action values.
         self.keyboard_value_scale = float(keyboard_value_scale)
         metrics_config = pipeline_kwargs.pop("metrics", None)
         self.metrics_config = self._parse_metrics_config(metrics_config)
@@ -184,7 +183,6 @@ class ValidationCallback(Callback):
         self.attn_qat_infer = self._coerce_bool(attn_qat_infer)
         self.pipeline_kwargs = dict(pipeline_kwargs)
 
-        # Set after on_train_start.
         self._pipeline: Any | None = None
         self._pipeline_key: tuple[Any, ...] | None = None
         self._sampling_param: SamplingParam | None = None
@@ -244,9 +242,6 @@ class ValidationCallback(Callback):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
-    # ----------------------------------------------------------
-    # Callback hooks
-    # ----------------------------------------------------------
 
     @staticmethod
     def _assert_attention_contract(
@@ -355,14 +350,10 @@ class ValidationCallback(Callback):
         """Return whether this callback schedules validation at ``iteration``."""
         if self.every_steps <= 0:
             return False
-        # Step zero measures the checkpoint before the first optimizer update.
         if iteration == 0 and not self.run_at_start:
             return False
         return iteration % self.every_steps == 0
 
-    # ----------------------------------------------------------
-    # Core validation logic
-    # ----------------------------------------------------------
 
     def _run_validation(
         self,
@@ -376,8 +367,6 @@ class ValidationCallback(Callback):
                     method,
                     validation_transformer=transformer,
             ):
-                # Look for an EMA callback to temporarily swap
-                # EMA weights during validation.
                 ema_cb = self._find_ema_callback()
                 ctx = ema_cb.ema_context(transformer) if ema_cb is not None else contextlib.nullcontext(transformer)
                 with ctx as t, self._attn_qat_infer_context(t):
@@ -557,12 +546,6 @@ class ValidationCallback(Callback):
             if device is None:
                 continue
             if self._is_fsdp_managed(module):
-                # `.to()` round-trips on fully_shard modules replace DTensor
-                # local storage behind FSDP2's bookkeeping; the corruption
-                # surfaces as device-mismatch errors on the first backward
-                # through the module a few steps after restore. Keep sharded
-                # roles resident — the optimizer-state offload above already
-                # returns the bulk of the memory.
                 logger.info(
                     "Keeping role %r transformer on %s during validation "
                     "(FSDP-managed modules do not survive .to() round-trips).",
@@ -667,8 +650,6 @@ class ValidationCallback(Callback):
                     transformer=transformer,
                 )
 
-                # Every rank participates in sequence-parallel inference, but
-                # only the group leader retains decoded media for saving.
                 if self.rank_in_sp_group != 0:
                     continue
 
@@ -741,8 +722,6 @@ class ValidationCallback(Callback):
                     all_audio_video_count = local_videos.audio_video_count
                     all_metric_stats = local_metric_stats
                     for sp_idx in range(1, num_sp_groups):
-                        # Sequence-parallel group leaders occupy the first
-                        # global rank in each contiguous group.
                         src = (sp_idx * self.sp_world_size)
                         recv_v = (self.world_group.recv_object(src=src))
                         recv_c = (self.world_group.recv_object(src=src))
@@ -790,8 +769,6 @@ class ValidationCallback(Callback):
                                 prefix="held-out reference",
                                 use_reference_num_frames=True,
                             ))
-                    # Media and completion counts share one tracker event so
-                    # artifacts and verification data remain aligned.
                     self._log_validation_video_artifacts(
                         all_video_filenames,
                         display_captions,
@@ -910,8 +887,6 @@ class ValidationCallback(Callback):
                     audio_sample_rate=audio_sample_rate,
                 )
             except Exception as exc:
-                # Validation media is diagnostic output, so one failed write
-                # must not terminate training or prevent later artifact writes.
                 logger.exception(
                     "Failed to save validation media %s on rank %s; skipping artifact: %s",
                     fname,
@@ -924,7 +899,6 @@ class ValidationCallback(Callback):
             saved.filenames.append(fname)
             saved.indices.append(i)
             if audio is not None:
-                # The media writer verifies requested streams before returning.
                 saved.audio_video_count += 1
         return saved
 
@@ -1043,9 +1017,6 @@ class ValidationCallback(Callback):
                 metrics[shape_key] = metrics.get(shape_key, 0.0) + 1.0
         return metrics
 
-    # ----------------------------------------------------------
-    # Metric evaluation
-    # ----------------------------------------------------------
 
     def _metric_device(self) -> str:
         device = self.metrics_config.device
@@ -1377,9 +1348,6 @@ class ValidationCallback(Callback):
             return -1
         return int(self.metrics_config.mouse_pitch_sign)
 
-    # ----------------------------------------------------------
-    # Pipeline management
-    # ----------------------------------------------------------
 
     def _get_sampling_param(self) -> SamplingParam:
         if self._sampling_param is None:
@@ -1513,8 +1481,6 @@ class ValidationCallback(Callback):
         )
 
         loaded_modules: dict[str, Any] = {"transformer": transformer}
-        # Distillation methods build the flow-match scheduler their few-step DMD
-        # sampler needs; inject it so the pipeline doesn't fall back to UniPC.
         method_scheduler = getattr(self.method, "_sf_scheduler", None)
         if method_scheduler is not None:
             loaded_modules["scheduler"] = method_scheduler
@@ -1533,8 +1499,6 @@ class ValidationCallback(Callback):
             kwargs["flow_shift"] = float(flow_shift)
         kwargs.update(self.pipeline_kwargs)
 
-        # The pipeline class comes from a YAML target, so static analysis cannot
-        # infer the dynamically resolved ``from_pretrained`` class method.
         self._pipeline = PipelineCls.from_pretrained(  # type: ignore[attr-defined]
             self._pipeline_model_path(),
             **kwargs,
@@ -1559,9 +1523,6 @@ class ValidationCallback(Callback):
         self._pipeline_key = key
         return self._pipeline
 
-    # ----------------------------------------------------------
-    # Batch preparation
-    # ----------------------------------------------------------
 
     def _prepare_validation_batch(
         self,
@@ -1581,15 +1542,10 @@ class ValidationCallback(Callback):
         if self.guidance_scale is not None:
             sampling_param.guidance_scale = float(self.guidance_scale)
         sampling_param.seed = self.seed
-        # Output multiplicity belongs in SamplingParam so pipeline stages
-        # allocate the same batch dimension that validation expects to log.
         sampling_param.num_videos_per_prompt = self.num_videos_per_prompt
 
-        # SamplingParam is cached across records; clearing the path prevents a
-        # prior record's image or video from conditioning a later prompt.
         sampling_param.image_path = None
         if self.use_validation_media_conditioning:
-            # Image-to-video pipelines use an image or the first frame of a validation video.
             img_path = (validation_batch.get("image_path") or validation_batch.get("video_path"))
             if img_path is not None and (img_path.startswith("http") or os.path.isfile(img_path)):
                 sampling_param.image_path = img_path
@@ -1622,18 +1578,10 @@ class ValidationCallback(Callback):
             VSA_sparsity=tc.vsa_sparsity,
             timesteps=sampling_timesteps_tensor,
         )
-        # shallow_asdict(sampling_param) copies list-typed fields by
-        # reference. sampling_param is cached and reused across every
-        # validation sample/step, so without this reset every ForwardBatch
-        # would share (and keep appending to) the same
-        # prompt_attention_mask/negative_attention_mask list forever --
-        # index [0] would then hold the *first-ever* validation sample's
-        # mask instead of the current one, mismatching prompt_embeds.
         batch.prompt_attention_mask = []
         batch.negative_attention_mask = []
         batch._inference_args = inference_args  # type: ignore[attr-defined]
 
-        # Conditionally set I2V fields.
         if ("image" in validation_batch and validation_batch["image"] is not None):
             batch.pil_image = validation_batch["image"]
 
@@ -1722,9 +1670,6 @@ class ValidationCallback(Callback):
                 tensor,
             )
 
-    # ----------------------------------------------------------
-    # Validation loop
-    # ----------------------------------------------------------
 
     def _run_validation_for_steps(
         self,
@@ -1764,8 +1709,6 @@ class ValidationCallback(Callback):
             pipeline.fastvideo_args.pipeline_config,
         )
 
-        # Propagate sampling_timesteps to pipeline_config so
-        # causal/DMD denoising stages can read them.
         if (self.sampling_timesteps is not None and inference_args.pipeline_config.dmd_denoising_steps is None):
             inference_args.pipeline_config.dmd_denoising_steps = ([int(s) for s in self.sampling_timesteps])
 
@@ -1788,10 +1731,6 @@ class ValidationCallback(Callback):
             )
 
             assert (batch.prompt is not None and isinstance(batch.prompt, str))
-            # Text-only validation may still carry the held-out raw video for
-            # side-by-side logging. ``ref_video`` avoids decoding it during
-            # dataset iteration; ``video_path`` remains a backward-compatible
-            # fallback for existing manifests.
             ref_video = (validation_batch.get("ref_video") or validation_batch.get("video_path"))
             action = self._validation_actions(validation_batch)
 
@@ -1805,8 +1744,6 @@ class ValidationCallback(Callback):
             if self.rank_in_sp_group != 0:
                 continue
 
-            # Append metadata only on the group leader so every list position
-            # describes the same decoded video throughout save and logging.
             output_audio = output_batch.extra.get("audio")
             output_audio_sample_rate = output_batch.extra.get("audio_sample_rate")
             if (output_audio is None) != (output_audio_sample_rate is None):
@@ -1816,8 +1753,6 @@ class ValidationCallback(Callback):
                 raise TypeError("Validation pipeline audio must be a torch.Tensor or numpy.ndarray; "
                                 f"got {type(output_audio).__name__}.")
             if torch.is_tensor(output_audio):
-                # The returned validation result stays on CPU so MP4 encoding
-                # does not retain a generation tensor on the GPU.
                 output_audio = output_audio.detach().cpu()
 
             video = rearrange(
@@ -1887,9 +1822,6 @@ class ValidationCallback(Callback):
             action=action,
         )
 
-    # ----------------------------------------------------------
-    # State management
-    # ----------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
         state: dict[str, Any] = {}

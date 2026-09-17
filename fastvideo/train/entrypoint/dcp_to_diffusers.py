@@ -106,10 +106,6 @@ def _save_role_pretrained(
                                       "Pass --overwrite to replace it.")
 
         def _copy_or_link(src: str, dest: str) -> None:
-            # Resolve symlinks ourselves: os.link's follow_symlinks=True
-            # default isn't honored on all filesystems (e.g. some
-            # network/overlay mounts), which can silently hard-link to
-            # the symlink itself instead of its target.
             real_src = os.path.realpath(src)
             try:
                 os.link(real_src, dest)
@@ -124,11 +120,6 @@ def _save_role_pretrained(
             link_base,
         )
         if link_base:
-            # Space-lean export: symlink every base component except the
-            # module dirs we are about to rewrite (those get a real dir with
-            # the base's non-weight files, e.g. config.json — weights and
-            # index are produced fresh below). Cross-user hardlinks are
-            # blocked by fs.protected_hardlinks, symlinks are not.
             rewritten = set(module_names or ["transformer"])
             dst.mkdir(parents=True, exist_ok=True)
             for entry in sorted(local_base.iterdir()):
@@ -150,15 +141,9 @@ def _save_role_pretrained(
                     dst,
                     symlinks=False,
                     copy_function=_copy_or_link,
-                    # HF hub bookkeeping under the base checkpoint (.cache/)
-                    # may be unreadable when the base belongs to another
-                    # user; it is not part of the model.
                     ignore=shutil.ignore_patterns(".cache", ".git*"),
                 )
             except shutil.Error as exc:
-                # copytree collects per-file failures and raises at the end;
-                # tolerate stragglers as long as the component manifest made
-                # it.
                 logger.warning("copytree finished with %d skipped entries (first: %s)", len(exc.args[0]),
                                exc.args[0][0] if exc.args[0] else "?")
         if not ((dst / "modular_model_index.json").is_file() or (dst / "model_index.json").is_file()):
@@ -196,17 +181,9 @@ def _save_role_pretrained(
         if _rank() == 0:
             for path in module_dir.glob("*.safetensors"):
                 path.unlink(missing_ok=True)
-            # A leftover shard index from the base would point at the shards
-            # deleted above and shadow the fresh single-file export.
             for path in module_dir.glob("*.safetensors.index.json"):
                 path.unlink(missing_ok=True)
 
-            # Convert internal parameter names back to HF format.
-            # load_model_from_full_model_state_dict builds reverse_param_names_mapping
-            # (internal_key → hf_key) and stores it on the module.  Without this,
-            # the exported safetensors would have internal keys (e.g.
-            # "patch_embedding.proj.bias") and the next load would double-map them
-            # (e.g. → "patch_embedding.proj.proj.bias").
             reverse_mapping: dict = getattr(modules[module_name], "reverse_param_names_mapping", {})
 
             tensor_state: dict[str, torch.Tensor] = {}
@@ -298,7 +275,6 @@ def convert(
 
     import torch.distributed.checkpoint as dcp
 
-    # -- Resolve checkpoint directory --
     resolved = _resolve_resume_checkpoint(
         checkpoint_dir,
         output_dir=checkpoint_dir,
@@ -307,7 +283,6 @@ def convert(
     if not dcp_dir.is_dir():
         raise FileNotFoundError(f"Missing dcp/ under {resolved}")
 
-    # -- Obtain config --
     cfg: RunConfig
     if config_path is not None:
         cfg = load_run_config(config_path)
@@ -322,13 +297,11 @@ def convert(
 
     tc = cfg.training
 
-    # -- Init distributed (1 GPU is enough; DCP reshards) --
     maybe_init_distributed_environment_and_model_parallel(
         tp_size=1,
         sp_size=1,
     )
 
-    # Override distributed config so model loading uses 1 GPU.
     tc.distributed.tp_size = 1
     tc.distributed.sp_size = 1
     tc.distributed.num_gpus = 1
@@ -336,10 +309,6 @@ def convert(
     tc.distributed.hsdp_shard_dim = 1
 
     if weights_only:
-        # A role-only export must not construct unrelated roles or initialize
-        # the training dataloader.  Large DMD2 checkpoints otherwise load the
-        # full teacher and critic merely to restore one student transformer,
-        # which can OOM and also makes export depend on stale dataset paths.
         if role not in cfg.models:
             raise KeyError(f"Role {role!r} is not present in the checkpoint config")
         model = instantiate(cfg.models[role], training_config=tc)
@@ -347,8 +316,6 @@ def convert(
             raise ValueError(f"Role {role!r} has no transformer to export")
         states = {f"roles.{role}.transformer": ModelWrapper(model.transformer)}
     else:
-        # Full-state export retains the legacy behavior for callers that need
-        # method-managed optimizer or multi-role state.
         _, method, _, _ = build_from_config(cfg)
         states = method.checkpoint_state()
         model = method._role_models[role]
@@ -358,7 +325,6 @@ def convert(
     )
     dcp.load(states, checkpoint_id=str(dcp_dir))
 
-    # -- Export to diffusers format --
     base_model_path = str(tc.model_path)
     if not base_model_path:
         raise ValueError("Cannot determine base_model_path from "

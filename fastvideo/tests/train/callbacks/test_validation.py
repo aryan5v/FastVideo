@@ -32,9 +32,6 @@ from fastvideo.train.callbacks.validation import (
     _ValidationMetricStats,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 _PIPE_TARGET = "fastvideo.pipelines.basic.wan.wan_pipeline.WanPipeline"
 
@@ -73,9 +70,6 @@ def _make_callback(
     )
 
 
-# ---------------------------------------------------------------------------
-# A. Constructor coercions / defaults
-# ---------------------------------------------------------------------------
 
 
 class TestConstructor:
@@ -100,7 +94,6 @@ class TestConstructor:
         assert cb.offload_training_state is False
         assert cb.unload_pipeline_after_validation is False
         assert cb.attn_qat_infer is False
-        # Lazy fields not yet populated.
         assert cb._pipeline is None
         assert cb._sampling_param is None
         assert cb.validation_random_generator is None
@@ -108,8 +101,6 @@ class TestConstructor:
 
     def test_string_inputs_are_coerced(self) -> None:
         """Verify YAML-compatible scalar strings become callback value types."""
-        # YAML often produces strings for numeric fields; the
-        # constructor must coerce them.
         cb = ValidationCallback(
             pipeline_target=_PIPE_TARGET,
             dataset_file="x.json",
@@ -161,7 +152,6 @@ class TestConstructor:
             extra_arg=123,
             another="value",
         )
-        # Unknown kwargs are stashed for the pipeline factory.
         assert cb.pipeline_kwargs == {
             "extra_arg": 123,
             "another": "value",
@@ -207,9 +197,6 @@ class TestConstructor:
         assert cb.metrics_config.log_prefix == "custom/validation"
 
 
-# ---------------------------------------------------------------------------
-# B. on_validation_begin gating
-# ---------------------------------------------------------------------------
 
 
 class _NoRunValidation(ValidationCallback):
@@ -690,16 +677,12 @@ class TestAttnQatInferValidation:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# C. _find_ema_callback
-# ---------------------------------------------------------------------------
 
 
 class TestFindEmaCallback:
 
     def test_returns_none_without_callback_dict(self) -> None:
         cb = _make_callback()
-        # _callback_dict is not set on bare instances.
         assert cb._find_ema_callback() is None
 
     def test_returns_none_when_no_ema_registered(self) -> None:
@@ -720,23 +703,17 @@ class TestFindEmaCallback:
         assert found is ema
 
 
-# ---------------------------------------------------------------------------
-# D. state_dict / load_state_dict (rng round-trip)
-# ---------------------------------------------------------------------------
 
 
 class TestStateDict:
 
     def test_state_dict_empty_without_generator(self) -> None:
         cb = _make_callback()
-        # validation_random_generator is None until on_train_start.
         assert cb.state_dict() == {}
 
     def test_round_trip_preserves_rng_state(self) -> None:
         cb = _make_callback()
         gen = torch.Generator(device="cpu").manual_seed(123)
-        # Advance RNG so a default-init generator on the receiving
-        # side is observably different.
         for _ in range(5):
             torch.randn(4, generator=gen)
         cb.validation_random_generator = gen
@@ -744,27 +721,20 @@ class TestStateDict:
         state = cb.state_dict()
         assert "validation_rng" in state
 
-        # Receiver: fresh generator with a different seed.
         fresh = _make_callback()
         fresh.validation_random_generator = (torch.Generator(device="cpu").manual_seed(999))
         fresh.load_state_dict(state)
 
-        # After load, both generators draw the same next sample.
         a = torch.randn(8, generator=cb.validation_random_generator)
         b = torch.randn(8, generator=fresh.validation_random_generator)
         assert torch.equal(a, b)
 
     def test_load_without_generator_is_noop(self) -> None:
         cb = _make_callback()
-        # Generator is None: load must not raise even when state has
-        # an rng entry.
         cb.load_state_dict({"validation_rng": torch.tensor([1, 2, 3], dtype=torch.uint8)})
         assert cb.validation_random_generator is None
 
 
-# ---------------------------------------------------------------------------
-# E. metric result aggregation
-# ---------------------------------------------------------------------------
 
 
 class TestMetricAggregation:
@@ -935,9 +905,6 @@ class TestMetricAggregation:
         assert ValidationCallback._available_paths(["a.mp4", None]) is None
 
 
-# ---------------------------------------------------------------------------
-# F. action overlay plumbing
-# ---------------------------------------------------------------------------
 
 
 class TestActionOverlay:
@@ -1169,7 +1136,6 @@ class TestKeepLoadedEncoderWidths:
         ))
 
     def test_copies_loaded_width(self) -> None:
-        # ByT5 at the generic T5 default vs the checkpoint's real width.
         validation = SimpleNamespace(text_encoder_configs=(self._encoder(512), ))
         loaded = SimpleNamespace(text_encoder_configs=(self._encoder(1472), ))
 
@@ -1178,8 +1144,6 @@ class TestKeepLoadedEncoderWidths:
         assert validation.text_encoder_configs[0].arch_config.hidden_size == 1472
 
     def test_preserves_training_owned_fields(self) -> None:
-        # ``text_len`` is a FastVideo-only field absent from HF configs, so
-        # the loader never populates it and the training value must survive.
         validation = SimpleNamespace(text_encoder_configs=(self._encoder(512, text_len=1000), ))
         loaded = SimpleNamespace(text_encoder_configs=(self._encoder(1472, text_len=0), ))
 
@@ -1188,8 +1152,6 @@ class TestKeepLoadedEncoderWidths:
         assert validation.text_encoder_configs[0].arch_config.text_len == 1000
 
     def test_keeps_config_objects_unshared(self) -> None:
-        # The second call site writes into ``tc.pipeline_config`` itself, so
-        # the merge must not alias the loaded encoder objects into it.
         validation = SimpleNamespace(text_encoder_configs=(self._encoder(512), ))
         original = validation.text_encoder_configs
         loaded = SimpleNamespace(text_encoder_configs=(self._encoder(1472), ))
@@ -1200,8 +1162,6 @@ class TestKeepLoadedEncoderWidths:
         assert validation.text_encoder_configs[0] is not loaded.text_encoder_configs[0]
 
     def test_skips_unpopulated_loaded_width(self) -> None:
-        # ``TextEncoderArchConfig.hidden_size`` defaults to 0; a loader that
-        # never filled it must not clobber a real training-side width.
         validation = SimpleNamespace(text_encoder_configs=(self._encoder(3584), ))
         loaded = SimpleNamespace(text_encoder_configs=(self._encoder(0), ))
 
@@ -1237,5 +1197,4 @@ class TestKeepLoadedEncoderWidths:
         validation: SimpleNamespace,
         loaded: SimpleNamespace,
     ) -> None:
-        # Pipelines without text encoders must not raise here.
         ValidationCallback._keep_loaded_encoder_widths(validation, loaded)

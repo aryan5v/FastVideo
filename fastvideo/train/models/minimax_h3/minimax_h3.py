@@ -41,17 +41,12 @@ from fastvideo.train.utils.moduleloader import load_module_from_path
 if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import TrainingConfig
 
-# H3 maps one shared denoising stage through modality-specific scheduler
-# shifts so video and audio remain synchronized at different noise amounts.
 _VIDEO_SCHEDULER_SHIFT = 12.0
 _AUDIO_SCHEDULER_SHIFT = 3.0
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
 _AUDIO_SAMPLE_RATE = 32_000
 
-# Dense TORCH_SDPA is the default; per-role overrides allow FLASH_ATTN
-# (teacher/critic, FA4 via FASTVIDEO_FA4=1) and the packed-sequence VSA-H3
-# backend (distillation student).
 _ALLOWED_ATTENTION_BACKENDS = (
     AttentionBackendEnum.TORCH_SDPA,
     AttentionBackendEnum.FLASH_ATTN,
@@ -96,26 +91,16 @@ class MiniMaxH3Model(ModelBase):
             trainable=trainable,
             attention_backend=attention_backend,
         )
-        # Attention layers bind their backend during construction, so this is
-        # the per-role selection point (student/teacher/critic can differ).
         if self.attention_backend not in _ALLOWED_ATTENTION_BACKENDS:
             allowed = ", ".join(b.name for b in _ALLOWED_ATTENTION_BACKENDS)
             raise ValueError("MiniMaxH3Model supports the attention backends "
                              f"{{{allowed}}}, got {self.attention_backend}")
         if training_config.pipeline_config is None:
             raise ValueError("MiniMaxH3Model requires a resolved MiniMax H3 pipeline config")
-        # Packed row indices describe one text-video-audio document without a
-        # batch offset, so each data-parallel replica consumes one sample.
         if int(training_config.data.train_batch_size) != 1:
             raise ValueError("MiniMaxH3Model requires training.data.train_batch_size=1")
-        # Classifier-free guidance (CFG) dropout replaces text embeddings with
-        # zeros, but H3 training does not define a zero-vector branch.
         if float(training_config.data.training_cfg_rate) != 0.0:
             raise ValueError("MiniMaxH3Model requires training.data.training_cfg_rate=0.0")
-        # Joint supervision requires paired video and stereo-audio latents from
-        # every parquet row ('t2va'). 'text_only' rows carry prompt conditioning
-        # alone and are valid only for data-free methods that synthesize latent
-        # shapes from config (DMD2 enforces rollout_mode='simulate' for them).
         if str(training_config.data.preprocessed_data_type) not in ("t2va", "text_only"):
             raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type "
                              "'t2va' or 'text_only'")
@@ -256,8 +241,6 @@ class MiniMaxH3Model(ModelBase):
         if latents_source == "data" and native_shapes:
             self._validate_native_latents(raw_batch, video_latents, audio_latents)
         elif not native_shapes:
-            # Preserve the legacy fixed-shape contract for configs that have
-            # not opted into exact-shape bucketing.
             if data_config.num_latent_t > 0:
                 video_latents = video_latents[:, :, :data_config.num_latent_t]
             expected_audio_frames = audio_latent_num_frames(data_config.num_frames)
@@ -361,8 +344,6 @@ class MiniMaxH3Model(ModelBase):
             dtype=torch.float32,
         )
         if int(self.training_config.distributed.sp_size) > 1:
-            # Sequence-parallel ranks shard one document and therefore require
-            # identical video and audio noise amounts for that document.
             self.sp_group.broadcast(base_noise_amount, src=0)
         return (
             shift_noise_amount(base_noise_amount, _VIDEO_SCHEDULER_SHIFT),
@@ -406,8 +387,6 @@ class MiniMaxH3Model(ModelBase):
         _, _, video_frames, latent_height, latent_width = video_latents.shape
         num_audio_latents = audio_latents.shape[-1]
         text_token_tags = torch.full((int(valid_text.sum()), ), MINIMAX_H3_TEXT_TAG, dtype=torch.long)
-        # H3 self-attention consumes one interleaved document, so the layout
-        # owns the row tags, positions, and modality output indices together.
         layout = build_packed_sequence(
             text_token_tags,
             video_frames,
@@ -434,8 +413,6 @@ class MiniMaxH3Model(ModelBase):
         training_batch.audio_noise = audio_noise
         training_batch.sigmas = video_sigmas
         training_batch.audio_sigmas = audio_sigmas
-        # ModelBase exposes clean-time timesteps while the loss consumes the
-        # complementary noise amounts stored in the sigma fields.
         training_batch.timesteps = 1.0 - video_noise_amount
         training_batch.audio_timesteps = 1.0 - audio_noise_amount
         training_batch.minimax_h3_layout = layout
@@ -461,8 +438,6 @@ class MiniMaxH3Model(ModelBase):
         if builder is None:
             builder = self._vsa_metadata_builder = MiniMaxH3VSAMetadataBuilder()
         batch.attn_metadata_vsa = builder.build(
-            # Training builds one metadata per batch and reuses it across the
-            # step's forwards; the step index only feeds probe bookkeeping.
             current_timestep=0,
             raw_latent_shape=(
                 layout.num_video_latent_frames,
@@ -500,9 +475,6 @@ class MiniMaxH3Model(ModelBase):
     ) -> NoisePrediction:
         """Pack modality timesteps and convert H3 outputs to noise-minus-clean."""
         del timestep
-        # Under dense backends both metadata views are None, so "vsa" silently
-        # means dense (mirrors WanModel). MiniMaxH3DMDModel.prepare_batch
-        # populates attn_metadata_vsa when the role runs VIDEO_SPARSE_ATTN_H3.
         if attn_kind not in ("dense", "vsa"):
             raise ValueError(f"Unknown attn_kind: {attn_kind!r}")
         attn_metadata = (batch.attn_metadata_vsa if attn_kind == "vsa" else batch.attn_metadata)
@@ -516,9 +488,6 @@ class MiniMaxH3Model(ModelBase):
 
         encoder_hidden_states = batch.encoder_hidden_states
         if not conditional:
-            # H3 has no negative-prompt encoder at training time, so the only
-            # supported unconditional branch (teacher CFG in distillation)
-            # zeroes the text embeddings.
             if (cfg_uncond or {}).get("text") != "zero":
                 raise ValueError("MiniMaxH3Model unconditional forwards require "
                                  "method.cfg_uncond={'text': 'zero'}")
@@ -529,9 +498,6 @@ class MiniMaxH3Model(ModelBase):
         video_input_dtype = noisy_latents.dtype
         audio_input_dtype = batch.audio_noisy_model_input.dtype
         video_bcthw = noisy_latents.permute(0, 2, 1, 3, 4).to(dtype)
-        # Match H3 checkpoint token order: video rows flatten
-        # (C, patch_t, patch_h, patch_w), while audio rows flatten stereo
-        # channel, time, and latent feature dimensions in that order.
         video_rows = patchify_video_latents(video_bcthw, self.transformer.patch_size)
         audio_latents = batch.audio_noisy_model_input.to(dtype)
         num_audio_latents = audio_latents.shape[-1]

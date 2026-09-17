@@ -25,9 +25,6 @@ class MiniMaxH3ArchConfig(DiTArchConfig):
     _supported_attention_backends: tuple[AttentionBackendEnum, ...] = (
         AttentionBackendEnum.TORCH_SDPA,
         AttentionBackendEnum.FLASH_ATTN,
-        # FP4-quantized QK attention (fa4_fp4 on sm_100/sm_103, cutlass on
-        # sm_12x). Enabled for speed experiments; output quality against the
-        # SSIM references is not yet validated.
         AttentionBackendEnum.ATTN_QAT_INFER,
         AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
     )
@@ -82,5 +79,4 @@ class MiniMaxH3Config(DiTConfig):
 
     arch_config: MiniMaxH3ArchConfig = field(default_factory=MiniMaxH3ArchConfig)
     prefix: str = "minimax_h3"
-    # Disable model-selected FP32 compute groups when uniform precision is required.
     uniform_parameter_dtype: bool = False

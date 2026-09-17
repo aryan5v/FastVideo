@@ -1,9 +1,4 @@
 #!/bin/bash
-# Compute-node payload for a Release-20B DMD2 V12 run.
-# Run as one top-level srun task per four-GPU node. The payload first proves
-# four critic updates and one student update, then resumes in the same
-# allocation to the requested target. Intermediate checkpoints are promotion gates,
-# not stop/requeue boundaries.
 set -euo pipefail
 
 : "${CODE_ROOT:?Set CODE_ROOT to the immutable execution checkout}"
@@ -46,10 +41,6 @@ test -s "${SELECTED_PARENT}/transformer/model.safetensors"
 test -s "${TEACHER_PARENT}/transformer/config.json"
 test -s "${TEACHER_PARENT}/transformer/diffusion_pytorch_model.safetensors.index.json"
 
-# SLURM/Pyxis falls back to /tmp because this cluster account has no
-# /home/vlm-aryan.  Validation manifests in the release config are intentionally
-# repository-relative, so pin the process working directory to the immutable
-# checkout before either preflight or training starts.
 cd "${CODE_ROOT}"
 
 if [[ "${NODE_RANK}" == "0" ]]; then
@@ -77,13 +68,7 @@ export FASTVIDEO_FA4=0
 export FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ENABLE_MONITORING=0
-# NVLS has intermittently failed during communicator creation on these GB200
-# allocations.  Ordinary NCCL collectives are slower only at startup scale and
-# avoid losing an otherwise healthy four-node allocation to a transport fault.
 export NCCL_NVLS_ENABLE=0
-# The Slinky rack-2 trays have also produced CUDA error 400 while creating
-# NCCL's direct P2P transport.  The established H3 launchers disable this
-# path and use the stable shared-memory/network transports instead.
 export NCCL_P2P_DISABLE=1
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=1
@@ -91,9 +76,6 @@ export TOKENIZERS_PARALLELISM=false
 
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
 
-# Run the exact V12 math/config suite once on the head node. Other node
-# launchers wait for its receipt so a failed unit contract cannot fall through
-# into model loading or consume training steps.
 if [[ "${NODE_RANK}" == "0" ]]; then
   "${PY}" -m pytest -q \
     "${CODE_ROOT}/fastvideo/tests/train/methods/test_dmd2_fastgen_parity.py" \
@@ -202,7 +184,4 @@ for _ in $(seq 1 180); do
 done
 test -e "${OUTPUT_ROOT}/.phase5-passed"
 
-# Continue uninterrupted after the contract smoke. Validation and immutable
-# checkpoints are produced every 100 phases (20 student updates); selection
-# is based on those checkpoints rather than assuming phase 1,000 is best.
 train_phase "${PRODUCTION_TARGET}" 100 100 "${OUTPUT_ROOT}/checkpoint-5" "$((MASTER_PORT + 1))" release20b-dmd2-v12-production

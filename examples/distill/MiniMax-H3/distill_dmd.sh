@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Direct torchrun wrapper for the current MiniMax-H3 DMD2 config.
-# Use examples/train/slurm/dmd2_32xgb200.sbatch for production allocation.
 
 set -euo pipefail
 

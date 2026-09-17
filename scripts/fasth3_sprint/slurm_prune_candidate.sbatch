@@ -79,10 +79,6 @@ srun \
       --wandb-run-id '${RUN_ID}'
   "
 
-# The trainer resolves pipeline and auxiliary components from one model root.
-# Keep the newly materialized transformer local and point all immutable V1
-# components at their persistent Hugging Face snapshot without duplicating
-# hundreds of gigabytes.
 for component in "${SOURCE_MODEL_ROOT}"/*; do
   name="$(basename "${component}")"
   if [[ "${name}" == "transformer" ]]; then

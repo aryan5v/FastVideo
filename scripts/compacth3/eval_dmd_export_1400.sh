@@ -1,10 +1,4 @@
 #!/bin/bash
-# Validate and render the corrected DMD2 run's native inference exports.
-#
-# Do not invoke dcp_to_diffusers here. The protected training checkpoint has
-# intentional mixed training dtypes, while the training callback has already
-# emitted a complete inference package in bfloat16 for each validation step.
-# Evaluating that package directly is both lossless and the release path.
 #SBATCH --job-name=h3-dmd2-export-eval
 #SBATCH --partition=all
 #SBATCH --nodes=1
@@ -52,8 +46,6 @@ for step in ${STEPS}; do
     exit 3
   }
 
-  # Header-only audit: proves the package is internally dtype-consistent
-  # without materializing ~40 GB of tensors on the CPU.
   "${PY}" - "${model}" <<"PY"
 import collections
 import json

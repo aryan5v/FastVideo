@@ -40,7 +40,6 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
-# Inverse of MiniMaxH3ArchConfig.param_names_mapping (fastvideo -> disk).
 INVERSE_PARAM_RULES: tuple[tuple[str, str], ...] = (
     (r"^time_embedder\.fc_in\.(.*)$", r"time_embedder.linear_1.\1"),
     (r"^time_embedder\.fc_out\.(.*)$", r"time_embedder.linear_2.\1"),
@@ -49,7 +48,6 @@ INVERSE_PARAM_RULES: tuple[tuple[str, str], ...] = (
     (r"^(.*)\.ff\.fc_out\.(.*)$", r"\1.ff.net.2.\2"),
 )
 
-# fastvideo-only trained params expected to have no disk counterpart.
 EXPECTED_NEW_PARAM_PATTERNS = (re.compile(r"\.attn\.to_gate_compress\."), )
 
 SHARD_BUDGET_BYTES = 5 * 1024**3  # ~5 GB per safetensors shard (bf16)
@@ -104,14 +102,12 @@ def main(args: argparse.Namespace) -> None:
         raise SystemExit(f"no keys under {prefix!r} in {dcp_dir}")
     print(f"{checkpoint.name}: {len(param_meta)} tensors under {prefix!r}")
 
-    # Reference key set from the base transformer, to catch mapping drift.
     base_transformer = base_model / "transformer"
     base_index = base_transformer / "diffusion_pytorch_model.safetensors.index.json"
     base_keys: set[str] = set()
     if base_index.exists():
         base_keys = set(json.loads(base_index.read_text())["weight_map"])
 
-    # Plan shards by byte budget over the (deterministic) sorted key order.
     def nbytes(meta) -> int:
         numel = 1
         for dim in meta.size:
@@ -164,7 +160,6 @@ def main(args: argparse.Namespace) -> None:
         json.dumps({"metadata": {"total_size": total_size}, "weight_map": weight_map}, indent=2))
     shutil.copy2(base_transformer / "config.json", out_transformer / "config.json")
 
-    # Everything but the transformer comes from the base model dir.
     for entry in sorted(base_model.iterdir()):
         if entry.name == "transformer":
             continue

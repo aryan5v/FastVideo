@@ -89,7 +89,6 @@ def test_uniform_sampler_draws_in_bounds_without_boundary_atoms() -> None:
 
     assert int(draws.min()) >= 20
     assert int(draws.max()) <= 980
-    # Uniform over 961 values yields about four samples per endpoint.
     assert int((draws == 20).sum()) < 20
     assert int((draws == 980).sum()) < 20
 

@@ -36,8 +36,6 @@ _V10_KERNEL_GATE = _REPO_ROOT / "scripts/train/gate_h3_v10_kernel.sh"
 _V10_KERNEL_REBUILD = _REPO_ROOT / "scripts/train/rebuild_h3_v10_kernel.sh"
 _V10_KERNEL_RECEIPT_HELPER = _REPO_ROOT / "scripts/train/h3_v10_kernel_receipt.py"
 
-# Fixture geometry: video latents [1, 24, 2, 4, 4] and audio latents
-# [1, 2, 32, 8]; the packed adapter stores video-major [1, T, C, H, W].
 _VIDEO_SHAPE = (1, 2, 24, 4, 4)
 _AUDIO_SHAPE = (1, 2, 32, 8)
 _PACKED_NUMEL = math.prod(_VIDEO_SHAPE) + math.prod(_AUDIO_SHAPE)
@@ -152,7 +150,6 @@ def _build_method(
     config = load_run_config(str(_FIXTURE))
     config.method["rollout_mode"] = rollout_mode
     config.method["generator_update_interval"] = generator_update_interval
-    # Distinct role scales keep the critic-vs-teacher DMD gradient non-zero.
     student = _make_model(monkeypatch, config.training, scale=1.0)
     teacher = _make_model(monkeypatch, config.training, trainable=False, scale=0.5)
     critic = _make_model(monkeypatch, config.training, scale=0.25)
@@ -169,9 +166,6 @@ def _build_method(
     return method
 
 
-# ----------------------------------------------------------------------
-# Core gate: one full DMD2 train step on CPU
-# ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("rollout_mode", ["data_latent", "simulate"])
@@ -277,9 +271,6 @@ def test_dmd2_five_step_cadence_and_resume_state(monkeypatch: pytest.MonkeyPatch
     ]
 
 
-# ----------------------------------------------------------------------
-# Packed dual-modality adapter units
-# ----------------------------------------------------------------------
 
 
 def test_packed_adapter_roundtrip_and_prepare_batch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -558,7 +549,6 @@ def test_packed_predict_noise_plumbs_timesteps_and_tolerates_vsa(monkeypatch: py
     noisy = torch.randn(1, _PACKED_NUMEL).to(torch.bfloat16)
     timestep = torch.tensor([757], dtype=torch.long)
 
-    # attn_kind="vsa" must silently mean dense (both metadata views are None).
     prediction = model.predict_noise(
         noisy,
         timestep,
@@ -576,8 +566,6 @@ def test_packed_predict_noise_plumbs_timesteps_and_tolerates_vsa(monkeypatch: py
         batch.audio_timesteps,
         1.0 - shift_noise_amount(base.double(), 3.0),
     )
-    # The unit-scale transformer echoes packed rows, and the H3 wrapper
-    # negates them into noise-minus-clean form.
     torch.testing.assert_close(prediction, -noisy)
 
     x0 = model.predict_x0(noisy, timestep, batch, conditional=True)
@@ -623,9 +611,6 @@ def test_uncond_forward_zeroes_text_and_guards_policies(monkeypatch: pytest.Monk
     model.set_requires_negative_conditioning(False)
 
 
-# ----------------------------------------------------------------------
-# VSA-H3 wiring
-# ----------------------------------------------------------------------
 
 
 def test_prepare_batch_builds_vsa_h3_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -642,8 +627,6 @@ def test_prepare_batch_builds_vsa_h3_metadata(monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(meta, MiniMaxH3VSAMetadata)
     assert batch.attn_metadata is None
     assert meta.VSA_sparsity == pytest.approx(0.35)
-    # Packed layout: 2 text rows | 0 condition rows | 16 stereo audio rows |
-    # 8 video rows ([1, 24, 2, 4, 4] latents at patch (1, 2, 2)).
     assert meta.total_seq_length == 26
     assert meta.num_prefix_tiles == 2
     assert meta.num_video_tiles == 1
@@ -710,8 +693,6 @@ def test_per_role_attention_backend_override_resolves(monkeypatch: pytest.Monkey
     assert student.attention_backend is AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
     assert student_config.pipeline_config.dit_config.uniform_parameter_dtype is False
     assert teacher.attention_backend is AttentionBackendEnum.FLASH_ATTN
-    # load_module_from_path turns this request into the construction scope
-    # that binds the backend to the transformer's attention layers.
     assert captured["role/student"] is AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3
     assert captured["role/teacher"] is AttentionBackendEnum.FLASH_ATTN
     assert not any(p.requires_grad for p in teacher.transformer.parameters())
@@ -724,9 +705,6 @@ def test_per_role_attention_backend_override_resolves(monkeypatch: pytest.Monkey
         )
 
 
-# ----------------------------------------------------------------------
-# Config contracts
-# ----------------------------------------------------------------------
 
 
 def test_h3_dmd2_fixture_resolves_trio_contract() -> None:
@@ -754,18 +732,14 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert method["rollout_mode"] == "simulate"
     assert method["rollout_carry"] is True
     assert (method["rollout_carry_slots"] == training["loop"]["gradient_accumulation_steps"])
-    # Global batch 128 = 32 DP x accum 4; the carry owns one stream per slot.
     assert training["loop"]["gradient_accumulation_steps"] == 4
     assert method["rollout_sample_type"] == "ode"
-    # Historical v9 explicitly opts into its non-golden per-batch hybrid.
     assert method["rollout_data_forcing"] is True
     assert method["allow_mixed_rollout_regimes"] is True
     assert method["generator_update_interval"] == 5
     assert method["real_score_guidance_scale"] == 1.0
-    # FastGen h3_new grid: time_shift(linspace(0.999, 0, 5), 12) in base time.
     assert method["dmd_denoising_steps"] == [999, 749, 500, 250]
     assert "warp_denoising_step" not in method
-    # f_{1/2.4} == f_{5/12}: FastGen's shifted draw f_5(U) on the shift-12 clock.
     assert method["score_timestep_shift"] == 2.4
     assert method["score_timestep_warp_max"] == 0.999
     assert method["score_timestep_continuous"] is True
@@ -784,8 +758,6 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert config["models"]["teacher"]["attention_backend"] == "FLASH_ATTN"
     assert config["models"]["critic"]["attention_backend"] == "FLASH_ATTN"
     assert config["pipeline"]["dit_config"]["uniform_parameter_dtype"] is False
-    # Mixed loading is declared t2va (the superset schema); text-only roots
-    # yield empty latent columns and route to the carried walk.
     assert training["data"]["preprocessed_data_type"] == "t2va"
     data_paths = training["data"]["data_path"]
     assert any("nuva_t2va" in str(path) for path in data_paths)
@@ -793,11 +765,7 @@ def test_h3_dmd2_current_config_pins_recipe() -> None:
     assert training["data"]["train_batch_size"] == 1
     assert training["data"]["training_cfg_rate"] == 0.0
     assert config["callbacks"]["grad_clip"]["max_grad_norm"] == 1.0
-    # Regional compile of the dense roles; gated on the A/B verdict before
-    # launch (see the YAML's PENDING GATE note).
     assert training["model"]["enable_torch_compile"] is True
-    # The compile A/B (vsa_gate/compile_ab/VERDICT.md) validated the flip
-    # with NO torch_compile_kwargs — the config must not add any.
     assert "torch_compile_kwargs" not in training["model"]
 
 

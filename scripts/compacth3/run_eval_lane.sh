@@ -1,5 +1,4 @@
 #!/bin/bash
-# Run the real eval set, honouring each case's declared generation exactly.
 #   usage: run_eval_lane.sh <MODEL> <LABEL> <BACKEND: h3-vae|taeh3> <QUANT|none> [MAXCASES]
 set -euo pipefail
 
@@ -35,7 +34,6 @@ SAMPLER=$!
 cd "$M"
 echo "=== $LABEL : backend=$BACKEND quant=$QUANT cases=$MAXCASES (declared shapes enforced) ==="
 
-# emit: case_id|width|height|frames|fps|prompt
 python3 - "$EVALJSON" "$MAXCASES" > "$OUT/case_list.txt" <<'PY'
 import json, sys
 path, maxc = sys.argv[1], int(sys.argv[2])
@@ -56,19 +54,16 @@ PY
 i=0
 while IFS='|' read -r cid w h f fps ptext; do
   [ -z "$cid" ] && continue
-  # --output is a DIRECTORY (the harness names the mp4 inside it)
   outdir="$OUT/case_${i}_${cid}"
   mkdir -p "$outdir"
   echo "--- [$i/$MAXCASES] $cid  ${w}x${h} ${f}f ---"
   START=$(date +%s.%N)
-  # shellcheck disable=SC2086
   $PY examples/inference/basic/basic_fasth3.py \
     --model-path "$MODEL" --prompt "$ptext" --output "$outdir" \
     --height "$h" --width "$w" --num-frames "$f" --steps 5 --num-gpus 4 \
     --repeats 1 $QARG $TEWARG --no-fa4 --video-decode-backend "$BACKEND" \
     >> "$OUT/run.log" 2>&1 || true
   END=$(date +%s.%N)
-  # flatten: pick up whichever mp4 the harness wrote (skip the warmup)
   real=$(find "$outdir" -name "*.mp4" -type f ! -name "_fasth3_warmup.mp4" | head -1)
   [ -n "$real" ] && mv "$real" "$OUT/${i}_${cid}.mp4" 2>/dev/null || true
   awk -v a="$START" -v b="$END" -v c="$cid" -v w="$w" -v h="$h" -v f="$f" \

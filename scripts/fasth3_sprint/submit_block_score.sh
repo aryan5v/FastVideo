@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Submit four independent 4-GPU scoring jobs and one aggregate dependency.
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"

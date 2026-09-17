@@ -1,4 +1,3 @@
-# Paired full-schedule recovery; prompt-only zero latents are not valid targets.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

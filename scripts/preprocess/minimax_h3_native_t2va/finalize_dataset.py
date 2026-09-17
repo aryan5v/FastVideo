@@ -582,8 +582,6 @@ def finalize_dataset(root: Path) -> None:
     if root_rows != int(frozen["training_rows"]):
         raise ValueError(f"audited training rows {root_rows} != frozen {frozen['training_rows']}")
 
-    # Repeat all read-only gates after publication, so a failure never leaves
-    # an aggregate READY marker behind. READY.json is the final atomic write.
     frozen = verify_frozen_sources(root)
     root_rows = audit_published_sources(root, frozen)
     if root_rows != int(frozen["training_rows"]):

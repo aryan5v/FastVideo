@@ -90,18 +90,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GROUP_SIZE = 64
 DEFAULT_BITS = 4
-# Affine codes span [0, 2**bits - 1]; for bits=4 that is [0, 15], stored as
-# torch.uint8 (two codes per byte, see ``w4a16_quantize``).
-# Guard against a degenerate group (all-equal values) producing a zero scale
-# and a division by zero in the zero-point solve.
 _EPS = 1e-8
-# A model with 362 targeted linears would otherwise emit 362 copies of the
-# "loader hook did not fire" warning on its first forward.
 _LAZY_CONVERSION_WARNED = False
 
-# ---------------------------------------------------------------------------
-# Group-wise affine 4-bit quantizer
-# ---------------------------------------------------------------------------
 
 
 def _group(w: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -221,14 +212,6 @@ def w4a16_dequantize(
     return dense if out_dtype is None else dense.to(out_dtype)
 
 
-# --- MiniMax-H3 layer set -------------------------------------------------
-#
-# H3's DiT (``fastvideo/models/dits/minimax_h3.py``) names its linears
-# ``{prefix}.{scope}.{i}.{suffix}`` with ``prefix="minimax_h3"``,
-# ``num_layers=50``, ``num_refiner_layers=2``
-# (``fastvideo/configs/models/dits/minimax_h3.py``). Both block stacks hold the
-# same ``MiniMaxH3Attention`` / ``MiniMaxH3FeedForward``; only the main stack
-# has ``adaln_proj``.
 MINIMAX_H3_PREFIX = "minimax_h3"
 MINIMAX_H3_NUM_LAYERS = 50
 MINIMAX_H3_NUM_REFINER_LAYERS = 2
@@ -244,11 +227,8 @@ MINIMAX_H3_BLOCK_LINEAR_SUFFIXES: tuple[str, ...] = (
     "ff.fc_in",
     "ff.fc_out",
 )
-# The main stack additionally carries the per-block AdaLN modulation GEMM.
 MINIMAX_H3_MAIN_STACK_LINEAR_SUFFIXES: tuple[str, ...] = MINIMAX_H3_BLOCK_LINEAR_SUFFIXES + ("adaln_proj.linear", )
 
-# Suffix rules for a generic (non-H3) transformer, so the config is usable
-# before a model has an enumerable prefix list.
 _GENERIC_LINEAR_SUFFIXES: tuple[str, ...] = (
     "attn.to_q",
     "attn.to_k",
@@ -258,17 +238,8 @@ _GENERIC_LINEAR_SUFFIXES: tuple[str, ...] = (
     "ff.fc_out",
 )
 
-# Linears that must NEVER be quantized, whatever a caller passes in
-# ``target_layers``. ``attn.to_gate_compress`` is H3's VSA sparse-attention
-# compression gate: its output steers a *discrete* tile-selection decision, so
-# quantizing it does not merely perturb the output, it can change which tiles
-# the sparse attention reads. H3 also probes the loaded gate structurally
-# (``MiniMaxH3Attention._gate_active`` tests ``weight != 0`` once to skip a
-# guaranteed-zero branch), which a dequantized weight would break. It matches
-# no generic "norm"/"embedder" exclusion heuristic, so it is named explicitly.
 _NEVER_QUANTIZE_SUBSTRINGS: tuple[str, ...] = ("attn.to_gate_compress", )
 
-# Modules H3 already pins to fp32 (``MiniMaxH3Transformer3DModel._keep_in_fp32_modules``).
 _H3_FP32_KEPT_SUBSTRINGS: tuple[str, ...] = (
     "proj_in",
     "audio_proj_in",
@@ -350,16 +321,7 @@ class W4A16Config(QuantizationConfig):
         self.target_layers: frozenset[str] | None = (None if target_layers is None else frozenset(target_layers))
         self.layer_suffixes: tuple[str, ...] = (tuple(_GENERIC_LINEAR_SUFFIXES)
                                                 if layer_suffixes is None else tuple(layer_suffixes))
-        # Fail-closed deny list. The hard exclusions are always present;
-        # ``exclude_substrings`` can only add, never remove -- this is what
-        # keeps ``attn.to_gate_compress`` unquantizable no matter what a
-        # caller passes as ``target_layers``.
         self.exclude_substrings: tuple[str, ...] = tuple(_NEVER_QUANTIZE_SUBSTRINGS) + tuple(exclude_substrings or ())
-        # Keep the dense bf16 ``layer.weight`` Parameter after conversion.
-        # Default True and it matters here: ``MiniMaxH3AdaLayerNormModulation.forward``
-        # reads ``self.linear.weight.dtype`` to cast its input, so purging the
-        # weight raises AttributeError. Setting False frees the bf16 copy at
-        # the cost of requiring every caller to stop touching ``.weight``.
         self.retain_original_weight = retain_original_weight
 
     def get_name(self) -> str:
@@ -445,9 +407,6 @@ class W4A16Config(QuantizationConfig):
 
         if not isinstance(layer, LinearBase) or not self.is_target_layer(prefix):
             return None
-        # A group must sit entirely inside one weight row. Skipping (rather
-        # than raising) keeps a config change from hard-failing model
-        # construction; the warning is what makes the skip visible.
         input_size = getattr(layer, "input_size", None)
         if input_size is not None and input_size % self.group_size:
             logger.warning(
@@ -563,10 +522,6 @@ class W4A16QuantizeMethod(QuantizeMethodBase):
                     "run that takes gradients.")
             return F.linear(x, weight.to(x.dtype) if weight.dtype != x.dtype else weight, bias)
 
-        # Reference path: one dense dequantize per forward, then a normal
-        # 16-bit GEMM. No cached dense copy -- caching it would hold both the
-        # 4-bit codes and a full bf16 weight on the device, which is exactly
-        # the memory this lane exists to avoid.
         weight = w4a16_dequantize(
             layer._w4a16_codes,
             layer._w4a16_scales,
@@ -579,9 +534,6 @@ class W4A16QuantizeMethod(QuantizeMethodBase):
         return F.linear(x, weight, bias)
 
 
-# ---------------------------------------------------------------------------
-# Load-time conversion
-# ---------------------------------------------------------------------------
 
 
 def _quantize_layer_weight(
@@ -602,9 +554,6 @@ def _quantize_layer_weight(
     mod.register_buffer("_w4a16_codes", codes.contiguous(), persistent=False)
     mod.register_buffer("_w4a16_scales", scales.to(torch.float32).contiguous(), persistent=False)
     mod.register_buffer("_w4a16_zeros", zeros.to(torch.float32).contiguous(), persistent=False)
-    # The logical weight shape is recorded rather than inferred at dequantize
-    # time: the packed code layout is (..., K // 2) and the orthogonal shape
-    # is not recoverable from it alone.
     mod._w4a16_weight_shape = tuple(weight_local.shape)
 
 
@@ -638,9 +587,6 @@ def convert_model_to_w4a16(model: torch.nn.Module) -> None:
         converted += 1
         schemes.add((qm.group_size, qm.bits))
         if not qm.retain_original_weight:
-            # register_parameter(None) (as convert_model_to_nvfp4 does) rather
-            # than popping the key: `layer.weight` then reads as None instead
-            # of raising AttributeError.
             original = mod._parameters.get("weight")
             if original is not None:
                 original.grad = None
@@ -648,8 +594,6 @@ def convert_model_to_w4a16(model: torch.nn.Module) -> None:
             purged += 1
 
     if converted:
-        # Say plainly what was produced. This is the 4-bit *storage* receipt,
-        # not a throughput claim: apply() still runs a dense 16-bit GEMM.
         logger.info(
             "W4A16 conversion receipt: quantized %d linear layers (%s, reference dequantize-then-GEMM "
             "path); purged %d original bf16 weight tensors.", converted,
@@ -659,64 +603,18 @@ def convert_model_to_w4a16(model: torch.nn.Module) -> None:
                     "dense weight and slower-than-BF16 step times.")
 
 
-# ---------------------------------------------------------------------------
-# Compact checkpoint sidecar — save/load of the quantized payload
-# ---------------------------------------------------------------------------
-#
-# The 4-bit buffers are registered with ``persistent=False`` (see
-# ``_quantize_layer_weight``), so ``state_dict()`` does NOT carry them: a saved
-# checkpoint holds dense bf16 weights only and the 4-bit payload is rebuilt by
-# re-running the conversion at every load. That is impossible on a host that
-# cannot hold the dense weights at all — the target cards for this lane are
-# 24-48 GB Ada parts and a 32 GB RTX 5090, and ``convert_model_to_w4a16``
-# starts from the dense weight. The sidecar is what makes a pre-quantized
-# checkpoint servable on that hardware.
-#
-# Format (identical in shape to the NVFP4 sidecar, ``nvfp4_config.py``): one
-# safetensors file keyed ``"<module fqn>::<buffer name>"`` plus a JSON manifest
-# under the ``fastvideo_w4a16`` metadata key describing the scheme.
-#
-# Buffer inventory restored by a load — these are the same tensors
-# ``_quantize_layer_weight`` registers, byte for byte:
-#
-#   ``_w4a16_codes``   uint8    two 4-bit codes packed per byte, shape
-#                      ``(out_dim, in_dim // 2)`` for ``bits=4`` and the full
-#                      ``(out_dim, in_dim)`` for ``bits=8``. The packing is
-#                      the module's own convention (``_pack_4bit``): the **low
-#                      nibble is the lower K index**, i.e.
-#                      ``packed[..., j] = codes[..., 2j] | codes[..., 2j+1] << 4``.
-#                      It matches neither AWQ, GPTQ nor bitsandbytes, so the
-#                      bytes are only meaningful to a reader that unpacks them
-#                      the same way.
-#   ``_w4a16_scales``  float32  ``(out_dim, in_dim // group_size)``
-#   ``_w4a16_zeros``   float32  ``(out_dim, in_dim // group_size)``
-#
-# A load also restores ``mod._w4a16_weight_shape``. That one is *not* a buffer
-# — it is a plain tuple attribute set by ``_quantize_layer_weight``, and
-# ``W4A16QuantizeMethod.apply`` passes it to ``w4a16_dequantize(out_shape=...)``
-# because the logical weight shape is not recoverable from the packed code
-# shape alone. A sidecar load that skipped it would leave every layer raising
-# ``AttributeError`` on first forward, so it is restored from the manifest's
-# per-layer ``weight_shape``.
 
 W4A16_SIDECAR_SUFFIX = ".w4a16.safetensors"
-# Filename used when the sidecar sits inside a checkpoint *directory*; it does
-# not carry the suffix above, which is what a sibling file is named with.
 W4A16_DIR_SIDECAR_NAME = "w4a16.safetensors"
 _W4A16_SIDECAR_FORMAT = "fastvideo.w4a16"
 _W4A16_SIDECAR_VERSION = 1
 _W4A16_SIDECAR_METADATA_KEY = "fastvideo_w4a16"
 _W4A16_SIDECAR_KEY_SEP = "::"
-# Order matters only for the manifest; every buffer is optional on load so a
-# future format can add tensors without breaking older readers.
 _W4A16_SIDECAR_BUFFERS = (
     "_w4a16_codes",
     "_w4a16_scales",
     "_w4a16_zeros",
 )
-# The exact container each buffer must have. A sidecar whose codes came back
-# as int8 (or float32) would unpack to garbage with no error anywhere, so
-# these are validated, never coerced.
 _W4A16_SIDECAR_DTYPES = {
     "_w4a16_codes": torch.uint8,
     "_w4a16_scales": torch.float32,
@@ -738,8 +636,6 @@ def _w4a16_tagged_modules(model: torch.nn.Module) -> list[tuple[str, torch.nn.Mo
 
 
 def _is_dtensor(tensor: torch.Tensor) -> bool:
-    # Imported lazily: torch.distributed.tensor is not cheap to import and is
-    # absent on some builds.
     try:
         from torch.distributed.tensor import DTensor  # type: ignore
     except ImportError:  # pragma: no cover - depends on the torch build
@@ -819,8 +715,6 @@ def save_w4a16_checkpoint(
         if weight is not None:
             weight_shape = [int(dim) for dim in weight.shape]
         elif getattr(mod, "_w4a16_weight_shape", None) is not None:
-            # Dense weight already purged: the converter recorded the logical
-            # shape separately, since 2 packed codes/byte lose it.
             weight_shape = [int(dim) for dim in mod._w4a16_weight_shape]
         else:
             raise RuntimeError(f"W4A16 layer {fqn!r} has no dense weight and no recorded "
@@ -844,9 +738,6 @@ def save_w4a16_checkpoint(
     metadata: dict[str, Any] = {
         "format": _W4A16_SIDECAR_FORMAT,
         "version": _W4A16_SIDECAR_VERSION,
-        # Uniform scheme when every layer agrees (the normal case); None when a
-        # model mixes schemes, in which case the per-layer entries are
-        # authoritative. A loader validates the per-layer values.
         "group_size": group_sizes.pop() if len(group_sizes) == 1 else None,
         "bits": bit_widths.pop() if len(bit_widths) == 1 else None,
         "num_layers": len(layers),
@@ -1024,9 +915,6 @@ def load_w4a16_checkpoint(
             if len(weight_shape) != 2:
                 raise ValueError(f"W4A16 sidecar entry {fqn!r} declares weight shape {list(weight_shape)}; "
                                  "a linear weight is 2-D.")
-            # A different scheme means a different nibble layout and different
-            # dequantize arithmetic over the same bytes: never recoverable, so
-            # never relaxed by strict=False.
             if group_size != qm.group_size or bits != qm.bits:
                 raise ValueError(f"W4A16 sidecar {os.fspath(path)} was written for {fqn!r} with "
                                  f"group_size={group_size}, bits={bits}, but this model quantizes it with "
@@ -1064,9 +952,6 @@ def load_w4a16_checkpoint(
                 continue
             for name, tensor in tensors.items():
                 mod.register_buffer(name, tensor, persistent=False)
-            # Not a buffer: without it ``apply`` raises AttributeError on the
-            # first forward, because 2 codes/byte do not encode the logical
-            # weight shape.
             mod._w4a16_weight_shape = weight_shape
             restored += 1
 

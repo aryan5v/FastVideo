@@ -88,8 +88,6 @@ def _build_model(*, num_blocks: int = 2, seed: int = 0, quant_config=None) -> nn
         blocks.append(block)
     dit.transformer_blocks = blocks
     root.minimax_h3 = dit
-    # ``create_weights`` allocates uninitialized storage; give it real values so
-    # the global scale (and therefore _nvfp4_alpha) is meaningful.
     for _, param in root.named_parameters():
         param.data.copy_(torch.randn(param.shape, generator=generator))
     return root
@@ -115,7 +113,6 @@ def _rewrite_sidecar(src, dst, *, metadata: dict | None = None, tensors: dict | 
 def test_convert_purges_weights_and_sidecar_shrinks_the_payload(tmp_path) -> None:
     model = _build_model()
     nv.convert_model_to_nvfp4(model)
-    # The always-FP4 layers are purged, so the sidecar is the only copy left.
     assert model.minimax_h3.transformer_blocks[0].attn.to_q.weight is None
 
     path = tmp_path / "nvfp4.safetensors"
@@ -144,7 +141,6 @@ def test_sidecar_state_dict_uses_module_fqn_keys_and_cpu_tensors() -> None:
     key = f"{_BLOCK.format(idx=0)}.attn.to_q::{nv._NVFP4_SIDECAR_BUFFERS[0]}"
     assert key in state
     assert state[key].device.type == "cpu"
-    # Only the four registered buffers are serialized; nothing else leaks in.
     assert {name for _, name in (k.split("::") for k in state)} == set(nv._NVFP4_SIDECAR_BUFFERS)
     assert state[f"{_BLOCK.format(idx=0)}.attn.to_q::_nvfp4_weight"].dtype is torch.uint8
 
@@ -157,7 +153,6 @@ def test_load_restores_buffers_without_reconverting(tmp_path) -> None:
     path = tmp_path / "nvfp4.safetensors"
     nv.save_nvfp4_checkpoint(source, path)
 
-    # A different model (different weights) restored purely from the sidecar.
     target = _build_model(seed=2)
     restored = nv.load_nvfp4_checkpoint(target, path)
     assert restored == 4
@@ -166,8 +161,6 @@ def test_load_restores_buffers_without_reconverting(tmp_path) -> None:
     for key, value in expected.items():
         assert torch.equal(actual[key], value), key
         assert actual[key].dtype == value.dtype
-    # The dense bf16 weights are gone under the default retention policy, so the
-    # sidecar really is the only copy of the quantized weights.
     assert target.minimax_h3.transformer_blocks[0].attn.to_q.weight is None
 
 
@@ -235,11 +228,8 @@ def test_layer_set_mismatch_strict_and_lenient(tmp_path, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         assert nv.load_nvfp4_checkpoint(bigger, path, strict=False) == 2
     assert any("does not match this model" in record.message for record in caplog.records)
-    # The unmatched layer keeps whatever it had (nothing) rather than silently
-    # becoming a dense layer with a quant_method attached.
     assert getattr(bigger.minimax_h3.transformer_blocks[1].attn.to_q, "_nvfp4_weight", None) is None
 
-    # The other direction: a sidecar with layers this model does not have.
     smaller = _build_model(num_blocks=1, seed=12)
     with pytest.raises(ValueError, match="not in the model"):
         nv.load_nvfp4_checkpoint(smaller, _sidecar_of(wider, tmp_path / "wide.safetensors"))
@@ -255,7 +245,6 @@ def test_layout_and_version_mismatches_are_fatal(tmp_path) -> None:
     bad_layout = _rewrite_sidecar(path, tmp_path / "layout.safetensors", metadata={"sf_layout": "layout_linear"})
     with pytest.raises(ValueError, match="sf_layout"):
         nv.load_nvfp4_checkpoint(target, bad_layout)
-    # Never downgraded by strict=False: mis-read nibbles are silent corruption.
     with pytest.raises(ValueError, match="sf_layout"):
         nv.load_nvfp4_checkpoint(target, bad_layout, strict=False)
 

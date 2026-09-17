@@ -1,5 +1,4 @@
 #!/bin/bash
-# Export compact NVFP4 weights using the worker-side hook.
 set -euo pipefail
 S=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
 M=/mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831/repo-main-3d8ac9d1

@@ -64,16 +64,12 @@ from pathlib import Path
 GENERATION_MODES = ("dense", "vsa")
 ALL_MODES = GENERATION_MODES + ("microbench",)
 
-# Environment applied in the worker subprocess BEFORE importing fastvideo.
-# The backend env var is folded into FastVideoArgs at generator boot.
 MODE_ENV: dict[str, dict[str, str]] = {
     "dense": {
         "FASTVIDEO_ATTENTION_BACKEND": "FLASH_ATTN",
         "FASTVIDEO_FA4": "1",
     },
     "vsa": {
-        # Layers that do not support VSA-H3 (e.g. the token refiner) fall
-        # back to flash attention, so FA4 stays enabled here too.
         "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3",
         "FASTVIDEO_FA4": "1",
     },
@@ -153,14 +149,7 @@ def apply_worker_env(mode: str, args: argparse.Namespace) -> None:
     """Set the mode's environment. Must run before any fastvideo import."""
     env = dict(MODE_ENV[mode])
     if dense_native_steps(mode, args):
-        # Teacher-style leg: the scheduler's own n-step schedule, no DMD
-        # ladder. The env var may leak in from the launch environment, so
-        # remove it explicitly (the H3 denoising stage reads it as a
-        # fallback when the pipeline config has no dmd_denoising_steps).
         os.environ.pop("FASTVIDEO_DMD_DENOISING_STEPS", None)
-        # Per-step DMD_DEBUG stat lines double as in-log proof that all n
-        # native steps actually execute (two small latent stats per step —
-        # negligible next to a transformer forward at video resolutions).
         env["FASTVIDEO_DMD_DEBUG_STATS"] = "1"
     else:
         env["FASTVIDEO_DMD_DENOISING_STEPS"] = args.dmd_steps
@@ -205,10 +194,6 @@ def run_generation_worker(args: argparse.Namespace) -> int:
 
     experimental: dict[str, float] = {}
     if mode == "vsa":
-        # Boot-time run-level sparsity: the H3 denoising stage reads
-        # fastvideo_args.VSA_sparsity (mirrored onto ForwardBatch.VSA_sparsity
-        # per request) when building the per-step VSA metadata. The tile size
-        # rides the same experimental->FastVideoArgs path.
         experimental["VSA_sparsity"] = args.sparsity
         experimental["VSA_tile_size"] = args.vsa_tile_size
 
@@ -411,8 +396,6 @@ def run_microbench_worker(args: argparse.Namespace) -> int:
 
         kernel_choices = ["triton"]
         if args.vsa_kernel == "cutedsl" and args.vsa_tile_size != 64:
-            # Tile 64 has no CuTe route (native Triton only) — a "cutedsl"
-            # row there would just re-measure the Triton path mislabeled.
             kernel_choices.insert(0, "cutedsl")
         for kernel in kernel_choices:
             os.environ["FASTVIDEO_VSA_CUTEDSL"] = "1" if kernel == "cutedsl" else "0"
@@ -519,9 +502,6 @@ def _mode_stats(status: dict) -> dict | None:
     generation = [r["generation_seconds"] for r in requests if r.get("generation_seconds") is not None]
     denoise = [r["denoise_seconds"] for r in requests if r.get("denoise_seconds") is not None]
     steps = results.get("num_inference_steps")
-    # Native schedule (dmd_steps is None): the H3 scheduler turns n inference
-    # steps into an n-point sigma grid ending at 0 = n-1 transformer forwards.
-    # The DMD ladder runs exactly one forward per ladder entry.
     native = steps is not None and results.get("dmd_steps") is None
     forwards = (steps - 1) if (native and steps > 1) else steps
     mean_denoise = statistics.mean(denoise) if denoise else None

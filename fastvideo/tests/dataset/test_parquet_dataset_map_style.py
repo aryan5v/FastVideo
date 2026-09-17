@@ -19,8 +19,6 @@ from fastvideo.dataset.parquet_dataset_map_style import (
 
 
 def test_parse_data_path_specs_accepts_old_repeat_string() -> None:
-    # Dataset parsing keeps compatibility with the old "path:repeat" string
-    # form used by existing training configs.
     assert _parse_data_path_specs("data/path1:2,data/path2:1") == [
         ("data/path1", 2),
         ("data/path2", 1),
@@ -28,8 +26,6 @@ def test_parse_data_path_specs_accepts_old_repeat_string() -> None:
 
 
 def test_parse_data_path_specs_accepts_yaml_mapping() -> None:
-    # New YAML mapping form should reach the dataset layer as path -> repeat
-    # and parse to the same internal spec representation.
     assert _parse_data_path_specs({
         "data/path1": 1,
         "data/path2": 2,
@@ -58,8 +54,6 @@ def test_parse_data_path_specs_drops_non_positive_repeats() -> None:
 
 
 def test_parse_data_path_specs_rejects_malformed_repeats() -> None:
-    # Repeat counts must parse as ints; anything else is an explicit error
-    # rather than a silently mis-weighted dataset.
     with pytest.raises(ValueError):
         _parse_data_path_specs("data/a:abc")
     with pytest.raises(ValueError):
@@ -85,8 +79,6 @@ def _write_root_cache(dataset_root, filename: str, length: int) -> str:
 
 
 def test_get_parquet_files_and_length_repeats_single_path(tmp_path, monkeypatch) -> None:
-    # get_parquet_files_and_length applies repeat counts after reading the
-    # per-root parquet cache, so a repeated root duplicates both names and rows.
     dataset_root = tmp_path / "dataset"
     parquet_file = _write_root_cache(dataset_root, "sample.parquet", 7)
 
@@ -102,8 +94,6 @@ def test_get_parquet_files_and_length_repeats_single_path(tmp_path, monkeypatch)
 
 
 def test_get_parquet_files_and_length_mixes_roots_and_resorts(tmp_path, monkeypatch) -> None:
-    # Multiple roots are expanded per repeat count and then globally re-sorted
-    # by filename, so the mix order is independent of the mapping order.
     root_a = tmp_path / "dataset_a"
     root_b = tmp_path / "dataset_b"
     file_a = _write_root_cache(root_a, "a.parquet", 5)
@@ -122,8 +112,6 @@ def test_get_parquet_files_and_length_mixes_roots_and_resorts(tmp_path, monkeypa
 
 
 def test_get_parquet_files_and_length_raises_when_all_repeats_dropped() -> None:
-    # Zero/negative repeats are dropped at parse time; if that leaves nothing
-    # to read, the mix branch fails loudly instead of yielding an empty dataset.
     with pytest.raises(FileNotFoundError):
         parquet_dataset.get_parquet_files_and_length({"data/a": 0})
 

@@ -1,5 +1,4 @@
 #!/bin/bash
-# Freeze an immutable extension and seed exact reusable chunks on a compute tray.
 
 #SBATCH --job-name=h3-native-prep
 #SBATCH --nodes=1

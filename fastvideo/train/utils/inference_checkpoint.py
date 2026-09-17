@@ -243,7 +243,6 @@ def _component_tensor_shapes(module_dir: Path) -> dict[str, tuple[int, ...]]:
     for path in files:
         try:
             with safe_open(str(path), framework="pt", device="cpu") as handle:
-                # ``safe_open`` exposes ``keys()`` but is not itself iterable.
                 for key in handle.keys():  # noqa: SIM118
                     if key in shapes:
                         raise InferenceCheckpointExportError(f"Duplicate base transformer tensor key {key!r}")
@@ -265,9 +264,6 @@ def _mapping_output_key(
 ) -> str:
     entry = reverse_mapping.get(internal_key)
     if entry is None:
-        # FastVideo-native additions such as MiniMax-H3's learned
-        # ``attn.to_gate_compress`` VSA parameters intentionally have no key in
-        # the base checkpoint.  The component loader accepts their native name.
         return internal_key
     if not isinstance(entry, tuple | list) or len(entry) != 3:
         raise InferenceCheckpointExportError(f"Invalid reverse mapping for {internal_key!r}: expected "
@@ -415,8 +411,6 @@ def _write_tensor_shards(
     for shard_index, shard in enumerate(shards, start=1):
         filename = (f"diffusion_pytorch_model-{shard_index:05d}-of-{shard_count:05d}.safetensors")
         state = {plan.checkpoint_key: torch.empty(plan.shape, dtype=plan.source_dtype, device="cpu") for plan in shard}
-        # This export is deliberately rank-local.  DCP assembles the full CPU
-        # tensors from its storage shards without using the live process group.
         dcp.load(state, checkpoint_id=str(dcp_dir), no_dist=True)
 
         output_tensors: dict[str, torch.Tensor] = {}
@@ -551,8 +545,6 @@ def export_inference_checkpoint_from_dcp(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        # Written last inside the private temp directory. The subsequent
-        # same-filesystem rename publishes the complete tree in one operation.
         (temp_dir / ".complete").write_text("complete\n", encoding="utf-8")
         try:
             temp_dir.rename(final_dir)

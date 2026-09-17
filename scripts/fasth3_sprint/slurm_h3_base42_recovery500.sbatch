@@ -32,8 +32,6 @@ export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_NCCL_ENABLE_MONITORING=0
 PY=/mnt/nfs/vlm-aryan/fastvideo-wan-venv/bin/python
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/assemble_h3_stage.py" --base "${BASE}" --student "${STUDENT}"
-# The step-zero panel is preserved from6869; do not regenerate it here.
-# User authorizes experimental recovery without waiting for external parity/review gates.
 "${PY}" "${CODE_ROOT}/scripts/fasth3_sprint/build_h3_recovery_config.py" --template "${CODE_ROOT}/examples/train/configs/fasth3_base42_recovery.yaml" --student "${STUDENT}" --output "${OUTPUT_ROOT}/config.yaml"
 
  "${PY}" -m torch.distributed.run --standalone --nproc_per_node=4 -m fastvideo.train.entrypoint.train \

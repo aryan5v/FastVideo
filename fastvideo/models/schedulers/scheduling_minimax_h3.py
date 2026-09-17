@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright 2025 The MiniMax authors and The HuggingFace Team.
 
 from dataclasses import dataclass
 
@@ -124,8 +123,6 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
 
         if not isinstance(timestep, torch.Tensor):
             timestep = torch.tensor(timestep, dtype=sample.dtype)
-        # H3 deliberately derives x0's sigma from the transformer timestep, while
-        # the Euler ratio below uses the stored grid. Keep the two float32 paths separate.
         sigma_from_timestep = 1 - timestep.to(device=sample.device, dtype=sample.dtype)
         while sigma_from_timestep.ndim < sample.ndim:
             sigma_from_timestep = sigma_from_timestep.unsqueeze(-1)

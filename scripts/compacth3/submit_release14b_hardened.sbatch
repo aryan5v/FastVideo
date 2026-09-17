@@ -1,8 +1,4 @@
 #!/bin/bash
-# 34-block recovery launcher.
-# - MASTER_PORT derived from SLURM_JOB_ID
-# - NCCL fail-fast with heartbeat watchdog
-# - RESUME_PATH selects the newest complete checkpoint
 #SBATCH --job-name=h3-14b-4k-wb
 #SBATCH --partition=hpc-rack-2
 #SBATCH --nodes=4
@@ -19,11 +15,9 @@ SPRINT_ROOT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
 CODE_ROOT=${SPRINT_ROOT}/code/release-execution-2e7fa15f
 OUTPUT_ROOT=${SPRINT_ROOT}/runs/release14b-folded-long-4k-v3
 
-# MASTER_PORT derived from the job id -- never a fixed port.
 MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 MASTER_PORT=$(( 20000 + SLURM_JOB_ID % 20000 ))
 
-# --- auto-select the newest COMPLETE checkpoint ---------------------------------
 RESUME_PATH=""
 for d in $(ls -1d "${OUTPUT_ROOT}"/checkpoint-* 2>/dev/null \
            | sed 's#.*/checkpoint-##' | grep -E '^[0-9]+$' | sort -n -r); do
@@ -63,7 +57,6 @@ export WANDB_RUN_ID=release14b-folded-long-4k-v3 WANDB_RESUME=allow
 export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA FASTVIDEO_MINIMAX_H3_FUSIONS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# --- fail fast instead of hanging ------------------------------------------------
 export TORCH_NCCL_ENABLE_MONITORING=1
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1

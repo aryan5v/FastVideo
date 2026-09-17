@@ -61,14 +61,11 @@ def test_h3_config_selects_the_300_block_linears() -> None:
     config = nv.NVFP4Config.for_minimax_h3()
     assert len(config.layer_prefixes) == 300
     assert config.layer_prefixes == nv.MINIMAX_H3_NVFP4_LINEAR_PREFIXES
-    # Every block, every suffix.
     for idx in range(nv.MINIMAX_H3_NUM_LAYERS):
         for suffix in nv.MINIMAX_H3_BLOCK_LINEAR_SUFFIXES:
             assert config.is_nvfp4_linear_prefix(_H3_BLOCK.format(idx=idx, suffix=suffix))
-    # Edge blocks are really in the set, and one past the last block is not.
     assert config.is_nvfp4_linear_prefix(_H3_BLOCK.format(idx=49, suffix="ff.fc_out"))
     assert not config.is_nvfp4_linear_prefix(_H3_BLOCK.format(idx=50, suffix="ff.fc_out"))
-    # Nothing outside the block set is selected.
     assert not config.is_nvfp4_linear_prefix("minimax_h3.token_refiner.blocks.0.attn.to_q")
     assert not config.is_nvfp4_linear_prefix("minimax_h3.proj_in")
     assert not config.is_nvfp4_linear_prefix("minimax_h3.transformer_blocks.0.adaln_proj.linear")
@@ -93,7 +90,6 @@ def test_gate_is_excluded_even_if_a_caller_allowlists_it() -> None:
     config = nv.NVFP4Config(layer_prefixes=frozenset({_GATE_PREFIX, _H3_BLOCK.format(idx=0, suffix="attn.to_q")}))
     assert not config.is_nvfp4_linear_prefix(_GATE_PREFIX)
     assert config.is_nvfp4_linear_prefix(_H3_BLOCK.format(idx=0, suffix="attn.to_q"))
-    # The same holds when the caller passes no exclusion list at all.
     assert _GATE_PREFIX not in nv._LTX2_NVFP4_LINEAR_PREFIXES
     assert not nv.NVFP4Config(layer_prefixes=[_GATE_PREFIX]).is_nvfp4_linear_prefix(_GATE_PREFIX)
 
@@ -103,7 +99,6 @@ def test_exclude_prefixes_match_a_suffix_or_a_full_path() -> None:
     config = nv.NVFP4Config(layer_prefixes=[full_path, "custom.other"], exclude_prefixes=["attn.to_out"])
     assert config.is_nvfp4_linear_prefix("custom.other")
     assert not config.is_nvfp4_linear_prefix(full_path)
-    # A dot boundary is required, so a sibling name is not excluded by accident.
     nested = nv.NVFP4Config(layer_prefixes=["custom.cross_ff.fc_in"], exclude_prefixes=["ff.fc_in"])
     assert nested.is_nvfp4_linear_prefix("custom.cross_ff.fc_in")
 
@@ -117,7 +112,6 @@ def test_from_config_round_trips_layer_prefixes() -> None:
     assert config.layer_profile == "base"
     assert config.layer_prefixes == frozenset({"minimax_h3.transformer_blocks.0.attn.to_q"})
     assert config.exclude_prefixes == frozenset({"attn.to_gate_compress"})
-    # Absent keys keep the LTX-2 default.
     assert nv.NVFP4Config.from_config({}).layer_prefixes == nv._LTX2_NVFP4_LINEAR_PREFIXES
 
 
@@ -137,11 +131,9 @@ def test_get_quant_method_attaches_for_h3_and_skips_the_gate() -> None:
     gate = _linear(h3, _GATE_PREFIX)
     assert type(gate.quant_method) is UnquantizedLinearMethod
 
-    # The pre-fix bug, pinned: the default config attaches nothing on H3.
     default = nv.NVFP4Config()
     untagged = _linear(default, _H3_BLOCK.format(idx=0, suffix="attn.to_q"))
     assert type(untagged.quant_method) is UnquantizedLinearMethod
-    # ... and still tags LTX-2.
     ltx2 = _linear(default, "ltx2.blocks.0.attn1.to_q")
     assert isinstance(ltx2.quant_method, nv.NVFP4QuantizeMethod)
 
@@ -150,9 +142,6 @@ def test_module_imports_without_flashinfer(monkeypatch) -> None:
     """The H3 surface must import on hosts with no flashinfer (only the
     kernels fail, at use time)."""
     monkeypatch.setitem(sys.modules, "flashinfer", None)
-    # delitem (not a bare pop) so monkeypatch puts the original module object
-    # back on teardown: leaving a re-imported copy in sys.modules would give
-    # later tests a second, non-identical NVFP4Config class.
     monkeypatch.delitem(sys.modules, "fastvideo.layers.quantization.nvfp4_config", raising=False)
     import importlib
 

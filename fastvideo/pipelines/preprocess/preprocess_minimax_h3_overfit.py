@@ -36,8 +36,6 @@ from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_conditioning import 
 from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_input_preparation import MINIMAX_H3_KEYFRAMES_KEY
 from fastvideo.utils import verify_model_config_and_directory
 
-# Match the H3 validation geometry and media rates, and limit both streams to
-# the same maximum duration used by validation.
 NUM_FRAMES = 124
 VIDEO_HEIGHT = 768
 VIDEO_WIDTH = 1344
@@ -127,8 +125,6 @@ def _load_component(
     Using the registered loader keeps preprocessing aligned with the component
     classes and precision policy that produce H3 inference conditioning.
     """
-    # Diffusers modular manifests can append loading metadata after the
-    # provider and architecture fields defined by the component contract.
     transformers_or_diffusers, _ = model_index[name][:2]
     return PipelineComponentLoader.load_module(
         module_name=name,
@@ -153,8 +149,6 @@ def encode_video_latents(
     """
     print("Loading MiniMax H3 video VAE")
     vae = _load_component("vae", model_path, model_index, fastvideo_args)
-    # Feed [B, C, T, H, W] pixels and retain [C, T, H, W] latents; H3 later
-    # flattens every video token in (C, patch_t, patch_h, patch_w) order.
     pixels = torch.from_numpy(frames.copy()).permute(3, 0, 1, 2)[None]
     pixels = pixels.to(device=torch.device("cuda:0"), dtype=torch.float32).div_(255.0)
     generator = torch.Generator("cpu").manual_seed(42)
@@ -274,8 +268,6 @@ def write_parquet(record: dict[str, Any], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     for parquet_path in output_dir.glob("*.parquet"):
         parquet_path.unlink()
-    # The map-style cache stores Parquet file metadata and row counts, so a
-    # replacement shard set requires cache reconstruction.
     shutil.rmtree(output_dir / "map_style_cache", ignore_errors=True)
     table = pa.table(
         {name: [record[name]]

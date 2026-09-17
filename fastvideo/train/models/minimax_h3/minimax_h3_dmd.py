@@ -23,8 +23,6 @@ from fastvideo.train.models.minimax_h3.minimax_h3 import (
     shift_noise_amount,
 )
 
-# DMD2 expresses score time in timestep units on [0, 1000]. Strict FastGen
-# parity keeps that coordinate continuous and applies shifts on max_t=0.999.
 _DMD_TIMESTEP_SCALE = 1000
 _FASTGEN_MAX_T = 0.999
 
@@ -100,9 +98,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
     def num_train_timesteps(self) -> int:
         return _DMD_TIMESTEP_SCALE
 
-    # ------------------------------------------------------------------
-    # Packed dual-modality helpers
-    # ------------------------------------------------------------------
 
     def _modality_shapes(self) -> tuple[tuple[int, int, int, int, int], tuple[int, int, int, int]]:
         """Return the ``[1, T, C, H, W]`` video and ``[1, 2, 32, Ta]`` audio shapes."""
@@ -185,9 +180,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
 
     def _noise_amounts(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Map one method timestep to both modality noise amounts in FP64."""
-        # Strict FastGen score times are continuous and live on max_t=0.999.
-        # Integer rollout rungs retain the release pipeline's unit-domain
-        # schedule so training and offline validation walk identical states.
         warp_max = (_FASTGEN_MAX_T if timestep.is_floating_point() else 1.0)
         base = (timestep.reshape(-1)[:1].to(torch.float64) / _DMD_TIMESTEP_SCALE)
         base = base.clamp(0.0, warp_max)
@@ -204,9 +196,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
             ),
         )
 
-    # ------------------------------------------------------------------
-    # ModelBase overrides (packed convention)
-    # ------------------------------------------------------------------
 
     def set_requires_negative_conditioning(self, requires: bool) -> None:
         """Fail fast: H3 cannot encode negative prompts at training time."""
@@ -227,10 +216,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
             generator=generator,
             latents_source=latents_source,
         )
-        # DMD2 draws its own noise and timesteps per forward; only the packed
-        # clean latents matter here (the base prepare_batch already built the
-        # VSA metadata view for VSA-H3 roles). The fine-tuning noisy fields
-        # are refreshed by predict_noise on every call.
         if batch.latents is None or batch.audio_latents is None:
             raise RuntimeError("MiniMax H3 batch preparation did not produce paired latents")
         layout = MiniMaxH3DMDLatentLayout.from_latents(batch.latents, batch.audio_latents)
@@ -262,8 +247,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         """Noise packed latents using immutable geometry from ``batch``."""
         layout = self._batch_latent_layout(batch)
         if not bool(getattr(self.training_config.data, "native_shape_bucketing", False)):
-            # Keep the established fixed-shape call path observable and
-            # byte-identical for existing data-free/data-forcing recipes.
             return self.add_noise(clean_latents, noise, timestep)
         return self._add_noise_with_layout(
             clean_latents,
@@ -366,8 +349,6 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         noisy_fp64 = noisy.to(torch.float64)
         clean_fp64 = clean.to(torch.float64)
         sigma_fp64 = sigma.to(device=noisy.device, dtype=torch.float64)
-        # The DMD grid never renoises from t=0, but clamp so a degenerate
-        # call cannot divide by zero.
         eps = ((noisy_fp64 - (1.0 - sigma_fp64) * clean_fp64) / sigma_fp64.clamp_min(1e-6))
         return eps.to(original_dtype)
 
@@ -438,17 +419,12 @@ class MiniMaxH3DMDModel(MiniMaxH3Model):
         pred_noise: torch.Tensor,
         sigma: torch.Tensor,
     ) -> torch.Tensor:
-        # noisy = (1 - sigma) * clean + sigma * noise and pred approximates
-        # noise - clean, so clean = noisy - sigma * pred.
         original_dtype = noisy.dtype
         noisy_fp64 = noisy.to(torch.float64)
         pred_noise_fp64 = pred_noise.to(torch.float64)
         sigma_fp64 = sigma.to(device=noisy.device, dtype=torch.float64)
         return (noisy_fp64 - sigma_fp64 * pred_noise_fp64).to(original_dtype)
 
-    # ------------------------------------------------------------------
-    # Intermediate-latent visualization (LatentVisCallback)
-    # ------------------------------------------------------------------
 
     def _load_vis_vae(self) -> Any:
         """Lazily load the H3 video VAE for visualization decodes.

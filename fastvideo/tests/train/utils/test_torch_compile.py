@@ -169,21 +169,16 @@ def test_checkpoint_wrapper_prefix_normalization() -> None:
     model = _BufferModel()
     model.blocks[0] = checkpoint_wrapper(model.blocks[0])
 
-    # state_dict is clean; raw named_buffers is prefixed.
     assert "blocks.0.freq" in model.state_dict()
     raw_buffer_names = {name for name, _ in model.named_buffers()}
     assert "blocks.0.freq" not in raw_buffer_names
     assert "blocks.0._checkpoint_wrapped_module.freq" in raw_buffer_names
 
-    # The canonicalized views match checkpoint keys exactly.
     clean_buffers = {_strip_checkpoint_wrapper_prefix(name) for name, _ in model.named_buffers()}
     clean_params = {_strip_checkpoint_wrapper_prefix(name) for name, _ in model.named_parameters()}
     assert clean_buffers == {"blocks.0.freq"}
     assert clean_params == {"blocks.0.lin.weight", "blocks.0.lin.bias"}
 
-    # End-to-end: membership keyed on canonical names keeps a loaded buffer a
-    # buffer under load_state_dict(assign=True) instead of promoting it to a
-    # trainable parameter.
     loaded = {
         "blocks.0.freq": torch.ones(4),
         "blocks.0.lin.weight": torch.ones(4, 4),

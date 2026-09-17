@@ -33,8 +33,6 @@ from fastvideo.models.loader.fsdp_load import (
 )
 
 DTYPE = torch.float32
-# The FQN from the original failure, used verbatim so the regression is
-# recognizable if it ever comes back.
 REPORTED_FQN = "transformer_blocks.0.attn.to_out.scale_input"
 
 
@@ -89,18 +87,14 @@ def _load(model: nn.Module, checkpoint: dict[str, torch.Tensor]):
 class TestQuantParamAllowlist(unittest.TestCase):
 
     def test_reported_fqn_is_allowed(self):
-        # The exact name from the failed AbsMaxFP8 run.
         self.assertTrue(is_allowed_new_param(REPORTED_FQN))
 
     def test_quant_scale_params_are_zero_initialized(self):
-        # The checkpoint holds only `weight`; `scale_weight` / `scale_input`
-        # exist in the model but never in the checkpoint.
         model = _model()
         checkpoint = {"transformer_blocks.0.attn.to_out.weight": torch.ones(2, 3, dtype=DTYPE)}
         _load(model, checkpoint)
 
         to_out = model.transformer_blocks[0].attn.to_out
-        # Per-tensor scales for a plain (non-merged) linear, zero-initialized.
         self.assertEqual(to_out.scale_weight.shape, (1, ))
         self.assertEqual(to_out.scale_input.shape, (1, ))
         self.assertTrue(torch.equal(to_out.scale_weight, torch.zeros(1, dtype=DTYPE)))
@@ -108,20 +102,14 @@ class TestQuantParamAllowlist(unittest.TestCase):
         self.assertTrue(torch.equal(to_out.weight, torch.ones(2, 3, dtype=DTYPE)))
 
     def test_missing_real_weight_still_raises(self):
-        # No quant scale involved: a plain model weight absent from the
-        # checkpoint is a mapping bug and must keep failing loudly.
         model = _model()
         with self.assertRaisesRegex(ValueError, "is not supported"):
             _load(model, {})
 
     def test_bare_scale_param_is_not_admitted(self):
-        # Guard against widening the allowlist to a bare "scale" token: a
-        # learned parameter that merely ends in `scale` must stay rejected.
         self.assertFalse(is_allowed_new_param("transformer_blocks.0.attn.to_out.scale"))
 
     def test_every_absmax_fp8_registered_param_is_allowed(self):
-        # Derived from the quant method itself, so a new scale tensor added by
-        # AbsMaxFP8 fails here instead of at checkpoint-load time.
         to_out = _QuantToOut()
         new_params = [name for name, _ in to_out.named_parameters() if name != "weight"]
         self.assertEqual(sorted(new_params), ["scale_input", "scale_weight"])
@@ -130,7 +118,6 @@ class TestQuantParamAllowlist(unittest.TestCase):
             self.assertTrue(is_allowed_new_param(fqn), f"{fqn} is not in {ALLOWED_NEW_PARAM_PATTERNS}")
 
     def test_existing_attention_patterns_still_allowed(self):
-        # The pre-existing entries must survive the change.
         for name in ("transformer_blocks.0.attn.to_gate_compress.weight", "blocks.0.attn1.attn_impl.proj_l.weight"):
             self.assertTrue(is_allowed_new_param(name))
 

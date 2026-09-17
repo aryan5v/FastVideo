@@ -130,9 +130,6 @@ def _parameter_samples(model: MiniMaxH3Model, *, samples_per_tensor: int = 16) -
         if name in result:
             raise ValueError(f"duplicate canonical parameter name: {name}")
         detached = parameter.detach()
-        # FSDP exposes DTensor parameters even when this gate reshards onto a
-        # one-rank process. Its local shard is the complete tensor here and can
-        # be sampled with ordinary Tensor indexing.
         local_parameter = detached.to_local() if hasattr(detached, "to_local") else detached
         flat = local_parameter.reshape(-1)
         sample_count = min(samples_per_tensor, flat.numel())
@@ -271,9 +268,6 @@ def main() -> None:
         dcp_parameter_samples = _compact_named_entries(dcp_parameter_samples, retained)
         dcp_backend["layer_backends"] = _compact_named_entries(dcp_backend["layer_backends"], retained)
 
-    # Use the smallest valid H3 geometry so this tests model arithmetic rather
-    # than exhausting memory. Five frames map to two video and eight audio
-    # latents, preserving the real modality timing relation.
     tc.data.num_frames = 5
     tc.data.num_latent_t = 2
     tc.data.num_height = 64
@@ -292,8 +286,6 @@ def main() -> None:
         "audio": _metrics(reference_audio, reference_repeat_audio),
     }
 
-    # Release the original role graph, including the 33B teacher, before
-    # loading the exported model into the same one-GPU process.
     attention_backend = model.attention_backend
     del states, method, model
     gc.collect()

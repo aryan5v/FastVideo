@@ -207,7 +207,6 @@ def _resolve_resume_checkpoint(
             raise ValueError(f"Checkpoint is incomplete under the configured resume policy: {path}")
         return path
 
-    # Treat as output_dir -> pick latest.
     latest = _find_latest_checkpoint(
         path,
         require_complete_marker=require_complete_marker,
@@ -215,7 +214,6 @@ def _resolve_resume_checkpoint(
     if latest is not None:
         return latest
 
-    # Give a clearer error message.
     out = Path(os.path.expanduser(str(output_dir))).resolve()
     raise ValueError("Could not resolve resume checkpoint. Expected a checkpoint directory "
                      f"named 'checkpoint-<step>' (with 'dcp/' inside), or an output_dir "
@@ -280,19 +278,12 @@ class _CallbackStateWrapper:
 
 @dataclass(slots=True)
 class CheckpointConfig:
-    # Full distributed state used to resume training.
     save_steps: int
     keep_last: int
-    # Suppress periodic saves before this step (early checkpoints of a long
-    # run are rarely useful and cost ~100 GiB each). 0 disables the gate.
     start_step: int = 0
-    # Deployable model-only checkpoints are written for every validation event
-    # and are never removed by ``keep_last``.
     save_inference_on_validation: bool = False
     inference_role: str = "student"
     inference_dtype: str = "bfloat16"
-    # Require the post-RNG completion marker when resolving resumable state.
-    # False preserves checkpoints written before that marker was introduced.
     require_complete_training_checkpoint: bool = False
 
 
@@ -330,19 +321,15 @@ class CheckpointManager:
                                  "training.distributed.num_gpus value in the saved raw config")
         self._callbacks = callbacks
         self._raw_config = raw_config
-        # Training-state and inference checkpoints have independent policies
-        # and deduplication.
         self._last_saved_step: int | None = None
         self._last_inference_saved_step: int | None = None
 
     def _build_states(self) -> dict[str, Any]:
         states: dict[str, Any] = self.method.checkpoint_state()
 
-        # Dataloader (optional but recommended for exact resume).
         if _is_stateful(self.dataloader):
             states["dataloader"] = self.dataloader
 
-        # Callback state (e.g. EMA shadow weights, validation RNG).
         if self._callbacks is not None and _is_stateful(self._callbacks):
             states["callbacks"] = _CallbackStateWrapper(self._callbacks, )
 
@@ -389,9 +376,6 @@ class CheckpointManager:
         dcp_dir = self._dcp_dir(step)
         os.makedirs(dcp_dir, exist_ok=True)
 
-        # A retry may target a directory whose previous DCP save completed but
-        # whose RNG snapshots did not. Remove the publication marker before
-        # overwriting any state so strict readers can never select stale data.
         if _rank() == 0:
             with contextlib.suppress(FileNotFoundError):
                 (checkpoint_dir / _TRAINING_CHECKPOINT_COMPLETE_MARKER).unlink()
@@ -407,11 +391,6 @@ class CheckpointManager:
         dcp.save(states, checkpoint_id=str(dcp_dir))
         _barrier()
 
-        # Save RNG state AFTER dcp.save so it captures the
-        # exact state the continuous run continues with.
-        # dcp.save triggers FSDP all-gather ops that can
-        # advance the RNG between when DCP captures it and
-        # when the save completes.
         self._save_rng_snapshot(checkpoint_dir)
         _barrier()
 
@@ -463,8 +442,6 @@ class CheckpointManager:
         dcp_dir = staging_dir / "dcp"
         export_status_path = staging_dir / "export-status.json"
         if _rank() == 0:
-            # A prior failed save is never a valid source: DCP writes
-            # ``.metadata`` last, and the exporter publishes independently.
             shutil.rmtree(staging_dir, ignore_errors=True)
             os.makedirs(dcp_dir, exist_ok=True)
         _barrier()
@@ -473,9 +450,6 @@ class CheckpointManager:
         if not states:
             raise ValueError(f"Inference checkpoint role {role!r} exposes no modules")
 
-        # Saving weights must not perturb the training trajectory. The regular
-        # resumable checkpoint intentionally snapshots its post-save RNG state;
-        # this model-only staging save instead restores the pre-save state.
         torch_rng = torch.get_rng_state()
         python_rng = random.getstate()
         numpy_rng = np.random.get_state()
@@ -525,10 +499,6 @@ class CheckpointManager:
             )
             os.replace(status_tmp, export_status_path)
         else:
-            # Do not enter a collective while rank zero performs a multi-minute
-            # CPU/Lustre export: an outstanding NCCL operation can trip the
-            # process-group watchdog. The atomically published shared-FS result
-            # gives every rank the same terminal outcome before any barrier.
             last_log = time.monotonic()
             while not export_status_path.is_file():
                 time.sleep(2.0)
@@ -616,7 +586,6 @@ class CheckpointManager:
         rank = _rank()
         rng_path = resolved / f"rng_state_rank{rank}.pt"
         if not rng_path.is_file():
-            # Fall back to legacy single-file snapshot.
             rng_path = resolved / "rng_state.pt"
         if not rng_path.is_file():
             logger.warning(
@@ -681,10 +650,6 @@ class CheckpointManager:
                 continue
             if not _CHECKPOINT_DIR_RE.match(child.name):
                 continue
-            # In strict mode, a directory without the post-RNG publication
-            # marker is diagnostic debris, not one of the rolling resumable
-            # checkpoints. It must not consume ``keep_last`` and displace an
-            # older checkpoint that can actually be resumed.
             if (self.config.require_complete_training_checkpoint
                     and not _is_complete_training_checkpoint(child, require_complete_marker=True)):
                 continue

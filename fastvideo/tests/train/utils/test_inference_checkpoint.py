@@ -233,8 +233,6 @@ def test_export_is_atomic_on_failure_and_retry_succeeds(
     result = export_inference_checkpoint_from_dcp(**kwargs)
     assert (result / ".complete").is_file()
 
-    # Completed outputs are immutable and retries are idempotent, even after
-    # the temporary DCP has been retired by the caller.
     for child in (source / "dcp").iterdir():
         child.unlink()
     (source / "dcp").rmdir()

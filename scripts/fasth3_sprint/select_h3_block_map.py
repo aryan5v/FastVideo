@@ -111,7 +111,6 @@ def select_map(blended: list[float],
     for index in range(blocks):
         run = run + 1 if index in base_removed else 0
         base_cap = max(base_cap, run)
-    # A re-cut may not stretch an already proven gap into a longer hole.
     cap = max(max_contiguous_removed, base_cap)
 
     def contiguous_ok(removed: set[int]) -> bool:

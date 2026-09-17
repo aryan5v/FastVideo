@@ -47,7 +47,6 @@ def run_training_from_config(
     from fastvideo.train.utils.builder import build_from_config
     from fastvideo.train.utils.config import load_run_config
 
-    # Enable deterministic mode for reproducibility.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -56,21 +55,11 @@ def run_training_from_config(
 
     model_path_lower = str(tc.model_path).lower()
 
-    # Auto-set attention backend for model families that require a specific
-    # backend at load time, unless the user already overrode it explicitly.
     if tc.vsa_sparsity > 0.0 and "minimax" not in model_path_lower:
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
             "VIDEO_SPARSE_ATTN",
         )
-    # H3: do NOT push VSA into the env fallback. Training roles take their
-    # backend from per-role model config (student VSA, teacher/critic dense);
-    # the validation/inference pipeline resolves from this env and currently
-    # faults under the VSA-H3 kernel (async CUDA error surfacing as
-    # ncclUnhandledCudaError at the next FSDP all-gather, job 2307).
-    # Until the inference-side VSA path is debugged, H3 validation runs its
-    # native dense backend — a sparse-trained student evaluated dense is a
-    # known contract mismatch; see the CompactH3 DMD2 configs.
     elif ("turbodiffusion" in model_path_lower or "turbowan" in model_path_lower):
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
@@ -95,8 +84,6 @@ def run_training_from_config(
         callback_configs=cfg.callbacks,
     )
 
-    # Attach the exact YAML used for this run to the
-    # tracker (e.g., W&B Files).
     trainer.tracker.log_file(
         os.path.abspath(os.path.expanduser(config_path)),
         name="run.yaml",

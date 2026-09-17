@@ -1,5 +1,4 @@
 #!/bin/bash
-# Launch one 32-GPU DMD2 world across two already-running four-node jobs.
 # Usage: bash resume_release20b_dmd2_paired_generic.sh JOB_A JOB_B RESUME_STEP
 set -euo pipefail
 
@@ -29,8 +28,6 @@ NODES_B="$(squeue -h -j "${JOB_B}" -o %N)"
 [[ "$(scontrol show hostnames "${NODES_A}" | wc -l)" -eq 4 ]]
 [[ "$(scontrol show hostnames "${NODES_B}" | wc -l)" -eq 4 ]]
 
-# A resumable checkpoint is committed only after all distributed state and all
-# rank-local RNG snapshots exist. Never fall back to a partially written save.
 test -s "${RESUME_PATH}/.complete"
 test -s "${RESUME_PATH}/dcp/.metadata"
 test -s "${RESUME_PATH}/metadata.json"

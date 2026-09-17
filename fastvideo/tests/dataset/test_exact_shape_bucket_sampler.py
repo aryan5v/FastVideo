@@ -87,7 +87,6 @@ def test_rare_bucket_is_padded_not_dropped_and_all_ranks_share_schedule() -> Non
             assert set(step_indices) == set(range(7))
             assert len(step_indices) == 32
 
-    # Padding may repeat rows, but every frozen row participates at least once.
     assert observed_originals == set(range(len(bucket_ids)))
 
 

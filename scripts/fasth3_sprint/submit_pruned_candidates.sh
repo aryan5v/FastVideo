@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Submit the four Dense/VSA × activation/uniform 20-block candidates.
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"

@@ -1,5 +1,4 @@
 #!/bin/bash
-# Export pre-quantized nvfp4 DiT weights for the FastH3 DMD2 student.
 # Run:  sbatch /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/exp.sbatch /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/export_lane_nvfp4.sh
 set -euo pipefail
 SPRINT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829

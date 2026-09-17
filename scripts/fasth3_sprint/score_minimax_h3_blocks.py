@@ -115,8 +115,6 @@ def _calibration_records(
                 else:
                     category = _category(str(record.get("caption", "")))
                     if category == "multiple_shots":
-                        # VGGSound's label "shot football" is not evidence of
-                        # scene cuts and must never populate the multi-shot gate.
                         category = None
                 if category is None:
                     continue
@@ -178,7 +176,6 @@ def _load_transformer(model_root: Path, device: torch.device) -> torch.nn.Module
     from fastvideo.attention.selector import _component_attention_backend_scope
     from fastvideo.platforms import AttentionBackendEnum
 
-    # Direct component loading bypasses PipelineComponentLoader's backend scope.
     with _component_attention_backend_scope(AttentionBackendEnum.TORCH_SDPA, component="transformer"):
         transformer = TransformerLoader().load(str(model_root / "transformer"), _loader_args(model_root))
     resolved = getattr(transformer.config, "_resolved_attention_backend", None)
@@ -358,10 +355,6 @@ def main() -> None:
     device = torch.device("cuda", local_rank)
     from fastvideo.distributed import maybe_init_distributed_environment_and_model_parallel
 
-    # torchrun initializes process identity, but FastVideo attention also
-    # requires its explicit TP/SP group objects even when both sizes are one.
-    # The remaining world dimension is data parallel: every rank owns a
-    # different scoring shard and a complete local transformer replica.
     maybe_init_distributed_environment_and_model_parallel(1, 1)
     records = _calibration_records(
         args.corpus_root,

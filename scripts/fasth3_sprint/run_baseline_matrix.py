@@ -76,8 +76,6 @@ def _checkpoint_revision(model_path: str) -> str:
 
 
 def _probe_media(path: Path) -> dict[str, Any]:
-    # PyAV is part of the FastVideo runtime and validates actual decoding.  Do
-    # not depend on a host ffprobe binary that is absent from the NGC image.
     import av
 
     with av.open(str(path)) as container:
@@ -293,8 +291,6 @@ def main() -> None:
         "checkpoint_revision": revision,
         "checkpoint_role": args.checkpoint_role,
         "attention": args.attention,
-        # backend_environment records the process env, which profile_environment
-        # used to clobber to FLASH_ATTN; this field is what the pipeline ran.
         "resolved_attention_backend": ("VIDEO_SPARSE_ATTN_H3" if args.attention == "vsa"
                                        else (args.attention_backend or "FLASH_ATTN")),
         "quantization": "none",

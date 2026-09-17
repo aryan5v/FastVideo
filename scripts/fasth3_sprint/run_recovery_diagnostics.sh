@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Export and evaluate the failed H3 recovery lineage without starting training.
 set -euo pipefail
 
 : "${SPRINT_ROOT:?SPRINT_ROOT is required}"
@@ -66,8 +65,6 @@ generate_one() {
 
 for kind in dense vsa; do
   export_checkpoint "${kind}" 100
-  # Step 200 was already exported for the comparison matrix; reuse that exact
-  # raw export so the audit covers the artifact that visibly failed.
   step200="${SPRINT_ROOT}/exports/h36-recovery-comparison/${kind}-activation-step200-raw"
   test -s "${step200}/transformer/model.safetensors"
   initial="${SPRINT_ROOT}/checkpoints/h18-candidates/${kind}-activation"

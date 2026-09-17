@@ -49,7 +49,6 @@ def _make_model(
     if extra_param is not None:
         extra = distribute_tensor(torch.randn(4, 4), cpu_mesh, placements)
         model.register_parameter(extra_param.replace(".", "_"), nn.Parameter(extra))
-        # register under the dotted name via a child module for realism
     model.reverse_param_names_mapping = {"weight": ("hf.weight", None, None)}
     return model
 
@@ -140,8 +139,6 @@ def test_ac_wrapped_buffer_stays_buffer_on_cache_hit(cpu_mesh, tmp_path):
         model.reverse_param_names_mapping = {}
         return model
 
-    # Cold boot writes the cache from the same (wrapped) model shape; keys in
-    # the manifest are clean either way because state_dict strips the prefix.
     src = _block_model()
     src.block = checkpoint_wrapper(src.block)
     ctx = _ctx(tmp_path)
@@ -178,8 +175,6 @@ def test_nonzero_rank_writer_emits_manifest_for_per_node_roots(cpu_mesh, tmp_pat
 
     src = _make_model(cpu_mesh)
     ctx = _ctx(tmp_path)
-    # Simulate a rank on a non-head node: still a writer (per-node root), but
-    # dist.get_rank() != 0.
     monkeypatch.setattr(sc.dist, "get_rank", lambda: 4)
     write_shard_cache(src, ctx)
     assert (ctx.entry_dir / "manifest.json").is_file()

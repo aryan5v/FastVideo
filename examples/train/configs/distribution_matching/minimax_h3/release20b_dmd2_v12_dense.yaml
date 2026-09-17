@@ -1,6 +1,3 @@
-# Release-20B adaptation of the successful MiniMax-H3 V12 dense DMD2 recipe.
-# The launcher replaces both __SELECTED_PARENT__ values with the checkpoint
-# selected by the matched-seed checkpoint-300/350/400/450 quality gate.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
@@ -12,17 +9,11 @@ models:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
     init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
     trainable: false
-    # The frozen teacher has no optimizer masters. FSDP already evaluates it
-    # in BF16, so BF16 construction is numerically identical at forward time
-    # and avoids retaining an unnecessary FP32 copy on every rank.
     construction_precision: bf16
     disable_custom_init_weights: true
     attention_backend: TORCH_SDPA
   critic:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
-    # V12's fake-score model starts from the full base H3 distribution.  A
-    # folded student critic is cheaper, but was the largest recipe drift in
-    # the rejected 2750-phase lineage.
     init_from: /mnt/nfs/vlm-aryan/hf-cache/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe
     trainable: true
     disable_custom_init_weights: true
@@ -62,9 +53,6 @@ training:
     hsdp_shard_dim: 16
     pin_cpu_memory: true
   data:
-    # Reuse the durable prompt-only corpus from the successful V12 run.  The
-    # previous custom index disappeared between resumes, leaving an empty
-    # directory and killing job 8945.
     data_path:
       - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data
       - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_5s_768p/data
@@ -89,8 +77,6 @@ training:
     lr_warmup_steps: 0
   loop:
     max_train_steps: 1000
-    # The runner overrides this to eight on the original 32-GPU V12 topology,
-    # preserving the recipe's global batch of 64.
     gradient_accumulation_steps: 16
   checkpoint:
     output_dir: __OUTPUT_DIR__
@@ -101,10 +87,6 @@ training:
     training_state_checkpointing_steps: 100
     require_complete_training_checkpoint: true
     checkpointing_start_step: 100
-    # Preserve intermediate peaks for the AV gate instead of assuming the
-    # last phase is the best phase.
-    # Smoke plus forty 100-phase gates through phase 4,000. Keep the complete
-    # trajectory so a middle quality peak cannot be pruned before AV review.
     checkpoints_total_limit: 50
   tracker:
     trackers: [wandb]

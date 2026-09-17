@@ -1,5 +1,4 @@
 #!/bin/bash
-# Validate every combined row and atomically publish v2 READY receipts.
 
 #SBATCH --job-name=h3-native-final
 #SBATCH --nodes=1

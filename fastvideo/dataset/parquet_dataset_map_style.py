@@ -9,10 +9,8 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-# Torch in general
 import torch
 import tqdm
-# Dataset
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from fastvideo.platforms import current_platform
@@ -50,13 +48,11 @@ class DP_SP_BatchSampler(Sampler[list[int]]):
         self.global_rank = global_rank
         self.sp_world_size = sp_world_size
 
-        # ── epoch-level RNG ────────────────────────────────────────────────
         if batch_size <= 0 or num_sp_groups <= 0 or sp_world_size <= 0:
             raise ValueError("batch_size, num_sp_groups, and sp_world_size must be positive")
 
         rng = torch.Generator().manual_seed(self.seed)
         if sample_bucket_ids is None:
-            # Legacy behavior: one permutation over the complete dataset.
             global_indices = torch.randperm(self.dataset_size, generator=rng)
             if drop_first_row:
                 global_indices = global_indices[global_indices != 0]
@@ -86,7 +82,6 @@ class DP_SP_BatchSampler(Sampler[list[int]]):
             if drop_first_row:
                 self.dataset_size -= 1
 
-        # shard the indices to each sp group
         ith_sp_group = self.global_rank // self.sp_world_size
         sp_group_local_indices = global_indices[ith_sp_group::self.num_sp_groups]
         self.sp_group_local_indices = sp_group_local_indices
@@ -123,10 +118,6 @@ class DP_SP_BatchSampler(Sampler[list[int]]):
             bucket_indices = bucket_indices[torch.randperm(len(bucket_indices), generator=rng)]
             remainder = len(bucket_indices) % samples_per_round
             if remainder:
-                # Native bucketing must retain every frozen row, including a
-                # rare bucket smaller than one global microbatch. Repeat only
-                # within that bucket; legacy drop_last behavior remains in the
-                # unbucketed branch above.
                 padding_size = samples_per_round - remainder
                 repeats = (padding_size + len(bucket_indices) - 1) // len(bucket_indices)
                 padding = bucket_indices.repeat(repeats)[:padding_size]
@@ -240,17 +231,14 @@ def get_parquet_files_and_length(path: str | Sequence[str] | dict[str, int]):
         return file_names_sorted, lengths_sorted
 
     dataset_root = os.path.realpath(os.path.expanduser(specs[0][0]))
-    # Check if cached info exists
     cache_dir = os.path.join(dataset_root, "map_style_cache")
     cache_file = os.path.join(cache_dir, "file_info.pkl")
 
-    # Only rank 0 checks for cache and scans files if needed
     if get_world_rank() == 0:
         cache_loaded = False
         file_names_sorted = None
         lengths_sorted = None
 
-        # First try to load existing cache
         if os.path.exists(cache_file):
             logger.info("Loading cached file info from %s", cache_file)
             try:
@@ -288,7 +276,6 @@ def get_parquet_files_and_length(path: str | Sequence[str] | dict[str, int]):
                 logger.info("Falling back to scanning files")
                 cache_loaded = False
 
-        # If cache not loaded (either doesn't exist or failed to load), scan files
         if not cache_loaded:
             logger.info("Scanning parquet files to get lengths")
             lengths = []
@@ -306,20 +293,16 @@ def get_parquet_files_and_length(path: str | Sequence[str] | dict[str, int]):
             for file_path in tqdm.tqdm(file_names, desc="Reading parquet files to get lengths"):
                 num_rows = pq.ParquetFile(file_path).metadata.num_rows
                 lengths.append(num_rows)
-            # sort according to file name to ensure all rank has the same order
             file_names_sorted, lengths_sorted = zip(*sorted(zip(file_names, lengths, strict=True), key=lambda x: x[0]),
                                                     strict=True)
-            # Save the cache
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "wb") as f:
                 pickle.dump((file_names_sorted, lengths_sorted), f)
             logger.info("Saved file info to %s", cache_file)
 
-    # Wait for rank 0 to finish creating/loading cache
     world_group = get_world_group()
     world_group.barrier()
 
-    # Now all ranks load the cache (it should exist and be valid now)
     logger.info("Loading cached file info from %s after barrier", cache_file)
     with open(cache_file, "rb") as f:
         file_names_sorted, lengths_sorted = pickle.load(f)
@@ -348,7 +331,6 @@ def read_row_from_parquet_file(
         lengths: List[int]
     Returns:
     '''
-    # find the parquet file and local row index
     cumulative = 0
     file_index = 0
     local_row_idx = 0
@@ -359,13 +341,10 @@ def read_row_from_parquet_file(
             break
         cumulative += lengths[file_index]
     else:
-        # If we reach here, global_row_idx is out of bounds
         raise IndexError(f"global_row_idx {global_row_idx} is out of bounds for dataset")
 
     parquet_file = pq.ParquetFile(parquet_files[file_index])
 
-    # Calculate the row group to read into memory and the local idx
-    # This way we can avoid reading in the entire parquet file
     cumulative = 0
     row_group_index = 0
     local_index = 0
@@ -378,12 +357,8 @@ def read_row_from_parquet_file(
             break
         cumulative += num_rows
     else:
-        # If we reach here, local_row_idx is out of bounds for this parquet file
         raise IndexError(f"local_row_idx {local_row_idx} is out of bounds for parquet file {parquet_files[file_index]}")
 
-    # Project at the Parquet reader boundary. This is especially important for
-    # data-free training over a T2VA superset: the text-only schema must not
-    # pull hundreds of MiB of unused video/audio latent bytes into host memory.
     row_group = parquet_file.read_row_group(row_group_index, columns=columns).to_pydict()
     row_dict = {k: v[local_index] for k, v in row_group.items()}
     del row_group
@@ -391,9 +366,6 @@ def read_row_from_parquet_file(
     return row_dict
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# 2.  Dataset with batched __getitems__
-# ────────────────────────────────────────────────────────────────────────────
 class LatentsParquetMapStyleDataset(Dataset):
     """
     Return latents[B,C,T,H,W] and embeddings[B,L,D] in pinned CPU memory.
@@ -418,7 +390,6 @@ class LatentsParquetMapStyleDataset(Dataset):
         self.cfg_rate = cfg_rate
         self.parquet_schema = parquet_schema
         self.seed = seed
-        # Create a seeded random generator for deterministic CFG
         self.rng = random.Random(seed)
         logger.info("Initializing LatentsParquetMapStyleDataset with path: %s", path)
         self.parquet_files, self.lengths = get_parquet_files_and_length(path)
@@ -447,10 +418,8 @@ class LatentsParquetMapStyleDataset(Dataset):
         Returns the processed negative prompt data (latents, embeddings, masks, info).
         """
 
-        # Read first row from first parquet file
         file_path = self.parquet_files[0]
         row_idx = 0
-        # Read the negative prompt data
         row_dict = read_row_from_parquet_file(
             [file_path],
             row_idx,
@@ -473,7 +442,6 @@ class LatentsParquetMapStyleDataset(Dataset):
 
         return negative_prompt_embedding, negative_prompt_attention_mask, negative_prompt
 
-    # PyTorch calls this ONLY because the batch_sampler yields a list
     def __getitems__(self, indices: list[int]) -> dict[str, Any]:
         """
         Batch fetch using read_row_from_parquet_file for each index.
@@ -487,8 +455,6 @@ class LatentsParquetMapStyleDataset(Dataset):
             ) for idx in indices
         ]
 
-        # Inject sample indices for deterministic CFG dropout
-        # that is reproducible across checkpoint resume.
         for row, idx in zip(rows, indices):
             row["_sample_index"] = idx
 
@@ -508,9 +474,6 @@ class LatentsParquetMapStyleDataset(Dataset):
         return sum(self.lengths)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# 3.  Loader helper – everything else stays just like your original trainer
-# ────────────────────────────────────────────────────────────────────────────
 def passthrough(batch):
     return batch
 

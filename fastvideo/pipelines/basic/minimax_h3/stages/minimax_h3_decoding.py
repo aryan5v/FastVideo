@@ -81,9 +81,6 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
         placeholder = torch.empty((0, 3, 0, 0, 0), device="cpu", dtype=torch.float32)
         sp_group, is_output_rank, parallel = _decode_participation(fastvideo_args, fastvideo_args.vae_parallel_decode)
         if not is_output_rank and not parallel:
-            # Consumers read the output rank's ForwardBatch. Keep a
-            # verifier-compatible placeholder on other ranks and avoid
-            # duplicating the full VAE decode and CPU output buffer.
             batch.output = placeholder
             return batch
 
@@ -127,8 +124,6 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
         try:
             latents = self.vae.denormalize_latents(latents.to(device=device, dtype=torch.float32))
             if fastvideo_args.output_type == "latent":
-                # No collectives on this path, so uniform participation is
-                # trivial: every rank returns here.
                 batch.output = latents.detach().float().cpu() if is_output_rank else placeholder
                 return batch
 
@@ -140,8 +135,6 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
                     dtype=torch.float32,
                     pin_memory=fastvideo_args.pin_cpu_memory and is_pin_memory_available(),
                 )
-            # Attribute the streamed decoder computation while retaining
-            # per-chunk device-to-host transfer and pinned-buffer reuse.
             with (
                     nvtx_range("minimax_h3.vae"),
                     torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"),
@@ -184,8 +177,6 @@ class MiniMaxH3AudioDecodingStage(PipelineStage):
     @torch.no_grad()
     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
         """Decode H3 audio latents into a stereo CPU waveform."""
-        # Decode once per sequence-parallel group so data-parallel validation
-        # retains one waveform for every generated sample.
         if model_parallel_is_initialized() and not get_sp_group().is_first_rank:
             batch.extra["audio"] = torch.empty((0, 2), device="cpu", dtype=torch.float32)
             batch.extra["audio_sample_rate"] = self.audio_vae.sampling_rate
@@ -209,8 +200,6 @@ class MiniMaxH3AudioDecodingStage(PipelineStage):
                 self._clear_runtime(batch)
                 return batch
 
-            # The range isolates waveform synthesis from packing and runtime
-            # cleanup so the audio decoder has one stable timeline boundary.
             with nvtx_range("minimax_h3.audio_vae"):
                 decoded = self.audio_vae.decode(latents).sample.float()
             if decoded.ndim != 3 or decoded.shape[0] != 2 or decoded.shape[1] != 1:

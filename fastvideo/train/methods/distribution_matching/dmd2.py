@@ -78,7 +78,6 @@ class DMD2Method(TrainingMethod):
         self._score_timestep_continuous = self._parse_score_timestep_continuous()
         self._fake_score_loss_space = self._parse_fake_score_loss_space()
 
-        # Initialize preprocessors on student.
         self.student.init_preprocessors(self.training_config)
 
         self._init_optimizers_and_schedulers()
@@ -97,7 +96,6 @@ class DMD2Method(TrainingMethod):
             "critic": self._critic_lr_scheduler,
         }
 
-    # TrainingMethod override: single_train_step
     def single_train_step(
         self,
         batch: dict[str, Any],
@@ -167,7 +165,6 @@ class DMD2Method(TrainingMethod):
             **generator_metrics,
             **critic_metrics,
         }
-        # Rank-local latent snapshots for LatentVisCallback.
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
@@ -176,7 +173,6 @@ class DMD2Method(TrainingMethod):
         }
         return loss_map, outputs, metrics
 
-    # TrainingMethod override: backward
     def backward(
         self,
         loss_map: dict[str, torch.Tensor],
@@ -237,7 +233,6 @@ class DMD2Method(TrainingMethod):
                 f"Nonfinite {role} gradients before clipping/Adam: {bad}"
             )
 
-    # TrainingMethod override: get_optimizers
     def get_optimizers(
         self,
         iteration: int,
@@ -246,7 +241,6 @@ class DMD2Method(TrainingMethod):
             return [self._student_optimizer]
         return [self._critic_optimizer]
 
-    # TrainingMethod override: get_lr_schedulers
     def get_lr_schedulers(
         self,
         iteration: int,
@@ -255,7 +249,6 @@ class DMD2Method(TrainingMethod):
             return [self._student_lr_scheduler]
         return [self._critic_lr_scheduler]
 
-    # TrainingMethod override: get_grad_clip_targets
     def get_grad_clip_targets(
         self,
         iteration: int,
@@ -417,9 +410,6 @@ class DMD2Method(TrainingMethod):
             raise ValueError("method.rollout_carry_slots must be positive, "
                              f"got {slots}")
         if slots != grad_accum:
-            # The trainer calls single_train_step once per accumulation round
-            # without passing the round index; the round-robin slot selection
-            # only matches the trainer's cadence when the counts agree.
             raise ValueError("method.rollout_carry_slots must equal "
                              "training.loop.gradient_accumulation_steps, got "
                              f"slots={slots} vs "
@@ -557,11 +547,6 @@ class DMD2Method(TrainingMethod):
         return len(raw)
 
     def _init_rollout_carry_state(self) -> None:
-        # Transient in-memory trajectory state: one independent slot per
-        # gradient-accumulation round, selected round-robin over calls.
-        # Intentionally never checkpointed (mirrors FastGen's CarryCallback):
-        # on resume every slot restarts from fresh noise — a brief warmup
-        # until the walk is mid-trajectory again.
         slots = max(0, int(self._rollout_carry_slot_count))
         self._carry_call_count = 0
         self._carry_slots: list[dict[str, Any] | None] = [None] * slots
@@ -652,7 +637,6 @@ class DMD2Method(TrainingMethod):
     def _init_optimizers_and_schedulers(self) -> None:
         tc = self.training_config
 
-        # Student optimizer/scheduler.
         student_lr = float(tc.optimizer.learning_rate)
         student_betas = tc.optimizer.betas
         student_sched = str(tc.optimizer.lr_scheduler)
@@ -669,8 +653,6 @@ class DMD2Method(TrainingMethod):
             scheduler_name=student_sched,
         )
 
-        # Critic optimizer/scheduler — must be set in
-        # method config.
         critic_lr_raw = get_optional_float(
             self.method_config,
             "fake_score_learning_rate",
@@ -954,11 +936,6 @@ class DMD2Method(TrainingMethod):
         t_hi = self._score_max_timestep / num_timesteps
 
         if getattr(self, "_score_timestep_continuous", False):
-            # FastGen draws the pre-warp coordinate continuously in float64,
-            # then applies the rational shift. This method stores the inverse
-            # shift because model adapters (H3: video 12, audio 3) apply their
-            # own modality clocks afterwards. Bounds therefore belong to U,
-            # not to the inverse-warped base time.
             u = torch.rand(
                 [1],
                 device=device,
@@ -973,8 +950,6 @@ class DMD2Method(TrainingMethod):
             return timestep.clamp(0.0, warp_max * num_timesteps)
 
         if shift == 1.0:
-            # Draw inside the bounds directly; drawing over the full range
-            # and clamping piles probability atoms onto both endpoints.
             timestep = torch.randint(
                 self._score_min_timestep,
                 self._score_max_timestep + 1,
@@ -1124,11 +1099,6 @@ class DMD2Method(TrainingMethod):
         batch.dmd_latent_vis_dict["generator_timestep"] = target_timestep.float().detach()
         return pred_x0
 
-    # ------------------------------------------------------------------
-    # Carried backward simulation — the student's own trajectory, walked
-    # one rung per single_train_step call (port of FastGen's
-    # _backward_simulation / _staggered_start / _advance_carry).
-    # ------------------------------------------------------------------
 
     def _carried_train_step(
         self,
@@ -1161,9 +1131,6 @@ class DMD2Method(TrainingMethod):
         slot = self._carry_call_count % self._rollout_carry_slot_count
         self._carry_call_count += 1
 
-        # Per-batch routing (off unless method.rollout_data_forcing): a batch
-        # that carries real latents trains on them at a noised grid rung and
-        # leaves this slot's walk untouched.
         if self._rollout_data_forcing and self._batch_has_latents(batch):
             return self._data_forced_train_step(batch, slot, iteration)
 
@@ -1187,9 +1154,6 @@ class DMD2Method(TrainingMethod):
                 dtype=latents.dtype,
                 generator=self.cuda_generator,
             )
-            # Stagger only the first-ever fill of each slot; later fresh
-            # starts begin at rung 0 with no pre-walk and stay out of phase
-            # naturally.
             if not self._carry_slot_seeded[slot]:
                 self._carry_slot_seeded[slot] = True
                 state, rung = self._staggered_start(
@@ -1253,8 +1217,6 @@ class DMD2Method(TrainingMethod):
             )
         training_batch.dmd_latent_vis_dict["generator_timestep"] = timestep.float().detach()
 
-        # Advance after the loss path: both phases generated, so both hand
-        # the trajectory on.
         self._advance_carry(
             slot,
             state,
@@ -1285,11 +1247,7 @@ class DMD2Method(TrainingMethod):
             **critic_metrics,
         }
         if self._rollout_data_forcing:
-            # The running mean of this metric is the realized latent-row
-            # fraction of the mix; emitted only when routing is enabled so
-            # carry-only runs keep their exact metric set.
             metrics["data_forced"] = 0.0
-        # Rank-local latent snapshots for LatentVisCallback.
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
@@ -1429,7 +1387,6 @@ class DMD2Method(TrainingMethod):
             **generator_metrics,
             **critic_metrics,
         }
-        # Rank-local latent snapshots for LatentVisCallback.
         self.latent_vis = {
             **(training_batch.fake_score_latent_vis_dict or {}),
             **(training_batch.dmd_latent_vis_dict or {}),
@@ -1480,10 +1437,6 @@ class DMD2Method(TrainingMethod):
         """
         rank, _ = self._rollout_carry_rank_world()
         grid_len = len(step_list)
-        # Exact-shape batches must remain shape-synchronous across every rank.
-        # Rank-staggered clears would let one rank adopt the next loader bucket
-        # while its peers were still carrying the previous geometry. Keep the
-        # slot staggering, but make it rank-independent for native-shape data.
         data_config = getattr(self.training_config, "data", None)
         stagger_rank = 0 if bool(getattr(data_config, "native_shape_bucketing", False)) else rank
         offset = (stagger_rank * self._rollout_carry_slot_count + slot) % grid_len
@@ -1623,10 +1576,6 @@ class DMD2Method(TrainingMethod):
         pred_noise: torch.Tensor | None = None
         target: torch.Tensor | None = None
         if all_x0:
-            # Match FastGen's fake_score_pred_type=x0 objective directly.
-            # Reweighting raw velocity MSE by sigma^2 is algebraically equal
-            # before rounding, but estimating sigma from BF16 x_t introduces a
-            # low-noise bias (especially for H3 audio).
             pred_x0 = self.critic.predict_x0(
                 noisy_x0,
                 fake_score_timestep,
@@ -1636,9 +1585,6 @@ class DMD2Method(TrainingMethod):
                 attn_kind="dense",
             )
         else:
-            # Retain the single-forward legacy path for mixed per-modality
-            # velocity/x0 configurations. Strict H3 parity uses global x0 and
-            # therefore always takes the direct branch above.
             pred_noise = self.critic.predict_noise(
                 noisy_x0,
                 fake_score_timestep,
@@ -1659,9 +1605,6 @@ class DMD2Method(TrainingMethod):
                 assert pred_noise is not None and target is not None
                 loss_m = torch.mean((pred_noise[:, modality].float() - target[:, modality].float())**2)
             if not all_x0 and self._fake_score_space_for(name) == "x0":
-                # For affine rectified flow, x0 MSE is sigma_m(t)^2 times
-                # velocity MSE. This compatibility path is retained only for
-                # legacy mixed-space recipes.
                 assert target is not None
                 with torch.no_grad():
                     num = torch.mean((noisy_x0[:, modality].float() - generator_pred_x0[:, modality].float())**2)
@@ -1732,8 +1675,6 @@ class DMD2Method(TrainingMethod):
                 attn_kind="dense",
             )
             if float(guidance_scale) == 1.0:
-                # Scale 1 is the conditional prediction and needs no
-                # unconditional forward.
                 real_cfg_x0 = real_cond_x0
             else:
                 real_uncond_x0 = self.teacher.predict_x0(
@@ -1746,7 +1687,6 @@ class DMD2Method(TrainingMethod):
                 )
                 real_cfg_x0 = real_uncond_x0 + (real_cond_x0 - real_uncond_x0) * guidance_scale
 
-            # LatentVisCallback decodes these estimates on rank 0.
             batch.dmd_latent_vis_dict.update({
                 "real_score_pred_video": real_cfg_x0.detach(),
                 "faker_score_pred_video": faker_x0.detach(),

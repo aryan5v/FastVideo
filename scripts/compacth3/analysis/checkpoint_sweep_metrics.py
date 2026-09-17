@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Technical A/V retention grading for paired FastH3 checkpoint renders.
-
-The script intentionally reports a *retention index*, not a learned perceptual
-quality score.  Every candidate is compared prompt-by-prompt with a reference
-render made with the same prompt and seed.  This makes exposure, detail,
-motion, temporal stability, and audio regressions visible without claiming to
-measure anatomy, semantic correctness, or human preference.
-"""
+"""A/V retention grading for paired FastH3 checkpoint renders."""
 
 from __future__ import annotations
 
@@ -203,7 +196,6 @@ def component_scores(candidate: dict[str, float], reference: dict[str, float]) -
                            {"spectral_centroid", "spectral_flatness",
                             "voice_band_ratio"})
 
-    # Hard technical failures must not be hidden by otherwise similar averages.
     if candidate["black_fraction"] > 0.05:
         visual *= max(0.0, 1.0 - candidate["black_fraction"])
     if candidate["clipped_fraction"] > 1e-4:

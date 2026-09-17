@@ -53,9 +53,6 @@ class EMACallback(Callback):
         self._ema_started = False
         self.student_ema: EMA_FSDP | None = None
 
-    # ----------------------------------------------------------
-    # Hooks
-    # ----------------------------------------------------------
 
     def on_train_start(
         self,
@@ -116,9 +113,6 @@ class EMACallback(Callback):
                 iteration,
             )
 
-    # ----------------------------------------------------------
-    # EMA context manager
-    # ----------------------------------------------------------
 
     @contextlib.contextmanager
     def ema_context(
@@ -135,9 +129,6 @@ class EMACallback(Callback):
         else:
             yield transformer
 
-    # ----------------------------------------------------------
-    # Checkpoint state
-    # ----------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
         if self.student_ema is None:

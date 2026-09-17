@@ -29,9 +29,6 @@ from fastvideo.layers.quantization.int8_affine_config import (
     minimax_h3_int8_affine_prefixes,
 )
 
-# ---------------------------------------------------------------------------
-# (a) importability without CUDA / inference deps
-# ---------------------------------------------------------------------------
 
 
 def test_config_module_imports_without_cuda_or_flashinfer():
@@ -50,7 +47,6 @@ def test_config_metadata_is_well_formed():
     assert torch.bfloat16 in cfg.get_supported_act_dtypes()
     assert cfg.get_config_filenames() == []
     assert INT8AffineConfig.get_min_capability() >= 70
-    # from_config round-trips the constructor surface the loader may pass.
     rebuilt = INT8AffineConfig.from_config({"group_size": 32, "bits": 4})
     assert (rebuilt.group_size, rebuilt.bits) == (32, 4)
 
@@ -62,9 +58,6 @@ def test_invalid_bits_and_group_size_are_rejected():
         INT8AffineConfig(group_size=0)
 
 
-# ---------------------------------------------------------------------------
-# (b) quantizer correctness
-# ---------------------------------------------------------------------------
 
 
 def _independent_affine_reference(w: torch.Tensor, group_size: int = 64, bits: int = 8):
@@ -80,13 +73,10 @@ def _independent_affine_reference(w: torch.Tensor, group_size: int = 64, bits: i
     flat = w.reshape(-1, w.shape[-1] // group_size, group_size).float()
     lo = flat.amin(dim=-1)
     hi = flat.amax(dim=-1)
-    # Anchor at whichever endpoint has the larger magnitude.
     anchor = torch.where(lo.abs() > hi.abs(), lo, hi)
     other = torch.where(lo.abs() > hi.abs(), hi, lo)
     step = ((hi - lo) / n_bins).clamp_min(1e-7)
     step = torch.where(lo.abs() > hi.abs(), step, -step)
-    # Re-express the anchor as an exact integer multiple of the step so the
-    # extreme value round-trips exactly.
     q0 = torch.round(anchor / step)
     use = q0 != 0
     step = torch.where(use, anchor / torch.where(use, q0, torch.ones_like(q0)), step)
@@ -104,13 +94,9 @@ def test_quantize_matches_independent_reference(dtype):
     ref_codes, ref_scales, ref_bias = _independent_affine_reference(w, group_size=64, bits=8)
 
     assert codes.dtype == torch.uint8
-    # Grouped shape, matching the reference contract.
     assert codes.shape == (*w.shape[:-1], w.shape[-1] // 64, 64)
     assert scales.shape == (*w.shape[:-1], w.shape[-1] // 64)
     assert torch.equal(codes.reshape(ref_codes.shape).to(torch.int64), ref_codes)
-    # The quantizer casts scales/biases to the input dtype (the reference does
-    # the same), so compare at that dtype: the fp32 solve is identical, the
-    # bf16/fp16 store is the only lossy step.
     torch.testing.assert_close(scales, ref_scales.to(dtype), rtol=0, atol=0)
     torch.testing.assert_close(biases, ref_bias.to(dtype), rtol=0, atol=0)
 
@@ -149,8 +135,6 @@ def test_roundtrip_error_is_within_documented_tolerance(dtype):
     torch.manual_seed(2)
     w = torch.randn(64, 1024, dtype=dtype)
     codes, scales, biases = int8_affine_quantize(w, group_size=64, bits=8)
-    # Dequant returns the scales' dtype (the reference's contract) — fp32 for an
-    # fp32 source, bf16 for a bf16 one — so measure in fp32.
     deq = int8_affine_dequantize(codes, scales, biases, out_shape=w.shape).float()
 
     assert deq.shape == w.shape
@@ -161,10 +145,6 @@ def test_roundtrip_error_is_within_documented_tolerance(dtype):
     assert rel_max < max_limit, f"max relative error {rel_max:.5f} exceeded {max_limit} for {dtype}"
     assert rel_rms < rms_limit, f"rms relative error {rel_rms:.5f} exceeded {rms_limit} for {dtype}"
 
-    # The extreme value of each group is the quantizer's anchor: it is
-    # re-expressed as an exact integer multiple of the scale, so it must
-    # round-trip to the precision the stored scales allow. Exact for an fp32
-    # source; bf16-level for a bf16 source, whose scales are themselves bf16.
     grouped_w = w.float().reshape(-1, 64)
     grouped_deq = deq.reshape(-1, 64)
     extreme = grouped_w.abs().max(dim=-1).values
@@ -186,11 +166,7 @@ def test_codes_never_exceed_uint8_range():
         assert codes.max().item() <= 255
 
 
-# ---------------------------------------------------------------------------
-# (c) H3 layer selection — the important test
-# ---------------------------------------------------------------------------
 
-# Every linear name H3's DiT actually builds, from fastvideo/models/dits/minimax_h3.py.
 _H3_INCLUDED = [
     "minimax_h3.transformer_blocks.0.attn.to_q",
     "minimax_h3.transformer_blocks.0.attn.to_k",
@@ -207,21 +183,16 @@ _H3_INCLUDED = [
 ]
 
 _H3_EXCLUDED = [
-    # THE critical exclusion: the VSA sparse-attention gate.
     "minimax_h3.transformer_blocks.0.attn.to_gate_compress",
     "minimax_h3.transformer_blocks.49.attn.to_gate_compress",
-    # Global timestep-basis projector.
     "minimax_h3.adaln_basis",
-    # Modules H3 itself pins to fp32.
     "minimax_h3.proj_in",
     "minimax_h3.audio_proj_in",
     "minimax_h3.proj_out",
     "minimax_h3.audio_proj_out",
     "minimax_h3.time_embedder.fc_in",
     "minimax_h3.time_embedder.fc_out",
-    # Text input projection (excluded by default; see the config docstring).
     "minimax_h3.context_embedder",
-    # Non-linear / unrelated names must not be swept in.
     "minimax_h3.transformer_blocks.0.norm1",
     "minimax_h3.rope",
 ]
@@ -247,10 +218,8 @@ def test_to_gate_compress_is_excluded_even_by_a_broad_allowlist():
         exclude_substrings=(),  # caller tries to clear the deny list
     )
     assert not hostile.is_target_layer("minimax_h3.transformer_blocks.7.attn.to_gate_compress")
-    # The same broad rule still reaches the real projections.
     assert hostile.is_target_layer("minimax_h3.transformer_blocks.7.attn.to_q")
 
-    # And via an explicit target_layers set, which bypasses suffix matching.
     explicit = INT8AffineConfig(
         target_layers=("minimax_h3.transformer_blocks.7.attn.to_gate_compress", ),
     )
@@ -264,8 +233,6 @@ def test_enumerated_h3_prefixes_agree_with_selection():
     assert len(enumerated) == 50 * 7 + 2 * 6  # 50 blocks x 7 suffixes, 2 refiner blocks x 6
     for prefix in enumerated:
         assert cfg.is_target_layer(prefix), f"enumerated prefix {prefix!r} not selected by the suffix rule"
-    # And nothing the suffix rule selects in the H3 blocks is missing from the
-    # enumeration: walk the two block scopes and compare.
     selected = {
         f"minimax_h3.{scope}.{i}.{suffix}"
         for scope, count in (("transformer_blocks", 50), ("token_refiner.refiner_blocks", 2))
@@ -290,9 +257,6 @@ def test_non_linear_layers_get_no_quant_method():
     assert gate.quant_method.__class__.__name__ == "UnquantizedLinearMethod"
 
 
-# ---------------------------------------------------------------------------
-# conversion + apply round-trip on a real ReplicatedLinear (CPU)
-# ---------------------------------------------------------------------------
 
 
 def test_conversion_and_apply_match_dense_linear_within_tolerance():

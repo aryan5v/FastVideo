@@ -62,16 +62,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_GROUP_SIZE = 64
 DEFAULT_BITS = 8
 _EPS = 1e-7
-# Affine codes span [0, 2**bits - 1]; for bits=8 that is [0, 255], which does
-# NOT fit torch.int8. Codes are therefore stored as torch.uint8 (see
-# ``int8_affine_quantize``) — the *scheme* is int8 affine, the container is
-# unsigned because the zero-point convention is free-floating.
 _MAX_UINT8_CODE = 255
 
 
-# ---------------------------------------------------------------------------
-# Affine quantizer — MLX-parity math
-# ---------------------------------------------------------------------------
 
 
 def _group(w: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -169,14 +162,7 @@ def int8_affine_dequantize(
     return deq
 
 
-# ---------------------------------------------------------------------------
-# Layer selection
-# ---------------------------------------------------------------------------
 
-# Model-agnostic default: the transformer-block GEMMs every DiT in this
-# repo names this way (H3, LTX-2's `attn1/attn2`, ...). Suffix matching is
-# used rather than a literal prefix set so depth/prefix variations cannot
-# silently drop layers.
 _GENERIC_LINEAR_SUFFIXES: tuple[str, ...] = (
     "attn.to_q",
     "attn.to_k",
@@ -186,22 +172,11 @@ _GENERIC_LINEAR_SUFFIXES: tuple[str, ...] = (
     "ff.fc_out",
 )
 
-# Names that are NEVER quantized by this config, whatever else is configured.
-# Checked before the allowlist, and unioned with (never replaced by) any
-# caller-supplied list, so this is fail-closed: there is no constructor
-# argument that re-enables them.
 _NEVER_QUANTIZE_SUBSTRINGS: tuple[str, ...] = (
-    # H3's VSA sparse-attention compression gate. Quantizing it perturbs a
-    # discrete routing decision and the checkpoint's gate is zero-initialized
-    # (the branch is exactly disabled until finetuned). H3's deploy path
-    # ignores it, so we must too.
     "to_gate_compress",
-    # Global timestep-basis projector; feeds every block's modulation.
     "adaln_basis",
 )
 
-# Modules H3 already pins to fp32 (MiniMaxH3Transformer3DModel._keep_in_fp32_modules).
-# They must not be targeted even if a suffix rule would otherwise reach them.
 _H3_FP32_KEPT_SUBSTRINGS: tuple[str, ...] = (
     "proj_in",
     "audio_proj_in",
@@ -210,26 +185,15 @@ _H3_FP32_KEPT_SUBSTRINGS: tuple[str, ...] = (
     "time_embedder",
 )
 
-# `context_embedder` is H3's text input projection. It is NOT in the model's
-# fp32 keep set, but it is the same kind of module as `proj_in` /
-# `audio_proj_in` (an input projection), and H3's deploy keeps input
-# projections in fp32. Quantizing the text conditioning stream while leaving
-# the video/audio input streams in fp32 is an unvalidated asymmetry, so it is
-# excluded by default. ``include_context_embedder=True`` opts in.
 _H3_INPUT_PROJECTION_SUBSTRINGS: tuple[str, ...] = ("context_embedder", )
 
 MINIMAX_H3_PREFIX = "minimax_h3"
 MINIMAX_H3_NUM_LAYERS = 50
 MINIMAX_H3_NUM_REFINER_LAYERS = 2
-# Both block stacks hold the same `MiniMaxH3Attention` / `MiniMaxH3FeedForward`
-# modules; the refiner stack simply has no `adaln_proj`.
 MINIMAX_H3_BLOCK_SCOPES: tuple[str, ...] = (
     "transformer_blocks",
     "token_refiner.refiner_blocks",
 )
-# The H3 profile equals the generic set plus the per-block AdaLN modulation
-# projection (`minimax_h3.transformer_blocks.{i}.adaln_proj.linear`), which is
-# a real per-block GEMM in H3 and is listed in H3's linear inventory.
 MINIMAX_H3_INT8_AFFINE_SUFFIXES: tuple[str, ...] = _GENERIC_LINEAR_SUFFIXES + ("adaln_proj.linear", )
 MINIMAX_H3_INT8_AFFINE_EXCLUSIONS: tuple[str, ...] = (
     _NEVER_QUANTIZE_SUBSTRINGS + _H3_FP32_KEPT_SUBSTRINGS + _H3_INPUT_PROJECTION_SUBSTRINGS)
@@ -264,7 +228,6 @@ def minimax_h3_int8_affine_prefixes(
             prefixes.add(f"{prefix}.transformer_blocks.{index}.{suffix}")
     for index in range(num_refiner_layers):
         for suffix in suffixes:
-            # The refiner stack has no `adaln_proj`.
             if suffix.startswith("adaln_proj"):
                 continue
             prefixes.add(f"{prefix}.token_refiner.refiner_blocks.{index}.{suffix}")
@@ -308,19 +271,11 @@ class INT8AffineConfig(QuantizationConfig):
         self.target_layers: frozenset[str] | None = (None if target_layers is None else frozenset(target_layers))
         self.layer_suffixes: tuple[str, ...] = (tuple(_GENERIC_LINEAR_SUFFIXES)
                                                 if layer_suffixes is None else tuple(layer_suffixes))
-        # Deny list is always unioned with the hard exclusions: passing a
-        # custom list can only ever *add* exclusions, never remove one. This
-        # is what keeps `to_gate_compress` unquantizable.
         self.exclude_substrings: tuple[str, ...] = tuple(_NEVER_QUANTIZE_SUBSTRINGS) + tuple(
             exclude_substrings or ())
         self._include_context_embedder = include_context_embedder
         if not include_context_embedder:
             self.exclude_substrings = self.exclude_substrings + _H3_INPUT_PROJECTION_SUBSTRINGS
-        # Keep the dense bf16 `layer.weight` Parameter after conversion.
-        # Default True: several H3 forwards read `linear.weight.dtype` to
-        # cast their input (e.g. `MiniMaxH3AdaLayerNormModulation.forward`),
-        # so purging it breaks the model. Setting False frees the bf16 copy
-        # at the cost of requiring every caller to stop touching `.weight`.
         self.retain_original_weight = retain_original_weight
 
     def get_name(self) -> str:
@@ -488,9 +443,6 @@ class INT8AffineQuantizeMethod(QuantizeMethodBase):
             return F.linear(x, weight.to(x.dtype) if weight.dtype != x.dtype else weight, bias)
 
         codes = layer._int8_affine_codes
-        # Dequantize in fp32 (the scales' dtype), then match the activation.
-        # `code * scale + bias` in fp32 is the more accurate side of the
-        # CPU/Metal split documented in mlx_affine_qat.py.
         weight = int8_affine_dequantize(
             codes,
             layer._int8_affine_scales,
@@ -500,9 +452,6 @@ class INT8AffineQuantizeMethod(QuantizeMethodBase):
         return F.linear(x, weight, bias)
 
 
-# ---------------------------------------------------------------------------
-# Load-time conversion
-# ---------------------------------------------------------------------------
 
 
 def _quantize_layer_weight(
@@ -516,16 +465,11 @@ def _quantize_layer_weight(
     from torch.distributed.tensor import DTensor  # type: ignore
 
     weight_local = weight.to_local() if isinstance(weight, DTensor) else weight  # type: ignore[arg-type]
-    # fp32 source keeps the scale/bias solve out of bf16 (see int8_affine_quantize).
-    # nan_to_num matches convert_model_to_nvfp4: one NaN would otherwise poison
-    # every group it touches.
     w32 = weight_local.detach().float().nan_to_num()
     if w32.shape[-1] % group_size != 0:
         raise ValueError(f"INT8Affine layer {mod!r}: input dim {w32.shape[-1]} is not divisible by "
                          f"group_size {group_size}.")
     codes, scales, biases = int8_affine_quantize(w32, group_size=group_size, bits=bits)
-    # Store codes flattened back to the weight shape (the quantizer returns the
-    # grouped view) so `apply` can dequantize with out_shape=codes.shape.
     mod.register_buffer("_int8_affine_codes", codes.reshape(w32.shape).contiguous(), persistent=False)
     mod.register_buffer("_int8_affine_scales", scales.to(torch.float32).contiguous(), persistent=False)
     mod.register_buffer("_int8_affine_biases", biases.to(torch.float32).contiguous(), persistent=False)
@@ -561,9 +505,6 @@ def convert_model_to_int8_affine(model: torch.nn.Module, ) -> None:
         converted += 1
         shapes.add((qm.group_size, qm.bits))
         if not qm.retain_original_weight:
-            # register_parameter(None) (as convert_model_to_nvfp4 does) rather
-            # than popping the key: `layer.weight` then reads as None instead
-            # of raising AttributeError.
             original = mod._parameters.get("weight")
             if original is not None:
                 original.grad = None
@@ -576,59 +517,18 @@ def convert_model_to_int8_affine(model: torch.nn.Module, ) -> None:
                     ", ".join(f"group_size={g}, bits={b}" for g, b in sorted(shapes)), purged)
 
 
-# ---------------------------------------------------------------------------
-# Compact checkpoint sidecar — save/load of the quantized payload
-# ---------------------------------------------------------------------------
-#
-# The INT8 buffers are registered with ``persistent=False`` (see
-# ``_quantize_layer_weight``), so ``state_dict()`` does NOT carry them: a saved
-# checkpoint holds dense bf16 weights only and the INT8 payload is rebuilt by
-# re-running the conversion at every load. That is impossible on a host that
-# cannot hold the dense weights at all — an RTX 5090 has 32 GB and H3's bf16
-# DiT is ~40 GB, so ``convert_model_to_int8_affine`` (which starts from the
-# dense weight) can never run there. The sidecar is what makes a pre-quantized
-# checkpoint servable on that hardware.
-#
-# Format (identical in shape to the NVFP4 sidecar, ``nvfp4_config.py``): one
-# safetensors file keyed ``"<module fqn>::<buffer name>"`` plus a JSON manifest
-# under the ``fastvideo_int8_affine`` metadata key describing the scheme.
-#
-# Buffer inventory restored by a load — these are the same three tensors
-# ``_quantize_layer_weight`` registers, byte for byte:
-#
-#   ``_int8_affine_codes``   uint8    ``(out_dim, in_dim)`` — one code per
-#                            weight, flattened back out of the quantizer's
-#                            grouped view so ``apply`` can dequantize with
-#                            ``out_shape=codes.shape``. **uint8, not int8**:
-#                            a bits=8 code spans [0, 255] and 255 does not fit
-#                            a signed byte (it would wrap to -1 and silently
-#                            invert that weight). The dtype is asserted at load
-#                            rather than cast for exactly that reason.
-#   ``_int8_affine_scales``  float32  ``(out_dim, in_dim // group_size)``
-#   ``_int8_affine_biases``  float32  ``(out_dim, in_dim // group_size)``
-#
-# Both constants are stored fp32 by the converter regardless of the weight
-# dtype, so fp32 is what a sidecar must carry; a bf16 copy would not be a
-# bit-exact restore.
 
 INT8_AFFINE_SIDECAR_SUFFIX = ".int8affine.safetensors"
-# Filename used when the sidecar sits inside a checkpoint *directory*; it does
-# not carry the suffix above, which is what a sibling file is named with.
 INT8_AFFINE_DIR_SIDECAR_NAME = "int8_affine.safetensors"
 _INT8_AFFINE_SIDECAR_FORMAT = "fastvideo.int8_affine"
 _INT8_AFFINE_SIDECAR_VERSION = 1
 _INT8_AFFINE_SIDECAR_METADATA_KEY = "fastvideo_int8_affine"
 _INT8_AFFINE_SIDECAR_KEY_SEP = "::"
-# Order matters only for the manifest; every buffer is optional on load so a
-# future format can add tensors without breaking older readers.
 _INT8_AFFINE_SIDECAR_BUFFERS = (
     "_int8_affine_codes",
     "_int8_affine_scales",
     "_int8_affine_biases",
 )
-# The exact container each buffer must have. A sidecar whose codes came back
-# as int8 (or float32) would dequantize to garbage with no error anywhere, so
-# these are validated, never coerced.
 _INT8_AFFINE_SIDECAR_DTYPES = {
     "_int8_affine_codes": torch.uint8,
     "_int8_affine_scales": torch.float32,
@@ -650,8 +550,6 @@ def _int8_affine_tagged_modules(model: torch.nn.Module) -> list[tuple[str, torch
 
 
 def _is_dtensor(tensor: torch.Tensor) -> bool:
-    # Imported lazily: torch.distributed.tensor is not cheap to import and is
-    # absent on some builds.
     try:
         from torch.distributed.tensor import DTensor  # type: ignore
     except ImportError:  # pragma: no cover - depends on the torch build
@@ -724,8 +622,6 @@ def save_int8_affine_checkpoint(
         weight = getattr(mod, "weight", None)
         if codes is None and weight is None:
             continue
-        # When the dense weight was purged the codes still give the logical
-        # shape: they hold one code per weight element.
         weight_shape = [int(dim) for dim in (weight if weight is not None else codes).shape]
         tensors = {
             name: [int(dim) for dim in getattr(mod, name).shape]
@@ -745,9 +641,6 @@ def save_int8_affine_checkpoint(
     metadata: dict[str, Any] = {
         "format": _INT8_AFFINE_SIDECAR_FORMAT,
         "version": _INT8_AFFINE_SIDECAR_VERSION,
-        # Uniform scheme when every layer agrees (the normal case); None when a
-        # model mixes schemes, in which case the per-layer entries are
-        # authoritative. A loader validates the per-layer values.
         "group_size": group_sizes.pop() if len(group_sizes) == 1 else None,
         "bits": bit_widths.pop() if len(bit_widths) == 1 else None,
         "num_layers": len(layers),
@@ -919,8 +812,6 @@ def load_int8_affine_checkpoint(
             if len(weight_shape) != 2:
                 raise ValueError(f"INT8 affine sidecar entry {fqn!r} declares weight shape {list(weight_shape)}; "
                                  "a linear weight is 2-D.")
-            # A different scheme means different dequantize arithmetic over the
-            # same bytes: never recoverable, so never relaxed by strict=False.
             if group_size != qm.group_size or bits != qm.bits:
                 raise ValueError(f"INT8 affine sidecar {os.fspath(path)} was written for {fqn!r} with "
                                  f"group_size={group_size}, bits={bits}, but this model quantizes it with "

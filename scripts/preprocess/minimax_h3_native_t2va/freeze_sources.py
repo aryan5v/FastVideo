@@ -87,8 +87,6 @@ def read_jsonl_snapshot(path: Path) -> tuple[list[tuple[int, dict[str, Any]]], s
     with path.open("rb") as handle:
         snapshot_size = os.fstat(handle.fileno()).st_size
         raw = handle.read(snapshot_size)
-    # A live producer can be between bytes of its next append. Freeze only
-    # complete newline-terminated records from the captured fd extent.
     if raw and not raw.endswith(b"\n"):
         raw = raw.rpartition(b"\n")[0] + b"\n"
     rows: list[tuple[int, dict[str, Any]]] = []
@@ -157,7 +155,6 @@ def source_inventory(spec: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[s
         completed[record_id] = (line_number, record)
         completed_lines += 1
 
-    # Deliberately non-recursive: server_tmp and _archive are not canonical.
     canonical_mp4s = {path.stem: path.resolve() for path in videos_dir.glob("*.mp4") if path.is_file()}
     eligible_ids = set(completed) & set(canonical_mp4s)
 
@@ -396,11 +393,7 @@ def filtered_validation_summary(
         "duration_band_counts": dict(
             sorted(collections.Counter(duration_band(row["num_frames"], row["fps"]) for row in rows).items())
         ),
-        # Training remains anchored to the complete inherited holdout-ID set,
-        # including nonrare cross-source variants of the four removed rows.
         "training_exclusions_by_source": dict(base_summary["training_exclusions_by_source"]),
-        # This separately describes which frozen source rows still intersect
-        # the filtered 60-ID validation manifest.
         "validation_membership_by_source": validation_membership_by_source,
         "filter": {
             "schema_version": FILTERED_DERIVATION_SCHEMA_VERSION,
@@ -1309,9 +1302,6 @@ def freeze_extension(
     if root.exists():
         raise FileExistsError(f"freeze root already exists at {root}; use --verify-existing instead of overwriting")
     root.parent.mkdir(parents=True, exist_ok=True)
-    # Assemble the complete tree as a sibling and publish it with one rename.
-    # A killed process can leave only an unreferenced sibling staging tree;
-    # the canonical root remains absent and a retry can safely start anew.
     stage = Path(tempfile.mkdtemp(prefix=f".{root.name}.freeze-extension-", dir=root.parent))
     try:
         source_summaries: list[dict[str, Any]] = []
@@ -1432,9 +1422,6 @@ def main() -> None:
     quotas = {str(name): int(value) for name, value in config["validation_quotas"].items()}
     if sum(quotas.values()) != 64:
         raise ValueError(f"validation quotas must sum to 64, got {sum(quotas.values())}")
-    # Select the duplicate-bearing low-resolution NuVA source first. This
-    # guarantees its quota, then prevents the same conditioning id from being
-    # selected from the high-resolution variant.
     configured_names = [str(spec["name"]) for spec in config["sources"]]
     selection_order = [
         "h3_t2av_video_nuva_10k_mixed_res_len",

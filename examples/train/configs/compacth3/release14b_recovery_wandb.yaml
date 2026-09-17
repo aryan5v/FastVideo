@@ -36,8 +36,6 @@ method:
   modality_energy_floor: 0.001
   low_sigma_interval_fraction: 0.5
   low_sigma_interval_count: 12
-  # Keep teacher-state inputs during recovery. The earlier 0.25 student-state
-  # exposure run amplified the folded student's audio and motion errors.
   student_state_probability: 0.0
   modality_grad_probe_every: 0
   allow_prompt_only: true

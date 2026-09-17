@@ -36,7 +36,6 @@ script = script.replace('export STUDENT="${SPRINT_ROOT}/checkpoints/base34-unifo
                         'export STUDENT=' + shlex.quote(str(student)))
 script = script.replace('test -s "${STUDENT}/transformer/block_map_manifest.json"\n', '')
 script = script.replace('${CODE_ROOT}/examples/train/configs/fasth3_base34_recovery.yaml', str(config_path))
-# JSON-derived paths are shell quoted; the launcher nests a single-quoted container command.
 if any("'" in str(path) for path in (a.export_path, a.output)):
     raise ValueError('Launcher paths must not contain single quotes')
 command = ('"${PY}" "${CODE_ROOT}/scripts/checkpoint_conversion/prune_minimax_h3_blocks.py"'

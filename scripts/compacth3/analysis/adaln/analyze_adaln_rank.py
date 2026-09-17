@@ -1,38 +1,5 @@
 #!/usr/bin/env python3
-"""Post-hoc spectral analysis of MiniMax-H3's timestep (AdaLN) conditioning.
-
-Part 3 of the "is rank-768 timestep conditioning unnecessary capacity?" question.
-
-Three levels, all measured by calling the checkpoint's OWN modules on a synthetic
-timestep grid (nothing is trained, nothing in the model code is modified):
-
-  A. SHARED COORDINATE     z(t)   = adaln_basis(silu(time_embedder(time_proj(t))))   (T x 768)
-  B. PER-BLOCK MODULATION  m_i(t) = block_i.adaln_proj(z(t))                         (T x 96768)
-  C. SHARED BASIS ACROSS BLOCKS   joint (summed) covariance of all centered block
-                                  trajectories -> how many directions represent ALL
-                                  blocks' timestep variation at once
-
-Timestep range (read from the code, not assumed): MiniMaxH3Scheduler stores
-timesteps = 1 - sigmas[:-1] with sigmas in [0, 1] (rectified flow, "clean time"
-convention), and build_row_timesteps additionally feeds 0.999 (conditioned video
-rows) and 1.0 (conditioned audio rows).  So the model's usable timestep range is
-exactly [0, 1].  The 4-call DMD ladder (FASTVIDEO_DMD_DENOISING_STEPS=999,749,500,250
-divided by 1000 and shift-warped) lands on t in {0.0001, 0.027, 0.077, 0.2} for video
-and {0.0003, 0.1, 0.25, 0.5} for audio.
-
-Grids analysed:
-  uniform_grid      linspace(0, 1, 4096)         -- primary
-  operating_points  union of the literal scheduler timesteps at 4/5/49/50 points
-                    for both shipped shifts plus 0.999 and 1.0 -- what inference
-                    actually feeds
-  control_0_1000    linspace(0, 1000, 4096)      -- CONTROL ONLY, not a convention
-                    this codebase uses: shows how much of the low rank is a
-                    property of the narrow [0,1] range + downscale_freq_shift=0
-                    embedding rather than of the learned basis.
-
-Must be a real file on disk (never stdin): FastVideo workers re-execute __main__
-via runpy and a heredoc has no path.
-"""
+"""Spectral analysis of MiniMax-H3 AdaLN timestep conditioning."""
 from __future__ import annotations
 
 import argparse
@@ -53,7 +20,6 @@ OUT_DIR = Path(SPRINT) / "adaln_rank_analysis"
 
 N_GRID = 4096
 ENERGY_THRESHOLDS = (0.90, 0.95, 0.99, 0.999)
-# cumulative-energy checkpoints for the cross-block shared-basis coverage table
 COVERAGE_K = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768)
 MAX_SIGMA_STORED = 1024
 DEVICE = "cuda:0"
@@ -65,17 +31,12 @@ def log(msg: str) -> None:
     print(f"[adaln-rank] {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-# ----------------------------------------------------------------------------------
-# checkpoint loading (the proven PipelineComponentLoader path)
-# ----------------------------------------------------------------------------------
 def build_fastvideo_args(model_path: str):
     spec = importlib.util.spec_from_file_location("fasth3_harness", HARNESS)
     harness = importlib.util.module_from_spec(spec)
     sys.modules["fasth3_harness"] = harness
     spec.loader.exec_module(harness)
 
-    # argparse treats a passed sequence as the FULL argument list (it does not
-    # strip a program name), so there is no prog element here.
     argv = [
         "--model-path", model_path,
         "--prompt", "adaln-rank-analysis",
@@ -87,8 +48,6 @@ def build_fastvideo_args(model_path: str):
     args = harness.parse_args(argv)
     args.fa4 = False
     harness.configure_environment(args)
-    # No attention forward is ever run; keep the loader off the fused/sparse
-    # kernels entirely so this analysis cannot depend on VSA/FA4 availability.
     os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "TORCH_SDPA"
 
     config = harness.build_generator_config(args)
@@ -124,9 +83,6 @@ def on_device_fp32(module):
         torch.cuda.empty_cache()
 
 
-# ----------------------------------------------------------------------------------
-# timestep grid
-# ----------------------------------------------------------------------------------
 def scheduler_timesteps(shift: float, grid_points: int) -> torch.Tensor:
     """Verbatim replica of MiniMaxH3Scheduler.set_timesteps (scheduler file read)."""
     base = torch.linspace(1.0, 0.0, int(grid_points), dtype=torch.float32)
@@ -146,9 +102,6 @@ def build_grids(video_shift: float, audio_shift: float):
     return uniform, ops, control
 
 
-# ----------------------------------------------------------------------------------
-# spectral helpers
-# ----------------------------------------------------------------------------------
 def spectral_stats(sigma: torch.Tensor, shape: tuple[int, int]) -> dict:
     s = sigma.detach().double().cpu()
     energy = s * s
@@ -158,13 +111,9 @@ def spectral_stats(sigma: torch.Tensor, shape: tuple[int, int]) -> dict:
         "frobenius_norm": float(total ** 0.5),
         "s_max": float(s[0]),
         "s_min": float(s[-1]),
-        # standard numpy matrix_rank tolerance.  NOTE the real noise floor here
-        # is set by arithmetic on bf16-derived weights, so this column is the
-        # least meaningful one -- the energy ranks are the scientific answer.
         "numerical_rank_fp32tol": int((s > s[0] * max(shape) * FP32_EPS).sum()),
         "stable_rank_trace_over_smax2": float(total / (float(s[0]) ** 2)),
     }
-    # Shape-independent rank floors, so levels with different D are comparable.
     for rel in (1e-2, 1e-3, 1e-4, 1e-5, 1e-6):
         out[f"rank_sigma_above_{rel:g}_of_smax"] = int((s > s[0] * rel).sum())
     p = energy / total
@@ -184,9 +133,6 @@ def gram_eigvals(G: torch.Tensor) -> torch.Tensor:
     return torch.clamp(lam.flip(0), min=0.0).sqrt()
 
 
-# ----------------------------------------------------------------------------------
-# level B + C on one trajectory matrix family
-# ----------------------------------------------------------------------------------
 def analyze_blocks(model, mods, Z, H, store_sigma: bool, do_coverage: bool) -> tuple[dict, dict]:
     T = int(Z.shape[0])
     D = 6 * H * N_MODALITY
@@ -285,9 +231,6 @@ def analyze_blocks(model, mods, Z, H, store_sigma: bool, do_coverage: bool) -> t
     return level_b, level_c
 
 
-# ----------------------------------------------------------------------------------
-# main measurement
-# ----------------------------------------------------------------------------------
 def measure(model, tag: str, ckpt: str, n_blocks_limit: int | None):
     from fastvideo.models.dits.minimax_h3 import MiniMaxH3AdaLayerNormModulation
 
@@ -328,7 +271,6 @@ def measure(model, tag: str, ckpt: str, n_blocks_limit: int | None):
         "device": DEVICE,
     }
 
-    # ---------------- shared coordinate: temb and z(t) ----------------
     def shared_coordinate(grid: torch.Tensor, native_bf16: bool = False) -> torch.Tensor:
         t = grid.to(DEVICE, dtype=torch.float32)
         if native_bf16:
@@ -361,7 +303,6 @@ def measure(model, tag: str, ckpt: str, n_blocks_limit: int | None):
     for name in level_a_out:
         log(f"LEVEL A {name}: {json.dumps(level_a_out[name]['stats'])}")
 
-    # ---------------- per-block modulation + shared basis ----------------
     mods: list[tuple[str, torch.nn.Module]] = [
         (f"transformer_blocks.{i}", b) for i, b in enumerate(model.transformer_blocks)]
     refiner_mods = [n for n, m in model.token_refiner.named_modules()

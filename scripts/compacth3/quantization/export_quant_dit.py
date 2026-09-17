@@ -33,17 +33,12 @@ SPRINT = "/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829"
 M = "/mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831/repo-main-3d8ac9d1"
 HARNESS = f"{M}/examples/inference/basic/basic_fasth3.py"
 
-# lane -> the registry name resolved by
-# fastvideo.layers.quantization.get_quantization_config
 LANES = {
     "nvfp4": "NVFP4H3",
     "int8": "INT8Affine",
     "w4a16": "W4A16",
 }
 
-# Buffer names carrying the quantized payload, per scheme.  NVFP4 has a real
-# serializer/deserializer pair (save_nvfp4_checkpoint / load_nvfp4_checkpoint);
-# the other two do not (see the lane note printed by main()).
 BUFFERS = {
     "nvfp4": ("_nvfp4_weight", "_nvfp4_weight_scale", "_weight_global_sf", "_nvfp4_alpha"),
     "int8": ("_int8_affine_codes", "_int8_affine_scales", "_int8_affine_biases"),
@@ -62,8 +57,6 @@ def build_fastvideo_args(model_path: str, quant_name: str, num_gpus: int):
     sys.modules["fasth3_harness"] = harness
     spec.loader.exec_module(harness)
 
-    # NOTE: argparse treats a passed sequence as the full argument list (it does
-    # not strip a program name), so no prog element here.
     argv = [
         "--model-path", model_path,
         "--prompt", "quant-export",

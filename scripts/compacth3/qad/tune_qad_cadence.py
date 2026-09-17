@@ -19,7 +19,6 @@ for tag in ("r768", "r16"):
     ck["training_state_checkpointing_steps"] = 25      # frequent -> finer sweet-spot search
     ck["checkpoints_total_limit"] = 24                 # keep them all
     d["training"]["loop"]["max_train_steps"] = 200
-    # validation cadence: cheap gate signal during the run
     v = d.get("callbacks", {}).get("validation")
     if isinstance(v, dict):
         v["every_steps"] = 50

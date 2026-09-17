@@ -27,8 +27,6 @@ _NUM_AUDIO = audio_latent_num_frames(_NUM_FRAMES)
 _SPARSITY = 0.9
 _DMD_STEPS = 3
 
-# text lengths straddle the 256-token tile boundary; "first" adds keyframe
-# condition rows (image-conditioned validation requests)
 _TEXT_LENS = [7, 100, 255, 256, 257, 500]
 
 
@@ -73,7 +71,6 @@ def _assert_in_bounds(meta, layout, tag: str):
     assert idx.numel() == meta.total_seq_length, tag
     assert int(idx.min()) >= 0 and int(idx.max()) < n_tiles * _TILE_ELEMS, tag
     assert idx.unique().numel() == idx.numel(), f"{tag}: untile index must be injective"
-    # no packed row may land in a pad slot of the padded tile buffer
     assert bool((idx % _TILE_ELEMS < sizes[idx // _TILE_ELEMS]).all()), tag
 
 
@@ -124,8 +121,6 @@ def test_route_a_expansion_in_bounds():
     assert sizes64.numel() == 4 * n_tiles
     assert int(sizes64.min()) >= 0 and int(sizes64.max()) <= 64
     assert int(sizes64.sum()) == meta.total_seq_length
-    # empty 64-blocks only ever pad the tail of a logical 256 tile: each
-    # tile's children must be its size chopped into non-increasing 64-strides
     per_tile = sizes64.view(n_tiles, 4)
     assert bool((per_tile[:, 0] > 0).all()), "every logical tile keeps at least one valid 64-block"
     assert bool((per_tile[:, :-1] >= per_tile[:, 1:]).all()), "child sizes must be non-increasing"
@@ -156,14 +151,12 @@ def test_geometry_guard_rejects_corruption():
         bad = untile.clone()
         bad[0] = sizes.numel() * _TILE_ELEMS  # beyond the padded buffer
         _validate_h3_tile_geometry(prefix, dit_shape, sizes, bad)
-    # a slot inside a partial tile's pad region is also out of bounds
     partial = int((sizes < _TILE_ELEMS).nonzero()[0])
     with pytest.raises(ValueError, match="injective"):
         bad = untile.clone()
         bad[0] = partial * _TILE_ELEMS + int(sizes[partial])  # first pad slot
         _validate_h3_tile_geometry(prefix, dit_shape, sizes, bad)
 
-    # the untampered geometry passes
     _validate_h3_tile_geometry(prefix, dit_shape, sizes, untile)
     assert int(sizes.sum()) == sum(prefix) + math.prod(dit_shape)
 

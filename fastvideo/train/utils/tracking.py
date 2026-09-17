@@ -32,7 +32,6 @@ def _wandb_usable() -> bool:
     if os.environ.get("WANDB_MODE") in ("offline", "disabled"):
         return True
     try:
-        # Covers ~/.netrc logins from a prior `wandb login`.
         return wandb.api.api_key is not None
     except Exception:
         return False
@@ -80,10 +79,6 @@ def build_tracker(
     except Exception as exc:
         if Trackers.WANDB.value not in trackers:
             raise
-        # A revoked API key or unreachable api.wandb.ai passes _wandb_usable()
-        # (it only proves a key exists) and then throws inside wandb.init —
-        # which must not kill a multi-node run at boot. Offline init never
-        # contacts the API; the run stays syncable later via `wandb sync`.
         logger.warning("Tracker init failed (%s); retrying wandb in offline mode.", exc)
         os.environ["WANDB_MODE"] = "offline"
         try:

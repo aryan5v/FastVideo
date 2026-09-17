@@ -87,8 +87,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
         for scheduler in (self.scheduler, self.audio_scheduler):
             shift = float(scheduler.shift)
             sigmas = shift * base / (1 + (shift - 1) * base)
-            # Explicit sigmas are already shifted. Scheduler timesteps are H3
-            # clean time (1 - sigma); passing integer rungs to step() is wrong.
             scheduler.set_timesteps(sigmas=sigmas, device=device)
 
     def verify_input(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> VerificationResult:
@@ -126,7 +124,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
             env_steps = os.environ.get("FASTVIDEO_DMD_DENOISING_STEPS", "").strip()
             if env_steps:
                 dmd_steps = [int(s) for s in env_steps.split(",") if s.strip()]
-        # Optionally re-noise x0 between explicit DMD steps.
         stochastic_renoise = bool(dmd_steps) and (
             bool(getattr(fastvideo_args.pipeline_config, "dmd_stochastic_renoise", False))
             or os.environ.get("FASTVIDEO_DMD_STOCHASTIC_RENOISE", "0").strip().lower() in ("1", "true", "yes"))
@@ -170,24 +167,14 @@ class MiniMaxH3DenoisingStage(PipelineStage):
         if vsa_metadata_builder is not None:
             vsa_patch_size = fastvideo_args.pipeline_config.dit_config.patch_size
             vsa_prefix_segments = _h3_vsa_prefix_segments(layout, vsa_patch_size)
-            # Per-request knobs (sweeps flip these between generate_video calls
-            # without respawning workers); mode None defers to the env default.
             vsa_mode = batch.extra.get("vsa_mode", "exempt")
             if vsa_mode not in ("exempt", "compete"):
                 raise ValueError(f"vsa_mode must be 'exempt' or 'compete', got {vsa_mode!r}.")
             vsa_exempt = vsa_mode == "exempt"
             vsa_dense_layers = tuple(batch.extra.get("vsa_dense_layers", ()))
             vsa_dense_first_n = int(batch.extra.get("vsa_dense_first_n_steps", 0))
-            # A per-request batch sparsity wins when set; otherwise fall back
-            # to the run-level args value (training validation and the CLI set
-            # fastvideo_args.VSA_sparsity — nothing populates the batch field
-            # on those paths, and the batch's 0.0 default silently sampled
-            # dense while training ran sparse).
             vsa_sparsity_base = (float(batch.VSA_sparsity)
                                  if float(batch.VSA_sparsity) > 0.0 else float(fastvideo_args.VSA_sparsity))
-            # Run-level tile geometry (256 default, 64 = native Triton path),
-            # plumbed like the run-level sparsity above; the builder validates
-            # the value against VSA_H3_TILE_SHAPES.
             vsa_tile_size = int(fastvideo_args.VSA_tile_size)
 
         try:
@@ -196,17 +183,12 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                 batch.latents = batch.latents.to(device)
                 batch.audio_latents = batch.audio_latents.to(device)
 
-            # The stage range groups the complete denoising loop while the
-            # indexed model ranges retain timing detail for every H3 block.
             with profiler_region("inference_denoising"), nvtx_range("minimax_h3.dit"):
                 for index, (video_timestep,
                             audio_timestep) in enumerate(zip(video_timesteps, audio_timesteps, strict=True)):
                     unique_timesteps, timestep_indices = row_timestep_plan[index]
                     attn_metadata = None
                     if vsa_metadata_builder is not None:
-                        # Optional schedule: run the first N steps dense (sparsity 0
-                        # selects every tile — parity-proven ≡ dense ≤2e-4); early
-                        # steps set global structure and are the most damage-prone.
                         vsa_sparsity = 0.0 if index < vsa_dense_first_n else vsa_sparsity_base
                         attn_metadata = vsa_metadata_builder.build(
                             current_timestep=index,
@@ -220,11 +202,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                             dense_layers=vsa_dense_layers,
                             tile_size=vsa_tile_size,
                         )
-                    # Under torch.compile(mode="reduce-overhead") each denoising
-                    # step must be marked, or cudagraph trees flag cross-step
-                    # reuse of pooled outputs as "accessing tensor output of
-                    # CUDAGraphs that has been overwritten" (surfaces at sp=1;
-                    # sp>1 is masked by collective-induced graph breaks).
                     torch.compiler.cudagraph_mark_step_begin()
                     with trace_step(index), set_forward_context(
                             current_timestep=index,
@@ -261,8 +238,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                                     "x0(std=%.4f,mean=%.4f) v(std=%.4f)", index, tag, s, xin.std(), xin.mean(),
                                     x0dbg.std(), x0dbg.mean(), vel[0, st:].float().std())
                     if stochastic_renoise:
-                        # Raw H3 output is clean - noise, so
-                        # x0 = sample + sigma * output.
                         assert self.scheduler.sigmas is not None and self.audio_scheduler.sigmas is not None
                         for latents, velocity, start, sigmas in (
                             (batch.latents, video_velocity, video_start, self.scheduler.sigmas),

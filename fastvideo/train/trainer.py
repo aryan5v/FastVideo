@@ -166,8 +166,6 @@ class Trainer:
             if resumed_step is not None:
                 start_step = int(resumed_step)
                 if bool(getattr(tc.checkpoint, "reset_lr_on_resume", False)):
-                    # The DCP load above restored the checkpoint's optimizer
-                    # LRs and scheduler base_lrs; re-apply the YAML's values.
                     method.apply_configured_lrs()
                     logger.info("reset_lr_on_resume: re-applied configured learning rates at step %s", start_step)
         initial_validation_scheduled = self.callbacks.will_run_validation(iteration=start_step)
@@ -185,9 +183,6 @@ class Trainer:
 
         data_stream = self._iter_dataloader(dataloader)
 
-        # Restore the RNG snapshot LAST — after dcp.load,
-        # after iter(dataloader), after everything that may
-        # have advanced the RNG as a side-effect.
         if (checkpoint_manager is not None and resume_from_checkpoint):
             checkpoint_manager.load_rng_snapshot(resume_from_checkpoint, )
         progress = tqdm(
@@ -196,13 +191,10 @@ class Trainer:
             desc="Steps",
             disable=self.local_rank > 0,
         )
-        # Allow method-specific optimization flow (e.g. DiffusionNFT).
         method_manages_optimization = bool(method.manages_optimization())
         for step in progress:
             t0 = time.perf_counter()
 
-            # Accumulate on GPU during grad-accum; materialise
-            # to CPU once per step right before logging.
             loss_sums: dict[str, float | torch.Tensor] = {}
             metric_sums: dict[str, float | torch.Tensor] = {}
             if method_manages_optimization:
@@ -263,8 +255,6 @@ class Trainer:
                 method.optimizers_schedulers_step(step)
                 method.optimizers_zero_grad(step)
 
-            # Single CPU sync point: materialise GPU tensors
-            # to float right before logging.
             divisor = 1 if method_manages_optimization else grad_accum
             metrics = {k: float(v) / divisor for k, v in loss_sums.items()}
             metrics.update({k: float(v) / divisor for k, v in metric_sums.items()})
@@ -281,8 +271,6 @@ class Trainer:
 
             validation_scheduled = self.callbacks.will_run_validation(iteration=step)
             if checkpoint_manager is not None:
-                # The deployable checkpoint is preserved first and corresponds
-                # exactly to the model this validation event will evaluate.
                 checkpoint_manager.maybe_save_inference(
                     step,
                     validation_scheduled=validation_scheduled,

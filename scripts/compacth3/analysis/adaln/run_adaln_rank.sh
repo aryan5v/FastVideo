@@ -1,11 +1,5 @@
 #!/bin/bash
-# Container entrypoint for the AdaLN timestep-rank spectral analysis.
-#
 # usage:
-#   sbatch <SPRINT>/exp.sbatch <SPRINT>/adaln_rank_analysis/run_adaln_rank.sh
-# env:
-#   STAGE=both|parent|dmd2   (default both) -- which checkpoints to analyse
-#   SMOKE=1                  (default 0)    -- only the first 2 blocks, load check
 set -uo pipefail
 
 SPRINT=/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829
@@ -22,8 +16,6 @@ SMOKE="${SMOKE:-0}"
 
 export HF_HOME=/mnt/nfs/vlm-aryan/hf-cache
 export PYTHONDONTWRITEBYTECODE=1
-# M first: the venv's editable fastvideo finder is appended to sys.meta_path, so
-# the path-based finder (sys.path) still wins and M is the code that runs.
 export PYTHONPATH="${M}:${SPRINT}/python-packages:/mnt/nfs/vlm-aryan/fastvideo-wan-venv/lib/python3.12/site-packages"
 export FASTVIDEO_ATTENTION_BACKEND=TORCH_SDPA
 export FASTVIDEO_MINIMAX_H3_FUSIONS=0

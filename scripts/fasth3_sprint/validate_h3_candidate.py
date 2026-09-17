@@ -39,10 +39,7 @@ DTYPE_BYTES = {
     "F64": 8,
 }
 PARAMETER_RANGES = {
-    # Dense keeps the shared modules plus 20 of the original 50 blocks.
     "dense": (13_700_000_000, 13_900_000_000),
-    # VSA-H3 additionally retains one learned compression-gate projection per
-    # selected block, making the sparse release tier roughly 14.5B.
     "vsa": (14_400_000_000, 14_650_000_000),
 }
 PARAMETER_RANGES_BY_LAYERS = {
@@ -52,9 +49,6 @@ PARAMETER_RANGES_BY_LAYERS = {
         "vsa": (17_150_000_000, 17_380_000_000),
     },
 }
-# Exact counts from both immutable V1 source checkpoint headers: shared
-# modules plus identical-size transformer blocks. These larger models are
-# initializer experiments, not a change to the 20-block release target.
 for _layers in (32, 36, 40, 48):
     PARAMETER_RANGES_BY_LAYERS[_layers] = {
         kind: (844_400_896 + _layers * per_block,) * 2

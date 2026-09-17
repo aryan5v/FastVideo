@@ -18,8 +18,6 @@ if TYPE_CHECKING:
     from fastvideo.train.utils.lora import LoraConfig
     from fastvideo.pipelines import TrainingBatch
 
-# Video models return one flow tensor. Joint video/audio models return an
-# ordered pair so training methods can apply each modality's scheduler target.
 NoisePrediction: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
@@ -89,9 +87,6 @@ class ModelBase(ABC):
         )
         return True
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def init_preprocessors(  # noqa: B027
             self,
@@ -117,9 +112,6 @@ class ModelBase(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement decode_latents()")
 
-    # ------------------------------------------------------------------
-    # Timestep helpers
-    # ------------------------------------------------------------------
 
     @property
     def num_train_timesteps(self) -> int:
@@ -130,9 +122,6 @@ class ModelBase(ABC):
         """Apply model/pipeline timestep shifting and clamp."""
         return timestep
 
-    # ------------------------------------------------------------------
-    # Runtime primitives
-    # ------------------------------------------------------------------
 
     @abstractmethod
     def prepare_batch(

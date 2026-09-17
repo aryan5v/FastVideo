@@ -23,10 +23,6 @@ from fastvideo.train.callbacks.callback import (
 )
 
 
-# ``fastvideo.logger.init_logger`` sets ``propagate=False`` on its
-# loggers, so the standard ``caplog`` fixture cannot observe them.
-# This helper attaches a temporary handler directly to the target
-# logger and yields the captured records.
 @contextmanager
 def _capture_logger(name: str, level: int = logging.WARNING) -> Iterator[list[logging.LogRecord]]:
     logger = logging.getLogger(name)
@@ -48,9 +44,6 @@ def _capture_logger(name: str, level: int = logging.WARNING) -> Iterator[list[lo
         logger.setLevel(prev_level)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 class _RecordingCallback(Callback):
@@ -83,9 +76,6 @@ class _NotACallback:
         pass
 
 
-# ---------------------------------------------------------------------------
-# A. Callback base class
-# ---------------------------------------------------------------------------
 
 
 class TestCallbackBase:
@@ -103,13 +93,9 @@ class TestCallbackBase:
     def test_default_state_dict_round_trip(self) -> None:
         cb = Callback()
         assert cb.state_dict() == {}
-        # Default load_state_dict accepts arbitrary state without raising.
         assert cb.load_state_dict({"unrelated": 1}) is None
 
 
-# ---------------------------------------------------------------------------
-# B. CallbackDict construction
-# ---------------------------------------------------------------------------
 
 
 class TestCallbackDictInit:
@@ -119,7 +105,6 @@ class TestCallbackDictInit:
         assert cb_dict._callbacks == {}
 
     def test_builtin_name_resolves_without_target(self) -> None:
-        # ``grad_clip`` is a registered builtin.
         cfg = {"grad_clip": {"max_grad_norm": 0.5}}
         tc = object()
         cb_dict = CallbackDict(cfg, training_config=tc)
@@ -129,7 +114,6 @@ class TestCallbackDictInit:
             GradNormClipCallback, )
         cb = cb_dict._callbacks["grad_clip"]
         assert isinstance(cb, GradNormClipCallback)
-        # CallbackDict wires up training_config + back-pointer.
         assert cb.training_config is tc
         assert cb._callback_dict is cb_dict
 
@@ -162,7 +146,6 @@ class TestCallbackDictInit:
             CallbackDict(cfg, training_config=object())
 
     def test_builtin_registry_has_expected_entries(self) -> None:
-        # Sanity: protect the builtin registry from silent shrinkage.
         assert set(_BUILTIN_CALLBACKS) >= {
             "grad_clip",
             "validation",
@@ -170,9 +153,6 @@ class TestCallbackDictInit:
         }
 
 
-# ---------------------------------------------------------------------------
-# C. Dispatch via __getattr__
-# ---------------------------------------------------------------------------
 
 
 class TestCallbackDictDispatch:
@@ -197,8 +177,6 @@ class TestCallbackDictDispatch:
         sink: list[str] = []
         cb_dict = self._build(sink)
 
-        # The base Callback subclass below only implements one hook;
-        # dispatch should still fan out without raising.
 
         class _OnlyValidation(Callback):
 
@@ -210,7 +188,6 @@ class TestCallbackDictDispatch:
         assert "vend:11" in sink
 
     def test_dispatch_unknown_hook_is_noop(self) -> None:
-        # Methods that don't exist on any callback should not raise.
         cb_dict = self._build([])
         cb_dict.totally_made_up_hook(method=None, iteration=0)
 
@@ -220,9 +197,6 @@ class TestCallbackDictDispatch:
             getattr(cb_dict, "_does_not_exist")
 
 
-# ---------------------------------------------------------------------------
-# D. state_dict / load_state_dict
-# ---------------------------------------------------------------------------
 
 
 class TestCallbackDictStateDict:

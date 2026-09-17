@@ -60,11 +60,6 @@ class AdamWBeta1Zero(torch.optim.Optimizer):
                 state = self.state[p]
                 if not state:
                     state["step"] = 0
-                    # Low-precision params must not starve the second moment:
-                    # bf16 v loses g^2 increments below ~0.4% of its running
-                    # magnitude. Keep v in fp32 whenever p is not fp32 (the
-                    # fp32-master path is unchanged and stays bitwise-equal
-                    # to torch.optim.AdamW).
                     if p.dtype == torch.float32:
                         state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     else:
@@ -106,8 +101,6 @@ def build_optimizer_and_scheduler(
                          "build_optimizer_and_scheduler")
 
     if float(betas[0]) == 0.0:
-        # beta1 == 0 makes Adam's first-moment buffer redundant; skip it to
-        # save one parameter-sized state tensor per trainable model.
         optimizer: torch.optim.Optimizer = AdamWBeta1Zero(
             params,
             lr=float(learning_rate),

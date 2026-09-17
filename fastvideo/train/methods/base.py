@@ -40,7 +40,6 @@ class TrainingMethod(torch.nn.Module, ABC):
     generator instead of relying on global RNG state.
     """
 
-    # Shared CUDA RNG generator (initialized in on_train_start).
     cuda_generator: torch.Generator | None = None
 
     def __init__(
@@ -58,7 +57,6 @@ class TrainingMethod(torch.nn.Module, ABC):
         self.method_config: dict[str, Any] = dict(cfg.method)
         self.validation_config: dict[str, Any] = dict(getattr(cfg, "validation", {}) or {})
 
-        # Build nn.ModuleDict for FSDP / checkpoint visibility.
         self.role_modules = torch.nn.ModuleDict()
         for role, model in role_models.items():
             mods: dict[str, torch.nn.Module] = {}
@@ -68,7 +66,6 @@ class TrainingMethod(torch.nn.Module, ABC):
             if mods:
                 self.role_modules[role] = torch.nn.ModuleDict(mods)
 
-    # ------------------------------------------------------------------
 
     def set_tracker(self, tracker: Any) -> None:
         self.tracker = tracker
@@ -241,7 +238,6 @@ class TrainingMethod(torch.nn.Module, ABC):
                         "exp_avg_sq": torch.zeros_like(p),
                     }
 
-    # -- Shared hooks (override in subclasses as needed) --
 
     def manages_optimization(self) -> bool:
         """Whether the method owns backward/optimizer stepping internally.
@@ -309,7 +305,6 @@ class TrainingMethod(torch.nn.Module, ABC):
         global_rank = int(world_group.rank)
         sp_size = int(self.training_config.distributed.sp_size or 1)
 
-        # Ranks within the same SP group share a seed.
         sp_group_seed = seed + (global_rank // sp_size) if sp_size > 1 else seed + global_rank
 
         set_random_seed(seed)

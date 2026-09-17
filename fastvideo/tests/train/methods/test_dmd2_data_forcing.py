@@ -91,9 +91,6 @@ def _text_only_batch() -> dict[str, torch.Tensor]:
     }
 
 
-# ----------------------------------------------------------------------
-# (1) Off by default: latent-bearing batches still walk the carry
-# ----------------------------------------------------------------------
 
 
 def test_data_forcing_defaults_off_and_latent_batches_walk() -> None:
@@ -104,16 +101,11 @@ def test_data_forcing_defaults_off_and_latent_batches_walk() -> None:
     assert method._rollout_data_forcing is False
     _, _, metrics = method.single_train_step(_latent_batch(), iteration=0)
 
-    # The batch's latents are ignored: the carried walk prepares with zeros
-    # and emits its usual metric set with no routing marker.
     assert student.prepare_sources == ["zeros"]
     assert "data_forced" not in metrics
     assert metrics["rollout_step"] == 0.0
 
 
-# ----------------------------------------------------------------------
-# (2) Routing: latent presence picks the branch, emptiness means text-only
-# ----------------------------------------------------------------------
 
 
 def test_routing_by_latent_presence_under_mixed_loading() -> None:
@@ -128,7 +120,6 @@ def test_routing_by_latent_presence_under_mixed_loading() -> None:
     assert walk_metrics["data_forced"] == 0.0
     assert walk_metrics["rollout_step"] == 0.0
     assert forced_metrics["data_forced"] == 1.0
-    # A forced call sits at a drawn rung, not on the walk's grid position.
     assert "rollout_step" not in forced_metrics
 
 
@@ -140,17 +131,12 @@ def test_half_present_latent_pair_fails_loud() -> None:
         method.single_train_step(batch, iteration=0)
 
 
-# ----------------------------------------------------------------------
-# (3) Forced-input math: uniform grid-rung draw, forward-noised real latents
-# ----------------------------------------------------------------------
 
 
 def test_forced_input_is_real_latents_noised_at_a_grid_rung() -> None:
     method = _make_method(slots=1, sample_type="ode", interval=1, student=_ForcingStudent(), data_forcing=True)
     _stub_losses(method)
     student = method.student
-    # Pre-seed the slot: the forced step itself is under test, not the
-    # one-time stagger.
     method._carry_slot_seeded[0] = True
 
     batch = _latent_batch(seed=3)
@@ -165,7 +151,6 @@ def test_forced_input_is_real_latents_noised_at_a_grid_rung() -> None:
     torch.testing.assert_close(forced["clean"], packed_real)
     sigma = forced["timestep"] / 1000.0
     torch.testing.assert_close(forced["noisy"], (1.0 - sigma) * packed_real + sigma * forced["noise"])
-    # The student trains exactly on that noised-real state at that rung.
     main = student.predict_calls[-1]
     assert main["timestep"] == forced["timestep"]
     assert main["grad_enabled"] is True
@@ -181,35 +166,27 @@ def test_forced_rung_draw_covers_the_whole_grid_and_never_zero() -> None:
 
     for call in range(64):
         method.single_train_step(_latent_batch(seed=call), iteration=call)
-    # _stub_losses replaces the loss paths, so the only add_noise per call is
-    # the forced one; FastGen's sample_from_t_list never yields t = 0.
     drawn = {call["timestep"] for call in method.student.add_noise_calls}
     assert drawn == {float(t) for t in _GRID}
     assert 0.0 not in drawn
 
 
-# ----------------------------------------------------------------------
-# (4) The walk pauses on forced batches and resumes untouched
-# ----------------------------------------------------------------------
 
 
 def test_forced_batches_pause_the_walk_and_text_batches_resume_it() -> None:
     method = _make_method(slots=1, sample_type="ode", interval=1, student=_ForcingStudent(), data_forcing=True)
     _stub_losses(method)
 
-    # Start the walk with a text-only batch (rung 0 trained, carry at rung 1).
     method.single_train_step(_text_only_batch(), iteration=0)
     carried = method._carry_slots[0]
     assert carried is not None and carried["rung"] == 1
     state_before = carried["state"].clone()
 
-    # Two forced calls: the slot's carry object and state are untouched.
     method.single_train_step(_latent_batch(seed=5), iteration=1)
     method.single_train_step(_latent_batch(seed=6), iteration=2)
     assert method._carry_slots[0] is carried
     torch.testing.assert_close(carried["state"], state_before)
 
-    # The next text-only batch resumes at rung 1 and advances to rung 2.
     _, _, metrics = method.single_train_step(_text_only_batch(), iteration=3)
     assert metrics["rollout_step"] == 1.0
     assert method._carry_slots[0] is not None
@@ -221,13 +198,10 @@ def test_forced_batch_at_walk_boundary_leaves_the_boundary_state() -> None:
                           data_forcing=True)
     _stub_losses(method)
 
-    # Walk the 2-rung grid to completion: offset 0, rungs 0 then 1, then clear.
     method.single_train_step(_text_only_batch(), iteration=0)
     method.single_train_step(_text_only_batch(), iteration=1)
     assert method._carry_slots[0] is None
 
-    # A forced batch at the boundary trains data-forced and does not restart
-    # the walk; the following text-only batch starts fresh at rung 0.
     _, _, forced_metrics = method.single_train_step(_latent_batch(), iteration=2)
     assert forced_metrics["data_forced"] == 1.0
     assert method._carry_slots[0] is None
@@ -235,9 +209,6 @@ def test_forced_batch_at_walk_boundary_leaves_the_boundary_state() -> None:
     assert metrics["rollout_step"] == 0.0
 
 
-# ----------------------------------------------------------------------
-# (5) Uniform seeding: a forced first call still runs the stagger pre-walk
-# ----------------------------------------------------------------------
 
 
 def test_forced_first_call_runs_stagger_prewalk_with_uniform_forward_count() -> None:
@@ -254,30 +225,21 @@ def test_forced_first_call_runs_stagger_prewalk_with_uniform_forward_count() -> 
     forced_method.single_train_step(latent, iteration=0)
     text_method.single_train_step(_text_only_batch(), iteration=0)
 
-    # Both branches pay the identical FSDP forward count on the slot's
-    # first-ever call: the whole-grid pre-walk plus this call's forward.
     assert len(forced_student.predict_calls) == len(_GRID)
     assert len(text_student.predict_calls) == len(_GRID)
 
-    # The seeded walk waits at the stream's stagger rung with this batch's
-    # conditioning adopted; the forced call did not consume the walk.
     carried = forced_method._carry_slots[0]
     assert carried is not None
     assert carried["rung"] == (1 * 1 + 0) % len(_GRID)
     assert forced_method._carry_slot_seeded[0] is True
     torch.testing.assert_close(carried["raw_batch"]["vae_latent"], latent["vae_latent"])
 
-    # The next text-only batch resumes the seeded walk at that rung with the
-    # adopted conditioning, not its own.
     _, _, metrics = forced_method.single_train_step(_text_only_batch(), iteration=1)
     assert metrics["rollout_step"] == float(carried["rung"])
     adopted = forced_student.prepare_calls[-1]
     torch.testing.assert_close(adopted["text_embedding"], latent["text_embedding"])
 
 
-# ----------------------------------------------------------------------
-# (6) Knob parsing and validation
-# ----------------------------------------------------------------------
 
 
 def test_data_forcing_requires_rollout_carry() -> None:
@@ -326,7 +288,6 @@ def test_data_forcing_requires_t2va_schema() -> None:
 def test_batch_classifier_contract() -> None:
     assert DMD2Method._batch_has_latents(_latent_batch()) is True
     assert DMD2Method._batch_has_latents(_text_only_batch()) is False
-    # Rows without the latent keys at all (pure text_only schema) are text-only.
     assert DMD2Method._batch_has_latents({"text_embedding": torch.ones(1, 4)}) is False
     with pytest.raises(ValueError, match="exactly one of"):
         DMD2Method._batch_has_latents({
@@ -335,9 +296,6 @@ def test_batch_classifier_contract() -> None:
         })
 
 
-# ----------------------------------------------------------------------
-# Integration: forced call on the real H3 CPU trio, per-modality shifts
-# ----------------------------------------------------------------------
 
 
 def _build_forcing_trio(monkeypatch: pytest.MonkeyPatch, *, interval: int) -> DMD2Method:
@@ -377,7 +335,6 @@ def test_forced_noising_per_modality_shift_on_real_h3_trio(monkeypatch: pytest.M
 
     method = _build_forcing_trio(monkeypatch, interval=5)
     student = method.student
-    # Skip the one-time stagger so the first add_noise call is the forced one.
     method._carry_slot_seeded[0] = True
 
     records: list[dict] = []
@@ -415,8 +372,6 @@ def test_forced_noising_per_modality_shift_on_real_h3_trio(monkeypatch: pytest.M
                     sigma * forced["noise"][:, slices[name]].to(torch.float64)).to(torch.bfloat16)
         torch.testing.assert_close(forced["noisy"][:, slices[name]], expected)
 
-    # Critic phase: the forced generation feeds the critic loss; the paused
-    # slot stays at the boundary (never seeded a walk beyond the skip above).
     assert metrics["data_forced"] == 1.0
     assert metrics["update_student"] == 0.0
     assert loss_map["fake_score_loss"].item() > 0.0
@@ -442,14 +397,12 @@ def test_forced_student_step_and_walk_adoption_on_real_h3_trio(monkeypatch: pyte
     assert torch.isfinite(loss_map["total_loss"])
     assert loss_map["generator_loss"].item() > 0.0
     assert "generator_loss_video" in metrics and "generator_loss_audio" in metrics
-    # The stagger seeded the walk at offset (0*1+0)%3 = 0 without training it.
     carried = method._carry_slots[0]
     assert carried is not None and carried["rung"] == 0
     method.backward(loss_map, outputs)
     assert student.transformer.scale.grad is not None
     assert torch.isfinite(student.transformer.scale.grad)
 
-    # A text-only batch resumes the seeded walk under the adopted prompt.
     text_raw = {
         "vae_latent": torch.zeros(1, 0),
         "audio_latent": torch.zeros(1, 0),

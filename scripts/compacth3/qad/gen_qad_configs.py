@@ -36,9 +36,6 @@ VARIANTS = {
 }
 
 HEADER = """# NVFP4 QAD -- {tag} (adaln_rank={rank})
-# Student: {init}
-# Teacher: frozen base H3. Quant: nvfp4_qat_train. audio_proj_in/out stay bf16.
-# {note}
 """
 
 def build(tag, v):

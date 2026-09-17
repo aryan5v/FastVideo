@@ -36,12 +36,7 @@ logger = init_logger(__name__)
 _FORMAT_VERSION = 1
 _ENV_DIR = "FASTVIDEO_WEIGHT_SHARD_CACHE"
 _ENV_MAX_GB = "FASTVIDEO_WEIGHT_SHARD_CACHE_MAX_GB"
-# Set to "1" when the cache dir is node-local (tmpfs) on a multi-node run so
-# every replicate rank writes its own node's copy.
 _ENV_PER_NODE = "FASTVIDEO_WEIGHT_SHARD_CACHE_PER_NODE"
-# Mirrors fsdp_load's zero-init allowance for params absent from checkpoints.
-# Kept as a literal (not an import) because fsdp_load imports this module; a
-# test asserts the two tuples stay identical so the mirror cannot drift.
 _ALLOWED_NEW_PARAM_PATTERNS = ("gate_compress", "proj_l", "scale_weight", "scale_input")
 _WRITE_MARGIN_BYTES = 5 << 30
 
@@ -105,15 +100,7 @@ def shard_cache_context(
         coordinate = device_mesh.get_coordinate()
         if coordinate is None:
             return None
-        # mesh dims are ("replicate", "shard")
         replicate_index, shard_index = int(coordinate[0]), int(coordinate[1])
-        # With a shared cache dir, replicate-coordinate 0 writes and replicas
-        # (identical shards) skip to avoid same-file collisions. With a
-        # node-local dir (e.g. /dev/shm on a multi-node HSDP run), every
-        # replica must write its own node's copy — same-name collisions are
-        # impossible across nodes, and a single-writer rule would leave every
-        # non-zero replica's node permanently cold (all-reduce MIN then turns
-        # that into a global miss).
         per_node_root = os.environ.get(_ENV_PER_NODE, "0") == "1"
         return ShardCacheContext(
             entry_dir=Path(root) / key,
@@ -196,11 +183,6 @@ def try_load_from_shard_cache(
 
         from safetensors import safe_open
 
-        # meta_sd (and the manifest) use clean checkpoint keys, but a model
-        # activation-checkpoint-wrapped before load (pre-FSDP AC) yields
-        # `_checkpoint_wrapped_module.`-prefixed names from named_buffers().
-        # Canonicalize like the full-load path, or the membership test below
-        # rebuilds a cached buffer as a trainable nn.Parameter on warm boots.
         from fastvideo.models.loader.fsdp_load import (
             _strip_checkpoint_wrapper_prefix, )
 
@@ -223,7 +205,6 @@ def try_load_from_shard_cache(
                     else:
                         tensor = local
                 else:
-                    # Zero-init new params exactly like the full-load path.
                     target_dtype = meta_param.dtype
                     if callable(dtype_selector):
                         target_dtype = dtype_selector(name, target_dtype)
@@ -244,8 +225,6 @@ def try_load_from_shard_cache(
         reverse_map = manifest.get("reverse_param_names_mapping", {})
         model.reverse_param_names_mapping = {k: tuple(v) for k, v in reverse_map.items()}
         model.load_state_dict(sharded_sd, strict=strict, assign=True)
-        # Freshen mtimes so mtime-based tmpfs cleaners (and our own LRU GC)
-        # treat actively used entries as recent.
         for p in (shard_path, manifest_path):
             try:
                 os.utime(p)
@@ -311,16 +290,6 @@ def write_shard_cache(model: nn.Module, ctx: ShardCacheContext) -> None:
 
         rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
         if ctx.is_writer:
-            # Every shard writer emits the manifest, not just global rank 0:
-            # with a node-local cache root (PER_NODE=1) each node holds its own
-            # entry copy, and a manifest written only on rank 0's node leaves
-            # every other node's entry manifest-less — the all-rank agreement
-            # vote in try_load_from_shard_cache then fails on EVERY multi-node
-            # warm boot and silently degrades relaunches to full loads. The
-            # content is rank-invariant for uniformly divisible shards; the
-            # rank-suffixed tmp name keeps concurrent same-directory writers
-            # (shared root, or several local ranks per node) from clobbering
-            # each other's half-written file before the atomic replace.
             reverse_map = {
                 k: list(v)
                 for k, v in getattr(model, "reverse_param_names_mapping", {}).items()

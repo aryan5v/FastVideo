@@ -1,5 +1,4 @@
 #!/bin/bash
-# Grade every comparable corrected-DMD2 checkpoint plus the protected old step 2750.
 #SBATCH --job-name=h3-dmd2-grade-all
 #SBATCH --partition=all
 #SBATCH --nodes=1

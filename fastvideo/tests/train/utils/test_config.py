@@ -33,9 +33,6 @@ def _minimal_yaml() -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Happy path
-# ---------------------------------------------------------------------------
 
 
 def test_minimal_yaml_loads_happy_path(tmp_path: Path) -> None:
@@ -46,7 +43,6 @@ def test_minimal_yaml_loads_happy_path(tmp_path: Path) -> None:
     assert cfg.method["_target_"] == ("fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod")
     assert "student" in cfg.models
     assert cfg.callbacks == {}
-    # raw retains the original YAML dict for downstream logging.
     assert "models" in cfg.raw and "method" in cfg.raw
 
 
@@ -201,9 +197,6 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.dit_precision == "bf16"
 
 
-# ---------------------------------------------------------------------------
-# Schema validation
-# ---------------------------------------------------------------------------
 
 
 def test_missing_models_raises(tmp_path: Path) -> None:
@@ -286,9 +279,6 @@ def test_missing_config_file_raises(tmp_path: Path) -> None:
         load_run_config(str(tmp_path / "does_not_exist.yaml"))
 
 
-# ---------------------------------------------------------------------------
-# Special parsing
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("betas_value, expected", [
@@ -336,8 +326,6 @@ def test_pipeline_quant_config_rejects_unknown_name(tmp_path: Path) -> None:
 
 
 def test_data_path_mapping_parses_repeat_counts(tmp_path: Path) -> None:
-    # Config loading should preserve structured multi-dataset paths so the
-    # dataset layer can interpret repeat counts later.
     data = _minimal_yaml()
     data["training"] = {
         "data": {
@@ -357,8 +345,6 @@ def test_data_path_mapping_parses_repeat_counts(tmp_path: Path) -> None:
 
 
 def test_dotted_override_replaces_mapping_data_path(tmp_path: Path) -> None:
-    # A dict-valued data_path is a single leaf for overrides: a scalar
-    # --training.data.data_path replaces the whole mapping.
     data = _minimal_yaml()
     data["training"] = {
         "data": {
@@ -405,7 +391,6 @@ def test_dotted_overrides_accept_separate_value_token(tmp_path: Path) -> None:
 def test_overrides_create_intermediate_keys(tmp_path: Path) -> None:
     """Overrides into a nested key absent from YAML should still apply."""
     data = _minimal_yaml()
-    # No `training.checkpoint` block in the minimal YAML.
     path = _write_yaml(tmp_path, data)
     cfg = load_run_config(
         path,
