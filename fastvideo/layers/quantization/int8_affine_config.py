@@ -1,43 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Weight-only affine INT8 quantization (group size 64) for CUDA inference.
-
-This is the CUDA-side counterpart of the affine INT8 scheme the Apple
-Silicon (MLX) deployment path already validates: per-group min/max affine
-quantization with ``group_size=64`` and ``bits=8``, applied to the linear
-*weights* only. Activations stay in bf16 — there is no activation
-quantizer here and there should not be one until a fused INT8 GEMM lands.
-
-The quantizer math is transcribed from
-``fastvideo/layers/quantization/mlx_affine_qat.py`` (itself a transcription
-of MLX's CPU ``quantized.cpp::quantize`` at v0.31.2), so the integer codes,
-per-group scales, and per-group biases this config produces are the same
-decisions the MLX runtime's quantizer makes. ``int8_affine_quantize`` and
-``int8_affine_dequantize`` were verified bit-identical to
-``mlx_affine_quantize_reference`` / ``mlx_affine_dequantize_reference`` on
-fp32, fp16, and bf16 inputs (codes, scales, biases, and the dequantized
-tensor all exactly equal) — the only representation change is that codes are
-stored as ``uint8`` rather than ``int32``.
-
-Design notes, deliberately different from ``nvfp4_config.py``:
-
-- **No hardcoded single-model layer list.** ``NVFP4Config`` hardcodes the
-  LTX-2 prefix set and its own docstring flags that as a wart. Here the
-  selection rule is a constructor field (``target_layers`` /
-  ``layer_suffixes``) with a model-agnostic default, and the MiniMax-H3 set
-  is built from H3's real module names by
-  :func:`minimax_h3_int8_affine_prefixes` / ``INT8AffineConfig.for_minimax_h3``.
-- **A fail-closed deny list.** ``attn.to_gate_compress`` is H3's
-  sparse-attention (VSA) gate. Quantizing it perturbs a *discrete* routing
-  decision, so an error there is not a small output perturbation — it flips
-  which tiles the sparse attention attends to. H3's own deploy path leaves
-  it alone. The name matches none of the usual "norm"/"scale_shift_table"
-  exclusion heuristics, so it is excluded by an explicit deny list that the
-  constructor cannot widen away.
-
-Like ``nvfp4_config.py``, this module allocates a *dense bf16* weight and
-converts to the low-precision form at load time (``convert_model_to_int8_affine``),
-so a plain BF16 checkpoint quantizes with no pre-quantized weights.
-"""
+"""Weight-only affine INT8 quantization (group size 64) for CUDA inference."""
 
 from __future__ import annotations
 

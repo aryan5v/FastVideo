@@ -1,40 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NVFP4 quantization (FlashInfer-backed) for LTX-2 and MiniMax-H3.
-
-NVFP4 is NVIDIA's block-scaled FP4 format (e2m1 mantissa, fp32 alpha,
-``layout_128x4`` scale layout, group size 16) — distinct from
-generic FP4 / OCP-FP4 / MX-FP4. We name the public surface ``NVFP4``
-explicitly so downstream callers don't conflate it with other FP4
-variants that may land later (e.g. AMD's MX-FP4 or vendor-neutral
-e3m0).
-
-Upstreamed from ``FastVideo-internal`` so consumers that load LTX-2
-weights with NVFP4 quantization can drive the public package
-end-to-end.
-
-The set of quantized linears is **per-model configuration**, not a
-hardcoded constant: ``NVFP4Config(layer_prefixes=...)`` selects it, and
-``layer_prefixes=None`` keeps the historical LTX-2 set the default so
-nothing regresses. A model whose prefix set is not supplied therefore
-attaches **no** quant methods and runs dense in silence — see
-``is_nvfp4_linear_prefix`` and the module docs in
-``docs/quantization/h3_nvfp4.md``.
-
-``NVFP4Config.for_minimax_h3()`` returns the MiniMax-H3 set (300 block
-linears), with H3's VSA compression gate ``attn.to_gate_compress``
-excluded.
-
-Quantized weights can be written to / restored from a compact sidecar
-safetensors file (packed FP4 codes + block scales + global scale, ~4x
-smaller than the dense bf16 weights) instead of being re-derived from
-dense weights at load time — see ``save_nvfp4_checkpoint`` /
-``load_nvfp4_checkpoint``.
-
-`flashinfer` is imported lazily inside the call paths that need it.
-This keeps ``import fastvideo`` cheap on hosts where flashinfer is
-not installed; only the actual NVFP4 quantize / matmul ops fail at
-use time, with a clear error.
-"""
+"""NVFP4 quantization (FlashInfer-backed) for LTX-2 and MiniMax-H3."""
 from __future__ import annotations
 
 import json

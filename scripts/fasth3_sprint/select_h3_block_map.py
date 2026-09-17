@@ -1,25 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Constrained 50-to-N block-map selection for H3 structural pruning.
-
-The audit of the activation-34 map (job 6928 student34) showed all 16 removals
-taken from source blocks 4-30 while 31-49 stayed intact: a front-loaded
-amputation. This selector keeps ablation scores as *proposals* only and enforces
-the structural constraints that the zero-shot and recovery evidence supports:
-
-* keep the first ``keep_prefix`` blocks and the final block,
-* never remove more than ``max_contiguous_removed`` consecutive blocks,
-* take at least ``min_late_removals`` removals from source >= ``late_start``,
-* never remove the ``audio_veto`` blocks with the highest audio-only
-  ablation importance (audio has no private capacity outside AdaLN, so the
-  blocks that carry it cannot be re-acquired elsewhere).
-
-Usage::
-
-    python scripts/fasth3_sprint/select_h3_block_map.py \
-        --partials-dir eval/h6-block-score --keep-blocks 34 \
-        --output /tmp/base34-recut-v1.json
-"""
+"""Constrained block-map selection for H3 structural pruning."""
 
 from __future__ import annotations
 
@@ -88,13 +69,7 @@ def select_map(blended: list[float],
                late_start: int = 31,
                audio_veto: int = 6,
                base_map: list[int] | None = None) -> list[int]:
-    """Select a kept set; with ``base_map`` only remove blocks it still has.
-
-    ``base_map`` re-cuts an already pruned lineage (e.g. 42 -> 34): the pools
-    are restricted to blocks the base kept, and the contiguity cap applies to
-    *newly* removed source blocks, since the base's own gaps are already
-    proven tolerable by its recovered quality.
-    """
+    """Select a kept set; with ``base_map`` only remove blocks it still has."""
     blocks = len(blended)
     allowed = set(base_map) if base_map is not None else set(range(blocks))
     removed_count = (len(base_map) if base_map is not None else blocks) - keep

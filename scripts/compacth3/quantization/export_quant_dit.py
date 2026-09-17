@@ -1,24 +1,4 @@
-"""Export pre-quantized DiT weights for the FastH3 DMD2 student to safetensors.
-
-Why this does NOT go through ``VideoGenerator``
----------------------------------------------
-The DiT is worker-resident: ``VideoGenerator.from_config(...)`` returns an
-orchestrator handle whose process never holds an ``nn.Module`` for the
-transformer (introspecting it prints "NO nn.Module attribute on the
-generator").  So we load the transformer directly with the very loader the
-generator uses -- ``PipelineComponentLoader.load_module`` -- and a
-``FastVideoArgs`` built through the supported compat adapter
-``fastvideo.api.compat.generator_config_to_fastvideo_args``, which is what
-pins ``transformer_quant`` onto ``dit_config.quant_config``.
-
-That pin is what makes the linears get built with the quant method attached;
-the loader's post-load hook ``_maybe_quantize_model``
-(``fastvideo/models/loader/fsdp_load.py``) then dispatches on that method and
-calls ``convert_model_to_<scheme>`` to materialize the quantized buffers.
-
-Must be a real file on disk (not stdin): FastVideo workers re-execute
-``__main__`` via ``runpy``, and a heredoc has no path.
-"""
+"""Export pre-quantized DiT weights to safetensors."""
 from __future__ import annotations
 
 import argparse
@@ -122,14 +102,7 @@ def scheme_tagged(model, lane: str) -> list[tuple[str, object]]:
 
 
 def save_int8_or_w4a16(model, lane: str, path: str, tagged) -> dict:
-    """No serializer exists for this lane in this checkout.
-
-    ``fastvideo/layers/quantization/{int8_affine,w4a16}_config.py`` export no
-    ``save_*_checkpoint`` and no sidecar format -- their ``__all__`` lists only
-    the quantizer, the config, the quantize method and the converter.  Writing
-    a made-up layout here would produce a file no loader can read, so this
-    stops with the evidence instead.
-    """
+    """No serializer exists for this lane in this checkout."""
     raise RuntimeError(
         f"lane {lane!r}: no sidecar serializer exists in this checkout. "
         f"grepped 'save_int8_affine_checkpoint' / 'save_w4a16_checkpoint' across the "

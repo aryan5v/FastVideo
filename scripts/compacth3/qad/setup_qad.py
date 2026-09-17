@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Set up the NVFP4 QAD run: 4-call, no taeh3, teacher = base H3, resuming from 1400.
-
-Two parts:
- 1. Fix the FP4 target-layer list so H3's FFN is actually quantized. The generic
-    dispatch matches "ffn.fc_in"/"ffn.fc_out", but H3's modules are "ff.fc_in"/
-    "ff.fc_out" -- so as shipped, QAD would quantize attention and silently skip
-    the entire FFN.
- 2. Emit a QAD yaml derived from the DMD2 run's own config (checkpoint-1400
-    metadata) with quant_config: nvfp4_qat_train on the student.
-"""
+"""Generate the NVFP4 QAD yaml from checkpoint-1400 metadata."""
 import json
 import pathlib
 import sys

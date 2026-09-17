@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""Select the QAD checkpoint: earliest one that cuts grain without raising anomalies.
-
-Judged as PAIRED DELTAS against the PRE-QAD NVFP4 model (not absolute scores), on the
-same prompts+seeds, on the hard-motion set. Criteria from the lead:
-
-    d_grain    < 0      (grain falls)
-    d_detail  >= 0      (detail does not regress)
-    d_anoms   <= 0      (temporal anomalies do not increase)
-    |d_motion| small    (motion magnitude preserved)
-
-Earliest checkpoint satisfying ALL FOUR wins. If NONE does, that is itself the result:
-standard QAD is trading away the NVFP4 stability benefit, and only then is a custom
-temporal objective worth designing.
-
-Runs over EVERY checkpoint (the run emits one per 25 steps), independent of the
-built-in validation cadence (every 50) -- otherwise the sweet spot falls between samples.
-"""
+"""Select the earliest acceptable QAD checkpoint."""
 import argparse, glob, json, os, re, subprocess, sys
 
 S = "/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829"

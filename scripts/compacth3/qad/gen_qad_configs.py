@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Emit launch-ready NVFP4 QAD configs for BOTH the rank-768 (20B) and rank-16 (~17B) students.
-
-QAD = the release path: FP4 forward with a full-precision backward (STE), so FSDP
-sharding and checkpointing stay dense-identical. No weight conversion needed.
-"""
+"""Generate NVFP4 QAD configs for rank-768 and rank-16 students."""
 import json, pathlib, sys, yaml
 
 S = pathlib.Path("/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829")
