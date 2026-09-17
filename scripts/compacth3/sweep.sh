@@ -1,10 +1,6 @@
 #!/bin/bash
-# Seed sweep for temporal-stability diagnosis.
-# Same prompts, same seeds, across checkpoints/step-counts/precisions, so we can
-# tell a REAL difference from trajectory luck (a 4-step sampler is highly
-# trajectory-sensitive, so one clean sample proves nothing).
-#
-#   usage: sweep.sh <MODEL> <LABEL> <GRID> <QUANT|none> <SEEDS>
+# Seed sweep across checkpoints, step counts, and precisions.
+# Usage: sweep.sh <MODEL> <LABEL> <GRID> <QUANT|none> <SEEDS>
 set -uo pipefail
 MODEL="$1"; LABEL="$2"; STEPS="$3"; QUANT="${4:-none}"; SEEDS="${5:-20260912,4242,777}"
 

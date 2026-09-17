@@ -36,26 +36,9 @@ VARIANTS = {
 }
 
 HEADER = """# NVFP4 QAD -- {tag} (adaln_rank={rank})
-#
-# THE RELEASE RUN. Post-hoc rank compression + NVFP4 quantization repair in one pass.
-#
-#   student   : {init}  (adaln_rank={rank})
-#   teacher   : frozen base H3 (base-h3-teacher-complete-v1)
-#   ladder    : 4 calls -- dmd_denoising_steps [999, 749, 500, 250]
-#   quant     : nvfp4_qat_train -- FP4 forward, full-precision backward (STE).
-#               No weight conversion, so FSDP sharding/checkpointing stay dense-identical.
-#   decode    : NOT taeh3 (rejected upstream; decoder sits downstream of the DiT anyway).
-#
-# AUDIO PROTECTION -- read before changing anything:
-#   * modality_loss_weights carried over from the parent run UNCHANGED, so QAD does not
-#     silently rebalance video against audio. Upweight 'audio' if the audio A/B regresses.
-#   * audio_proj_in / audio_proj_out match no DEFAULT_FP4_LAYERS entry, so they stay bf16.
-#     Do not add them.
-#   * Upstream's NVFP4 text-encoder PR found the fully-quantized variant LOST THE VOICE
-#     TRACK. Audio is the first thing low precision breaks -- gate every QAD checkpoint on
-#     speech intelligibility, not on a combined scalar.
-#
-# RANK-SPECIFIC NOTE: {note}
+# Student: {init}
+# Teacher: frozen base H3. Quant: nvfp4_qat_train. audio_proj_in/out stay bf16.
+# {note}
 """
 
 def build(tag, v):

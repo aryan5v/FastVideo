@@ -5,9 +5,7 @@ group-64 / 8-bit affine math the Apple Silicon (MLX) deployment lane already
 validates. Implemented in
 `fastvideo/layers/quantization/int8_affine_config.py`.
 
-This page is written for someone who has none of the session context in which
-the lane was built. It covers what the scheme is, how to turn it on, exactly
-which H3 layers are and are not quantized, and what has (and has not) been
+Covers how to enable the lane, which H3 layers are quantized, and what has been
 verified.
 
 ---

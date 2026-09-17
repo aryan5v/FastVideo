@@ -118,26 +118,8 @@ out = M / "examples/train/configs/distribution_matching/minimax_h3/qad_nvfp4_4ca
 out.parent.mkdir(parents=True, exist_ok=True)
 
 import yaml
-header = """# NVFP4 QAD for the 42-block 4-call DMD2 student.
-#
-#   student   : checkpoint-1400 of the CORRECTED re-run (job-paired8972-8975-4000-v3)
-#   teacher   : frozen base H3 (base-h3-teacher-complete-v1)
-#   ladder    : 4 calls -- dmd_denoising_steps [999, 749, 500, 250]
-#   decode    : NOT taeh3. The decoder is downstream of the DiT, so keeping it out
-#               lets one QAD serve both the taeh3 preview and the full-VAE release.
-#   quant     : nvfp4_qat_train -- FP4 forward, full-precision backward (STE).
-#               No weight conversion, so FSDP sharding/checkpointing stay dense-identical.
-#
-# AUDIO PROTECTION -- read before changing anything:
-#   * modality_loss_weights is carried over from the parent run unchanged, so the
-#     QAD does not silently rebalance video against audio. Upweight 'audio' here
-#     if the audio A/B regresses.
-#   * audio_proj_in / audio_proj_out are NOT in the FP4 target list (they match no
-#     DEFAULT_FP4_LAYERS entry), so they stay bf16. Do not add them.
-#   * The PR that added the NVFP4 encoder found the fully-quantized variant LOST THE
-#     VOICE TRACK. Audio is the first thing low precision breaks -- gate every QAD
-#     checkpoint on speech intelligibility, not on a combined scalar.
-#   * The validation panel below includes speech and music prompts on purpose.
+header = """# NVFP4 QAD for the 42-block four-call DMD2 student (checkpoint-1400).
+# Student uses nvfp4_qat_train; audio_proj_in/out stay bf16.
 """
 out.write_text(header + yaml.safe_dump(qad, sort_keys=False))
 print("wrote", out)

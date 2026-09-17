@@ -1,12 +1,4 @@
-# Long folded-backbone recovery. The launcher binds the exact selected student
-# and pruning seams. The production launcher uses three DP replicas x four
-# accumulation rounds (global effective batch 12) over the audio-stratified
-# 58k prompt corpus; the in-file topology remains a 16-GPU reference maximum.
-# Keep high-step recovery on Base-teacher prefix states. The controlled 7045 /
-# 7046 comparison showed that 25% student prefixes from a half-recovered 6972
-# parent crushed audio brightness and voicing. Few-call inference-state
-# exposure is handled later by DMD2/PDD, after the backbone clears quality
-# gates, rather than teaching this recovery run to imitate its own errors.
+# Long folded-backbone recovery on base-teacher prefix states.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

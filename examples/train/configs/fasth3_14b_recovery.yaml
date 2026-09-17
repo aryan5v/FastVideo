@@ -1,5 +1,4 @@
-# FastH3 20-block four-call BF16 recovery. The SLURM launcher overrides the
-# candidate, student attention backend, GPU topology, target step, and output.
+# FastH3 20-block four-call BF16 recovery.
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

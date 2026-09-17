@@ -70,7 +70,7 @@ def run_training_from_config(
     # ncclUnhandledCudaError at the next FSDP all-gather, job 2307).
     # Until the inference-side VSA path is debugged, H3 validation runs its
     # native dense backend — a sparse-trained student evaluated dense is a
-    # known contract mismatch, noted in h3_dmd.md.
+    # known contract mismatch; see the CompactH3 DMD2 configs.
     elif ("turbodiffusion" in model_path_lower or "turbowan" in model_path_lower):
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",

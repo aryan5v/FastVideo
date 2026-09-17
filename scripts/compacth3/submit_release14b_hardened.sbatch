@@ -1,17 +1,8 @@
 #!/bin/bash
-# 34-block recovery launcher, hardened after four failures in one day.
-#
-# Fixes vs submit_release14b_from1000.sbatch:
-#   1. MASTER_PORT derived from SLURM_JOB_ID (was hardcoded 64621 -> invites collisions
-#      with any other job on the master node; the 18:52 death was a C10d store failure).
-#   2. No `sleep 7200` hold. It burned 4 GPU-hours across three incidents and never
-#      helped. Fail fast so the slot can be reclaimed / resubmitted immediately.
-#   3. NCCL fail-fast: TORCH_NCCL_ASYNC_ERROR_HANDLING=1 plus a heartbeat watchdog.
-#      NOTE: timeouts must exceed the longest legitimate stall (a 20B checkpoint write can
-#      take 20+ min). An earlier revision used 1800s and self-destructed a healthy run at
-#      exactly 30:06 -- do not tighten these below 3600s.
-#   4. RESUME_PATH auto-selects the NEWEST COMPLETE checkpoint instead of a hardcoded step.
-#      A resubmit therefore always continues rather than replaying from a stale step.
+# 34-block recovery launcher.
+# - MASTER_PORT derived from SLURM_JOB_ID
+# - NCCL fail-fast with heartbeat watchdog
+# - RESUME_PATH selects the newest complete checkpoint
 #SBATCH --job-name=h3-14b-4k-wb
 #SBATCH --partition=hpc-rack-2
 #SBATCH --nodes=4

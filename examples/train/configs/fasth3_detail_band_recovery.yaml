@@ -1,9 +1,4 @@
-# Detail-band recovery (audit 2026-09-08): 300 updates from the preserved
-# activation-42 step-500 export with (a) low-sigma-biased interval sampling so
-# the detail-forming steps of the shift-12/shift-3 grid are actually trained,
-# (b) audio up-weighted to match its true gradient share, (c) the real paired
-# denoising branch kept on as the ground-truth anchor. Arm B overrides
-# method.student_state_probability to 0.25 from the launcher.
+# Detail-band recovery for the 42-block student (300 updates from step-500 export).
 models:
   student:
     _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model

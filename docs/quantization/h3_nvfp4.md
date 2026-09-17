@@ -3,11 +3,9 @@
 Load-time NVFP4 weight quantization for the MiniMax-H3 joint audio-video DiT,
 implemented in `fastvideo/layers/quantization/nvfp4_config.py`.
 
-This page is written for someone with none of the session context in which the
-lane was built. It covers what NVFP4 is here, why the config used to be a
-**silent no-op on H3**, how to turn it on, exactly which layers are quantized,
-what is required to run it, and how to write/read a compact quantized
-checkpoint.
+Covers what NVFP4 means here, why the config used to be a silent no-op on H3,
+how to enable it, which layers are quantized, runtime requirements, and how to
+write or read a compact quantized checkpoint.
 
 ---
 
