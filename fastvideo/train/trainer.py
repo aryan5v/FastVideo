@@ -11,6 +11,7 @@ import torch
 from tqdm.auto import tqdm
 
 from fastvideo.distributed import get_sp_group, get_world_group
+from fastvideo.logger import init_logger
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.methods.base import LogScalar, TrainingMethod
 from fastvideo.train.utils.tracking import build_tracker
@@ -18,6 +19,42 @@ from fastvideo.train.utils.tracking import build_tracker
 if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
         TrainingConfig, )
+
+logger = init_logger(__name__)
+
+
+def _verify_master_weight_precision(method: TrainingMethod, tc: TrainingConfig) -> None:
+    """Refuse to train on low-precision master weights unless opted in.
+
+    Optimizer steps applied in-place to bf16/fp16 parameters round away
+    updates below ~half an ulp of each weight's magnitude; O(1)-magnitude
+    parameters (norm gains) freeze entirely at typical distillation learning
+    rates, and ``zeros_like``-allocated optimizer state inherits the same
+    starved dtype. FP32 sharded masters (``training.dit_precision: fp32``)
+    fix both; ordinary FSDP groups still compute in BF16, while models may
+    declare narrower FP32 compute boundaries.
+    """
+    if bool(getattr(tc.model, "allow_low_precision_master_weights", False)):
+        return
+    offenders: list[str] = []
+    for role, model in getattr(method, "_role_models", {}).items():
+        if not getattr(model, "_trainable", False):
+            continue
+        transformer = getattr(model, "transformer", None)
+        if transformer is None:
+            continue
+        for name, param in transformer.named_parameters():
+            if param.requires_grad and param.dtype != torch.float32:
+                offenders.append(f"{role}:{name} ({param.dtype})")
+                break
+    if offenders:
+        raise RuntimeError("Trainable master weights are not fp32: "
+                           f"{offenders}. bf16/fp16 parameter storage silently rounds away "
+                           "optimizer updates below ~half an ulp per weight (norm-scale "
+                           "parameters freeze completely). Set training.dit_precision: fp32 "
+                           "(FP32 sharded masters; ordinary groups compute in BF16), "
+                           "or acknowledge the effect explicitly with "
+                           "training.model.allow_low_precision_master_weights: true.")
 
 
 def _coerce_log_scalar(
@@ -114,6 +151,7 @@ class Trainer:
         )
 
         method.set_tracker(self.tracker)
+        _verify_master_weight_precision(method, tc)
         method.on_train_start()
         self.callbacks.on_train_start(
             method,
@@ -127,6 +165,17 @@ class Trainer:
             resumed_step = (checkpoint_manager.maybe_resume(resume_from_checkpoint=(resume_from_checkpoint)))
             if resumed_step is not None:
                 start_step = int(resumed_step)
+                if bool(getattr(tc.checkpoint, "reset_lr_on_resume", False)):
+                    # The DCP load above restored the checkpoint's optimizer
+                    # LRs and scheduler base_lrs; re-apply the YAML's values.
+                    method.apply_configured_lrs()
+                    logger.info("reset_lr_on_resume: re-applied configured learning rates at step %s", start_step)
+        initial_validation_scheduled = self.callbacks.will_run_validation(iteration=start_step)
+        if checkpoint_manager is not None:
+            checkpoint_manager.maybe_save_inference(
+                start_step,
+                validation_scheduled=initial_validation_scheduled,
+            )
         self.callbacks.on_validation_begin(
             method,
             iteration=start_step,
@@ -230,7 +279,14 @@ class Trainer:
                 iteration=step,
             )
 
+            validation_scheduled = self.callbacks.will_run_validation(iteration=step)
             if checkpoint_manager is not None:
+                # The deployable checkpoint is preserved first and corresponds
+                # exactly to the model this validation event will evaluate.
+                checkpoint_manager.maybe_save_inference(
+                    step,
+                    validation_scheduled=validation_scheduled,
+                )
                 checkpoint_manager.maybe_save(step)
 
             self.callbacks.on_validation_begin(

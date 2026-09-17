@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from fastvideo.api.sampling_param import SamplingParam
+from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_input_preparation import resolve_target_num_frames
 from fastvideo.train.callbacks.callback import CallbackDict
 from fastvideo.train.callbacks.ema import EMACallback
 from fastvideo.train.callbacks.validation import (
@@ -44,6 +45,8 @@ def _make_callback(
     sampling_steps: list[int] | None = None,
     guidance_scale: float | None = None,
     num_frames: int | None = None,
+    use_record_dimensions: bool = False,
+    max_record_num_frames: int | None = None,
     num_videos_per_prompt: int = 1,
     use_validation_media_conditioning: bool = True,
     sampling_timesteps: list[int] | None = None,
@@ -59,6 +62,8 @@ def _make_callback(
         sampling_steps=sampling_steps,
         guidance_scale=guidance_scale,
         num_frames=num_frames,
+        use_record_dimensions=use_record_dimensions,
+        max_record_num_frames=max_record_num_frames,
         num_videos_per_prompt=num_videos_per_prompt,
         use_validation_media_conditioning=use_validation_media_conditioning,
         sampling_timesteps=sampling_timesteps,
@@ -84,6 +89,8 @@ class TestConstructor:
         assert cb.sampling_steps == [40]
         assert cb.guidance_scale is None
         assert cb.num_frames is None
+        assert cb.use_record_dimensions is False
+        assert cb.max_record_num_frames is None
         assert cb.num_videos_per_prompt == 1
         assert cb.use_validation_media_conditioning is True
         assert cb.run_at_start is True
@@ -110,6 +117,8 @@ class TestConstructor:
             sampling_steps=["20", "40"],  # type: ignore[arg-type]
             guidance_scale="4.5",  # type: ignore[arg-type]
             num_frames="77",  # type: ignore[arg-type]
+            use_record_dimensions="true",  # type: ignore[arg-type]
+            max_record_num_frames="345",  # type: ignore[arg-type]
             num_videos_per_prompt="2",  # type: ignore[arg-type]
             use_validation_media_conditioning="false",  # type: ignore[arg-type]
             sampling_timesteps=["1000", "500"],
@@ -123,6 +132,8 @@ class TestConstructor:
         assert cb.sampling_steps == [20, 40]
         assert cb.guidance_scale == 4.5
         assert cb.num_frames == 77
+        assert cb.use_record_dimensions is True
+        assert cb.max_record_num_frames == 345
         assert cb.num_videos_per_prompt == 2
         assert cb.use_validation_media_conditioning is False
         assert cb.run_at_start is False
@@ -136,6 +147,12 @@ class TestConstructor:
         """Verify every prompt requests at least one generated video."""
         with pytest.raises(ValueError, match="num_videos_per_prompt must be positive"):
             _make_callback(num_videos_per_prompt=0)
+
+    @pytest.mark.parametrize("max_record_num_frames", [0, -1])
+    def test_init_rejects_nonpositive_record_frame_cap(self, max_record_num_frames: int) -> None:
+        """A configured native-record cap must describe a usable request."""
+        with pytest.raises(ValueError, match="max_record_num_frames must be positive"):
+            _make_callback(max_record_num_frames=max_record_num_frames)
 
     def test_pipeline_kwargs_collected(self) -> None:
         cb = ValidationCallback(
@@ -220,6 +237,7 @@ class TestOnValidationBegin:
 
     def test_skipped_when_every_steps_zero(self) -> None:
         cb = _make_recording(every_steps=0)
+        assert cb.will_run_validation(0) is False
         cb.on_validation_begin(method=None, iteration=0)
         cb.on_validation_begin(method=None, iteration=1000)
         assert cb.run_calls == []
@@ -232,6 +250,8 @@ class TestOnValidationBegin:
 
     def test_runs_on_match(self) -> None:
         cb = _make_recording(every_steps=50)
+        assert cb.will_run_validation(50) is True
+        assert cb.will_run_validation(51) is False
         cb.on_validation_begin(method=None, iteration=50)
         cb.on_validation_begin(method=None, iteration=100)
         assert cb.run_calls == [50, 100]
@@ -257,6 +277,8 @@ class TestOnValidationBegin:
         cb.on_validation_begin(method=None, iteration=0)
         cb.on_validation_begin(method=None, iteration=20)
         assert cb.run_calls == [20]
+        assert cb.will_run_validation(0) is False
+        assert cb.will_run_validation(20) is True
 
 
 class TestH3ValidationContract:
@@ -291,6 +313,122 @@ class TestH3ValidationContract:
         )
 
         assert batch.num_videos_per_prompt == 3
+
+    def test_prepare_validation_batch_honors_complete_record_dimensions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """V10 samples each held-out prompt at its native spatial/temporal shape."""
+        cb = _make_callback(
+            num_frames=77,
+            use_record_dimensions=True,
+        )
+        cb.training_config = SimpleNamespace(
+            data=SimpleNamespace(
+                num_height=64,
+                num_width=96,
+                num_latent_t=2,
+            ),
+            pipeline_config=SimpleNamespace(vae_config=SimpleNamespace(
+                arch_config=SimpleNamespace(temporal_compression_ratio=4), ), ),
+            model_path="unused",
+            vsa_sparsity=0.0,
+        )
+        monkeypatch.setattr(
+            "fastvideo.train.callbacks.validation.make_inference_args",
+            lambda *args, **kwargs: SimpleNamespace(),
+        )
+
+        batch = cb._prepare_validation_batch(
+            SamplingParam(),
+            {
+                "prompt": "Generate synchronized media.",
+                "width": 128,
+                "height": 80,
+                "num_frames": 39,
+            },
+            num_inference_steps=4,
+        )
+
+        assert (batch.width, batch.height, batch.num_frames) == (128, 80, 39)
+        assert batch.n_tokens == 10 * 10 * 16
+
+    def test_record_dimensions_require_complete_triplet(self) -> None:
+        cb = _make_callback(use_record_dimensions=True)
+        cb.training_config = SimpleNamespace(
+            data=SimpleNamespace(
+                num_height=64,
+                num_width=96,
+                num_latent_t=2,
+            ),
+            pipeline_config=SimpleNamespace(vae_config=SimpleNamespace(
+                arch_config=SimpleNamespace(temporal_compression_ratio=4), ), ),
+        )
+
+        with pytest.raises(ValueError, match="must provide width, height, and num_frames together"):
+            cb._validation_sampling_dimensions({
+                "prompt": "partial",
+                "width": 128,
+            })
+
+    @pytest.mark.parametrize(
+        ("record_num_frames", "max_record_num_frames", "expected_num_frames"),
+        [
+            (328, 345, 328),
+            (362, 345, 345),
+            (362, None, 362),
+        ],
+    )
+    def test_record_frame_cap_preserves_shorter_and_legacy_geometry(
+        self,
+        record_num_frames: int,
+        max_record_num_frames: int | None,
+        expected_num_frames: int,
+    ) -> None:
+        """The opt-in cap affects only over-limit native record lengths."""
+        cb = _make_callback(
+            use_record_dimensions=True,
+            max_record_num_frames=max_record_num_frames,
+        )
+        cb.training_config = SimpleNamespace(
+            data=SimpleNamespace(
+                num_height=64,
+                num_width=96,
+                num_latent_t=2,
+            ),
+            pipeline_config=SimpleNamespace(vae_config=SimpleNamespace(
+                arch_config=SimpleNamespace(temporal_compression_ratio=4), ), ),
+        )
+
+        assert cb._validation_sampling_dimensions({
+            "width": 1344,
+            "height": 768,
+            "num_frames": record_num_frames,
+        }) == (768, 1344, expected_num_frames)
+
+    def test_record_frame_cap_matches_h3_inference_boundary(self) -> None:
+        """The v10 cap is the largest released H3 geometry below 15 seconds."""
+        assert resolve_target_num_frames(345) == 345
+        with pytest.raises(ValueError, match="aligned num_frames=362"):
+            resolve_target_num_frames(362)
+
+    def test_record_dimensions_are_ignored_without_opt_in(self) -> None:
+        cb = _make_callback(num_frames=77, use_record_dimensions=False)
+        cb.training_config = SimpleNamespace(
+            data=SimpleNamespace(
+                num_height=64,
+                num_width=96,
+                num_latent_t=2,
+            ),
+            pipeline_config=SimpleNamespace(vae_config=SimpleNamespace(
+                arch_config=SimpleNamespace(temporal_compression_ratio=4), ), ),
+        )
+
+        assert cb._validation_sampling_dimensions({
+            "width": 128,
+            "height": 80,
+            "num_frames": 39,
+        }) == (64, 96, 77)
 
     def test_prepare_validation_batch_ignores_media_for_text_only_generation(
         self,
@@ -374,8 +512,12 @@ class TestH3ValidationContract:
         monkeypatch.setattr(
             cb,
             "_prepare_validation_batch",
-            lambda sampling_param, validation_batch, num_inference_steps: SimpleNamespace(prompt=validation_batch[
-                "caption"], ),
+            lambda sampling_param, validation_batch, num_inference_steps: SimpleNamespace(
+                prompt=validation_batch["caption"],
+                width=96,
+                height=64,
+                num_frames=5,
+            ),
         )
 
         result = cb._run_validation_for_steps(50, transformer=torch.nn.Identity())
@@ -384,6 +526,13 @@ class TestH3ValidationContract:
         assert len(result.videos) == 8
         assert result.audio_sample_rates == [32_000] * 8
         assert len(result.audio_waveforms) == 8
+        assert result.metadata == [{
+            "source": "unknown",
+            "sample_id": None,
+            "width": 96,
+            "height": 64,
+            "num_frames": 5,
+        }] * 8
         for prompt_index, waveform in enumerate(result.audio_waveforms):
             assert torch.is_tensor(waveform)
             torch.testing.assert_close(waveform, torch.full((32, 2), float(prompt_index)))
@@ -430,6 +579,64 @@ class TestH3ValidationContract:
         assert step == 20
         assert artifacts["validation_videos_50_steps"] == filenames
         assert {key: artifacts[key] for key in scalar_metrics} == scalar_metrics
+
+    def test_log_validation_artifacts_keeps_references_and_metadata_in_one_event(self) -> None:
+        """Generated/reference pairs and source/shape receipts remain aligned."""
+
+        class FakeWandbTracker:
+
+            def __init__(self) -> None:
+                self.artifact_calls = []
+
+            def video(self, filename, *, caption, fps):
+                return (filename, caption, fps)
+
+            def log_artifacts(self, artifacts, step):
+                self.artifact_calls.append((artifacts, step))
+
+        cb = _make_callback()
+        cb.tracker = FakeWandbTracker()
+        metadata = [{
+            "source": "nuva/50k",
+            "sample_id": "sample-1",
+            "width": 1344,
+            "height": 768,
+            "num_frames": 345,
+            "reference_num_frames": 362,
+        }]
+        caption = cb._validation_artifact_caption("A prompt", metadata[0])
+        ref_caption = cb._validation_artifact_caption(
+            "A prompt",
+            metadata[0],
+            prefix="held-out reference",
+            use_reference_num_frames=True,
+        )
+        scalar_metrics = cb._validation_metadata_scalar_metrics(
+            metadata,
+            num_inference_steps=4,
+        )
+
+        cb._log_validation_video_artifacts(
+            ["generated.mp4"],
+            [caption],
+            key="validation_videos_4_steps",
+            step=100,
+            fps=24,
+            reference_video_filenames=["reference.mp4"],
+            reference_captions=[ref_caption],
+            reference_key="validation_references_4_steps",
+            scalar_metrics=scalar_metrics,
+        )
+
+        artifacts, step = cb.tracker.artifact_calls[0]
+        assert step == 100
+        assert artifacts["validation_videos_4_steps"][0][0] == "generated.mp4"
+        assert artifacts["validation_references_4_steps"][0][0] == "reference.mp4"
+        assert "source=nuva/50k" in artifacts["validation_videos_4_steps"][0][1]
+        assert "shape=1344x768x345f" in artifacts["validation_videos_4_steps"][0][1]
+        assert "shape=1344x768x362f" in artifacts["validation_references_4_steps"][0][1]
+        assert artifacts["validation/4_steps/source/nuva_50k_count"] == 1.0
+        assert artifacts["validation/4_steps/shape/1344x768x345f_count"] == 1.0
 
 
 class TestAttnQatInferValidation:

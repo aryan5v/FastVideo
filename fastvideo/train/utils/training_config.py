@@ -32,6 +32,10 @@ class DataConfig:
     num_width: int = 0
     num_latent_t: int = 0
     num_frames: int = 0
+    # Preserve each T2VA row's native temporal/spatial latent geometry and
+    # schedule exact-shape global microbatches across data-parallel ranks.
+    # False retains the legacy fixed-shape/truncation contract.
+    native_shape_bucketing: bool = False
 
 
 @dataclass(slots=True)
@@ -56,8 +60,23 @@ class TrainingLoopConfig:
 class CheckpointConfig:
     output_dir: str = ""
     resume_from_checkpoint: str = ""
+    # Deployable, model-only checkpoints are saved for every scheduled
+    # validation event and are independent from rolling resumable state.
+    save_inference_checkpoint_on_validation: bool = False
+    inference_checkpoint_role: str = "student"
+    inference_checkpoint_dtype: str = "bfloat16"
     training_state_checkpointing_steps: int = 0
+    # Opt in to resumable checkpoints published only after DCP state and every
+    # rank's RNG snapshot are complete. False keeps legacy checkpoints usable.
+    require_complete_training_checkpoint: bool = False
+    # Applies only to resumable ``checkpoint-<step>`` directories. Inference
+    # checkpoints are retained as the run's immutable model lineage.
     checkpoints_total_limit: int = 0
+    checkpointing_start_step: int = 0
+    # DCP checkpoints restore optimizer param-group LRs and scheduler
+    # base_lrs, silently overriding the YAML on resume. Set true to re-apply
+    # the configured learning rates after loading (LR-change experiments).
+    reset_lr_on_resume: bool = False
 
 
 @dataclass(slots=True)
@@ -77,6 +96,15 @@ class ModelTrainingConfig:
     precondition_outputs: bool = False
     moba_config: dict = field(default_factory=dict)
     enable_gradient_checkpointing_type: str | None = None
+    # Optimizer steps applied to bf16/fp16 parameter storage round away
+    # updates smaller than ~half an ulp of each weight's magnitude —
+    # O(1)-magnitude parameters (norm gains) freeze entirely at typical
+    # distillation LRs. The trainer refuses to start unless master weights
+    # are fp32 (training.dit_precision: fp32) or this explicit opt-in
+    # acknowledges the effect (memory-constrained topologies).
+    allow_low_precision_master_weights: bool = False
+    enable_torch_compile: bool = False
+    torch_compile_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -88,6 +116,12 @@ class TrainingConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     vsa_sparsity: float = 0.0
+    # Tokens per sparse-attention tile for the VSA student. 256 (default)
+    # keeps the (4,8,8) tiles and today's VSA-256 CuTe/Triton routing; 64
+    # selects (4,4,4) tiles on the native 64-token Triton block-sparse
+    # kernels (forward and backward). Consumed by the VSA-H3 (MiniMax H3)
+    # backend; Wan's VSA path ignores it.
+    vsa_tile_size: int = 256
     # Reuse the per-step padded VSA tile buffer across attention layers.
     # Defaults to False for training: under full activation checkpointing the
     # cached buffer survives into the backward recompute and inflates peak

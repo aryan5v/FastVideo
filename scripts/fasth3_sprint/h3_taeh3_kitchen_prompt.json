@@ -1,0 +1,20 @@
+[
+  {
+    "id": "warmup_kitchen_golden_creature",
+    "role": "warmup",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 2025,
+    "prompt": "Five-second 16:9 cinematic shot in a small lived-in kitchen at dusk. A tiny hand-drawn creature made of warm golden light climbs out of a half-washed ceramic mug and skips across an old wooden table. Live-action room, luminous pencil-and-ink creature. One-handed phone camera with subtle tremor, a quick close-focus pull, sunset backlight, natural exposure breathing, and coarse shadow grain. The creature pauses and waves at the camera in the final second. Audio: quiet room tone, a soft mug clink, faucet drips, tiny curious chirps, and the camera operator's surprised breath. No text, subtitles, logos, horror, extra limbs, or cuts."
+  },
+  {
+    "id": "measured_kitchen_golden_creature",
+    "role": "measured",
+    "resolution": "480p",
+    "width": 832,
+    "height": 480,
+    "seed": 2026,
+    "prompt": "Five-second 16:9 cinematic shot in a small lived-in kitchen at dusk. A tiny hand-drawn creature made of warm golden light climbs out of a half-washed ceramic mug and skips across an old wooden table. Live-action room, luminous pencil-and-ink creature. One-handed phone camera with subtle tremor, a quick close-focus pull, sunset backlight, natural exposure breathing, and coarse shadow grain. The creature pauses and waves at the camera in the final second. Audio: quiet room tone, a soft mug clink, faucet drips, tiny curious chirps, and the camera operator's surprised breath. No text, subtitles, logos, horror, extra limbs, or cuts."
+  }
+]

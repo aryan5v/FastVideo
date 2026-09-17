@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Set up the NVFP4 QAD run: 4-call, no taeh3, teacher = base H3, resuming from 1400.
+
+Two parts:
+ 1. Fix the FP4 target-layer list so H3's FFN is actually quantized. The generic
+    dispatch matches "ffn.fc_in"/"ffn.fc_out", but H3's modules are "ff.fc_in"/
+    "ff.fc_out" -- so as shipped, QAD would quantize attention and silently skip
+    the entire FFN.
+ 2. Emit a QAD yaml derived from the DMD2 run's own config (checkpoint-1400
+    metadata) with quant_config: nvfp4_qat_train on the student.
+"""
+import json
+import pathlib
+import sys
+
+M = pathlib.Path("/mnt/nfs/vlm-aryan/fasth3-h3-serve-cookbook-eval-20260831/repo-main-3d8ac9d1")
+SPRINT = pathlib.Path("/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829")
+RUN = SPRINT / "runs/release20b-dmd2-v12-corrected-c4-parent750-32gpu-4000-v3/job-paired8972-8975-4000-v3"
+
+# --- 1. FFN layer-name fix --------------------------------------------------
+qc = M / "fastvideo/layers/quantization/nvfp4_qat_config.py"
+t = qc.read_text(); orig = t
+if '"ff.fc_in"' in t:
+    print("layer list: already fixed")
+else:
+    anchor = 'DEFAULT_FP4_LAYERS = (\n'
+    assert t.count(anchor) == 1, f"anchor={t.count(anchor)}"
+    t = t.replace(anchor, anchor + '    # MiniMax-H3 names its FFN "ff.", not "ffn." -- without these the\n'
+                                   '    # FFN is silently left dense and QAD only covers attention.\n'
+                                   '    "ff.fc_in",\n    "ff.fc_out",\n', 1)
+    assert t != orig
+    qc.with_suffix(".py.pre-qad-bak").write_text(orig)
+    qc.write_text(t)
+    print("layer list: added ff.fc_in / ff.fc_out for H3")
+
+# --- 2. build the QAD yaml from the DMD2 run's own metadata ------------------
+meta = json.loads((RUN / "checkpoint-1400/metadata.json").read_text())
+c = meta["config"]
+
+def y(path, default=None):
+    cur = c
+    for k in path.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+qad = {
+    "models": {
+        "student": {
+            "_target_": y("models.student._target_"),
+            "init_from": str(RUN / "checkpoint-1400"),
+            "trainable": True,
+            "enable_gradient_checkpointing_type": "full",
+            "attention_backend": y("models.student.attention_backend", "TORCH_SDPA"),
+            # THE QAD KNOB: FP4 forward + full-precision backward (STE).
+            # No weight conversion, so FSDP sharding/checkpointing stay dense-identical.
+            "quant_config": "nvfp4_qat_train",
+        },
+        "teacher": {
+            "_target_": y("models.teacher._target_"),
+            "init_from": y("models.teacher.init_from"),
+            "trainable": False,
+            "disable_custom_init_weights": True,
+            "attention_backend": y("models.teacher.attention_backend", "TORCH_SDPA"),
+        },
+    },
+    "method": {
+        "_target_": y("method._target_"),
+        "rollout_mode": y("method.rollout_mode"),
+        "rollout_carry": y("method.rollout_carry"),
+        "rollout_carry_slots": y("method.rollout_carry_slots"),
+        "rollout_sample_type": y("method.rollout_sample_type"),
+        "generator_update_interval": y("method.generator_update_interval"),
+        "real_score_guidance_scale": y("method.real_score_guidance_scale"),
+        # 4-call ladder, unchanged from the parent run
+        "dmd_denoising_steps": y("method.dmd_denoising_steps"),
+        "min_timestep_ratio": y("method.min_timestep_ratio"),
+        "max_timestep_ratio": y("method.max_timestep_ratio"),
+        "score_timestep_shift": y("method.score_timestep_shift"),
+        "score_timestep_warp_max": y("method.score_timestep_warp_max"),
+        "score_timestep_continuous": y("method.score_timestep_continuous"),
+        "fake_score_loss_space": y("method.fake_score_loss_space"),
+        "modality_loss_weights": y("method.modality_loss_weights"),
+        "dmd_denom_floor_ratio": y("method.dmd_denom_floor_ratio"),
+        "dmd_grad_cap": y("method.dmd_grad_cap"),
+        "cfg_uncond": y("method.cfg_uncond"),
+        "fake_score_learning_rate": y("method.fake_score_learning_rate"),
+        "fake_score_betas": y("method.fake_score_betas"),
+        "fake_score_lr_scheduler": y("method.fake_score_lr_scheduler"),
+    },
+    "training": {
+        "distributed": y("training.distributed"),
+        "data": y("training.data"),
+        "optimizer": y("training.optimizer"),
+        "loop": {"max_train_steps": 200, "gradient_accumulation_steps": y("training.loop.gradient_accumulation_steps", 8)},
+        "checkpoint": {
+            "output_dir": str(SPRINT / "runs/release20b-dmd2-v12-qad-nvfp4-4call-v1"),
+            "resume_from_checkpoint": str(RUN / "checkpoint-1400"),
+            "training_state_checkpointing_steps": 25,
+            "require_complete_training_checkpoint": True,
+            "checkpointing_start_step": 1400,
+            "checkpoints_total_limit": 12,
+        },
+        "tracker": {"trackers": ["wandb"], "project_name": "fasth3-14b-2step-qad-sprint",
+                    "run_name": "release20b-dmd2-qad-nvfp4-4call-v1"},
+    },
+    "callbacks": {
+        "grad_clip": {"_target_": "fastvideo.train.callbacks.grad_clip.GradNormClipCallback", "max_grad_norm": 1.0},
+        "validation": y("callbacks.validation"),
+    },
+    "model": {"precondition_outputs": False, "enable_gradient_checkpointing_type": "full", "enable_torch_compile": False},
+    "dit_precision": "fp32",
+    "vsa": y("vsa"),
+}
+
+out = M / "examples/train/configs/distribution_matching/minimax_h3/qad_nvfp4_4call.yaml"
+out.parent.mkdir(parents=True, exist_ok=True)
+
+import yaml
+header = """# NVFP4 QAD for the 42-block 4-call DMD2 student.
+#
+#   student   : checkpoint-1400 of the CORRECTED re-run (job-paired8972-8975-4000-v3)
+#   teacher   : frozen base H3 (base-h3-teacher-complete-v1)
+#   ladder    : 4 calls -- dmd_denoising_steps [999, 749, 500, 250]
+#   decode    : NOT taeh3. The decoder is downstream of the DiT, so keeping it out
+#               lets one QAD serve both the taeh3 preview and the full-VAE release.
+#   quant     : nvfp4_qat_train -- FP4 forward, full-precision backward (STE).
+#               No weight conversion, so FSDP sharding/checkpointing stay dense-identical.
+#
+# AUDIO PROTECTION -- read before changing anything:
+#   * modality_loss_weights is carried over from the parent run unchanged, so the
+#     QAD does not silently rebalance video against audio. Upweight 'audio' here
+#     if the audio A/B regresses.
+#   * audio_proj_in / audio_proj_out are NOT in the FP4 target list (they match no
+#     DEFAULT_FP4_LAYERS entry), so they stay bf16. Do not add them.
+#   * The PR that added the NVFP4 encoder found the fully-quantized variant LOST THE
+#     VOICE TRACK. Audio is the first thing low precision breaks -- gate every QAD
+#     checkpoint on speech intelligibility, not on a combined scalar.
+#   * The validation panel below includes speech and music prompts on purpose.
+"""
+out.write_text(header + yaml.safe_dump(qad, sort_keys=False))
+print("wrote", out)
+print("student init_from:", qad["models"]["student"]["init_from"])
+print("quant_config      :", qad["models"]["student"]["quant_config"])
+print("denoise steps     :", qad["method"]["dmd_denoising_steps"])
+print("output_dir        :", qad["training"]["checkpoint"]["output_dir"])

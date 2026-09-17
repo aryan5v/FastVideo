@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # adapted from: https://github.com/a-r-r-o-w/finetrainers/blob/main/finetrainers/data/dataset.py
+import json
 import os
 import pathlib
 
@@ -29,7 +30,15 @@ class ValidationDataset(IterableDataset):
         if self.filename.suffix == ".csv":
             data = datasets.load_dataset("csv", data_files=self.filename.as_posix(), split="train")
         elif self.filename.suffix == ".json":
-            data = datasets.load_dataset("json", data_files=self.filename.as_posix(), split="train", field="data")
+            # Historically validation JSON was wrapped as {"data": [...]};
+            # native-shape held-out manifests are plain JSON arrays. Parse the
+            # tiny validation document directly so both contracts remain
+            # supported without guessing a datasets ``field`` value.
+            document = json.loads(self.filename.read_text(encoding="utf-8"))
+            rows = document.get("data") if isinstance(document, dict) else document
+            if not isinstance(rows, list):
+                raise ValueError("Validation JSON must be a row array or an object containing a 'data' row array")
+            data = datasets.Dataset.from_list(rows)
         elif self.filename.suffix == ".parquet":
             data = datasets.load_dataset("parquet", data_files=self.filename.as_posix(), split="train")
         elif self.filename.suffix == ".arrow":

@@ -29,6 +29,7 @@ def build_parquet_t2v_train_dataloader(
         drop_last=True,
         text_padding_length=int(text_len),
         seed=int(data_config.seed or 0),
+        native_shape_bucketing=bool(data_config.native_shape_bucketing),
     ))
     return dataloader
 

@@ -45,10 +45,32 @@ from fastvideo.models.loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from fastvideo.models.registry import ModelRegistry
+from fastvideo.platforms import AttentionBackendEnum
 from fastvideo.utils import PRECISION_TO_TYPE, is_pin_memory_available
 from fastvideo.hooks.layerwise_offload import enable_layerwise_offload
 
 logger = init_logger(__name__)
+
+
+def _teacher_critic_attention_context(fastvideo_args: FastVideoArgs):
+    """Mask only a generator-only QAT request for teacher/critic loads.
+
+    ``_loading_teacher_critic_model`` predates role-local attention backends and
+    also controls custom-weight/quant-config handling. Treating the flag as a
+    blanket request for automatic attention used to erase an explicit
+    ``FLASH_ATTN`` request from DMD teacher and critic roles. Preserve every
+    explicit dense request; only suppress ``ATTN_QAT_TRAIN``, which is the
+    generator-only policy the flag was introduced to isolate.
+    """
+    if not hasattr(fastvideo_args, "_loading_teacher_critic_model"):
+        return nullcontext()
+
+    active_scope = _active_component_attention_backend_scope()
+    requested = (active_scope.backend if active_scope is not None else
+                 coerce_attn_backend(getattr(fastvideo_args, "attention_backend", None)))
+    if requested is AttentionBackendEnum.ATTN_QAT_TRAIN:
+        return _component_attention_backend_scope(None, component="transformer")
+    return nullcontext()
 
 
 class ComponentLoader(ABC):
@@ -1052,14 +1074,11 @@ class TransformerLoader(ComponentLoader):
 
         # Generator-only QAT for DMD distillation: the teacher (real_score) and
         # critic (fake_score) transformers load with this flag set and must stay
-        # full precision. Drop the nvfp4_qat quant from their copied config, and
-        # build their attention under a scope that ignores any process-wide
-        # ATTN_QAT_TRAIN request so it falls back to dense. The generator loads
-        # without the flag and keeps both. The scope is exception-safe and
-        # needs no env mutation or selector cache flush (the request is part
-        # of the resolution cache key).
-        _qat_generator_only = hasattr(fastvideo_args, "_loading_teacher_critic_model")
-        if _qat_generator_only:
+        # full precision. Drop nvfp4_qat from their copied config. Attention is
+        # narrowed separately below only when the inherited request is
+        # ATTN_QAT_TRAIN; an explicit role-local FLASH_ATTN/SDPA request wins.
+        _teacher_or_critic = hasattr(fastvideo_args, "_loading_teacher_critic_model")
+        if _teacher_or_critic:
             dit_config.quant_config = None
 
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
@@ -1107,8 +1126,7 @@ class TransformerLoader(ComponentLoader):
         # non-strictly for Cosmos2.5 only; keep upstream strict behavior for others.
         strict_load = not (cls_name.startswith("Cosmos25") or cls_name == "Cosmos25Transformer3DModel"
                            or getattr(fastvideo_args.pipeline_config, "prefix", "") == "Cosmos25")
-        attention_context = (_component_attention_backend_scope(None, component="transformer")
-                             if _qat_generator_only else nullcontext())
+        attention_context = _teacher_critic_attention_context(fastvideo_args)
         with attention_context:
             # dit_config is what the model is handed and keeps as `self.config`,
             # so recording here makes the decision readable from the loaded
@@ -1142,6 +1160,8 @@ class TransformerLoader(ComponentLoader):
                 training_mode=fastvideo_args.training_mode,
                 enable_torch_compile=fastvideo_args.enable_torch_compile,
                 torch_compile_kwargs=fastvideo_args.torch_compile_kwargs,
+                regional_compile=getattr(fastvideo_args, "regional_compile", False),
+                pre_fsdp_transform=getattr(fastvideo_args, "_pre_fsdp_transform", None),
                 inference_regional_compile=fastvideo_args.inference_torch_compile,
                 inference_vsa_tile_size=fastvideo_args.VSA_tile_size,
                 # Only the whole-parameter half of the adapter is applied here, while

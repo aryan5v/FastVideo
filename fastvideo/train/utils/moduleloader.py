@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 from typing import Any, TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 
 from fastvideo.attention.selector import (
+    NO_REQUEST,
     _component_attention_backend_scope,
     coerce_attn_backend,
+    component_attention_backend,
 )
 from fastvideo.configs.pipelines.base import PipelineConfig
 from fastvideo.fastvideo_args import ExecutionMode, TrainingArgs
@@ -60,7 +63,11 @@ def _make_training_args(
         text_encoder_cpu_offload=False,
         image_encoder_cpu_offload=False,
         use_fsdp_inference=False,
-        enable_torch_compile=False,
+        enable_torch_compile=tc.model.enable_torch_compile,
+        # Modular stack opts into regional fullgraph compile; the legacy
+        # stack keeps whole-model torch.compile semantics (default False).
+        regional_compile=True,
+        torch_compile_kwargs=tc.model.torch_compile_kwargs,
     )
 
 
@@ -73,8 +80,19 @@ def make_inference_args(
     args = _make_training_args(tc, model_path=model_path)
     args.inference_mode = True
     args.mode = ExecutionMode.INFERENCE
-    args.dit_cpu_offload = True
+    # Never CPU-offload the DiT here: validation samples with the LIVE
+    # training transformer, and the denoising stages' post-sampling
+    # ``transformer.to("cpu")`` strands the FSDP-sharded training params on
+    # CPU — the next training backward then dies assigning CUDA grads to
+    # CPU tensors (no-grad forwards keep working off gathered buffers,
+    # which is why it surfaces steps later).
+    args.dit_cpu_offload = False
+    # Validation must sample at the training attention contract: both the
+    # sparsity AND the tile geometry. Leaving the tile size at its
+    # FastVideoArgs default silently validates a tile-64-trained student at
+    # tile 256 (v8 shipped 2400 steps of validation that way).
     args.VSA_sparsity = tc.vsa_sparsity
+    args.VSA_tile_size = tc.vsa_tile_size
     return args
 
 
@@ -92,6 +110,8 @@ def load_module_from_path(
     override_transformer_cls_name: str | None = None,
     transformer_override_safetensor: str | None = None,
     attention_backend: AttentionBackendEnum | str | None = None,
+    construction_precision: str | None = None,
+    pre_fsdp_transform: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
 ) -> torch.nn.Module:
     """Load one pipeline component with its role-scoped attention policy.
 
@@ -104,6 +124,12 @@ def load_module_from_path(
     scoped to this load call.
     """
     fastvideo_args: Any = _make_training_args(training_config, model_path=model_path)
+    original_dit_precision = fastvideo_args.pipeline_config.dit_precision
+    if construction_precision is not None:
+        # A frozen role does not need FP32 optimizer masters. Its FSDP forward
+        # already casts parameters to BF16, so constructing/storing that role
+        # in BF16 removes memory with no change to the actual teacher compute.
+        fastvideo_args.pipeline_config.dit_precision = str(construction_precision)
 
     local_model_path = maybe_download_model(model_path)
     config = verify_model_config_and_directory(local_model_path)
@@ -130,6 +156,12 @@ def load_module_from_path(
     if transformer_override_safetensor:
         fastvideo_args.init_weights_from_safetensors = str(transformer_override_safetensor)
 
+    if pre_fsdp_transform is not None:
+        if module_type != "transformer":
+            raise ValueError("pre_fsdp_transform can only be set when loading "
+                             f"a transformer, got module_type={module_type!r}")
+        fastvideo_args._pre_fsdp_transform = pre_fsdp_transform
+
     if attention_backend is not None and module_type != "transformer":
         raise ValueError("attention_backend can only be set when loading "
                          f"a transformer, got module_type={module_type!r}")
@@ -145,15 +177,31 @@ def load_module_from_path(
     # Attention implementations are bound while transformer layers are
     # constructed. Scope the override to this one role so student,
     # teacher, and critic can use independent backends in one process.
-    with attention_context:
-        module = PipelineComponentLoader.load_module(
-            module_name=module_type,
-            component_model_path=component_path,
-            transformers_or_diffusers=(transformers_or_diffusers),
-            fastvideo_args=fastvideo_args,
-        )
+    try:
+        with attention_context:
+            module = PipelineComponentLoader.load_module(
+                module_name=module_type,
+                component_model_path=component_path,
+                transformers_or_diffusers=(transformers_or_diffusers),
+                fastvideo_args=fastvideo_args,
+            )
+    finally:
+        # _make_training_args intentionally shares the resolved pipeline
+        # config. Do not leak a role-local construction choice to later roles.
+        fastvideo_args.pipeline_config.dit_precision = original_dit_precision
 
     if not isinstance(module, torch.nn.Module):
         raise TypeError(f"Loaded {module_type!r} is not a "
                         f"torch.nn.Module: {type(module)}")
+    if resolved_attention_backend is not None:
+        receipt = component_attention_backend(module)
+        if receipt is NO_REQUEST:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} did not record its "
+                               f"requested attention backend {resolved_attention_backend.name}. "
+                               "The component loader must stamp the construction decision on "
+                               "module.config._resolved_attention_backend.")
+        if receipt is not resolved_attention_backend:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} requested attention "
+                               f"backend {resolved_attention_backend.name}, but recorded "
+                               f"{receipt.name}.")
     return module

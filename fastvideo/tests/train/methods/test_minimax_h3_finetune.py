@@ -47,7 +47,8 @@ class _IdentityJointTransformer:
     patch_size = (1, 2, 2)
 
     def __call__(self, **kwargs):
-        return kwargs["hidden_states"], kwargs["audio_hidden_states"]
+        self.autocast_enabled = torch.is_autocast_enabled("cpu")
+        return kwargs["hidden_states"].float(), kwargs["audio_hidden_states"].float()
 
 
 @pytest.mark.parametrize(
@@ -144,6 +145,50 @@ def test_h3_uniform_parameter_dtype_uses_fsdp_dtype() -> None:
     assert parameter_dtype == torch.bfloat16
 
 
+def test_h3_default_parameter_dtype_keeps_compute_boundaries_fp32() -> None:
+    model = cast(
+        MiniMaxH3Transformer3DModel,
+        SimpleNamespace(
+            config=MiniMaxH3Config(uniform_parameter_dtype=False),
+            _keep_in_fp32_modules=MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
+        ),
+    )
+
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "proj_in.weight",
+        torch.bfloat16,
+    ) == torch.float32
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "transformer_blocks.0.attn.to_q.weight",
+        torch.bfloat16,
+    ) == torch.bfloat16
+
+
+def test_h3_folded_adaln_keeps_fp32_training_master() -> None:
+    """Rank-reduced AdaLN must not silently demote an FP32 training load."""
+    model = cast(
+        MiniMaxH3Transformer3DModel,
+        SimpleNamespace(
+            config=MiniMaxH3Config(uniform_parameter_dtype=False),
+            adaln_rank=768,
+            _keep_in_fp32_modules=MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
+        ),
+    )
+
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "transformer_blocks.0.adaln_proj.linear.weight",
+        torch.float32,
+    ) == torch.float32
+    assert MiniMaxH3Transformer3DModel._get_parameter_dtype(
+        model,
+        "transformer_blocks.0.adaln_proj.linear.weight",
+        torch.bfloat16,
+    ) == torch.bfloat16
+
+
 def test_h3_materializes_rotary_frequencies_on_loader_device() -> None:
     """Verify that checkpoint loading moves analytic rotary state to the model device."""
     model = cast(
@@ -209,8 +254,11 @@ def test_h3_plugin_prepares_and_restores_joint_latent_shapes(monkeypatch: pytest
     )
 
     assert isinstance(prediction, tuple)
+    assert model.transformer.autocast_enabled is False
     assert prediction[0].shape == batch.latents.shape
     assert prediction[1].shape == batch.audio_latents.shape
+    assert prediction[0].dtype == batch.noisy_model_input.dtype
+    assert prediction[1].dtype == batch.audio_noisy_model_input.dtype
     torch.testing.assert_close(
         prediction[0],
         -batch.noisy_model_input.permute(0, 2, 1, 3, 4),

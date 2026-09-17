@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from fastvideo.distributed import get_local_torch_device, get_sp_group, get_world_group, model_parallel_is_initialized
+from fastvideo.distributed import get_local_torch_device, get_sp_group, model_parallel_is_initialized
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.models.vaes.minimax_h3_audio import MiniMaxH3AudioVAE
@@ -40,9 +40,9 @@ def _layout(batch: ForwardBatch) -> MiniMaxH3PackedLayout:
 def _decode_participation(fastvideo_args: FastVideoArgs, want_parallel: bool) -> tuple[Any, bool, bool]:
     """Resolve (sp_group, is_output_rank, parallel) for the VAE decode stages.
 
-    The existing serial path keeps its global-rank-zero output ownership.
-    Parallel decode assembles once per sequence-parallel group, on that
-    group's first rank. ``parallel`` is only true when every group rank will
+    Both paths produce one output per sequence-parallel group, on that
+    group's first rank. This retains every data-parallel validation sample
+    instead of silently keeping only global rank zero. ``parallel`` is only true when every group rank will
     run the decode body — the collectives inside require uniform
     participation, so no rank-dependent branch may guard them.
     """
@@ -51,7 +51,7 @@ def _decode_participation(fastvideo_args: FastVideoArgs, want_parallel: bool) ->
     sp_group = get_sp_group()
     if bool(want_parallel) and sp_group.world_size > 1:
         return sp_group, sp_group.is_first_rank, True
-    return sp_group, get_world_group().is_first_rank, False
+    return sp_group, sp_group.is_first_rank, False
 
 
 class MiniMaxH3VideoDecodingStage(PipelineStage):
@@ -184,9 +184,9 @@ class MiniMaxH3AudioDecodingStage(PipelineStage):
     @torch.no_grad()
     def forward(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> ForwardBatch:
         """Decode H3 audio latents into a stereo CPU waveform."""
-        # Audio decode is sub-second, so preserve the serial path's global
-        # rank-zero ownership.
-        if model_parallel_is_initialized() and not get_world_group().is_first_rank:
+        # Decode once per sequence-parallel group so data-parallel validation
+        # retains one waveform for every generated sample.
+        if model_parallel_is_initialized() and not get_sp_group().is_first_rank:
             batch.extra["audio"] = torch.empty((0, 2), device="cpu", dtype=torch.float32)
             batch.extra["audio_sample_rate"] = self.audio_vae.sampling_rate
             self._clear_runtime(batch)

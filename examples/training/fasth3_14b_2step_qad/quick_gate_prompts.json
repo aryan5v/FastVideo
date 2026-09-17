@@ -1,0 +1,74 @@
+[
+  {
+    "id": "speech_exact_presenter",
+    "category": "exact_speech",
+    "prompt": "(S1) In a quiet recording studio, a presenter looks directly into the camera and says <d>[English] Fast video and clear audio arrive together.</d> The camera is locked off, the face is well lit, and no music plays.",
+    "expected_audio": "Exact intelligible English sentence with visible lip motion and no music."
+  },
+  {
+    "id": "speech_exact_barista",
+    "category": "exact_speech",
+    "prompt": "(S1) A barista behind a cafe counter smiles and says <d>[English] Your coffee is ready by the window.</d> Cups clink softly in the background while the camera holds a close medium shot.",
+    "expected_audio": "Exact intelligible English sentence, subtle cup sounds, and synchronized lips."
+  },
+  {
+    "id": "dog_bark_visible",
+    "category": "animal_sound",
+    "prompt": "A golden retriever stands beside a red garden gate, looks toward the camera, and gives two distinct barks. Its mouth and chest movement visibly match each bark; birds remain faint in the distance.",
+    "expected_audio": "Two dog barks synchronized to the visible dog."
+  },
+  {
+    "id": "mechanical_press",
+    "category": "visible_mechanical_sound",
+    "prompt": "Inside a clean workshop, a metal stamping press descends once onto a small steel plate. The visible impact produces one sharp metallic clang followed by a short machine hiss. Static three-quarter camera view.",
+    "expected_audio": "One impact clang and a short hiss synchronized to the press."
+  },
+  {
+    "id": "violin_duet",
+    "category": "music",
+    "prompt": "Two violinists perform a gentle chamber duet on a small wooden stage. Their bow strokes are clearly visible and the stereo violin music follows the motion, with quiet room ambience and no speech.",
+    "expected_audio": "Coherent stereo violin duet synchronized to bow motion."
+  },
+  {
+    "id": "silent_snow",
+    "category": "near_silence",
+    "prompt": "A wide locked shot of fresh snow falling over an empty field at dawn. Nothing moves except soft snowflakes and distant tree branches. The scene is nearly silent, with only a very faint winter breeze and no music or speech.",
+    "expected_audio": "Near silence without hiss, line noise, speech, or music."
+  },
+  {
+    "id": "closeup_woman",
+    "category": "human_closeup",
+    "prompt": "Close-up portrait of a woman in warm window light listening thoughtfully, blinking naturally, then taking a quiet breath. Fine skin and eye detail, shallow depth of field, soft indoor room tone, no speech.",
+    "expected_audio": "Subtle room tone and breath without synthetic speech."
+  },
+  {
+    "id": "closeup_man_laugh",
+    "category": "human_closeup",
+    "prompt": "Close-up portrait of an older man outdoors who breaks into a brief natural laugh. His eyes, cheeks, mouth, and shoulders move consistently; the laugh is intelligible and synchronized, with light park ambience.",
+    "expected_audio": "Brief synchronized natural laugh with park ambience."
+  },
+  {
+    "id": "motorcycle_tracking",
+    "category": "large_motion",
+    "prompt": "A motorcycle accelerates along a wet coastal road while the camera tracks beside it at speed. Water sprays from the tires, scenery moves rapidly, and the engine pitch rises with acceleration in stereo.",
+    "expected_audio": "Engine pitch and tire spray synchronized to acceleration and motion."
+  },
+  {
+    "id": "basketball_pan",
+    "category": "large_motion",
+    "prompt": "An athlete sprints across an indoor basketball court, catches a fast pass, and completes a powerful dunk as the camera pans quickly. Sneakers squeak, the rim rattles at impact, and the crowd reacts once.",
+    "expected_audio": "Squeaks, one rim impact, and crowd reaction synchronized to the action."
+  },
+  {
+    "id": "two_shot_transition",
+    "category": "two_shot_transition",
+    "prompt": "A two-shot sequence: first, a wide view of a steam train entering a rural station with rhythmic wheel sounds; then a clean cut to a close view of the conductor opening a carriage door as steam hisses. Audio perspective changes naturally after the cut.",
+    "expected_audio": "Wheel rhythm before the cut and close steam hiss after it, with no desynchronization."
+  },
+  {
+    "id": "onscreen_text",
+    "category": "onscreen_text",
+    "prompt": "A clean product-demo shot of a small electronic sign on a desk. The display clearly reads FAST H3 in large white capital letters while a hand presses one button and a single soft confirmation beep sounds. Locked camera, neutral background.",
+    "expected_audio": "One confirmation beep synchronized to the button press; on-screen text should read FAST H3."
+  }
+]

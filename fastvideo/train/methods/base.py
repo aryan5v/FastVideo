@@ -109,6 +109,17 @@ class TrainingMethod(torch.nn.Module, ABC):
     def _lr_scheduler_dict(self) -> dict[str, Any]:
         ...
 
+    def apply_configured_lrs(self) -> None:
+        """Re-apply the config's learning rates to live optimizers/schedulers.
+
+        Called after a checkpoint resume when
+        ``training.checkpoint.reset_lr_on_resume`` is set: DCP restores
+        param-group ``lr``/``initial_lr`` and scheduler ``base_lrs`` from the
+        checkpoint, which would otherwise silently override an LR change in
+        the YAML. Methods with per-role LRs override this.
+        """
+        return None
+
     def checkpoint_state(self) -> dict[str, Any]:
         """Return DCP-ready checkpoint state for all trainable roles.
 
@@ -143,6 +154,41 @@ class TrainingMethod(torch.nn.Module, ABC):
                 states[f"schedulers.{role}"] = SchedulerWrapper(sched)
 
         return states
+
+    def inference_checkpoint_modules(
+        self,
+        role: str = "student",
+    ) -> dict[str, torch.nn.Module]:
+        """Return the complete modules that form an inference checkpoint.
+
+        This intentionally does not reuse :meth:`checkpoint_state`: resumable
+        state includes optimizers and every trainable role, while inference
+        exports select one explicit role and must retain frozen parameters too.
+        Methods with a different deployable role contract may override this
+        hook; EMA is never selected implicitly.
+        """
+        model = self._role_models.get(role)
+        if model is None:
+            raise ValueError(f"Inference checkpoint role {role!r} is not available; "
+                             f"known roles: {sorted(self._role_models)}")
+        transformer = getattr(model, "transformer", None)
+        if not isinstance(transformer, torch.nn.Module):
+            raise ValueError(f"Inference checkpoint role {role!r} has no transformer module")
+        return {"transformer": transformer}
+
+    def inference_checkpoint_base_model_path(
+        self,
+        role: str = "student",
+    ) -> str:
+        """Return the immutable model directory supplying non-trained parts."""
+        model = self._role_models.get(role)
+        if model is None:
+            raise ValueError(f"Inference checkpoint role {role!r} is not available; "
+                             f"known roles: {sorted(self._role_models)}")
+        path = str(getattr(model, "_init_from", "") or "")
+        if not path:
+            raise ValueError(f"Inference checkpoint role {role!r} does not expose its init_from model path")
+        return path
 
     def backward(
         self,
@@ -182,7 +228,7 @@ class TrainingMethod(torch.nn.Module, ABC):
         DCP needs matching entries to load into; without them
         the saved optimizer state is silently dropped.
         """
-        for opt in self.get_optimizers(0):
+        for opt in self._optimizer_dict.values():
             for group in opt.param_groups:
                 for p in group["params"]:
                     if not p.requires_grad:
@@ -275,6 +321,6 @@ class TrainingMethod(torch.nn.Module, ABC):
     def _infer_attn_kind(self) -> Literal["dense", "vsa"]:
         """Derive metadata mode from the student's resolved backend."""
         backend = (self.student.attention_backend_name or envs.FASTVIDEO_ATTENTION_BACKEND)
-        if backend == "VIDEO_SPARSE_ATTN":
+        if backend in ("VIDEO_SPARSE_ATTN", "VIDEO_SPARSE_ATTN_H3"):
             return "vsa"
         return "dense"

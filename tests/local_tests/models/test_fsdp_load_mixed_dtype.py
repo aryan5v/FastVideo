@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Mixed-precision parameter loading coverage for native model dtype policies."""
 
+import argparse
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -60,6 +64,25 @@ class _NestedMixedDtypeModel(torch.nn.Module):
         """Run the sharded child and consume both root parameters."""
         hidden_states = self.blocks[0](hidden_states)
         return hidden_states * self.root_bulk + self.root_sensitive.to(hidden_states.dtype)
+
+
+class _GroupedMixedDtypeModel(torch.nn.Module):
+    """Tiny model declaring one FP32 compute module."""
+
+    _keep_in_fp32_modules = frozenset({"sensitive"})
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = torch.nn.Linear(2, 2, dtype=torch.bfloat16)
+        self.sensitive = torch.nn.Linear(2, 2, dtype=torch.float32)
+
+    def _get_parameter_dtype(self, name: str, default_dtype: torch.dtype) -> torch.dtype:
+        return torch.float32 if name.startswith("sensitive.") else default_dtype
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = self.sensitive(hidden_states.float()).to(input_dtype)
+        return self.block(hidden_states)
 
 
 class _RouterBufferModel(torch.nn.Module):
@@ -135,6 +158,47 @@ def test_training_rejection_uses_fsdp_parameter_dtype() -> None:
         )
 
 
+def test_declared_fp32_module_gets_separate_fsdp_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _GroupedMixedDtypeModel()
+    calls: list[tuple[torch.nn.Module, dict]] = []
+
+    monkeypatch.setattr(
+        "fastvideo.models.loader.fsdp_load.fully_shard",
+        lambda module, **kwargs: calls.append((module, kwargs)),
+    )
+    shard_model(
+        model,
+        cpu_offload=False,
+        mp_policy=MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            output_dtype=None,
+            cast_forward_inputs=False,
+        ),
+        mesh=None,
+        fsdp_shard_conditions=[lambda name, module: name == "block"],
+        pin_cpu_memory=False,
+    )
+
+    assert [module for module, _ in calls] == [model.block, model.sensitive, model]
+    assert [kwargs["mp_policy"].param_dtype for _, kwargs in calls] == [
+        torch.bfloat16,
+        torch.float32,
+        torch.bfloat16,
+    ]
+    assert all("ignored_params" not in kwargs for _, kwargs in calls)
+
+    with pytest.raises(ValueError, match="contains a declared FP32 compute group"):
+        shard_model(
+            _GroupedMixedDtypeModel(),
+            cpu_offload=False,
+            mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16),
+            mesh=None,
+            fsdp_shard_conditions=[lambda name, module: name == ""],
+            pin_cpu_memory=False,
+        )
+
+
 def test_nested_fsdp_ignores_selected_fp32_parameters() -> None:
     """Run a CUDA forward with bf16 DTensors and replicated fp32 parameters."""
     if os.environ.get("LINGBOT_VIDEO_RUN_GPU_TESTS") != "1":
@@ -170,3 +234,88 @@ def test_nested_fsdp_ignores_selected_fp32_parameters() -> None:
     assert isinstance(model.root_bulk, DTensor)
     assert not isinstance(model.root_sensitive, DTensor)
     assert model.root_sensitive.dtype == torch.float32
+
+
+def _run_grouped_fsdp_worker() -> None:
+    torch.distributed.init_process_group("nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device("cuda", local_rank)
+    torch.cuda.set_device(device)
+    try:
+        torch.manual_seed(7)
+        model = _GroupedMixedDtypeModel().to(device)
+        observed: dict[str, tuple[torch.dtype, torch.dtype]] = {}
+
+        def record(name: str):
+            def hook(module, inputs, output):
+                observed[name] = (inputs[0].dtype, module.weight.dtype)
+                assert output.dtype == module.weight.dtype
+
+            return hook
+
+        model.block.register_forward_hook(record("block"))
+        model.sensitive.register_forward_hook(record("sensitive"))
+        mesh = torch.distributed.init_device_mesh(
+            "cuda",
+            mesh_shape=(1, torch.distributed.get_world_size()),
+            mesh_dim_names=("replicate", "shard"),
+        )
+        shard_model(
+            model,
+            cpu_offload=False,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                output_dtype=None,
+                cast_forward_inputs=False,
+            ),
+            mesh=mesh,
+            fsdp_shard_conditions=[lambda name, module: name == "block"],
+            pin_cpu_memory=False,
+        )
+
+        output = model(torch.randn(4, 2, device=device, dtype=torch.bfloat16))
+        assert output.dtype == torch.bfloat16
+        output.float().square().mean().backward()
+        assert observed == {
+            "block": (torch.bfloat16, torch.bfloat16),
+            "sensitive": (torch.float32, torch.float32),
+        }
+        for parameter in model.parameters():
+            assert isinstance(parameter, DTensor)
+            assert parameter.grad is not None
+            assert torch.isfinite(parameter.grad.to_local()).all()
+            full_grad = parameter.grad.full_tensor()
+            rank_zero_grad = full_grad.clone()
+            torch.distributed.broadcast(rank_zero_grad, src=0)
+            torch.testing.assert_close(full_grad, rank_zero_grad)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_declared_fp32_group_distributed_forward_backward() -> None:
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node=2",
+            str(Path(__file__).resolve()),
+            "--grouped-fsdp-worker",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert process.returncode == 0, f"STDOUT:\n{process.stdout}\nSTDERR:\n{process.stderr}"
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--grouped-fsdp-worker", action="store_true")
+    if parser.parse_args().grouped_fsdp_worker:
+        _run_grouped_fsdp_worker()

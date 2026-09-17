@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Callback base class and CallbackDict manager.
-
-Adapted from FastGen's callback pattern to FastVideo's types.
-"""
+"""Callback base class and CallbackDict manager."""
 
 from __future__ import annotations
 
@@ -24,6 +21,7 @@ _BUILTIN_CALLBACKS: dict[str, str] = {
     "grad_clip": "fastvideo.train.callbacks.grad_clip.GradNormClipCallback",
     "validation": "fastvideo.train.callbacks.validation.ValidationCallback",
     "ema": "fastvideo.train.callbacks.ema.EMACallback",
+    "latent_vis": "fastvideo.train.callbacks.latent_vis.LatentVisCallback",
 }
 
 
@@ -72,6 +70,11 @@ class Callback:
         iteration: int = 0,
     ) -> None:
         pass
+
+    def will_run_validation(self, iteration: int = 0) -> bool:
+        """Return whether this callback will validate at ``iteration``."""
+        del iteration
+        return False
 
     def on_validation_end(
         self,
@@ -179,3 +182,7 @@ class CallbackDict:
                 fn(*args, **kwargs)
 
         return _dispatch
+
+    def will_run_validation(self, iteration: int = 0) -> bool:
+        """Return whether any configured callback schedules validation now."""
+        return any(cb.will_run_validation(iteration) for cb in self._callbacks.values())

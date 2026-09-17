@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal, TYPE_CHECKING
 
 import torch
 
+import fastvideo.envs as envs
+from fastvideo.attention.backends.video_sparse_attn_h3 import (
+    MiniMaxH3VSAMetadataBuilder, )
+from fastvideo.dataset.shape_bucket import parse_video_shape_bucket_id
 from fastvideo.distributed import get_sp_group
 from fastvideo.forward_context import set_forward_context
 from fastvideo.models.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 from fastvideo.pipelines import TrainingBatch
 from fastvideo.pipelines.basic.minimax_h3.packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_TEXT_TAG,
     MiniMaxH3PackedLayout,
     audio_latent_num_frames,
@@ -21,7 +27,10 @@ from fastvideo.pipelines.basic.minimax_h3.packing import (
     patchify_video_latents,
     unpack_audio_tokens,
     unpatchify_video_tokens,
+    video_latent_num_frames,
 )
+from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_denoising import (
+    _h3_vsa_prefix_segments, )
 from fastvideo.platforms import AttentionBackendEnum
 
 from fastvideo.train.models.base import ModelBase, NoisePrediction
@@ -38,13 +47,31 @@ _VIDEO_SCHEDULER_SHIFT = 12.0
 _AUDIO_SCHEDULER_SHIFT = 3.0
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
+_AUDIO_SAMPLE_RATE = 32_000
+
+# Dense TORCH_SDPA is the default; per-role overrides allow FLASH_ATTN
+# (teacher/critic, FA4 via FASTVIDEO_FA4=1) and the packed-sequence VSA-H3
+# backend (distillation student).
+_ALLOWED_ATTENTION_BACKENDS = (
+    AttentionBackendEnum.TORCH_SDPA,
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3,
+)
 
 
-def shift_noise_amount(base_noise_amount: torch.Tensor, shift: float) -> torch.Tensor:
-    """Apply the MiniMax H3 rational shift to a unit noise amount."""
+def shift_noise_amount(
+    base_noise_amount: torch.Tensor,
+    shift: float,
+    *,
+    max_noise_amount: float = 1.0,
+) -> torch.Tensor:
+    """Apply the MiniMax H3 rational shift on ``[0, max_noise_amount]``."""
     if shift <= 0:
         raise ValueError(f"shift must be positive, got {shift}")
-    return shift * base_noise_amount / (1.0 + (shift - 1.0) * base_noise_amount)
+    if not 0.0 < max_noise_amount <= 1.0:
+        raise ValueError("max_noise_amount must satisfy 0 < max <= 1, "
+                         f"got {max_noise_amount}")
+    return (shift * base_noise_amount * max_noise_amount / (base_noise_amount * (shift - 1.0) + max_noise_amount))
 
 
 class MiniMaxH3Model(ModelBase):
@@ -62,16 +89,19 @@ class MiniMaxH3Model(ModelBase):
         enable_gradient_checkpointing_type: str | None = None,
         transformer_override_safetensor: str | None = None,
         attention_backend: AttentionBackendEnum | str | None = AttentionBackendEnum.TORCH_SDPA,
+        construction_precision: str | None = None,
     ) -> None:
         """Validate the single-document T2VA contract and load the transformer."""
         super().__init__(
             trainable=trainable,
             attention_backend=attention_backend,
         )
-        # PyTorch scaled dot product attention (SDPA) provides dense attention
-        # without adding another attention-kernel dependency to H3 training.
-        if self.attention_backend != AttentionBackendEnum.TORCH_SDPA:
-            raise ValueError("MiniMaxH3Model requires the TORCH_SDPA attention backend")
+        # Attention layers bind their backend during construction, so this is
+        # the per-role selection point (student/teacher/critic can differ).
+        if self.attention_backend not in _ALLOWED_ATTENTION_BACKENDS:
+            allowed = ", ".join(b.name for b in _ALLOWED_ATTENTION_BACKENDS)
+            raise ValueError("MiniMaxH3Model supports the attention backends "
+                             f"{{{allowed}}}, got {self.attention_backend}")
         if training_config.pipeline_config is None:
             raise ValueError("MiniMaxH3Model requires a resolved MiniMax H3 pipeline config")
         # Packed row indices describe one text-video-audio document without a
@@ -83,15 +113,19 @@ class MiniMaxH3Model(ModelBase):
         if float(training_config.data.training_cfg_rate) != 0.0:
             raise ValueError("MiniMaxH3Model requires training.data.training_cfg_rate=0.0")
         # Joint supervision requires paired video and stereo-audio latents from
-        # every parquet row.
-        if str(training_config.data.preprocessed_data_type) != "t2va":
-            raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type='t2va'")
-
-        # FastVideo's Fully Sharded Data Parallel loading path requires one BF16
-        # parameter dtype, including modules that H3 inference keeps in FP32.
-        training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
+        # every parquet row ('t2va'). 'text_only' rows carry prompt conditioning
+        # alone and are valid only for data-free methods that synthesize latent
+        # shapes from config (DMD2 enforces rollout_mode='simulate' for them).
+        if str(training_config.data.preprocessed_data_type) not in ("t2va", "text_only"):
+            raise ValueError("MiniMaxH3Model requires training.data.preprocessed_data_type "
+                             "'t2va' or 'text_only'")
+        configured_precision = str(getattr(training_config, "dit_precision", "fp32"))
+        if trainable and construction_precision not in (None, configured_precision):
+            raise ValueError("A trainable MiniMaxH3 role cannot override construction_precision; "
+                             "FP32 optimizer masters must follow training.dit_precision")
 
         self._init_from = str(init_from)
+        self._construction_precision = construction_precision
         self.training_config = training_config
         self.transformer = self._load_transformer(
             trainable=trainable,
@@ -123,6 +157,7 @@ class MiniMaxH3Model(ModelBase):
             override_transformer_cls_name=self._transformer_cls_name,
             transformer_override_safetensor=transformer_override_safetensor,
             attention_backend=self.attention_backend,
+            construction_precision=self._construction_precision,
         )
         checkpointing_type = (enable_gradient_checkpointing_type
                               or self.training_config.model.enable_gradient_checkpointing_type)
@@ -135,15 +170,17 @@ class MiniMaxH3Model(ModelBase):
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
         """Load precomputed text embeddings and paired video-audio latents."""
-        from fastvideo.dataset.dataloader.schema import pyarrow_schema_t2va
+        from fastvideo.dataset.dataloader.schema import (pyarrow_schema_t2va, pyarrow_schema_text_only)
         from fastvideo.train.utils.dataloader import build_parquet_t2v_train_dataloader
 
         self.sp_group = get_sp_group()
         text_config = training_config.pipeline_config.text_encoder_configs[0]  # type: ignore[union-attr]
+        parquet_schema = (pyarrow_schema_text_only
+                          if str(training_config.data.preprocessed_data_type) == "text_only" else pyarrow_schema_t2va)
         self.dataloader = build_parquet_t2v_train_dataloader(
             training_config.data,
             text_len=int(text_config.arch_config.text_len),
-            parquet_schema=pyarrow_schema_t2va,
+            parquet_schema=parquet_schema,
         )
         self.start_step = 0
 
@@ -154,30 +191,57 @@ class MiniMaxH3Model(ModelBase):
         dtype: torch.dtype,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resolve fixed visual and stereo-audio latent tensors for one sample."""
+        """Resolve fixed or native visual and stereo-audio latents."""
         data_config = self.training_config.data
+        native_shapes = bool(getattr(data_config, "native_shape_bucketing", False))
         if latents_source == "data":
             if "vae_latent" not in raw_batch or "audio_latent" not in raw_batch:
                 raise ValueError("A T2VA batch requires vae_latent and audio_latent tensors")
             video_latents = raw_batch["vae_latent"]
             audio_latents = raw_batch["audio_latent"]
         elif latents_source == "zeros":
+            latent_frames = int(data_config.num_latent_t)
+            height = int(data_config.num_height)
+            width = int(data_config.num_width)
+            num_frames = int(data_config.num_frames)
+            if native_shapes:
+                bucket_id = raw_batch.get("_shape_bucket_id")
+                if not isinstance(bucket_id, str):
+                    raise ValueError(
+                        "Native-shape data-free batches require the exact-shape sampler to set _shape_bucket_id")
+                bucket = parse_video_shape_bucket_id(bucket_id)
+                width = bucket.width
+                height = bucket.height
+                num_frames = bucket.num_frames
+                latent_frames = video_latent_num_frames(num_frames)
+                if width % MINIMAX_H3_CANVAS_MULTIPLE or height % MINIMAX_H3_CANVAS_MULTIPLE:
+                    raise ValueError(f"Native pixel geometry {width}x{height} must use the H3 canvas multiple "
+                                     f"{MINIMAX_H3_CANVAS_MULTIPLE}")
+                latent_geometry = (latent_frames, height // 16, width // 16)
+                patch_size = tuple(int(value) for value in self.transformer.patch_size)
+                if any(value % patch for value, patch in zip(latent_geometry, patch_size, strict=True)):
+                    raise ValueError(
+                        f"Native latent geometry {latent_geometry} is not divisible by transformer patch {patch_size}")
             video_latents = torch.zeros(
                 1,
                 _VIDEO_LATENT_CHANNELS,
-                data_config.num_latent_t,
-                data_config.num_height // 16,
-                data_config.num_width // 16,
+                latent_frames,
+                height // 16,
+                width // 16,
             )
             audio_latents = torch.zeros(
                 1,
                 MINIMAX_H3_AUDIO_CHANNELS,
                 _AUDIO_LATENT_CHANNELS,
-                audio_latent_num_frames(data_config.num_frames),
+                audio_latent_num_frames(num_frames),
             )
         else:
             raise ValueError(f"Unknown latents_source: {latents_source!r}")
 
+        if not isinstance(video_latents, torch.Tensor):
+            raise ValueError(f"vae_latent must be a tensor, got {type(video_latents).__name__}")
+        if not isinstance(audio_latents, torch.Tensor):
+            raise ValueError(f"audio_latent must be a tensor, got {type(audio_latents).__name__}")
         if video_latents.ndim != 5 or tuple(video_latents.shape[:2]) != (1, _VIDEO_LATENT_CHANNELS):
             raise ValueError("vae_latent must have shape [1, 24, latent_frames, latent_height, latent_width], "
                              f"got {tuple(video_latents.shape)}")
@@ -188,18 +252,101 @@ class MiniMaxH3Model(ModelBase):
         ):
             raise ValueError("audio_latent must have shape [1, 2, 32, audio_frames], "
                              f"got {tuple(audio_latents.shape)}")
-        if data_config.num_latent_t > 0:
-            video_latents = video_latents[:, :, :data_config.num_latent_t]
-        expected_audio_frames = audio_latent_num_frames(data_config.num_frames)
-        audio_latents = audio_latents[:, :, :, :expected_audio_frames]
-        if video_latents.shape[2] != data_config.num_latent_t:
-            raise ValueError("vae_latent contains fewer frames than training.data.num_latent_t")
-        if audio_latents.shape[-1] != expected_audio_frames:
-            raise ValueError("audio_latent length does not match training.data.num_frames")
+
+        if latents_source == "data" and native_shapes:
+            self._validate_native_latents(raw_batch, video_latents, audio_latents)
+        elif not native_shapes:
+            # Preserve the legacy fixed-shape contract for configs that have
+            # not opted into exact-shape bucketing.
+            if data_config.num_latent_t > 0:
+                video_latents = video_latents[:, :, :data_config.num_latent_t]
+            expected_audio_frames = audio_latent_num_frames(data_config.num_frames)
+            audio_latents = audio_latents[:, :, :, :expected_audio_frames]
+            if video_latents.shape[2] != data_config.num_latent_t:
+                raise ValueError("vae_latent contains fewer frames than training.data.num_latent_t")
+            if audio_latents.shape[-1] != expected_audio_frames:
+                raise ValueError("audio_latent length does not match training.data.num_frames")
         return (
             video_latents.to(device=device, dtype=dtype),
             audio_latents.to(device=device, dtype=dtype),
         )
+
+    def _validate_native_latents(
+        self,
+        raw_batch: dict[str, Any],
+        video_latents: torch.Tensor,
+        audio_latents: torch.Tensor,
+    ) -> None:
+        """Cross-check the canonical bucket, row metadata, and latent clocks."""
+        bucket_id = raw_batch.get("_shape_bucket_id")
+        if not isinstance(bucket_id, str):
+            raise ValueError("Native-shape T2VA batches require the exact-shape sampler to set _shape_bucket_id")
+        bucket = parse_video_shape_bucket_id(bucket_id)
+
+        infos = raw_batch.get("info_list")
+        if not isinstance(infos, list) or len(infos) != 1 or not isinstance(infos[0], dict):
+            raise ValueError("Native-shape T2VA batches require exactly one info_list metadata record")
+        info = infos[0]
+
+        def _metadata_int(name: str) -> int:
+            value = info.get(name)
+            if value is None or isinstance(value, bool):
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}")
+            try:
+                result = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}") from exc
+            if result <= 0 or result != value:
+                raise ValueError(f"T2VA metadata {name!r} must be a positive integer, got {value!r}")
+            return result
+
+        width = _metadata_int("width")
+        height = _metadata_int("height")
+        num_frames = _metadata_int("num_frames")
+        audio_sample_rate = _metadata_int("audio_sample_rate")
+        if (width, height, num_frames) != (bucket.width, bucket.height, bucket.num_frames):
+            raise ValueError(f"Shape bucket {bucket_id!r} disagrees with row metadata "
+                             f"width={width}, height={height}, num_frames={num_frames}")
+        if audio_sample_rate != _AUDIO_SAMPLE_RATE:
+            raise ValueError(
+                f"MiniMax H3 T2VA audio must be encoded at {_AUDIO_SAMPLE_RATE} Hz, got {audio_sample_rate}")
+        fps_value = info.get("fps")
+        if fps_value is None:
+            raise ValueError("T2VA metadata 'fps' must be numeric, got None")
+        try:
+            fps = float(fps_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"T2VA metadata 'fps' must be numeric, got {info.get('fps')!r}") from exc
+        if not math.isfinite(fps) or not math.isclose(fps, 24.0, rel_tol=0.0, abs_tol=0.05):
+            raise ValueError(f"MiniMax H3 T2VA video must use the 24 fps clock, got {fps}")
+
+        if width % MINIMAX_H3_CANVAS_MULTIPLE or height % MINIMAX_H3_CANVAS_MULTIPLE:
+            raise ValueError(f"Native pixel geometry {width}x{height} must use the H3 canvas multiple "
+                             f"{MINIMAX_H3_CANVAS_MULTIPLE}")
+        expected_video_shape = (
+            1,
+            _VIDEO_LATENT_CHANNELS,
+            video_latent_num_frames(num_frames),
+            height // 16,
+            width // 16,
+        )
+        expected_audio_shape = (
+            1,
+            MINIMAX_H3_AUDIO_CHANNELS,
+            _AUDIO_LATENT_CHANNELS,
+            audio_latent_num_frames(num_frames),
+        )
+        if tuple(video_latents.shape) != expected_video_shape:
+            raise ValueError(f"vae_latent shape does not match {bucket_id!r}: expected {expected_video_shape}, "
+                             f"got {tuple(video_latents.shape)}")
+        if tuple(audio_latents.shape) != expected_audio_shape:
+            raise ValueError(f"audio_latent shape does not match the {num_frames}-frame H3 audio clock: "
+                             f"expected {expected_audio_shape}, got {tuple(audio_latents.shape)}")
+        latent_geometry = (expected_video_shape[2], expected_video_shape[3], expected_video_shape[4])
+        patch_size = tuple(int(value) for value in self.transformer.patch_size)
+        if any(value % patch for value, patch in zip(latent_geometry, patch_size, strict=True)):
+            raise ValueError(
+                f"Native latent geometry {latent_geometry} is not divisible by transformer patch {patch_size}")
 
     def _sample_noise_amounts(
         self,
@@ -294,7 +441,40 @@ class MiniMaxH3Model(ModelBase):
         training_batch.minimax_h3_layout = layout
         training_batch.attn_metadata = None
         training_batch.attn_metadata_vsa = None
+        self._maybe_build_vsa_metadata(training_batch)
         return training_batch
+
+    def _maybe_build_vsa_metadata(self, batch: TrainingBatch) -> None:
+        """Populate the VSA view when this model runs the VSA-H3 backend.
+
+        Methods route it through ``predict_noise(attn_kind="vsa")``; dense
+        models keep ``attn_metadata_vsa`` as ``None`` so their forwards stay
+        dense. One builder per model keeps the padded tile buffer reused
+        across steps (see ``MiniMaxH3VSAMetadata.tile_buf_holder``).
+        """
+        backend = (getattr(self, "attention_backend_name", None) or envs.FASTVIDEO_ATTENTION_BACKEND)
+        if backend != "VIDEO_SPARSE_ATTN_H3":
+            return
+        layout = batch.minimax_h3_layout
+        patch_size = tuple(self.transformer.patch_size)
+        builder = getattr(self, "_vsa_metadata_builder", None)
+        if builder is None:
+            builder = self._vsa_metadata_builder = MiniMaxH3VSAMetadataBuilder()
+        batch.attn_metadata_vsa = builder.build(
+            # Training builds one metadata per batch and reuses it across the
+            # step's forwards; the step index only feeds probe bookkeeping.
+            current_timestep=0,
+            raw_latent_shape=(
+                layout.num_video_latent_frames,
+                layout.latent_height,
+                layout.latent_width,
+            ),
+            patch_size=patch_size,
+            VSA_sparsity=float(self.training_config.vsa_sparsity),
+            prefix_segments=_h3_vsa_prefix_segments(layout, patch_size),
+            device=self.device,
+            tile_size=int(self.training_config.vsa_tile_size),
+        )
 
     def add_noise(
         self,
@@ -320,10 +500,12 @@ class MiniMaxH3Model(ModelBase):
     ) -> NoisePrediction:
         """Pack modality timesteps and convert H3 outputs to noise-minus-clean."""
         del timestep
-        if not conditional or cfg_uncond is not None:
-            raise ValueError("MiniMaxH3Model predicts one conditional T2VA sample")
-        if attn_kind != "dense":
-            raise ValueError("MiniMaxH3Model supports dense attention for training")
+        # Under dense backends both metadata views are None, so "vsa" silently
+        # means dense (mirrors WanModel). MiniMaxH3DMDModel.prepare_batch
+        # populates attn_metadata_vsa when the role runs VIDEO_SPARSE_ATTN_H3.
+        if attn_kind not in ("dense", "vsa"):
+            raise ValueError(f"Unknown attn_kind: {attn_kind!r}")
+        attn_metadata = (batch.attn_metadata_vsa if attn_kind == "vsa" else batch.attn_metadata)
         layout = batch.minimax_h3_layout
         if not isinstance(layout, MiniMaxH3PackedLayout):
             raise RuntimeError("prepare_batch() must set TrainingBatch.minimax_h3_layout")
@@ -332,8 +514,20 @@ class MiniMaxH3Model(ModelBase):
         if batch.timesteps is None or batch.audio_timesteps is None:
             raise RuntimeError("prepare_batch() must set video and audio timesteps")
 
+        encoder_hidden_states = batch.encoder_hidden_states
+        if not conditional:
+            # H3 has no negative-prompt encoder at training time, so the only
+            # supported unconditional branch (teacher CFG in distillation)
+            # zeroes the text embeddings.
+            if (cfg_uncond or {}).get("text") != "zero":
+                raise ValueError("MiniMaxH3Model unconditional forwards require "
+                                 "method.cfg_uncond={'text': 'zero'}")
+            encoder_hidden_states = torch.zeros_like(encoder_hidden_states)
+
         dtype = torch.bfloat16
         device = self.device
+        video_input_dtype = noisy_latents.dtype
+        audio_input_dtype = batch.audio_noisy_model_input.dtype
         video_bcthw = noisy_latents.permute(0, 2, 1, 3, 4).to(dtype)
         # Match H3 checkpoint token order: video rows flatten
         # (C, patch_t, patch_h, patch_w), while audio rows flatten stereo
@@ -352,14 +546,14 @@ class MiniMaxH3Model(ModelBase):
         unique_timesteps = unique_timesteps.to(device)
         timestep_indices = timestep_indices.to(device)
 
-        with torch.autocast(device.type, dtype=dtype), set_forward_context(
+        with set_forward_context(
                 current_timestep=unique_timesteps,
-                attn_metadata=None,
+                attn_metadata=attn_metadata,
         ):
             video_velocity, audio_velocity = self.transformer(
                 hidden_states=video_rows[None],
                 audio_hidden_states=audio_rows[None],
-                encoder_hidden_states=batch.encoder_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
                 timestep=unique_timesteps,
                 timestep_indices=timestep_indices,
                 token_tags=layout.token_tags.to(device),
@@ -379,7 +573,10 @@ class MiniMaxH3Model(ModelBase):
             self.transformer.patch_size,
         ).permute(0, 2, 1, 3, 4)
         audio_prediction = unpack_audio_tokens(audio_velocity[0], num_audio_latents)[None]
-        return -video_prediction, -audio_prediction
+        return (
+            (-video_prediction).to(video_input_dtype),
+            (-audio_prediction).to(audio_input_dtype),
+        )
 
     def backward(
         self,
@@ -390,6 +587,19 @@ class MiniMaxH3Model(ModelBase):
     ) -> None:
         """Restore the forward context and average accumulated microbatch gradients."""
         timesteps, attn_metadata = ctx
+        expected_device_type = self.device.type
+        offenders = []
+        for name, param in self.transformer.named_parameters():
+            local = getattr(param, "_local_tensor", param)
+            if local.device.type != expected_device_type:
+                offenders.append(f"param {name} on {local.device}")
+            if param.grad is not None:
+                grad_local = getattr(param.grad, "_local_tensor", param.grad)
+                if grad_local.device.type != expected_device_type:
+                    offenders.append(f"grad {name} on {grad_local.device}")
+        if offenders:
+            raise RuntimeError(f"{len(offenders)} training tensors off-CUDA before backward; "
+                               f"first offenders: {offenders[:8]}")
         with set_forward_context(
                 current_timestep=timesteps,
                 attn_metadata=attn_metadata,

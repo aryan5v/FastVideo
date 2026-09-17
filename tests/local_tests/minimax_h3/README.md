@@ -1,5 +1,8 @@
 # MiniMax H3 validation
 
+Related training handoff:
+[`HANDOFF-h3-dmd2-vsa.md`](../../../HANDOFF-h3-dmd2-vsa.md).
+
 Local tests keep checks that need the pinned Diffusers source, published weights, or the public registry surface.
 FastVideo-owned unit contracts belong under `fastvideo/tests/`.
 

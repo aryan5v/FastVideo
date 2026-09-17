@@ -229,6 +229,11 @@ class MiniMaxH3Attention(nn.Module):
         reach a zero gate for it to ever train).
         """
         if torch.is_grad_enabled():
+            # Training can turn the zero-init gate nonzero; drop the cached
+            # answer so the next no-grad forward (validation sampling)
+            # re-tests the weight instead of skipping a branch that has
+            # started contributing.
+            self._gate_compress_active = None
             return True
         if self._gate_compress_active is None:
             if torch.compiler.is_compiling():
@@ -481,7 +486,6 @@ class MiniMaxH3TransformerBlock(nn.Module):
         fuse_modulate: bool = False,
         fuse_qknorm_rope: bool = False,
         fuse_swiglu: bool = False,
-        fa4_packed_varlen: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, eps=norm_eps)
@@ -494,7 +498,10 @@ class MiniMaxH3TransformerBlock(nn.Module):
             quant_config,
             prefix=f"{prefix}.attn",
             fuse_qknorm_rope=fuse_qknorm_rope,
-            fa4_packed_varlen=fa4_packed_varlen,
+            # The packed multimodal document is a single long self-attention
+            # sequence. FA4's varlen API is substantially faster for this
+            # shape; the backend keeps grad/training and non-FA4 calls fixed.
+            fa4_packed_varlen=True,
         )
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = MiniMaxH3FeedForward(
@@ -592,16 +599,12 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
     def _get_parameter_dtype(self, name: str, default_dtype: torch.dtype) -> torch.dtype:
         """Keep the released input, timestep, and output projections in FP32.
 
-        Factorized AdaLN uses FP16; BF16 is ~1.7x worse there.
+        Folded AdaLN parameters follow the enclosing FSDP policy.  In
+        particular, an FP32 training load must keep them as FP32 optimizer
+        masters; pinning the folded weights to FP16 here quantizes every
+        small Adam update before the next forward.  Release checkpoints are
+        still exported in BF16, matching the validated 42-block parent.
         """
-        # Precedence: the factorized-AdaLN FP16 pin wins over
-        # uniform_parameter_dtype on purpose. Under FSDP's one-dtype rule the
-        # resulting mix hard-fails at load time, which beats silently training
-        # AdaLN in BF16. Rank-reduced checkpoints are inference artifacts --
-        # train from the full-rank release.
-        if getattr(self, "adaln_rank", None) is not None and (
-                ".adaln_proj." in name or name.startswith(("norm_out.linear.", "adaln_basis."))):
-            return torch.float16
         if self.config.uniform_parameter_dtype:
             return default_dtype
         return torch.float32 if name.split(".", 1)[0] in self._keep_in_fp32_modules else default_dtype
@@ -666,14 +669,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             prefix=f"{config.prefix}.time_embedder",
         )
         self.adaln_rank: int | None = arch.adaln_rank
-        if self.adaln_rank is not None and config.uniform_parameter_dtype:
-            raise ValueError(
-                "Rank-reduced AdaLN checkpoints (adaln_rank set) cannot be trained: "
-                "uniform_parameter_dtype needs one dtype for every trainable "
-                "parameter, but factorized AdaLN weights are pinned to FP16 "
-                "(BF16 reconstructs them ~1.7x worse). Fine-tune the full-rank "
-                "checkpoint instead, then re-fit the basis with "
-                "scripts/checkpoint_conversion/convert_minimax_h3_adaln_rank.py.")
         adaln_dim = self.adaln_rank or arch.time_embed_dim
         self.adaln_basis = ReplicatedLinear(
             arch.time_embed_dim,
@@ -720,7 +715,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                 fuse_modulate="modulate" in self.enabled_fusions,
                 fuse_qknorm_rope="qknorm_rope" in self.enabled_fusions,
                 fuse_swiglu="swiglu" in self.enabled_fusions,
-                fa4_packed_varlen=envs.FASTVIDEO_MINIMAX_H3_FA4_PACKED_VARLEN,
             ) for index in range(arch.num_layers)
         ])
         self.norm_out = MiniMaxH3AdaLayerNormOut(

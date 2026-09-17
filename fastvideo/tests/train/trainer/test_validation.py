@@ -84,6 +84,27 @@ class _DummyMethod:
         self.weight.grad = None
 
 
+class _RecordingCheckpointManager:
+
+    def __init__(self) -> None:
+        self.inference_events: list[tuple[int, bool]] = []
+        self.training_events: list[int] = []
+        self.final_events: list[int] = []
+
+    def maybe_resume(self, *, resume_from_checkpoint: str) -> None:
+        assert resume_from_checkpoint == ""
+        return None
+
+    def maybe_save_inference(self, step: int, *, validation_scheduled: bool) -> None:
+        self.inference_events.append((step, validation_scheduled))
+
+    def maybe_save(self, step: int) -> None:
+        self.training_events.append(step)
+
+    def save_final(self, step: int) -> None:
+        self.final_events.append(step)
+
+
 def test_trainer_runs_validation_callback_during_training(monkeypatch, ) -> None:
     tracker = _DummyTracker()
     group = SimpleNamespace(rank=0, local_rank=0, rank_in_group=0, world_size=1)
@@ -119,6 +140,7 @@ def test_trainer_runs_validation_callback_during_training(monkeypatch, ) -> None
         callback_configs=callback_configs,
     )
     method = _DummyMethod()
+    checkpoint_manager = _RecordingCheckpointManager()
 
     trainer.run(
         method,
@@ -126,6 +148,7 @@ def test_trainer_runs_validation_callback_during_training(monkeypatch, ) -> None
             "sample": "x"
         }],
         max_steps=3,
+        checkpoint_manager=checkpoint_manager,
     )
 
     validation = trainer.callbacks._callbacks["validation"]
@@ -137,3 +160,11 @@ def test_trainer_runs_validation_callback_during_training(monkeypatch, ) -> None
     assert method.optimizer_steps == [1, 2, 3]
     assert [step for _, step in tracker.logs] == [1, 2, 3]
     assert tracker.finished is True
+    assert checkpoint_manager.inference_events == [
+        (0, True),
+        (1, False),
+        (2, True),
+        (3, False),
+    ]
+    assert checkpoint_manager.training_events == [1, 2, 3]
+    assert checkpoint_manager.final_events == [3]

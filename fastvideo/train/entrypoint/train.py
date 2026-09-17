@@ -58,11 +58,19 @@ def run_training_from_config(
 
     # Auto-set attention backend for model families that require a specific
     # backend at load time, unless the user already overrode it explicitly.
-    if tc.vsa_sparsity > 0.0:
+    if tc.vsa_sparsity > 0.0 and "minimax" not in model_path_lower:
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
             "VIDEO_SPARSE_ATTN",
         )
+    # H3: do NOT push VSA into the env fallback. Training roles take their
+    # backend from per-role model config (student VSA, teacher/critic dense);
+    # the validation/inference pipeline resolves from this env and currently
+    # faults under the VSA-H3 kernel (async CUDA error surfacing as
+    # ncclUnhandledCudaError at the next FSDP all-gather, job 2307).
+    # Until the inference-side VSA path is debugged, H3 validation runs its
+    # native dense backend — a sparse-trained student evaluated dense is a
+    # known contract mismatch, noted in h3_dmd.md.
     elif ("turbodiffusion" in model_path_lower or "turbowan" in model_path_lower):
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
@@ -97,6 +105,11 @@ def run_training_from_config(
     ckpt_config = CheckpointConfig(
         save_steps=int(tc.checkpoint.training_state_checkpointing_steps or 0),
         keep_last=int(tc.checkpoint.checkpoints_total_limit or 0),
+        start_step=int(tc.checkpoint.checkpointing_start_step or 0),
+        save_inference_on_validation=bool(tc.checkpoint.save_inference_checkpoint_on_validation),
+        inference_role=str(tc.checkpoint.inference_checkpoint_role or "student"),
+        inference_dtype=str(tc.checkpoint.inference_checkpoint_dtype or "bfloat16"),
+        require_complete_training_checkpoint=bool(tc.checkpoint.require_complete_training_checkpoint),
     )
 
     checkpoint_manager = CheckpointManager(
