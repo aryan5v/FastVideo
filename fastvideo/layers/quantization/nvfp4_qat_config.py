@@ -45,20 +45,15 @@ from fastvideo.models.utils import set_weight_attrs
 
 logger = logging.getLogger(__name__)
 
-# Wan-style attention + FFN projection layers. Matched as substrings of the
-# layer prefix (e.g. "blocks.0.attn1.to_q" contains "to_q"). Wan's "to_q"/
-# "to_k"/"to_v" also substring-match Kandinsky5's "to_query"/"to_key"/
-# "to_value", so only Kandinsky5's out-projection and FFN names (which don't
-# share a substring with Wan's "to_out"/"ffn.fc_in"/"ffn.fc_out") need to be
-# listed explicitly below.
 DEFAULT_FP4_LAYERS = (
+    "ff.fc_in",
+    "ff.fc_out",
     "ffn.fc_in",
     "ffn.fc_out",
     "to_q",
     "to_k",
     "to_v",
     "to_out",
-    # Kandinsky5
     "self_attention.out_layer",
     "cross_attention.out_layer",
     "feed_forward.mlp.fc_in",
@@ -85,11 +80,6 @@ class NVFP4QATQuantizeMethod(QuantizeMethodBase):
         super().__init__()
         self.weight_fp4 = None
         self.weight_scale = None
-        # Static input global scale factor. Matches the FastVideo-Quantization
-        # production path; recomputing it per-call via a ``.max()`` reduction
-        # (the previous behavior) adds a sync point, costs a kernel launch,
-        # and produces a data-dependent value that prevents CUDA-graph
-        # capture under ``torch.compile(mode='reduce-overhead')``.
         self.x_global_sf = torch.tensor(1.0, device="cuda", dtype=torch.float32)
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
@@ -105,8 +95,6 @@ class NVFP4QATQuantizeMethod(QuantizeMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        # ``_fp4_weight`` carries the (out, in/2) packed fp4 weight, so its
-        # row count is the output dim even after the dense weight is popped.
         out_dim = layer._fp4_weight.shape[0]
         original_shape = x.shape
 
@@ -206,7 +194,6 @@ def convert_model_to_fp4(model: torch.nn.Module) -> None:
 
             weight_local = weight.to_local() if isinstance(weight, DTensor) else weight  # type: ignore[arg-type]
 
-            # Only the reduced scalar needs fp32; avoid a full fp32 copy.
             weight_absmax = (weight_local.detach().abs().nan_to_num().amax().to(dtype=torch.float32))
             weight_global_sf = (448 * 6) / weight_absmax
             fp4_w, fp4_s = _nvfp4_quantize(
@@ -223,8 +210,6 @@ def convert_model_to_fp4(model: torch.nn.Module) -> None:
                 persistent=False,
             )
 
-            # Drop the dense weight as soon as the fp4 buffers are installed
-            # so it cannot keep occupying GPU memory.
             removed_weight = mod._parameters.pop("weight", None)
             if removed_weight is not None:
                 removed_weight.grad = None

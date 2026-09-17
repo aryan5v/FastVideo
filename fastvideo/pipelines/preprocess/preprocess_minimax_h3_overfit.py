@@ -36,8 +36,6 @@ from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_conditioning import 
 from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_input_preparation import MINIMAX_H3_KEYFRAMES_KEY
 from fastvideo.utils import verify_model_config_and_directory
 
-# Match the H3 validation geometry and media rates, and limit both streams to
-# the same maximum duration used by validation.
 NUM_FRAMES = 124
 VIDEO_HEIGHT = 768
 VIDEO_WIDTH = 1344
@@ -127,8 +125,6 @@ def _load_component(
     Using the registered loader keeps preprocessing aligned with the component
     classes and precision policy that produce H3 inference conditioning.
     """
-    # Diffusers modular manifests can append loading metadata after the
-    # provider and architecture fields defined by the component contract.
     transformers_or_diffusers, _ = model_index[name][:2]
     return PipelineComponentLoader.load_module(
         module_name=name,
@@ -153,8 +149,6 @@ def encode_video_latents(
     """
     print("Loading MiniMax H3 video VAE")
     vae = _load_component("vae", model_path, model_index, fastvideo_args)
-    # Feed [B, C, T, H, W] pixels and retain [C, T, H, W] latents; H3 later
-    # flattens every video token in (C, patch_t, patch_h, patch_w) order.
     pixels = torch.from_numpy(frames.copy()).permute(3, 0, 1, 2)[None]
     pixels = pixels.to(device=torch.device("cuda:0"), dtype=torch.float32).div_(255.0)
     generator = torch.Generator("cpu").manual_seed(42)
@@ -274,8 +268,6 @@ def write_parquet(record: dict[str, Any], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     for parquet_path in output_dir.glob("*.parquet"):
         parquet_path.unlink()
-    # The map-style cache stores Parquet file metadata and row counts, so a
-    # replacement shard set requires cache reconstruction.
     shutil.rmtree(output_dir / "map_style_cache", ignore_errors=True)
     table = pa.table(
         {name: [record[name]]
@@ -313,21 +305,35 @@ def validate_preprocessed_training_data(
     print(f"Validated one Crush-Smol H3 training row in {expected_path}")
 
 
-def main() -> None:
-    """Encode the selected Crush-Smol record with each H3 component in sequence.
+def main(
+    video: Path | None = None,
+    prompt: str | None = None,
+    output_dir: Path = OUTPUT_DIR,
+    model_path: Path = MODEL_PATH,
+) -> None:
+    """Encode one audio-video-caption record with each H3 component in sequence.
 
+    With no arguments this encodes the pinned Crush-Smol record; ``--video`` +
+    ``--prompt`` preprocess an arbitrary mp4 (with soundtrack) instead.
     Releasing each component before loading the next component keeps video,
     audio, and text preprocessing within one GPU's memory.
     """
     _init_single_process_distributed()
-    resolved_model_path = MODEL_PATH.resolve()
+    resolved_model_path = model_path.resolve()
     if not resolved_model_path.is_dir():
         raise FileNotFoundError(f"Filtered MiniMax H3 model directory is missing at {resolved_model_path}")
     model_index = verify_model_config_and_directory(str(resolved_model_path))
-    video_path, caption = load_crush_smol_training_sample(
-        DATA_DIR / "videos2caption.json",
-        DATA_DIR / "videos",
-    )
+    if video is None:
+        video_path, caption = load_crush_smol_training_sample(
+            DATA_DIR / "videos2caption.json",
+            DATA_DIR / "videos",
+        )
+    else:
+        if not prompt or not prompt.strip():
+            raise ValueError("--prompt is required when --video is given")
+        video_path, caption = video, prompt.strip()
+        if not video_path.is_file():
+            raise FileNotFoundError(f"Training video is missing at {video_path}")
     frames, waveform = load_training_media(video_path)
     pipeline_config = MiniMaxH3PipelineConfig()
     fastvideo_args = FastVideoArgs(
@@ -345,21 +351,34 @@ def main() -> None:
     audio_latents = encode_audio_latents(waveform, resolved_model_path, model_index, fastvideo_args)
     text_embedding = encode_text_embedding(caption, resolved_model_path, model_index, fastvideo_args)
     record = build_parquet_record(
-        file_name=TRAINING_VIDEO_NAME,
+        file_name=video_path.name,
         caption=caption,
         video_latents=video_latents,
         audio_latents=audio_latents,
         text_embedding=text_embedding,
     )
-    output_path = write_parquet(record, OUTPUT_DIR)
-    print(f"Wrote one Crush-Smol MiniMax H3 T2VA record to {output_path}")
+    output_path = write_parquet(record, output_dir)
+    print(f"Wrote one MiniMax H3 T2VA record to {output_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--video",
+                        type=Path,
+                        default=None,
+                        help="mp4 with a soundtrack (>=124 frames at 24 fps); "
+                        "default: the pinned Crush-Smol record")
+    parser.add_argument("--prompt", type=str, default=None, help="caption for --video")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--model-path", type=Path, default=MODEL_PATH)
     cli_args = parser.parse_args()
     if cli_args.validate_only:
         validate_preprocessed_training_data()
     else:
-        main()
+        main(
+            video=cli_args.video,
+            prompt=cli_args.prompt,
+            output_dir=cli_args.output_dir,
+            model_path=cli_args.model_path,
+        )

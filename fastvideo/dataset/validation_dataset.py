@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# adapted from: https://github.com/a-r-r-o-w/finetrainers/blob/main/finetrainers/data/dataset.py
+import json
 import os
 import pathlib
 
@@ -20,7 +20,6 @@ class ValidationDataset(IterableDataset):
         super().__init__()
 
         self.filename = pathlib.Path(filename)
-        # get directory of filename
         self.dir = os.path.abspath(self.filename.parent)
 
         if not self.filename.exists():
@@ -29,7 +28,11 @@ class ValidationDataset(IterableDataset):
         if self.filename.suffix == ".csv":
             data = datasets.load_dataset("csv", data_files=self.filename.as_posix(), split="train")
         elif self.filename.suffix == ".json":
-            data = datasets.load_dataset("json", data_files=self.filename.as_posix(), split="train", field="data")
+            document = json.loads(self.filename.read_text(encoding="utf-8"))
+            rows = document.get("data") if isinstance(document, dict) else document
+            if not isinstance(rows, list):
+                raise ValueError("Validation JSON must be a row array or an object containing a 'data' row array")
+            data = datasets.Dataset.from_list(rows)
         elif self.filename.suffix == ".parquet":
             data = datasets.load_dataset("parquet", data_files=self.filename.as_posix(), split="train")
         elif self.filename.suffix == ".arrow":
@@ -40,22 +43,18 @@ class ValidationDataset(IterableDataset):
                 f"Unsupported file format {self.filename.suffix} for validation dataset. Supported formats are: {_SUPPORTED_FILE_FORMATS}"
             )
 
-        # Get distributed training info
         self.global_rank = get_world_rank()
         self.world_size = get_world_size()
         self.sp_world_size = get_sp_world_size()
         self.num_sp_groups = self.world_size // self.sp_world_size
 
-        # Convert to list to get total samples
         self.all_samples = list(data)
         self.original_total_samples = len(self.all_samples)
 
-        # Extend samples to be a multiple of DP degree (num_sp_groups)
         remainder = self.original_total_samples % self.num_sp_groups
         if remainder != 0:
             samples_to_add = self.num_sp_groups - remainder
 
-            # Duplicate samples cyclically to reach the target
             additional_samples = []
             for i in range(samples_to_add):
                 additional_samples.append(self.all_samples[i % self.original_total_samples])
@@ -64,17 +63,13 @@ class ValidationDataset(IterableDataset):
 
         self.total_samples = len(self.all_samples)
 
-        # Calculate which SP group this rank belongs to
         self.sp_group_id = self.global_rank // self.sp_world_size
 
-        # Now all SP groups will have equal number of samples
         self.samples_per_sp_group = self.total_samples // self.num_sp_groups
 
-        # Calculate start and end indices for this SP group
         self.start_idx = self.sp_group_id * self.samples_per_sp_group
         self.end_idx = self.start_idx + self.samples_per_sp_group
 
-        # Get samples for this SP group
         self.sp_group_samples = self.all_samples[self.start_idx:self.end_idx]
 
         logger.info(
@@ -98,12 +93,8 @@ class ValidationDataset(IterableDataset):
 
     def __iter__(self):
         for sample in self.sp_group_samples:
-            # For consistency reasons, we mandate that "caption" is always present in the validation dataset.
-            # However, since the model specifications use "prompt", we create an alias here.
             sample["prompt"] = sample["caption"]
 
-            # Load image or video if the path is provided
-            # TODO(aryan): need to handle custom columns here for control conditions
             sample["image"] = None
             sample["video"] = None
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import Any
 
 import torch
@@ -11,6 +13,7 @@ from fastvideo.attention.selector import component_attention_backend, get_attn_b
 from fastvideo.distributed import get_local_torch_device
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.forward_context import set_forward_context
+from fastvideo.logger import init_logger
 from fastvideo.hooks.activation_trace import trace_step
 from fastvideo.profiler import nvtx_range, profiler_region
 from fastvideo.pipelines.basic.minimax_h3.packing import (
@@ -24,6 +27,8 @@ from fastvideo.pipelines.stages.base import PipelineStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.utils import get_compute_dtype
+
+logger = init_logger(__name__)
 
 
 def _h3_vsa_metadata_builder(transformer: Any, fastvideo_args: FastVideoArgs) -> Any:
@@ -82,8 +87,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
         for scheduler in (self.scheduler, self.audio_scheduler):
             shift = float(scheduler.shift)
             sigmas = shift * base / (1 + (shift - 1) * base)
-            # Explicit sigmas are already shifted. Scheduler timesteps are H3
-            # clean time (1 - sigma); passing integer rungs to step() is wrong.
             scheduler.set_timesteps(sigmas=sigmas, device=device)
 
     def verify_input(self, batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> VerificationResult:
@@ -117,11 +120,21 @@ class MiniMaxH3DenoisingStage(PipelineStage):
         device = get_local_torch_device()
 
         dmd_steps = fastvideo_args.pipeline_config.dmd_denoising_steps
-        if dmd_steps is None:
+        if not dmd_steps:
+            env_steps = os.environ.get("FASTVIDEO_DMD_DENOISING_STEPS", "").strip()
+            if env_steps:
+                dmd_steps = [int(s) for s in env_steps.split(",") if s.strip()]
+        stochastic_renoise = bool(dmd_steps) and (
+            bool(getattr(fastvideo_args.pipeline_config, "dmd_stochastic_renoise", False))
+            or os.environ.get("FASTVIDEO_DMD_STOCHASTIC_RENOISE", "0").strip().lower() in ("1", "true", "yes"))
+        if stochastic_renoise:
+            logger.info("MiniMax-H3 DMD denoising with stochastic fresh-noise re-noising.")
+        if dmd_steps:
+            self._set_dmd_schedule(dmd_steps, batch.num_inference_steps, device)
+            logger.info("MiniMax-H3 denoising with explicit DMD steps %s.", list(dmd_steps))
+        else:
             self.scheduler.set_timesteps(batch.num_inference_steps, device=device)
             self.audio_scheduler.set_timesteps(batch.num_inference_steps, device=device)
-        else:
-            self._set_dmd_schedule(dmd_steps, batch.num_inference_steps, device)
         video_timesteps = self.scheduler.timesteps
         audio_timesteps = self.audio_scheduler.timesteps
         if video_timesteps is None or audio_timesteps is None:
@@ -154,17 +167,14 @@ class MiniMaxH3DenoisingStage(PipelineStage):
         if vsa_metadata_builder is not None:
             vsa_patch_size = fastvideo_args.pipeline_config.dit_config.patch_size
             vsa_prefix_segments = _h3_vsa_prefix_segments(layout, vsa_patch_size)
-            # Per-request knobs (sweeps flip these between generate_video calls
-            # without respawning workers); mode None defers to the env default.
             vsa_mode = batch.extra.get("vsa_mode", "exempt")
             if vsa_mode not in ("exempt", "compete"):
                 raise ValueError(f"vsa_mode must be 'exempt' or 'compete', got {vsa_mode!r}.")
             vsa_exempt = vsa_mode == "exempt"
             vsa_dense_layers = tuple(batch.extra.get("vsa_dense_layers", ()))
             vsa_dense_first_n = int(batch.extra.get("vsa_dense_first_n_steps", 0))
-            # Run-level tile geometry (256 default, 64 = native Triton path),
-            # plumbed like the run-level sparsity; the builder validates the
-            # value against VSA_H3_TILE_SHAPES.
+            vsa_sparsity_base = (float(batch.VSA_sparsity)
+                                 if float(batch.VSA_sparsity) > 0.0 else float(fastvideo_args.VSA_sparsity))
             vsa_tile_size = int(fastvideo_args.VSA_tile_size)
 
         try:
@@ -173,18 +183,13 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                 batch.latents = batch.latents.to(device)
                 batch.audio_latents = batch.audio_latents.to(device)
 
-            # The stage range groups the complete denoising loop while the
-            # indexed model ranges retain timing detail for every H3 block.
             with profiler_region("inference_denoising"), nvtx_range("minimax_h3.dit"):
                 for index, (video_timestep,
                             audio_timestep) in enumerate(zip(video_timesteps, audio_timesteps, strict=True)):
                     unique_timesteps, timestep_indices = row_timestep_plan[index]
                     attn_metadata = None
                     if vsa_metadata_builder is not None:
-                        # Optional schedule: run the first N steps dense (sparsity 0
-                        # selects every tile — parity-proven ≡ dense ≤2e-4); early
-                        # steps set global structure and are the most damage-prone.
-                        vsa_sparsity = 0.0 if index < vsa_dense_first_n else float(batch.VSA_sparsity)
+                        vsa_sparsity = 0.0 if index < vsa_dense_first_n else vsa_sparsity_base
                         attn_metadata = vsa_metadata_builder.build(
                             current_timestep=index,
                             raw_latent_shape=(layout.num_video_latent_frames, layout.latent_height,
@@ -197,11 +202,6 @@ class MiniMaxH3DenoisingStage(PipelineStage):
                             dense_layers=vsa_dense_layers,
                             tile_size=vsa_tile_size,
                         )
-                    # Under torch.compile(mode="reduce-overhead") each denoising
-                    # step must be marked, or cudagraph trees flag cross-step
-                    # reuse of pooled outputs as "accessing tensor output of
-                    # CUDAGraphs that has been overwritten" (surfaces at sp=1;
-                    # sp>1 is masked by collective-induced graph breaks).
                     torch.compiler.cudagraph_mark_step_begin()
                     with trace_step(index), set_forward_context(
                             current_timestep=index,
@@ -223,18 +223,49 @@ class MiniMaxH3DenoisingStage(PipelineStage):
 
                     video_start = layout.num_condition_video_rows
                     audio_start = layout.num_condition_audio_rows
-                    batch.latents[video_start:] = self.scheduler.step(
-                        video_velocity[0, video_start:].float(),
-                        video_timestep,
-                        batch.latents[video_start:],
-                        return_dict=False,
-                    )[0]
-                    batch.audio_latents[audio_start:] = self.audio_scheduler.step(
-                        audio_velocity[0, audio_start:].float(),
-                        audio_timestep,
-                        batch.audio_latents[audio_start:],
-                        return_dict=False,
-                    )[0]
+                    if os.environ.get("FASTVIDEO_DMD_DEBUG_STATS", "0") == "1":
+                        with torch.no_grad():
+                            for tag, lat, vel, st, sig in (
+                                ("video", batch.latents, video_velocity, video_start, self.scheduler.sigmas),
+                                ("audio", batch.audio_latents, audio_velocity, audio_start,
+                                 self.audio_scheduler.sigmas),
+                            ):
+                                s = float(sig[index])
+                                xin = lat[st:].float()
+                                x0dbg = xin + s * vel[0, st:].float()
+                                logger.info(
+                                    "DMD_DEBUG step=%d %s sigma=%.4f in(std=%.4f,mean=%.4f) "
+                                    "x0(std=%.4f,mean=%.4f) v(std=%.4f)", index, tag, s, xin.std(), xin.mean(),
+                                    x0dbg.std(), x0dbg.mean(), vel[0, st:].float().std())
+                    if stochastic_renoise:
+                        assert self.scheduler.sigmas is not None and self.audio_scheduler.sigmas is not None
+                        for latents, velocity, start, sigmas in (
+                            (batch.latents, video_velocity, video_start, self.scheduler.sigmas),
+                            (batch.audio_latents, audio_velocity, audio_start, self.audio_scheduler.sigmas),
+                        ):
+                            sigma = float(sigmas[index])
+                            sigma_next = float(sigmas[index + 1])
+                            sample = latents[start:].float()
+                            pred_x0 = sample + sigma * velocity[0, start:].float()
+                            if sigma_next > 0.0:
+                                noise = torch.randn_like(pred_x0)
+                                nxt = (1.0 - sigma_next) * pred_x0 + sigma_next * noise
+                            else:
+                                nxt = pred_x0
+                            latents[start:] = nxt.to(latents.dtype)
+                    else:
+                        batch.latents[video_start:] = self.scheduler.step(
+                            video_velocity[0, video_start:].float(),
+                            video_timestep,
+                            batch.latents[video_start:],
+                            return_dict=False,
+                        )[0]
+                        batch.audio_latents[audio_start:] = self.audio_scheduler.step(
+                            audio_velocity[0, audio_start:].float(),
+                            audio_timestep,
+                            batch.audio_latents[audio_start:],
+                            return_dict=False,
+                        )[0]
                     batch.step_index = index
                     batch.timestep = video_timestep
         finally:

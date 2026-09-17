@@ -83,8 +83,6 @@ class MiniMaxH3RotaryPosEmbed(nn.Module):
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Build rotary tensors on the device that owns the packed positions."""
         position_ids = position_ids.to(torch.float32)
-        # Analytic rotary positional embedding (RoPE) state is non-persistent,
-        # so runtime coordinates own the device after loading or state offload.
         inv_freq = self.inv_freq.to(position_ids.device)
         freqs = position_ids.unsqueeze(-1) * inv_freq.view(1, 1, -1)
         freqs_t, freqs_h, freqs_w = freqs.unbind(dim=1)
@@ -188,11 +186,6 @@ class MiniMaxH3Attention(nn.Module):
             prefix=f"{prefix}.to_out",
         )
         self.fuse_qknorm_rope = fuse_qknorm_rope
-        # VSA carries a learned gate on its pooled-compression branch. The H3
-        # checkpoint has no such weight, so the loader zero-initializes it
-        # (ALLOWED_NEW_PARAM_PATTERNS) and the branch is exactly disabled
-        # until finetuned. Built only when VSA-H3 actually resolves, keeping
-        # the FLASH/SDPA paths and their state_dict untouched.
         resolved_backend = get_attn_backend(attention_head_dim,
                                             get_compute_dtype(),
                                             supported_attention_backends=supported_attention_backends)
@@ -207,8 +200,6 @@ class MiniMaxH3Attention(nn.Module):
             fa4_packed_varlen=fa4_packed_varlen,
         )
         self.to_gate_compress: ReplicatedLinear | None = None
-        # None = unchecked; the first forward tests the loaded weight once and
-        # skips the gate branch entirely while it is structurally zero.
         self._gate_compress_active: bool | None = None
         if use_vsa:
             self.to_gate_compress = ReplicatedLinear(
@@ -229,6 +220,7 @@ class MiniMaxH3Attention(nn.Module):
         reach a zero gate for it to ever train).
         """
         if torch.is_grad_enabled():
+            self._gate_compress_active = None
             return True
         if self._gate_compress_active is None:
             if torch.compiler.is_compiling():
@@ -252,8 +244,6 @@ class MiniMaxH3Attention(nn.Module):
             return
         if self._gate_compress_active is None:
             weight = self.to_gate_compress.weight
-            # bool() on a DTensor reduction resolves collectively, so every
-            # rank caches the same answer.
             self._gate_compress_active = bool((weight != 0).any())
 
     @staticmethod
@@ -298,8 +288,6 @@ class MiniMaxH3Attention(nn.Module):
                 query = self._apply_rotary_emb(query, rotary_emb)
                 key = self._apply_rotary_emb(key, rotary_emb)
 
-        # H3 rotates only 96/128 channels, which the generic `freqs_cis`
-        # branch cannot express. Apply it above, then pass no RoPE here.
         extra_attention_kwargs = {}
         if self.to_gate_compress is not None and self._gate_active():
             gate_compress, _ = self.to_gate_compress(hidden_states)
@@ -481,7 +469,6 @@ class MiniMaxH3TransformerBlock(nn.Module):
         fuse_modulate: bool = False,
         fuse_qknorm_rope: bool = False,
         fuse_swiglu: bool = False,
-        fa4_packed_varlen: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, eps=norm_eps)
@@ -494,7 +481,7 @@ class MiniMaxH3TransformerBlock(nn.Module):
             quant_config,
             prefix=f"{prefix}.attn",
             fuse_qknorm_rope=fuse_qknorm_rope,
-            fa4_packed_varlen=fa4_packed_varlen,
+            fa4_packed_varlen=True,
         )
         self.norm2 = nn.RMSNorm(hidden_size, eps=norm_eps)
         self.ff = MiniMaxH3FeedForward(
@@ -592,16 +579,12 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
     def _get_parameter_dtype(self, name: str, default_dtype: torch.dtype) -> torch.dtype:
         """Keep the released input, timestep, and output projections in FP32.
 
-        Factorized AdaLN uses FP16; BF16 is ~1.7x worse there.
+        Folded AdaLN parameters follow the enclosing FSDP policy.  In
+        particular, an FP32 training load must keep them as FP32 optimizer
+        masters; pinning the folded weights to FP16 here quantizes every
+        small Adam update before the next forward.  Release checkpoints are
+        still exported in BF16, matching the validated 42-block parent.
         """
-        # Precedence: the factorized-AdaLN FP16 pin wins over
-        # uniform_parameter_dtype on purpose. Under FSDP's one-dtype rule the
-        # resulting mix hard-fails at load time, which beats silently training
-        # AdaLN in BF16. Rank-reduced checkpoints are inference artifacts --
-        # train from the full-rank release.
-        if getattr(self, "adaln_rank", None) is not None and (
-                ".adaln_proj." in name or name.startswith(("norm_out.linear.", "adaln_basis."))):
-            return torch.float16
         if self.config.uniform_parameter_dtype:
             return default_dtype
         return torch.float32 if name.split(".", 1)[0] in self._keep_in_fp32_modules else default_dtype
@@ -666,14 +649,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             prefix=f"{config.prefix}.time_embedder",
         )
         self.adaln_rank: int | None = arch.adaln_rank
-        if self.adaln_rank is not None and config.uniform_parameter_dtype:
-            raise ValueError(
-                "Rank-reduced AdaLN checkpoints (adaln_rank set) cannot be trained: "
-                "uniform_parameter_dtype needs one dtype for every trainable "
-                "parameter, but factorized AdaLN weights are pinned to FP16 "
-                "(BF16 reconstructs them ~1.7x worse). Fine-tune the full-rank "
-                "checkpoint instead, then re-fit the basis with "
-                "scripts/checkpoint_conversion/convert_minimax_h3_adaln_rank.py.")
         adaln_dim = self.adaln_rank or arch.time_embed_dim
         self.adaln_basis = ReplicatedLinear(
             arch.time_embed_dim,
@@ -684,8 +659,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         ) if self.adaln_rank else None
 
         self.rope = MiniMaxH3RotaryPosEmbed(arch.rope_freq_dim, arch.rope_theta)
-        # per-generation caches for loop-invariant work (see _rotary_for /
-        # _refined_text); plain attrs, never in state_dict
         self._rope_cache: tuple | None = None
         self._text_cache: tuple | None = None
         self.token_refiner = MiniMaxH3TokenRefiner(
@@ -697,8 +670,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             arch.norm_eps,
             arch.qk_norm_eps,
             arch.final_norm_eps,
-            # The refiner attends over the text stream only; the packed-sequence
-            # VSA backend must never be selected for it.
             tuple(backend for backend in self.supported_attention_backends
                   if backend != AttentionBackendEnum.VIDEO_SPARSE_ATTN_H3),
             config.quant_config,
@@ -720,7 +691,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
                 fuse_modulate="modulate" in self.enabled_fusions,
                 fuse_qknorm_rope="qknorm_rope" in self.enabled_fusions,
                 fuse_swiglu="swiglu" in self.enabled_fusions,
-                fa4_packed_varlen=envs.FASTVIDEO_MINIMAX_H3_FA4_PACKED_VARLEN,
             ) for index in range(arch.num_layers)
         ])
         self.norm_out = MiniMaxH3AdaLayerNormOut(
@@ -911,9 +881,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
         rotary_emb = self._rotary_for(position_ids, text_embeds.dtype)
         sp_world_size = get_sp_world_size() if model_parallel_is_initialized() else 1
 
-        # text/video/audio indices partition [0, sequence_length), so the
-        # uninitialized buffer is fully overwritten; in-place index_copy_ avoids
-        # the three full-buffer clones out-of-place index_copy would make.
         packed_hidden_states = text_embeds.new_empty((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
         packed_hidden_states.index_copy_(1, text_indices, text_embeds)
         packed_hidden_states.index_copy_(1, video_indices, video_embeds.to(text_embeds.dtype))
@@ -935,8 +902,6 @@ class MiniMaxH3Transformer3DModel(BaseDiT):
             local_timestep_indices, _ = sequence_model_parallel_shard(local_timestep_indices, dim=0)
             rotary_emb = (rotary_cos, rotary_sin)
 
-        # The eager driver owns profiling markers while each block's compiled
-        # forward owns the graph that the marker surrounds.
         for block_index, block in enumerate(self.transformer_blocks):
             with nvtx_range(f"minimax_h3.transformer_block.{block_index}"):
                 packed_hidden_states = block(

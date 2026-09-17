@@ -1,7 +1,3 @@
-# MiniMax H3 T2VA 400-step overfit experiment on one Crush-Smol record.
-#
-# Submit eight H200 nodes through the fixed launch script:
-#   bash examples/train/launch_minimax_h3_t2va_crush_smol_validation.sh
 
 models:
   student:
@@ -83,4 +79,6 @@ callbacks:
     text_encoder_cpu_offload: true
     vae_cpu_offload: true
 
-pipeline: {}
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: true

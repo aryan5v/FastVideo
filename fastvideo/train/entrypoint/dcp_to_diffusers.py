@@ -62,6 +62,7 @@ def _save_role_pretrained(
     output_dir: str,
     module_names: list[str] | None = None,
     overwrite: bool = False,
+    link_base: bool = False,
     model: Any,
 ) -> str:
     """Export a role's modules into a diffusers-style model dir.
@@ -105,10 +106,6 @@ def _save_role_pretrained(
                                       "Pass --overwrite to replace it.")
 
         def _copy_or_link(src: str, dest: str) -> None:
-            # Resolve symlinks ourselves: os.link's follow_symlinks=True
-            # default isn't honored on all filesystems (e.g. some
-            # network/overlay mounts), which can silently hard-link to
-            # the symlink itself instead of its target.
             real_src = os.path.realpath(src)
             try:
                 os.link(real_src, dest)
@@ -117,16 +114,40 @@ def _save_role_pretrained(
 
         logger.info(
             "Creating pretrained export dir at %s "
-            "(base=%s)",
+            "(base=%s, link_base=%s)",
             dst,
             local_base,
+            link_base,
         )
-        shutil.copytree(
-            local_base,
-            dst,
-            symlinks=False,
-            copy_function=_copy_or_link,
-        )
+        if link_base:
+            rewritten = set(module_names or ["transformer"])
+            dst.mkdir(parents=True, exist_ok=True)
+            for entry in sorted(local_base.iterdir()):
+                if entry.name == ".cache" or entry.name.startswith(".git"):
+                    continue
+                target = dst / entry.name
+                if entry.is_dir() and entry.name in rewritten:
+                    target.mkdir()
+                    for f in sorted(entry.iterdir()):
+                        if f.name.endswith(".safetensors") or f.name.endswith(".safetensors.index.json"):
+                            continue
+                        shutil.copy2(os.path.realpath(f), target / f.name)
+                else:
+                    os.symlink(os.path.realpath(entry), target)
+        else:
+            try:
+                shutil.copytree(
+                    local_base,
+                    dst,
+                    symlinks=False,
+                    copy_function=_copy_or_link,
+                    ignore=shutil.ignore_patterns(".cache", ".git*"),
+                )
+            except shutil.Error as exc:
+                logger.warning("copytree finished with %d skipped entries (first: %s)", len(exc.args[0]),
+                               exc.args[0][0] if exc.args[0] else "?")
+        if not ((dst / "modular_model_index.json").is_file() or (dst / "model_index.json").is_file()):
+            raise FileNotFoundError(f"Export dir {dst} is missing its model index after copy.")
 
     _barrier()
 
@@ -160,13 +181,9 @@ def _save_role_pretrained(
         if _rank() == 0:
             for path in module_dir.glob("*.safetensors"):
                 path.unlink(missing_ok=True)
+            for path in module_dir.glob("*.safetensors.index.json"):
+                path.unlink(missing_ok=True)
 
-            # Convert internal parameter names back to HF format.
-            # load_model_from_full_model_state_dict builds reverse_param_names_mapping
-            # (internal_key → hf_key) and stores it on the module.  Without this,
-            # the exported safetensors would have internal keys (e.g.
-            # "patch_embedding.proj.bias") and the next load would double-map them
-            # (e.g. → "patch_embedding.proj.proj.bias").
             reverse_mapping: dict = getattr(modules[module_name], "reverse_param_names_mapping", {})
 
             tensor_state: dict[str, torch.Tensor] = {}
@@ -233,6 +250,8 @@ def convert(
     role: str = "student",
     overwrite: bool = False,
     verify: bool = False,
+    weights_only: bool = False,
+    link_base: bool = False,
 ) -> str:
     """Load a DCP checkpoint and export as a diffusers model.
 
@@ -243,6 +262,8 @@ def convert(
     from fastvideo.distributed import (
         maybe_init_distributed_environment_and_model_parallel, )
     from fastvideo.train.utils.builder import build_from_config
+    from fastvideo.train.utils.instantiate import instantiate
+    from fastvideo.training.checkpointing_utils import ModelWrapper
     from fastvideo.train.utils.checkpoint import (
         CheckpointManager,
         _resolve_resume_checkpoint,
@@ -254,7 +275,6 @@ def convert(
 
     import torch.distributed.checkpoint as dcp
 
-    # -- Resolve checkpoint directory --
     resolved = _resolve_resume_checkpoint(
         checkpoint_dir,
         output_dir=checkpoint_dir,
@@ -263,7 +283,6 @@ def convert(
     if not dcp_dir.is_dir():
         raise FileNotFoundError(f"Missing dcp/ under {resolved}")
 
-    # -- Obtain config --
     cfg: RunConfig
     if config_path is not None:
         cfg = load_run_config(config_path)
@@ -278,32 +297,34 @@ def convert(
 
     tc = cfg.training
 
-    # -- Init distributed (1 GPU is enough; DCP reshards) --
     maybe_init_distributed_environment_and_model_parallel(
         tp_size=1,
         sp_size=1,
     )
 
-    # Override distributed config so model loading uses 1 GPU.
     tc.distributed.tp_size = 1
     tc.distributed.sp_size = 1
     tc.distributed.num_gpus = 1
     tc.distributed.hsdp_replicate_dim = 1
     tc.distributed.hsdp_shard_dim = 1
 
-    # -- Build model (loads pretrained weights + FSDP) --
-    _, method, _, _ = build_from_config(cfg)
-
-    # -- Load DCP weights into the model --
-    states = method.checkpoint_state()
+    if weights_only:
+        if role not in cfg.models:
+            raise KeyError(f"Role {role!r} is not present in the checkpoint config")
+        model = instantiate(cfg.models[role], training_config=tc)
+        if model.transformer is None:
+            raise ValueError(f"Role {role!r} has no transformer to export")
+        states = {f"roles.{role}.transformer": ModelWrapper(model.transformer)}
+    else:
+        _, method, _, _ = build_from_config(cfg)
+        states = method.checkpoint_state()
+        model = method._role_models[role]
     logger.info(
         "Loading DCP checkpoint from %s",
         resolved,
     )
     dcp.load(states, checkpoint_id=str(dcp_dir))
 
-    # -- Export to diffusers format --
-    model = method._role_models[role]
     base_model_path = str(tc.model_path)
     if not base_model_path:
         raise ValueError("Cannot determine base_model_path from "
@@ -321,6 +342,7 @@ def convert(
         base_model_path=base_model_path,
         output_dir=output_dir,
         overwrite=overwrite,
+        link_base=link_base,
         model=model,
     )
     logger.info("Export complete: %s", result)
@@ -443,6 +465,22 @@ def main() -> None:
               "the exported directory to catch key-mapping bugs "
               "immediately."),
     )
+    parser.add_argument(
+        "--weights-only",
+        action="store_true",
+        help=("Load only roles.* module weights from the checkpoint, "
+              "skipping optimizer/scheduler states (halves GPU memory "
+              "and allows exporting via a shim config whose optimizer "
+              "differs from the checkpoint's)."),
+    )
+    parser.add_argument(
+        "--link-base",
+        action="store_true",
+        help=("Symlink base-model components into the export dir instead "
+              "of copying them (only the exported module dirs are real). "
+              "Saves hundreds of GB per export; the export then depends on "
+              "the base model dir staying in place."),
+    )
     args = parser.parse_args(sys.argv[1:])
 
     convert(
@@ -452,6 +490,8 @@ def main() -> None:
         role=args.role,
         overwrite=args.overwrite,
         verify=args.verify,
+        weights_only=args.weights_only,
+        link_base=args.link_base,
     )
 
 

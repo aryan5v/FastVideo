@@ -1,5 +1,8 @@
 # MiniMax H3 validation
 
+CompactH3 training recipes and launchers:
+[`examples/compacth3/README.md`](../../../examples/compacth3/README.md).
+
 Local tests keep checks that need the pinned Diffusers source, published weights, or the public registry surface.
 FastVideo-owned unit contracts belong under `fastvideo/tests/`.
 

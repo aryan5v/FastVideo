@@ -16,12 +16,7 @@ from fastvideo.attention.backends.video_sparse_attn_h3 import (_TILE_ELEMS, Mini
 
 _720P = dict(raw_latent_shape=(30, 44, 80), patch_size=(1, 2, 2), prefix_segments=(512, 1760, 400))
 _TINY = dict(raw_latent_shape=(8, 8, 12), patch_size=(1, 2, 2), prefix_segments=(7, 5, 3))
-# (4,4,4) coverage: dit grid (9, 10, 13) is ragged in all three dims
-# (t: 4+4+1, h: 4+4+2, w: 4+4+4+1) and every prefix segment leaves a
-# partial tail tile at 64 (70 -> 64+6, 5 -> 5, 130 -> 64+64+2).
 _TINY64 = dict(raw_latent_shape=(9, 20, 26), patch_size=(1, 2, 2), prefix_segments=(70, 5, 130))
-# production-shape request: 768x1344, 124 frames -> latents (37, 48, 84),
-# patch (1,2,2) -> token grid (37, 24, 42); text 300 + audio 414 rows.
 _PROD = dict(raw_latent_shape=(37, 48, 84), patch_size=(1, 2, 2), prefix_segments=(300, 0, 414))
 
 _CPU = torch.device("cpu")
@@ -69,16 +64,12 @@ def test_geometry_720p():
     assert meta.num_prefix_tiles == 2 + 7 + 2
     assert meta.num_video_tiles == 8 * 3 * 5
     assert int(meta.variable_block_sizes.sum()) == seq
-    # (permutation coverage of [0, seq) is implied by the roundtrip below:
-    # untile_combined_index scatters seq distinct rows and recovers all of x)
-    # segment purity: no prefix tile straddles a segment boundary
     boundaries = [512, 512 + 1760, 512 + 1760 + 400]
     start = 0
     for size in meta.variable_block_sizes[:meta.num_prefix_tiles].tolist():
         end = start + size
         assert all(not (start < b < end) for b in boundaries), (start, end)
         start = end
-    # untile(tile(x)) == x
     x = torch.randn(1, seq, 2, 4)
     buf = _impl().tile(x, meta)
     assert buf.shape[1] == meta.variable_block_sizes.numel() * _TILE_ELEMS
@@ -143,9 +134,28 @@ def test_prefix_queries_stay_dense_at_high_sparsity():
             "video rows should actually be sparse at 75%"
 
 
-# ---------------------------------------------------------------------------
-# 64-token (4,4,4) tile geometry
-# ---------------------------------------------------------------------------
+def test_tile_under_grad_does_not_reuse_shared_buffer():
+    """Training forwards need fresh tile buffers; in-place reuse of the shared
+    holder would trip autograd's saved-tensor version check at backward."""
+    meta = _build(_TINY)
+    impl = _impl()
+    seq = meta.total_seq_length
+
+    x1 = torch.randn(1, seq, 2, 8, requires_grad=True)
+    x2 = torch.randn(1, seq, 2, 8, requires_grad=True)
+    buf1 = impl.tile(x1, meta)
+    saved = (buf1 * buf1).sum()  # saves buf1 for backward, like the kernel
+    buf2 = impl.tile(x2, meta)
+    assert buf1 is not buf2
+    saved.backward()  # raises "modified by an inplace operation" on reuse
+    assert x1.grad is not None and x2.grad is None
+
+    with torch.no_grad():
+        y1 = impl.tile(x1.detach(), meta)
+        y2 = impl.tile(x2.detach(), meta)
+    assert y1 is y2
+
+
 
 
 def test_geometry_tile64_ragged_tails():
@@ -163,7 +173,6 @@ def test_geometry_tile64_ragged_tails():
     assert int(meta.variable_block_sizes.max()) <= 64
     assert meta.variable_block_sizes[:meta.num_prefix_tiles].tolist() == [64, 6, 5, 64, 64, 2]
 
-    # per-tile valid sizes: product of the per-dim clamped tails
     expected = torch.tensor([
         min(4, t - 4 * tt) * min(4, h - 4 * hh) * min(4, w - 4 * ww) for tt in range(n_t) for hh in range(n_h)
         for ww in range(n_w)
@@ -172,16 +181,13 @@ def test_geometry_tile64_ragged_tails():
     assert torch.equal(meta.variable_block_sizes[meta.num_prefix_tiles:], expected)
     assert int(expected.min()) == 1 * 2 * 1  # the (t,h,w) ragged corner
 
-    # every packed video row lands in the 3D tile its (t,h,w) coordinate says
     idx = meta.untile_combined_index
     row = torch.arange(t * h * w)
     row_t, row_h, row_w = row // (h * w), (row // w) % h, row % w
     expected_tile = meta.num_prefix_tiles + ((row_t // 4) * n_h + row_h // 4) * n_w + row_w // 4
     assert torch.equal(idx[prefix_len:] // 64, expected_tile)
-    # and in a non-pad slot of that tile
     assert bool((idx % 64 < meta.variable_block_sizes[idx // 64]).all())
 
-    # untile(tile(x)) == x on the 64-wide padded buffer
     x = torch.randn(1, seq, 2, 4)
     buf = _impl().tile(x, meta)
     assert buf.shape[1] == meta.variable_block_sizes.numel() * 64
@@ -198,7 +204,6 @@ def test_geometry_tile64_production_shape():
     sizes_vid = meta64.variable_block_sizes[meta64.num_prefix_tiles:]
     assert int(sizes_vid.max()) == 64 and int(sizes_vid.min()) == 1 * 4 * 2  # (t, w) ragged corner
 
-    # same packed sequence under the default 256 geometry, fewer tiles
     meta256 = _build(_PROD)
     assert meta256.tile_elems == _TILE_ELEMS
     assert meta256.num_prefix_tiles == 2 + 2
@@ -236,7 +241,6 @@ def test_geometry_guard_enforces_tile64_bound():
     sizes[0] = 65
     with pytest.raises(ValueError, match="tile sizes out of bounds"):
         _validate_h3_tile_geometry(prefix, dit_shape, sizes, meta.untile_combined_index, 64)
-    # the untampered tile-64 geometry passes its own bound
     _validate_h3_tile_geometry(prefix, dit_shape, meta.variable_block_sizes, meta.untile_combined_index, 64)
 
 
@@ -251,6 +255,7 @@ if __name__ == "__main__":
     test_mask_policy()
     test_sparsity_zero_matches_dense_sdpa()
     test_prefix_queries_stay_dense_at_high_sparsity()
+    test_tile_under_grad_does_not_reuse_shared_buffer()
     test_geometry_tile64_ragged_tails()
     test_geometry_tile64_production_shape()
     test_sparsity_zero_matches_dense_sdpa_tile64()

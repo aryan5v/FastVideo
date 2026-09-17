@@ -47,7 +47,6 @@ def run_training_from_config(
     from fastvideo.train.utils.builder import build_from_config
     from fastvideo.train.utils.config import load_run_config
 
-    # Enable deterministic mode for reproducibility.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
@@ -56,9 +55,7 @@ def run_training_from_config(
 
     model_path_lower = str(tc.model_path).lower()
 
-    # Auto-set attention backend for model families that require a specific
-    # backend at load time, unless the user already overrode it explicitly.
-    if tc.vsa_sparsity > 0.0:
+    if tc.vsa_sparsity > 0.0 and "minimax" not in model_path_lower:
         os.environ.setdefault(
             "FASTVIDEO_ATTENTION_BACKEND",
             "VIDEO_SPARSE_ATTN",
@@ -87,8 +84,6 @@ def run_training_from_config(
         callback_configs=cfg.callbacks,
     )
 
-    # Attach the exact YAML used for this run to the
-    # tracker (e.g., W&B Files).
     trainer.tracker.log_file(
         os.path.abspath(os.path.expanduser(config_path)),
         name="run.yaml",
@@ -97,6 +92,11 @@ def run_training_from_config(
     ckpt_config = CheckpointConfig(
         save_steps=int(tc.checkpoint.training_state_checkpointing_steps or 0),
         keep_last=int(tc.checkpoint.checkpoints_total_limit or 0),
+        start_step=int(tc.checkpoint.checkpointing_start_step or 0),
+        save_inference_on_validation=bool(tc.checkpoint.save_inference_checkpoint_on_validation),
+        inference_role=str(tc.checkpoint.inference_checkpoint_role or "student"),
+        inference_dtype=str(tc.checkpoint.inference_checkpoint_dtype or "bfloat16"),
+        require_complete_training_checkpoint=bool(tc.checkpoint.require_complete_training_checkpoint),
     )
 
     checkpoint_manager = CheckpointManager(

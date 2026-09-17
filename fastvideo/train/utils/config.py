@@ -65,7 +65,6 @@ class RunConfig:
         return resolved
 
 
-# ---- parsing helpers (kept for use by methods) ----
 
 
 def _resolve_existing_file(path: str) -> str:
@@ -138,7 +137,6 @@ def parse_betas(raw: Any, *, where: str) -> tuple[float, float]:
                      f"got {type(raw).__name__}")
 
 
-# ---- config convenience helpers ----
 
 
 def require_positive_int(
@@ -264,8 +262,6 @@ def _parse_pipeline_config(
 
     pipeline_raw, dit_arch_overrides = _split_training_dit_arch_overrides(pipeline_raw)
 
-    # Derive model_path from models.student.init_from —
-    # needed by PipelineConfig.from_kwargs.
     model_path: str | None = None
     student_cfg = models.get("student")
     if student_cfg is not None:
@@ -382,6 +378,32 @@ def _build_training_config(
                          "{'t2v', 't2va', 'text_only'}, got "
                          f"{preprocessed_data_type!r}")
 
+    vsa_tile_size = int(vs.get("tile_size", 256) or 256)
+    if vsa_tile_size not in (64, 256):
+        raise ValueError(f"training.vsa.tile_size must be 64 or 256, got {vsa_tile_size!r}")
+
+    save_inference_checkpoint_on_validation = require_bool(
+        ck,
+        "save_inference_checkpoint_on_validation",
+        default=False,
+        where="training.checkpoint.save_inference_checkpoint_on_validation",
+    )
+    inference_checkpoint_role = str(ck.get("inference_checkpoint_role", "student") or "").strip()
+    if save_inference_checkpoint_on_validation and not inference_checkpoint_role:
+        raise ValueError("training.checkpoint.inference_checkpoint_role must be non-empty "
+                         "when validation inference checkpointing is enabled")
+    inference_checkpoint_dtype = str(ck.get("inference_checkpoint_dtype", "bfloat16") or "bfloat16").strip().lower()
+    if inference_checkpoint_dtype not in {"bfloat16", "float16", "float32"}:
+        raise ValueError("training.checkpoint.inference_checkpoint_dtype must be one of "
+                         "['bfloat16', 'float16', 'float32'], got "
+                         f"{inference_checkpoint_dtype!r}")
+    require_complete_training_checkpoint = require_bool(
+        ck,
+        "require_complete_training_checkpoint",
+        default=False,
+        where="training.checkpoint.require_complete_training_checkpoint",
+    )
+
     return TrainingConfig(
         distributed=DistributedConfig(
             num_gpus=num_gpus,
@@ -402,6 +424,7 @@ def _build_training_config(
             num_width=int(da.get("num_width", 0) or 0),
             num_latent_t=int(da.get("num_latent_t", 0) or 0),
             num_frames=int(da.get("num_frames", 0) or 0),
+            native_shape_bucketing=bool(da.get("native_shape_bucketing", False)),
         ),
         optimizer=OptimizerConfig(
             learning_rate=float(o.get("learning_rate", 0.0) or 0.0),
@@ -420,8 +443,14 @@ def _build_training_config(
         checkpoint=CheckpointConfig(
             output_dir=str(ck.get("output_dir", "") or ""),
             resume_from_checkpoint=str(ck.get("resume_from_checkpoint", "") or ""),
+            save_inference_checkpoint_on_validation=save_inference_checkpoint_on_validation,
+            inference_checkpoint_role=inference_checkpoint_role or "student",
+            inference_checkpoint_dtype=inference_checkpoint_dtype,
             training_state_checkpointing_steps=int(ck.get("training_state_checkpointing_steps", 0) or 0),
+            require_complete_training_checkpoint=require_complete_training_checkpoint,
             checkpoints_total_limit=int(ck.get("checkpoints_total_limit", 0) or 0),
+            checkpointing_start_step=int(ck.get("checkpointing_start_step", 0) or 0),
+            reset_lr_on_resume=bool(ck.get("reset_lr_on_resume", False)),
         ),
         tracker=TrackerConfig(
             trackers=list(tr.get("trackers", []) or []),
@@ -430,6 +459,7 @@ def _build_training_config(
             run_name=str(tr.get("run_name", "") or ""),
         ),
         vsa_sparsity=float(vs.get("sparsity", 0.0) or 0.0),
+        vsa_tile_size=vsa_tile_size,
         vsa_cache_tile_buf=bool(vs.get("cache_tile_buf", False) or False),
         model=ModelTrainingConfig(
             weighting_scheme=str(m.get("weighting_scheme", "uniform") or "uniform"),
@@ -439,6 +469,9 @@ def _build_training_config(
             precondition_outputs=bool(m.get("precondition_outputs", False)),
             moba_config=dict(m.get("moba_config", {}) or {}),
             enable_gradient_checkpointing_type=(m.get("enable_gradient_checkpointing_type")),
+            allow_low_precision_master_weights=bool(m.get("allow_low_precision_master_weights", False)),
+            enable_torch_compile=bool(m.get("enable_torch_compile", False)),
+            torch_compile_kwargs=dict(m.get("torch_compile_kwargs", {}) or {}),
         ),
         pipeline_config=pipeline_config,
         model_path=model_path,
@@ -481,17 +514,14 @@ def _cast_value(raw: str) -> Any:
         return False
     if raw.lower() in ("none", "null"):
         return None
-    # Try int
     try:
         return int(raw)
     except ValueError:
         pass
-    # Try float
     try:
         return float(raw)
     except ValueError:
         pass
-    # Try YAML list literal like [1, 2]
     if raw.startswith("[") and raw.endswith("]"):
         try:
             return yaml.safe_load(raw)
@@ -536,13 +566,11 @@ def load_run_config(
         raw = yaml.safe_load(f)
     cfg = _require_mapping(raw, where=path)
 
-    # Apply CLI overrides before building typed config.
     if overrides:
         parsed = _parse_cli_overrides(overrides)
         _apply_overrides(cfg, parsed)
         logger.info("Applied CLI overrides: %s", parsed)
 
-    # --- models ---
     models_raw = _require_mapping(cfg.get("models"), where="models")
     models: dict[str, dict[str, Any]] = {}
     for role, model_cfg_raw in models_raw.items():
@@ -553,23 +581,19 @@ def load_run_config(
                              "'_target_' key")
         models[role_str] = dict(model_cfg)
 
-    # --- method ---
     method_raw = _require_mapping(cfg.get("method"), where="method")
     if "_target_" not in method_raw:
         raise ValueError("method must have a '_target_' key")
     method = dict(method_raw)
 
-    # --- callbacks ---
     callbacks_raw = cfg.get("callbacks", None)
     if callbacks_raw is None:
         callbacks: dict[str, dict[str, Any]] = {}
     else:
         callbacks = _require_mapping(callbacks_raw, where="callbacks")
 
-    # --- pipeline config ---
     pipeline_config = _parse_pipeline_config(cfg, models=models)
 
-    # --- training config ---
     training_raw = _require_mapping(cfg.get("training"), where="training")
     t = dict(training_raw)
     training = _build_training_config(t, models=models, pipeline_config=pipeline_config)

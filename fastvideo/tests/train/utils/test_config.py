@@ -33,9 +33,6 @@ def _minimal_yaml() -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Happy path
-# ---------------------------------------------------------------------------
 
 
 def test_minimal_yaml_loads_happy_path(tmp_path: Path) -> None:
@@ -46,7 +43,6 @@ def test_minimal_yaml_loads_happy_path(tmp_path: Path) -> None:
     assert cfg.method["_target_"] == ("fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod")
     assert "student" in cfg.models
     assert cfg.callbacks == {}
-    # raw retains the original YAML dict for downstream logging.
     assert "models" in cfg.raw and "method" in cfg.raw
 
 
@@ -75,6 +71,10 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
     assert t.loop.gradient_accumulation_steps == 1
 
     assert t.checkpoint.output_dir == ""
+    assert t.checkpoint.save_inference_checkpoint_on_validation is False
+    assert t.checkpoint.inference_checkpoint_role == "student"
+    assert t.checkpoint.inference_checkpoint_dtype == "bfloat16"
+    assert t.checkpoint.require_complete_training_checkpoint is False
     assert t.checkpoint.checkpoints_total_limit == 0
 
     assert t.tracker.trackers == []
@@ -84,9 +84,12 @@ def test_minimal_yaml_applies_all_defaults(tmp_path: Path) -> None:
     assert t.model.weighting_scheme == "uniform"
     assert t.model.precondition_outputs is False
     assert t.model.moba_config == {}
+    assert t.model.enable_torch_compile is False
+    assert t.model.torch_compile_kwargs == {}
 
     assert t.dit_precision == "fp32"
     assert t.vsa_sparsity == 0.0
+    assert t.vsa_tile_size == 256
     assert t.pipeline_config is None
 
 
@@ -126,7 +129,11 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
         },
         "checkpoint": {
             "output_dir": "/out",
+            "save_inference_checkpoint_on_validation": True,
+            "inference_checkpoint_role": "student",
+            "inference_checkpoint_dtype": "float16",
             "training_state_checkpointing_steps": 50,
+            "require_complete_training_checkpoint": True,
             "checkpoints_total_limit": 3,
         },
         "tracker": {
@@ -135,13 +142,18 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
             "run_name": "myrun",
         },
         "vsa": {
-            "sparsity": 0.5
+            "sparsity": 0.5,
+            "tile_size": 64,
         },
         "model": {
             "weighting_scheme": "logit_normal",
             "logit_mean": 0.5,
             "logit_std": 1.5,
             "precondition_outputs": True,
+            "enable_torch_compile": True,
+            "torch_compile_kwargs": {
+                "dynamic": False,
+            },
         },
         "dit_precision": "bf16",
     }
@@ -167,26 +179,70 @@ def test_full_yaml_populates_all_training_fields(tmp_path: Path) -> None:
     assert t.loop.gradient_accumulation_steps == 4
 
     assert t.checkpoint.output_dir == "/out"
+    assert t.checkpoint.save_inference_checkpoint_on_validation is True
+    assert t.checkpoint.inference_checkpoint_role == "student"
+    assert t.checkpoint.inference_checkpoint_dtype == "float16"
+    assert t.checkpoint.require_complete_training_checkpoint is True
     assert t.checkpoint.checkpoints_total_limit == 3
 
     assert t.tracker.trackers == ["wandb"]
     assert t.tracker.project_name == "myproj"
 
     assert t.vsa_sparsity == pytest.approx(0.5)
+    assert t.vsa_tile_size == 64
     assert t.model.weighting_scheme == "logit_normal"
     assert t.model.precondition_outputs is True
+    assert t.model.enable_torch_compile is True
+    assert t.model.torch_compile_kwargs == {"dynamic": False}
     assert t.dit_precision == "bf16"
 
 
-# ---------------------------------------------------------------------------
-# Schema validation
-# ---------------------------------------------------------------------------
 
 
 def test_missing_models_raises(tmp_path: Path) -> None:
     data = _minimal_yaml()
     del data["models"]
     with pytest.raises(ValueError, match="models"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_invalid_vsa_tile_size_raises(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"vsa": {"tile_size": 128}}
+    with pytest.raises(ValueError, match="training.vsa.tile_size must be 64 or 256"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_validation_inference_checkpoint_flag_requires_bool(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"save_inference_checkpoint_on_validation": 1}}
+    with pytest.raises(ValueError, match="save_inference_checkpoint_on_validation"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_training_checkpoint_completion_flag_requires_bool(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"require_complete_training_checkpoint": 1}}
+    with pytest.raises(ValueError, match="require_complete_training_checkpoint"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_enabled_inference_checkpoint_requires_role(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {
+        "checkpoint": {
+            "save_inference_checkpoint_on_validation": True,
+            "inference_checkpoint_role": "",
+        }
+    }
+    with pytest.raises(ValueError, match="inference_checkpoint_role"):
+        load_run_config(_write_yaml(tmp_path, data))
+
+
+def test_invalid_inference_checkpoint_dtype_raises(tmp_path: Path) -> None:
+    data = _minimal_yaml()
+    data["training"] = {"checkpoint": {"inference_checkpoint_dtype": "fp8"}}
+    with pytest.raises(ValueError, match="inference_checkpoint_dtype"):
         load_run_config(_write_yaml(tmp_path, data))
 
 
@@ -223,9 +279,6 @@ def test_missing_config_file_raises(tmp_path: Path) -> None:
         load_run_config(str(tmp_path / "does_not_exist.yaml"))
 
 
-# ---------------------------------------------------------------------------
-# Special parsing
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("betas_value, expected", [
@@ -273,8 +326,6 @@ def test_pipeline_quant_config_rejects_unknown_name(tmp_path: Path) -> None:
 
 
 def test_data_path_mapping_parses_repeat_counts(tmp_path: Path) -> None:
-    # Config loading should preserve structured multi-dataset paths so the
-    # dataset layer can interpret repeat counts later.
     data = _minimal_yaml()
     data["training"] = {
         "data": {
@@ -294,8 +345,6 @@ def test_data_path_mapping_parses_repeat_counts(tmp_path: Path) -> None:
 
 
 def test_dotted_override_replaces_mapping_data_path(tmp_path: Path) -> None:
-    # A dict-valued data_path is a single leaf for overrides: a scalar
-    # --training.data.data_path replaces the whole mapping.
     data = _minimal_yaml()
     data["training"] = {
         "data": {
@@ -342,7 +391,6 @@ def test_dotted_overrides_accept_separate_value_token(tmp_path: Path) -> None:
 def test_overrides_create_intermediate_keys(tmp_path: Path) -> None:
     """Overrides into a nested key absent from YAML should still apply."""
     data = _minimal_yaml()
-    # No `training.checkpoint` block in the minimal YAML.
     path = _write_yaml(tmp_path, data)
     cfg = load_run_config(
         path,

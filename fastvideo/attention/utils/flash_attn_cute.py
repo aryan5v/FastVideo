@@ -13,36 +13,23 @@ if torch.cuda.is_available():
     try:
         from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
     except ImportError:
-        # flash_attn.cute (FA4) is simply not installed -- expected on builds
-        # without it; callers handle the ImportError (the FASTVIDEO_FA4 gate in
-        # flash_attn.py raises, the FP4 probe treats FA4 as unavailable).
         raise
     except Exception as e:
-        # flash_attn.cute IS installed but failed to import -- almost always an
-        # nvidia-cutlass-dsl (CuTe DSL) version skew, e.g. "module
-        # 'cutlass.cute.core' has no attribute 'ThrMma'" (an AttributeError, not
-        # ImportError). This is fixable by pinning a compatible
-        # nvidia-cutlass-dsl, so warn loudly, then re-raise as ImportError so
-        # callers can handle it uniformly.
         logger.warning(
             "flash_attn.cute (FA4) is installed but failed to import (%r). "
             "This is usually an nvidia-cutlass-dsl version mismatch -- pin a "
             "compatible nvidia-cutlass-dsl to restore FA4.", e)
         raise ImportError(f"flash_attn.cute (FA4) import failed: {e!r}") from e
 else:
-    # This error will be caught in flash_attn.py or flash_attn_no_pad.py
     raise ImportError("flash_attn.cute is only available on CUDA devices; this error must be handled internally")
 
 try:
-    # FA2 serves the calls FA4 cute cannot on pre-sm90 GPUs (backward, GQA).
-    # Optional so FA4-only installs can still import this module.
     from flash_attn import flash_attn_func as _flash_attn_2_func
     from flash_attn import flash_attn_varlen_func as _flash_attn_2_varlen_func
 except ImportError:
     _flash_attn_2_func = None
     _flash_attn_2_varlen_func = None
 
-# Dynamo unwraps functools caches, so keep this cache inside the opaque helper.
 _SM90_OR_NEWER_BY_DEVICE: dict[int, bool] = {}
 
 
@@ -63,11 +50,6 @@ def _use_fa2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
     assert device_id is not None
     if _sm90_or_newer(device_id):
         return False
-    # Pre-sm90 FA4 cute limitations, both served by FA2 (deterministic
-    # capability gate, not a runtime fallback):
-    #   * the backward asserts sm90+ (L40S/sm_89 dies on its arch check);
-    #   * GQA fails CuTeDSL JIT in pack_gqa ("ValueError: Operation creation
-    #     failed", observed on sm_89 with HunyuanGameCraft/LTX2).
     if q.shape[-2] != k.shape[-2]:
         return True
     return torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
@@ -94,9 +76,6 @@ def _flash_attn_cute_forward(
     causal: bool,
     deterministic: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # _flash_attn_fwd returns (out, lse) on its empty-sequence early path but
-    # (out, lse, p, row_max) on the main path at the pinned FA4 cute ref; take
-    # the first two so both arities work.
     out, lse = _flash_attn_fwd(
         q,
         k,
@@ -108,6 +87,7 @@ def _flash_attn_cute_forward(
         softcap=0.0,
         num_splits=1,
         pack_gqa=None,
+        return_lse=True,
     )[:2]
     return out, lse
 
@@ -132,9 +112,58 @@ def _flash_attn_cute_setup_context(ctx: torch.autograd.function.FunctionCtx, inp
     q, k, v, softmax_scale, causal, deterministic = inputs
     out, lse = output
     ctx.save_for_backward(q, k, v, out, lse)
+    ctx.mark_non_differentiable(lse)
     ctx.softmax_scale = softmax_scale
     ctx.causal = causal
     ctx.deterministic = deterministic
+
+
+@torch.library.custom_op(
+    "fastvideo::_flash_attn_cute_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _flash_attn_cute_backward_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    grad_out: torch.Tensor,
+    lse: torch.Tensor,
+    softmax_scale: float | None,
+    causal: bool,
+    deterministic: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _flash_attn_bwd(
+        q,
+        k,
+        v,
+        out,
+        grad_out,
+        lse,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        softcap=0.0,
+        window_size_left=None,
+        window_size_right=None,
+        deterministic=deterministic,
+    )
+
+
+@torch.library.register_fake("fastvideo::_flash_attn_cute_backward")
+def _flash_attn_cute_backward_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    grad_out: torch.Tensor,
+    lse: torch.Tensor,
+    softmax_scale: float | None,
+    causal: bool,
+    deterministic: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del out, grad_out, lse, softmax_scale, causal, deterministic
+    return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
 
 
 def _flash_attn_cute_backward(
@@ -144,19 +173,16 @@ def _flash_attn_cute_backward(
 ):
     del grad_lse
     q, k, v, out, lse = ctx.saved_tensors
-    dq, dk, dv = _flash_attn_bwd(
+    dq, dk, dv = torch.ops.fastvideo._flash_attn_cute_backward(
         q,
         k,
         v,
         out,
         grad_out,
         lse,
-        softmax_scale=ctx.softmax_scale,
-        causal=ctx.causal,
-        softcap=0.0,
-        window_size_left=None,
-        window_size_right=None,
-        deterministic=ctx.deterministic,
+        ctx.softmax_scale,
+        ctx.causal,
+        ctx.deterministic,
     )
     return dq, dk, dv, None, None, None
 
@@ -200,6 +226,7 @@ def _flash_attn_cute_varlen_forward(
         softcap=0.0,
         num_splits=1,
         pack_gqa=None,
+        return_lse=True,
     )[:2]
     return out, lse
 
@@ -241,11 +268,73 @@ def _flash_attn_cute_varlen_setup_context(ctx: torch.autograd.function.FunctionC
     ) = inputs
     out, lse = output
     ctx.save_for_backward(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)
+    ctx.mark_non_differentiable(lse)
     ctx.max_seqlen_q = max_seqlen_q
     ctx.max_seqlen_k = max_seqlen_k
     ctx.softmax_scale = softmax_scale
     ctx.causal = causal
     ctx.deterministic = deterministic
+
+
+@torch.library.custom_op(
+    "fastvideo::_flash_attn_cute_varlen_backward",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _flash_attn_cute_varlen_backward_op(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    grad_out: torch.Tensor,
+    lse: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float | None,
+    causal: bool,
+    deterministic: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _flash_attn_bwd(
+        q,
+        k,
+        v,
+        out,
+        grad_out,
+        lse,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        softcap=0.0,
+        window_size_left=None,
+        window_size_right=None,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        deterministic=deterministic,
+    )
+
+
+@torch.library.register_fake("fastvideo::_flash_attn_cute_varlen_backward")
+def _flash_attn_cute_varlen_backward_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    grad_out: torch.Tensor,
+    lse: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float | None,
+    causal: bool,
+    deterministic: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del out, grad_out, lse, cu_seqlens_q, cu_seqlens_k
+    del max_seqlen_q, max_seqlen_k, softmax_scale, causal, deterministic
+    return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
 
 
 def _flash_attn_cute_varlen_backward(
@@ -255,23 +344,20 @@ def _flash_attn_cute_varlen_backward(
 ):
     del grad_lse
     q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
-    dq, dk, dv = _flash_attn_bwd(
+    dq, dk, dv = torch.ops.fastvideo._flash_attn_cute_varlen_backward(
         q,
         k,
         v,
         out,
         grad_out,
         lse,
-        softmax_scale=ctx.softmax_scale,
-        causal=ctx.causal,
-        softcap=0.0,
-        window_size_left=None,
-        window_size_right=None,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=ctx.max_seqlen_q,
-        max_seqlen_k=ctx.max_seqlen_k,
-        deterministic=ctx.deterministic,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        ctx.max_seqlen_q,
+        ctx.max_seqlen_k,
+        ctx.softmax_scale,
+        ctx.causal,
+        ctx.deterministic,
     )
     return dq, dk, dv, None, None, None, None, None, None, None
 
@@ -308,13 +394,6 @@ def flash_attn_func(
     return out
 
 
-# ---------------------------------------------------------------------------
-# FP4 (NVFP4 block-scaled) variant
-# ---------------------------------------------------------------------------
-# The FP4 path needs the mSFQ/mSFK scale-factor tensors that the regular
-# wrapper does not expose. We register a separate custom op so that
-# torch.compile can treat the kernel as an opaque boundary (the underlying
-# CuTeDSL kernel uses cuda.CUstream which dynamo cannot trace).
 
 
 @torch.library.custom_op(
@@ -359,8 +438,6 @@ def _flash_attn_cute_fp4_forward_fake(
     causal: bool,
 ) -> torch.Tensor:
     del k, sfq, sfk, softmax_scale, causal
-    # q is FP4 packed: shape (batch, seqlen, nheads, headdim/2). Output is in
-    # V's dtype with full headdim.
     batch, seqlen_q, nheads = q.shape[:3]
     return v.new_empty(batch, seqlen_q, nheads, v.shape[-1])
 

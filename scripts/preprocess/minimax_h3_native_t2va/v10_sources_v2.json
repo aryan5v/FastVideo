@@ -1,0 +1,65 @@
+{
+  "schema_version": "minimax-h3-native-t2va-sources-v1",
+  "snapshot_seed": 20260822,
+  "output_root": "/mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v2",
+  "legacy_validation_ids": "/mnt/lustre/vlm-wlsaidhi/fastvideo/data/h3_validation_synth64_ids.txt",
+  "validation_quotas": {
+    "h3_t2av_video_nuva_50k_720_mixed_len": 12,
+    "h3_t2av_video_nuva_10k_720_mixed_len": 12,
+    "h3_t2av_video_nuva_10k_mixed_res_len": 8,
+    "h3_t2av_video_5s_768p": 16,
+    "h3_t2av_fastgen_vidprom_150k": 16
+  },
+  "sources": [
+    {
+      "name": "h3_t2av_video_nuva_50k_720_mixed_len",
+      "family": "nuva",
+      "videos_dir": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_50k_720_mixed_len/runs/nuvalab-768-short-edge-mixed-len-49700/videos",
+      "status_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_50k_720_mixed_len/runs/nuvalab-768-short-edge-mixed-len-49700/status.jsonl",
+      "prompts_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_50k_720_mixed_len/t2va-prompts-50k.jsonl",
+      "prompt_id_field": "id",
+      "prompt_text_field": "prompt_compiled",
+      "require_prompt_validation_passed": true
+    },
+    {
+      "name": "h3_t2av_video_nuva_10k_720_mixed_len",
+      "family": "nuva",
+      "videos_dir": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_10k_720_mixed_len/runs/nuvalab-768-short-edge-mixed-len-10k/videos",
+      "status_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_10k_720_mixed_len/runs/nuvalab-768-short-edge-mixed-len-10k/status.jsonl",
+      "prompts_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_prompt/h3_t2va_prompts_10k.jsonl",
+      "prompt_id_field": "id",
+      "prompt_text_field": "prompt_compiled",
+      "require_prompt_validation_passed": true
+    },
+    {
+      "name": "h3_t2av_video_nuva_10k_mixed_res_len",
+      "family": "nuva",
+      "videos_dir": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_10k_mixed_res_len/runs/nuvalab-mixed-res-10k/videos",
+      "status_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_video_nuva_10k_mixed_res_len/runs/nuvalab-mixed-res-10k/status.jsonl",
+      "prompts_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_prompt/h3_t2va_prompts_10k.jsonl",
+      "prompt_id_field": "id",
+      "prompt_text_field": "prompt_compiled",
+      "require_prompt_validation_passed": true
+    },
+    {
+      "name": "h3_t2av_video_5s_768p",
+      "family": "vidprom",
+      "videos_dir": "/mnt/lustre/vlm-shared/h3_t2av_video_5s_768p/videos",
+      "status_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_video_5s_768p/status.jsonl",
+      "prompts_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_prompt/vidprom_h3_v1_248041_20260813.jsonl",
+      "prompt_id_field": "id",
+      "prompt_text_field": "rewritten_prompt",
+      "require_prompt_validation_passed": false
+    },
+    {
+      "name": "h3_t2av_fastgen_vidprom_150k",
+      "family": "vidprom",
+      "videos_dir": "/mnt/lustre/vlm-shared/h3_t2av_fastgen_vidprom_150k/runs/h3ext-720p-150k/videos",
+      "status_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_fastgen_vidprom_150k/runs/h3ext-720p-150k/status.jsonl",
+      "prompts_jsonl": "/mnt/lustre/vlm-shared/h3_t2av_fastgen_vidprom_150k/h3ext_720p_150k_prompts.jsonl",
+      "prompt_id_field": "sample_id",
+      "prompt_text_field": "prompt",
+      "require_prompt_validation_passed": false
+    }
+  ]
+}

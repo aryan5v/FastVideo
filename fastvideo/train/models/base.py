@@ -18,8 +18,6 @@ if TYPE_CHECKING:
     from fastvideo.train.utils.lora import LoraConfig
     from fastvideo.pipelines import TrainingBatch
 
-# Video models return one flow tensor. Joint video/audio models return an
-# ordered pair so training methods can apply each modality's scheduler target.
 NoisePrediction: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
@@ -89,9 +87,6 @@ class ModelBase(ABC):
         )
         return True
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def init_preprocessors(  # noqa: B027
             self,
@@ -117,9 +112,6 @@ class ModelBase(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement decode_latents()")
 
-    # ------------------------------------------------------------------
-    # Timestep helpers
-    # ------------------------------------------------------------------
 
     @property
     def num_train_timesteps(self) -> int:
@@ -130,9 +122,6 @@ class ModelBase(ABC):
         """Apply model/pipeline timestep shifting and clamp."""
         return timestep
 
-    # ------------------------------------------------------------------
-    # Runtime primitives
-    # ------------------------------------------------------------------
 
     @abstractmethod
     def prepare_batch(
@@ -152,6 +141,22 @@ class ModelBase(ABC):
         timestep: torch.Tensor,
     ) -> torch.Tensor:
         """Apply forward-process noise at *timestep*."""
+
+    def add_noise_for_batch(
+        self,
+        clean_latents: torch.Tensor,
+        noise: torch.Tensor,
+        timestep: torch.Tensor,
+        batch: TrainingBatch,
+    ) -> torch.Tensor:
+        """Apply noise with optional immutable geometry carried by ``batch``.
+
+        Video-only and fixed-shape models keep their existing behavior. Joint
+        packed models override this hook when splitting the tensor requires
+        batch-local shape context.
+        """
+        del batch
+        return self.add_noise(clean_latents, noise, timestep)
 
     @abstractmethod
     def predict_noise(

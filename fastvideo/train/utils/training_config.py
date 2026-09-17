@@ -32,6 +32,7 @@ class DataConfig:
     num_width: int = 0
     num_latent_t: int = 0
     num_frames: int = 0
+    native_shape_bucketing: bool = False
 
 
 @dataclass(slots=True)
@@ -56,8 +57,14 @@ class TrainingLoopConfig:
 class CheckpointConfig:
     output_dir: str = ""
     resume_from_checkpoint: str = ""
+    save_inference_checkpoint_on_validation: bool = False
+    inference_checkpoint_role: str = "student"
+    inference_checkpoint_dtype: str = "bfloat16"
     training_state_checkpointing_steps: int = 0
+    require_complete_training_checkpoint: bool = False
     checkpoints_total_limit: int = 0
+    checkpointing_start_step: int = 0
+    reset_lr_on_resume: bool = False
 
 
 @dataclass(slots=True)
@@ -77,6 +84,9 @@ class ModelTrainingConfig:
     precondition_outputs: bool = False
     moba_config: dict = field(default_factory=dict)
     enable_gradient_checkpointing_type: str | None = None
+    allow_low_precision_master_weights: bool = False
+    enable_torch_compile: bool = False
+    torch_compile_kwargs: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -88,11 +98,7 @@ class TrainingConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     vsa_sparsity: float = 0.0
-    # Reuse the per-step padded VSA tile buffer across attention layers.
-    # Defaults to False for training: under full activation checkpointing the
-    # cached buffer survives into the backward recompute and inflates peak
-    # memory (see #1423). Enable on memory-rich setups to keep the per-step
-    # buffer-reuse speedup.
+    vsa_tile_size: int = 256
     vsa_cache_tile_buf: bool = False
     model: ModelTrainingConfig = field(default_factory=ModelTrainingConfig)
     pipeline_config: PipelineConfig | None = None

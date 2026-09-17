@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 from typing import Any, TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 
 from fastvideo.attention.selector import (
+    NO_REQUEST,
     _component_attention_backend_scope,
     coerce_attn_backend,
+    component_attention_backend,
 )
 from fastvideo.configs.pipelines.base import PipelineConfig
 from fastvideo.fastvideo_args import ExecutionMode, TrainingArgs
@@ -26,9 +29,6 @@ if TYPE_CHECKING:
     from fastvideo.train.utils.training_config import (
         TrainingConfig, )
 
-# ------------------------------------------------------------------
-# TrainingArgs builders (only place that creates FastVideoArgs)
-# ------------------------------------------------------------------
 
 
 def _make_training_args(
@@ -38,9 +38,6 @@ def _make_training_args(
 ) -> TrainingArgs:
     """Build a TrainingArgs for PipelineComponentLoader."""
     pipeline_config = tc.pipeline_config or PipelineConfig()
-    # Propagate dit_precision from TrainingConfig to PipelineConfig
-    # so that TransformerLoader.load() picks up the correct
-    # default_dtype (e.g. fp32 master weights for training).
     if tc.dit_precision and tc.dit_precision != pipeline_config.dit_precision:
         pipeline_config.dit_precision = tc.dit_precision
     return TrainingArgs(
@@ -60,7 +57,9 @@ def _make_training_args(
         text_encoder_cpu_offload=False,
         image_encoder_cpu_offload=False,
         use_fsdp_inference=False,
-        enable_torch_compile=False,
+        enable_torch_compile=tc.model.enable_torch_compile,
+        regional_compile=True,
+        torch_compile_kwargs=tc.model.torch_compile_kwargs,
     )
 
 
@@ -73,14 +72,12 @@ def make_inference_args(
     args = _make_training_args(tc, model_path=model_path)
     args.inference_mode = True
     args.mode = ExecutionMode.INFERENCE
-    args.dit_cpu_offload = True
+    args.dit_cpu_offload = False
     args.VSA_sparsity = tc.vsa_sparsity
+    args.VSA_tile_size = tc.vsa_tile_size
     return args
 
 
-# ------------------------------------------------------------------
-# Module loading
-# ------------------------------------------------------------------
 
 
 def load_module_from_path(
@@ -92,6 +89,8 @@ def load_module_from_path(
     override_transformer_cls_name: str | None = None,
     transformer_override_safetensor: str | None = None,
     attention_backend: AttentionBackendEnum | str | None = None,
+    construction_precision: str | None = None,
+    pre_fsdp_transform: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
 ) -> torch.nn.Module:
     """Load one pipeline component with its role-scoped attention policy.
 
@@ -104,6 +103,9 @@ def load_module_from_path(
     scoped to this load call.
     """
     fastvideo_args: Any = _make_training_args(training_config, model_path=model_path)
+    original_dit_precision = fastvideo_args.pipeline_config.dit_precision
+    if construction_precision is not None:
+        fastvideo_args.pipeline_config.dit_precision = str(construction_precision)
 
     local_model_path = maybe_download_model(model_path)
     config = verify_model_config_and_directory(local_model_path)
@@ -117,43 +119,53 @@ def load_module_from_path(
         raise ValueError(f"Module {module_type!r} has null value in "
                          f"config at {local_model_path}")
 
-    # Trailing modular-manifest metadata does not change component dispatch;
-    # the provider and architecture remain the first two fields.
     transformers_or_diffusers, _architecture = module_info[:2]
     component_path = os.path.join(local_model_path, module_type)
 
-    # fastvideo_args is freshly built above and never escapes this function,
-    # so overrides are plain assignments — nothing to save or restore.
     if override_transformer_cls_name is not None:
         fastvideo_args.override_transformer_cls_name = str(override_transformer_cls_name)
 
     if transformer_override_safetensor:
         fastvideo_args.init_weights_from_safetensors = str(transformer_override_safetensor)
 
+    if pre_fsdp_transform is not None:
+        if module_type != "transformer":
+            raise ValueError("pre_fsdp_transform can only be set when loading "
+                             f"a transformer, got module_type={module_type!r}")
+        fastvideo_args._pre_fsdp_transform = pre_fsdp_transform
+
     if attention_backend is not None and module_type != "transformer":
         raise ValueError("attention_backend can only be set when loading "
                          f"a transformer, got module_type={module_type!r}")
     resolved_attention_backend = coerce_attn_backend(attention_backend)
-    # Per-role request delivered as a construction scope: process-local,
-    # exception-safe, and part of the selector's cache key (no global
-    # mutation, no cache flushes between roles).
     attention_context = (nullcontext() if resolved_attention_backend is None else _component_attention_backend_scope(
         resolved_attention_backend, component=module_type))
 
     if disable_custom_init_weights:
         fastvideo_args._loading_teacher_critic_model = True
-    # Attention implementations are bound while transformer layers are
-    # constructed. Scope the override to this one role so student,
-    # teacher, and critic can use independent backends in one process.
-    with attention_context:
-        module = PipelineComponentLoader.load_module(
-            module_name=module_type,
-            component_model_path=component_path,
-            transformers_or_diffusers=(transformers_or_diffusers),
-            fastvideo_args=fastvideo_args,
-        )
+    try:
+        with attention_context:
+            module = PipelineComponentLoader.load_module(
+                module_name=module_type,
+                component_model_path=component_path,
+                transformers_or_diffusers=(transformers_or_diffusers),
+                fastvideo_args=fastvideo_args,
+            )
+    finally:
+        fastvideo_args.pipeline_config.dit_precision = original_dit_precision
 
     if not isinstance(module, torch.nn.Module):
         raise TypeError(f"Loaded {module_type!r} is not a "
                         f"torch.nn.Module: {type(module)}")
+    if resolved_attention_backend is not None:
+        receipt = component_attention_backend(module)
+        if receipt is NO_REQUEST:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} did not record its "
+                               f"requested attention backend {resolved_attention_backend.name}. "
+                               "The component loader must stamp the construction decision on "
+                               "module.config._resolved_attention_backend.")
+        if receipt is not resolved_attention_backend:
+            raise RuntimeError(f"Loaded {module_type!r} from {model_path!r} requested attention "
+                               f"backend {resolved_attention_backend.name}, but recorded "
+                               f"{receipt.name}.")
     return module

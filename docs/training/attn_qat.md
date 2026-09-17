@@ -105,7 +105,7 @@ The migrated recipe preserves these behaviors:
 |---|---|
 | Student fake-quantized attention | `models.student.attention_backend: ATTN_QAT_TRAIN` |
 | Teacher and critic full-precision attention | Role-local `FLASH_ATTN` |
-| Generator update every five critic steps | `method.generator_update_interval: 5` |
+| Four critic-only steps, then one student-only step | `method.generator_update_interval: 5` |
 | Three-step rollout | `method.dmd_denoising_steps: [1000, 757, 522]` |
 | Score timestep range | `method.min_timestep_ratio: 0.02`, `max_timestep_ratio: 0.98` |
 | Legacy guidance `cond + 2(cond - uncond)` | Standard CFG scale `3.0` |

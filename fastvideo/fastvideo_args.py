@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Inspired by SGLang: https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/server_args.py
 """The arguments of FastVideo Inference."""
 import argparse
 import dataclasses
@@ -26,9 +25,6 @@ else:
 
 logger = init_logger(__name__)
 
-# Offload flags that trade device memory for host memory. All of them are a loss
-# on a device where the two are the same physical pool. Keeping the policy
-# centralized lets every loader and stage share one worker-local decision.
 UNIFIED_MEMORY_OFFLOAD_FLAGS = (
     "dit_layerwise_offload",
     "dit_cpu_offload",
@@ -91,32 +87,24 @@ class WorkloadType(str, Enum):
         return [workload.value for workload in cls]
 
 
-# args for fastvideo framework
 @dataclasses.dataclass
 class FastVideoArgs:
-    # Model and path configuration (for convenience)
     model_path: str
 
-    # Running mode
     mode: ExecutionMode = ExecutionMode.INFERENCE
 
-    # Workload type
     workload_type: WorkloadType = WorkloadType.T2V
 
-    # Distributed executor backend
     distributed_executor_backend: str = "mp"
 
-    # a few attributes for ray related
     ray_placement_group: PlacementGroup | None = None
     ray_runtime_env: RuntimeEnv | None = None
 
     inference_mode: bool = True  # if False == training mode
 
-    # HuggingFace specific parameters
     trust_remote_code: bool = False
     revision: str | None = None
 
-    # Parallelism
     num_gpus: int = 1
     tp_size: int = -1
     sp_size: int = -1
@@ -127,30 +115,15 @@ class FastVideoArgs:
     pipeline_config: PipelineConfig = field(default_factory=PipelineConfig)
     preprocess_config: PreprocessConfig | None = None
 
-    # LoRA parameters
-    # (Wenxuan) prefer to keep it here instead of in pipeline config to not make it complicated.
     lora_path: str | None = None
     lora_nickname: str = "default"  # for swapping adapters in the pipeline
     lora_strength: float = 1.0
-    # can restrict layers to adapt, e.g. ["q_proj"]
-    # Will adapt only q, k, v, o by default.
     lora_target_modules: list[str] | None = None
 
     output_type: str = "pil"
 
-    # The attention backend requested for this run. Applied per component at
-    # load time (each component resolves its own decision, recorded on its
-    # config); a role-level request (the train stack's per-role
-    # attention_backend) overrides it.
-    #
-    # This field is the parse-once adapter for FASTVIDEO_ATTENTION_BACKEND:
-    # when left unset it takes the env var's value in __post_init__, so the
-    # environment is an *input* read once here rather than something the loader
-    # consults later. None means no request: per-layer defaults, then platform
-    # auto-selection.
     attention_backend: str | None = None
 
-    # CPU offload parameters
     dit_cpu_offload: bool = True
     use_fsdp_inference: bool = False
     dit_layerwise_offload: bool = True
@@ -159,96 +132,44 @@ class FastVideoArgs:
     vae_cpu_offload: bool = True
     pin_cpu_memory: bool = True
 
-    # MiniMax-H3 inference load order. ``None`` (auto) defers DiT/VAE load until
-    # after the Qwen3-VL encoder is released, but only on unified-memory
-    # devices (GB10 / Spark). Discrete GPUs keep the encoder resident so a
-    # later ``generate()`` on the same worker can re-encode. Explicit True /
-    # False overrides the probe. Training never defers.
     h3_sequential_load: bool | None = None
 
-    # MiniMax-H3 video reconstruction. ``h3-vae`` is the full ViT decoder.
-    # ``taeh3`` is Ollin Boer Bohan's tiny preview decoder; it changes quality
-    # and is opt-in. T2VA with TAEH3 does not need the video VAE weights.
     video_decode_backend: str = "h3-vae"
     taeh3_checkpoint: str | None = None
     taeh3_chunk_size: int = 5
 
-    # Load each heavy component on first use and free it once the last stage
-    # that holds it has run, instead of keeping every component resident from
-    # load time to shutdown. Peak memory becomes the largest overlapping set
-    # rather than the sum of all components. ``None`` (auto) turns this on for
-    # unified-memory devices (GB10 / Spark) after the worker binds its device,
-    # and leaves it off on discrete GPUs. Explicit True / False overrides the
-    # probe. A released component is re-read from disk on the next generation,
-    # so this trades per-request latency for headroom. Inference only; training
-    # keeps every component resident.
     lazy_module_load: bool | None = None
 
-    # Sequence-parallel MiniMax-H3 VAE (opt-in, default off). With SP > 1 the
-    # video VAE's temporal chunks (decode) and clips (reference encode) are
-    # round-robined across the sequence-parallel ranks and reassembled
-    # bit-exactly on the group's first rank instead of running serially on
-    # one rank while the others idle. ``__post_init__`` folds the
-    # FASTVIDEO_VAE_PARALLEL_DECODE / FASTVIDEO_VAE_PARALLEL_ENCODE env vars
-    # into these fields (parse-once, like attention_backend), and
-    # FASTVIDEO_VAE_PARALLEL_DECODE_STRATEGY overrides the chunk-transport
-    # collective ("gather" or "all_gather").
     vae_parallel_decode: bool = False
     vae_parallel_encode: bool = False
     vae_parallel_decode_strategy: str | None = None
 
-    # Compilation
-    # ``enable_torch_compile`` covers the DiT path (transformer,
-    # transformer_2, and the LTX-2 stage-2 transformer_refine).
-    # Per-component flags below let callers compile additional submodules
-    # independently; ``False`` leaves the component eager.
     enable_torch_compile: bool = False
+    regional_compile: bool = False
     enable_torch_compile_text_encoder: bool = False
     enable_torch_compile_vae: bool = False
     enable_torch_compile_audio_vae: bool = False
-    # ``torch_compile_kwargs`` is the master kwargs dict (applied to every
-    # compiled submodule unless a per-component dict below is non-empty,
-    # in which case the per-component dict overrides entirely — matching
-    # the FastVideo-internal precedent).
     torch_compile_kwargs: dict[str, Any] = field(default_factory=dict)
     torch_compile_kwargs_dit: dict[str, Any] = field(default_factory=dict)
     torch_compile_kwargs_text_encoder: dict[str, Any] = field(default_factory=dict)
     torch_compile_kwargs_vae: dict[str, Any] = field(default_factory=dict)
     torch_compile_kwargs_audio_vae: dict[str, Any] = field(default_factory=dict)
-    # Regional (per-transformer-block) fullgraph torch.compile of the DiT at
-    # inference — the inference-side counterpart of the training regional
-    # compile ported from hao-ai-lab/FastVideo#1718. Applied by the loader
-    # right after the transformer loads, with fullgraph=True and inductor
-    # options {emulate_precision_casts: True} injected (no user kwargs
-    # needed). MiniMax-H3 VSA is supported only by its compile-safe sm_100a
-    # tile-64 inference route; other VSA routes degrade the transformer to
-    # eager with one warning. Dense FA2/FA3/FA4 inference uses compile-visible
-    # custom-op boundaries. Opt-in via FASTVIDEO_INFERENCE_TORCH_COMPILE=1 (folded in
-    # __post_init__) or PipelineSelection.experimental
-    # {"inference_torch_compile": true}. Distinct from ``enable_torch_compile``,
-    # which keeps the pipeline-level compile semantics.
     inference_torch_compile: bool = False
 
     disable_autocast: bool = False
 
-    # VSA parameters
     VSA_sparsity: float = 0.0  # inference/validation sparsity
     VSA_tile_size: int = 256  # VSA-H3 tile size (256 or 64); 64 = native Triton path
 
-    # V-MoBA parameters
     moba_config_path: str | None = None
     moba_config: dict[str, Any] = field(default_factory=dict)
 
-    # Master port for distributed training/inference
     master_port: int | None = None
 
-    # Stage verification
     enable_stage_verification: bool = True
 
-    # Prompt text file for batch processing
     prompt_txt: str | None = None
 
-    # LTX-2 VAE tiling overrides
     ltx2_vae_tiling: bool | None = None
     ltx2_vae_spatial_tile_size_in_pixels: int | None = None
     ltx2_vae_spatial_tile_overlap_in_pixels: int | None = None
@@ -256,12 +177,6 @@ class FastVideoArgs:
     ltx2_vae_temporal_tile_overlap_in_frames: int | None = None
     ltx2_initial_latent_path: str | None = None
     ltx2_audio_latent_path: str | None = None
-    # Generic stage-2 refine surface (preferred user-facing API). The
-    # ltx2_refine_* fields below remain the runtime carriers; these
-    # generic ones let CLI / typed-config callers set the same values
-    # without binding to a specific model family. ``None`` here means
-    # "fall back to the model_index.json default and/or the
-    # ltx2_refine_* runtime carrier".
     refine_enabled: bool | None = None
     refine_upsampler_path: str | None = None
     refine_transformer_path: str | None = None
@@ -271,11 +186,6 @@ class FastVideoArgs:
     refine_add_noise: bool | None = None
     refine_noise_path: str | None = None
     refine_audio_noise_path: str | None = None
-    # LTX-2 stage-2 spatial refinement (the SR pipeline). When enabled the
-    # transformer runs once at half resolution, the latents are upsampled
-    # by the LTX2 latent upsampler, then a short stage-2 distilled
-    # denoising pass refines the upsampled latents. Behaviour is opt-in
-    # and isolated to LTX-2 today.
     ltx2_refine_enabled: bool = False
     ltx2_refine_upsampler_path: str | None = None
     ltx2_refine_transformer_path: str | None = None
@@ -288,7 +198,6 @@ class FastVideoArgs:
     ltx2_legacy_native_noise_order: bool = False
     ltx2_use_distilled_sigmas: bool = True
 
-    # model paths for correct deallocation
     model_paths: dict[str, str] = field(default_factory=dict)
     model_loaded: dict[str, bool] = field(default_factory=lambda: {
         "transformer": True,
@@ -298,14 +207,6 @@ class FastVideoArgs:
 
     override_text_encoder_safetensors: str | None = None  # path to safetensors file for text encoder override
     override_text_encoder_quant: QuantizationMethods = None
-    # Typed transformer quantization carrier. The typed inference API
-    # accepts ``engine.quantization.transformer_quant: "NVFP4"`` and the
-    # compat layer resolves the name to a concrete ``QuantizationConfig``
-    # instance (e.g. ``NVFP4Config()``); ``__post_init__`` then pins it on
-    # ``pipeline_config.dit_config.quant_config`` so the loader can detect
-    # FP4 layers via the standard ``get_quant_method`` path. ``None``
-    # leaves whatever value the caller already set on ``dit_config``
-    # untouched.
     transformer_quant: Any | None = None
 
     override_transformer_cls_name: str | None = None
@@ -314,10 +215,7 @@ class FastVideoArgs:
 
     override_pipeline_cls_name: str | None = None
 
-    # # DMD parameters
-    # dmd_denoising_steps: List[int] | None = field(default=None)
 
-    # MoE parameters used by Wan2.2
     boundary_ratio: float | None = 0.875
 
     @property
@@ -339,22 +237,13 @@ class FastVideoArgs:
         self._resolve_refine_args()
         self._apply_transformer_quant()
         if not self.inference_torch_compile:
-            # Parse-once adapter (same pattern as attention_backend below): the
-            # environment variable is an input read once here, so the loader
-            # only ever consults the typed field.
             import fastvideo.envs as envs
             if envs.FASTVIDEO_INFERENCE_TORCH_COMPILE:
                 self.inference_torch_compile = True
         if self.attention_backend is not None:
-            # Fail fast on typos instead of silently auto-selecting later.
             from fastvideo.attention.selector import coerce_attn_backend
             coerce_attn_backend(self.attention_backend)
         else:
-            # Parse-once adapter: fold the environment variable into the typed
-            # request so resolution has a single input and library code never
-            # consults the environment on the load path. The env var keeps its
-            # historically permissive parse — an unknown name is ignored here
-            # and falls through to automatic selection rather than raising.
             import fastvideo.envs as envs
             from fastvideo.attention.selector import backend_name_to_enum
             env_backend = envs.FASTVIDEO_ATTENTION_BACKEND
@@ -367,9 +256,6 @@ class FastVideoArgs:
         """Parse-once adapters for the sequence-parallel VAE env vars."""
         import fastvideo.envs as envs
 
-        # Mirrors fastvideo.models.vaes.minimax_h3_parallel.DECODE_GATHER_STRATEGIES /
-        # DEFAULT_DECODE_GATHER_STRATEGY (kept literal here so constructing args
-        # never imports model modules; a unit test pins the two in sync).
         strategies = ("gather", "all_gather")
         if not self.vae_parallel_decode and envs.FASTVIDEO_VAE_PARALLEL_DECODE:
             self.vae_parallel_decode = True
@@ -395,15 +281,10 @@ class FastVideoArgs:
         dit_config = getattr(self.pipeline_config, "dit_config", None)
         if dit_config is None:
             return
-        # Resolve a registry name (e.g. "nvfp4_qat_train" from the CLI) to a
-        # QuantizationConfig instance; a bare string has no get_quant_method.
         tq = self.transformer_quant
         if isinstance(tq, str):
             from fastvideo.layers.quantization import get_quantization_config
             tq = get_quantization_config(tq)()
-        # Don't overwrite if the caller already set it explicitly on
-        # dit_config (e.g. via ``pipeline_config.dit_config.quant_config = NVFP4Config()``);
-        # the explicit setter wins.
         if getattr(dit_config, "quant_config", None) is None:
             dit_config.quant_config = tq
 
@@ -459,14 +340,12 @@ class FastVideoArgs:
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        # Model and path configuration
         parser.add_argument(
             "--model-path",
             type=str,
             help="The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
         )
 
-        # Running mode
         parser.add_argument(
             "--mode",
             type=str,
@@ -475,7 +354,6 @@ class FastVideoArgs:
             help="The mode to run FastVideo",
         )
 
-        # Workload type
         parser.add_argument(
             "--workload-type",
             type=str,
@@ -484,7 +362,6 @@ class FastVideoArgs:
             help="The workload type",
         )
 
-        # distributed_executor_backend
         parser.add_argument(
             "--distributed-executor-backend",
             type=str,
@@ -500,7 +377,6 @@ class FastVideoArgs:
             help="Whether to use inference mode",
         )
 
-        # HuggingFace specific parameters
         parser.add_argument(
             "--trust-remote-code",
             action=StoreBoolean,
@@ -514,7 +390,6 @@ class FastVideoArgs:
             help="The specific model version to use (can be a branch name, tag name, or commit id)",
         )
 
-        # Parallelism
         parser.add_argument(
             "--num-gpus",
             type=int,
@@ -552,7 +427,6 @@ class FastVideoArgs:
             help="Set timeout for torch.distributed initialization.",
         )
 
-        # Output type
         parser.add_argument(
             "--output-type",
             type=str,
@@ -561,7 +435,6 @@ class FastVideoArgs:
             help="Output type for the generated video",
         )
 
-        # Attention backend (process-wide default request)
         parser.add_argument(
             "--attention-backend",
             type=str,
@@ -572,7 +445,6 @@ class FastVideoArgs:
             "then per-layer defaults, then automatic selection.",
         )
 
-        # Prompt text file for batch processing
         parser.add_argument(
             "--prompt-txt",
             type=str,
@@ -580,7 +452,6 @@ class FastVideoArgs:
             help="Path to a text file containing prompts (one per line) for batch processing",
         )
 
-        # LTX-2 VAE tiling overrides
         parser.add_argument(
             "--ltx2-vae-tiling",
             action=StoreBoolean,
@@ -618,7 +489,6 @@ class FastVideoArgs:
             help="Path to load/save a precomputed LTX-2 initial latent.",
         )
 
-        # LoRA parameters (inference-time adapter loading)
         parser.add_argument(
             "--lora-path",
             type=str,
@@ -645,7 +515,6 @@ class FastVideoArgs:
             help="Optional list of module name substrings to restrict LoRA injection (e.g. q_proj k_proj v_proj).",
         )
 
-        # BSA runtime control (LongCat)
         parser.add_argument(
             "--enable-bsa",
             action=StoreBoolean,
@@ -688,7 +557,9 @@ class FastVideoArgs:
             type=str,
             default=None,
             help=
-            "JSON string of kwargs to pass to torch.compile. Example: '{\"backend\":\"inductor\",\"mode\":\"reduce-overhead\"}'",
+            "JSON string of kwargs to pass to torch.compile. Example: '{\"backend\":\"inductor\",\"mode\":\"reduce-overhead\"}'. "
+            "Note: the modular fastvideo/train stack uses regional fullgraph compile, which rejects 'mode' "
+            "(it injects inductor options); express mode effects via 'options' there.",
         )
         parser.add_argument(
             "--inference-torch-compile",
@@ -793,7 +664,6 @@ class FastVideoArgs:
             help="Disable autocast for denoising loop and vae decoding in pipeline sampling",
         )
 
-        # VSA parameters
         parser.add_argument(
             "--VSA-sparsity",
             type=float,
@@ -807,7 +677,6 @@ class FastVideoArgs:
             help="VSA-H3 tile size in tokens (256 or 64); 64 runs the native Triton block-sparse path",
         )
 
-        # Master port for distributed training/inference
         parser.add_argument(
             "--master-port",
             type=int,
@@ -815,7 +684,6 @@ class FastVideoArgs:
             help="Master port for distributed training/inference",
         )
 
-        # Stage verification
         parser.add_argument(
             "--enable-stage-verification",
             action=StoreBoolean,
@@ -854,10 +722,8 @@ class FastVideoArgs:
                             type=str,
                             help="Path to safetensors file for initial weight loading")
 
-        # Add pipeline configuration arguments
         PipelineConfig.add_cli_args(parser)
 
-        # Add preprocessing configuration arguments
         PreprocessConfig.add_cli_args(parser)
 
         return parser
@@ -865,10 +731,8 @@ class FastVideoArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "FastVideoArgs":
         provided_args = clean_cli_args(args)
-        # Get all fields from the dataclass
         attrs = [attr.name for attr in dataclasses.fields(cls)]
 
-        # Create a dictionary of attribute values, with defaults for missing attributes
         kwargs: dict[str, Any] = {}
         for attr in attrs:
             if attr == 'pipeline_config':
@@ -878,11 +742,9 @@ class FastVideoArgs:
                 preprocess_config = PreprocessConfig.from_kwargs(provided_args)
                 kwargs['preprocess_config'] = preprocess_config
             elif attr == 'mode':
-                # Convert string to ExecutionMode enum
                 mode_value = getattr(args, attr, FastVideoArgs.mode.value)
                 kwargs['mode'] = ExecutionMode.from_string(mode_value) if isinstance(mode_value, str) else mode_value
             elif attr == 'torch_compile_kwargs':
-                # Parse JSON string for torch.compile kwargs
                 torch_compile_kwargs_str = getattr(args, 'torch_compile_kwargs', None)
                 if torch_compile_kwargs_str:
                     try:
@@ -893,17 +755,13 @@ class FastVideoArgs:
                 else:
                     kwargs['torch_compile_kwargs'] = {}
             elif attr == 'workload_type':
-                # Convert string to WorkloadType enum
                 workload_type_value = getattr(args, 'workload_type', FastVideoArgs.workload_type.value)
                 kwargs['workload_type'] = WorkloadType.from_string(workload_type_value) if isinstance(
                     workload_type_value, str) else workload_type_value
-            # Use getattr with default value from the dataclass for potentially missing attributes
             else:
-                # Get the field to check if it has a default_factory
                 field = dataclasses.fields(cls)[next(i for i, f in enumerate(dataclasses.fields(cls))
                                                      if f.name == attr)]
                 if field.default_factory is not dataclasses.MISSING:
-                    # Use the default_factory to create the default value
                     default_value = field.default_factory()
                 else:
                     default_value = getattr(cls, attr, None)
@@ -914,29 +772,22 @@ class FastVideoArgs:
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "FastVideoArgs":
-        # Convert mode string to enum if necessary
         if 'mode' in kwargs and isinstance(kwargs['mode'], str):
             kwargs['mode'] = ExecutionMode.from_string(kwargs['mode'])
 
-        # Convert workload_type string to enum if necessary
         if 'workload_type' in kwargs and isinstance(kwargs['workload_type'], str):
             kwargs['workload_type'] = WorkloadType.from_string(kwargs['workload_type'])
 
         kwargs['pipeline_config'] = PipelineConfig.from_kwargs(kwargs)
         kwargs['preprocess_config'] = PreprocessConfig.from_kwargs(kwargs)
-        # Filter to only FastVideoArgs dataclass fields — pipeline-specific CLI
-        # args (e.g. enable_bsa, bsa_sparsity) live in PipelineConfig and must
-        # not be forwarded to the FastVideoArgs constructor.
         valid_fields = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in kwargs.items() if k in valid_fields})
 
     def check_fastvideo_args(self) -> None:
         """Validate inference arguments for consistency"""
-        # Validate mode and inference_mode consistency
         assert isinstance(self.mode, ExecutionMode), f"Mode must be an ExecutionMode enum, got {type(self.mode)}"
         assert self.mode in ExecutionMode.choices(), f"Invalid execution mode: {self.mode}"
 
-        # Validate workload type
         assert isinstance(self.workload_type,
                           WorkloadType), f"Workload type must be a WorkloadType enum, got {type(self.workload_type)}"
         assert self.workload_type in WorkloadType.choices(), f"Invalid workload type: {self.workload_type}"
@@ -948,11 +799,6 @@ class FastVideoArgs:
             logger.warning("Mode is '%s' but inference_mode is False. Setting inference_mode to True.", self.mode)
             self.inference_mode = True
 
-        # Inference policy must wait until a worker owns and binds its device:
-        # a unified-memory device disables layerwise offload before conflicts
-        # are resolved, preserving an explicit FSDP request. Training does not
-        # pass through the inference worker boundary, so retain its historical
-        # constructor-time normalization.
         if not self.inference_mode:
             self._resolve_device_offload_conflicts()
 
@@ -980,7 +826,6 @@ class FastVideoArgs:
 
         self.pipeline_config.check_pipeline_config()
 
-        # Add preprocessing config validation if needed
         if self.mode == ExecutionMode.PREPROCESS:
             if self.preprocess_config is None:
                 raise ValueError("preprocess_config is not set in FastVideoArgs when mode is PREPROCESS")
@@ -1054,11 +899,6 @@ class FastVideoArgs:
             try:
                 device_name = current_platform.get_device_name(device_id)
             except Exception:
-                # Device naming is diagnostic only. NVML can be unavailable on
-                # an integrated GPU (for example Jetson), and its physical-
-                # ordinal lookup cannot interpret CUDA_VISIBLE_DEVICES UUID/MIG
-                # selectors. Neither case should undo an authoritative driver
-                # classification.
                 device_name = current_platform.device_name
 
             for flag in enabled_flags:
@@ -1112,10 +952,6 @@ def set_current_fastvideo_args(fastvideo_args: FastVideoArgs):
 
 def get_current_fastvideo_args() -> FastVideoArgs:
     if _current_fastvideo_args is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the fastvideo config. In that case, we set a default
-        # config.
-        # TODO(will): may need to handle this for CI.
         raise ValueError("Current fastvideo args is not set.")
     return _current_fastvideo_args
 
@@ -1138,20 +974,16 @@ class TrainingArgs(FastVideoArgs):
     group_frame: bool = False
     group_resolution: bool = False
 
-    # text encoder & vae & diffusion model
     pretrained_model_name_or_path: str = ""
 
-    # DMD model paths - separate paths for each network
     real_score_model_path: str = ""  # path for real score (teacher) model
     fake_score_model_path: str = ""  # path for fake score (critic) model
 
-    # diffusion setting
     ema_decay: float = 0.0
     ema_start_step: int = 0
     training_cfg_rate: float = 0.0
     precondition_outputs: bool = False
 
-    # validation & logs
     validation_dataset_file: str = ""
     validation_preprocessed_path: str = ""
     validation_sampling_steps: str = ""
@@ -1163,12 +995,10 @@ class TrainingArgs(FastVideoArgs):
     wandb_run_name: str = ""
     seed: int | None = None
 
-    # output
     output_dir: str = ""
     checkpoints_total_limit: int = 0
     resume_from_checkpoint: str = ""  # specify the checkpoint folder to resume from
 
-    # optimizer & scheduler
     num_train_epochs: int = 0
     max_train_steps: int = 0
     gradient_accumulation_steps: int = 0
@@ -1205,37 +1035,21 @@ class TrainingArgs(FastVideoArgs):
     pred_decay_type: str = ""
     hunyuan_teacher_disable_cfg: bool = False
 
-    # master_weight_type
     master_weight_type: str = ""
 
-    # VSA training decay parameters
     VSA_decay_rate: float = 0.01  # decay rate -> 0.02
     VSA_decay_interval_steps: int = 1  # decay interval steps -> 50
-    # Reuse the per-step padded VSA tile buffer across attention layers during
-    # training. Defaults to False: under full activation checkpointing the
-    # cached buffer survives into the backward recompute and inflates peak
-    # memory (see #1423). Enable on memory-rich setups to keep the per-step
-    # buffer-reuse speedup.
     VSA_cache_tile_buf: bool = False
 
-    # LoRA training parameters
     lora_rank: int | None = None
     lora_alpha: int | None = None
     lora_training: bool = False
     ltx2_first_frame_conditioning_p: float = 0.1
 
-    # distillation args
     generator_update_interval: int = 5
     dfake_gen_update_ratio: int = 5  # self-forcing: how often to train generator vs critic
     min_timestep_ratio: float = 0.2
     max_timestep_ratio: float = 0.98
-    # CFG scale applied to the real (teacher) score in the DMD loss, using the
-    # parameterization `x = x_cond + w * (x_cond - x_uncond)`. This differs
-    # from the Ho & Salimans form `x_uncond + w * (x_cond - x_uncond)` by an
-    # offset of 1: `w_here = w_standard - 1`. So `w=0` recovers the
-    # conditional output, `w=-1` recovers the unconditional output, and the
-    # default 3.5 corresponds to a standard CFG scale of 4.5. Matches the
-    # original DMD2 reference implementation.
     real_score_guidance_scale: float = 3.5
     fake_score_learning_rate: float = 0.0  # separate learning rate for fake_score_transformer, if 0.0, use learning_rate
     fake_score_lr_scheduler: str = "constant"  # separate lr scheduler for fake_score_transformer, if not set, use lr_scheduler
@@ -1244,11 +1058,9 @@ class TrainingArgs(FastVideoArgs):
     weight_only_checkpointing_steps: int = 0  # for inference
     log_visualization: bool = False
     visualization_steps: int = 0
-    # simulate generator forward to match inference
     simulate_generator_forward: bool = False
     warp_denoising_step: bool = False
 
-    # Self-forcing specific arguments
     num_frame_per_block: int = 3
     independent_first_frame: bool = False
     enable_gradient_masking: bool = True
@@ -1260,41 +1072,32 @@ class TrainingArgs(FastVideoArgs):
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "TrainingArgs":
         provided_args = clean_cli_args(args)
-        # Get all fields from the dataclass
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         logger.info(provided_args)
-        # Create a dictionary of attribute values, with defaults for missing attributes
         kwargs: dict[str, Any] = {}
         for attr in attrs:
             if attr == 'pipeline_config':
                 pipeline_config = PipelineConfig.from_kwargs(provided_args)
                 kwargs[attr] = pipeline_config
             elif attr == 'mode':
-                # Convert string to ExecutionMode enum
                 mode_value = getattr(args, attr, ExecutionMode.FINETUNING.value)
                 kwargs[attr] = ExecutionMode.from_string(mode_value) if isinstance(mode_value, str) else mode_value
             elif attr == 'workload_type':
-                # Convert string to WorkloadType enum
                 workload_type_value = getattr(args, 'workload_type', WorkloadType.T2V.value)
                 kwargs[attr] = WorkloadType.from_string(workload_type_value) if isinstance(workload_type_value,
                                                                                            str) else workload_type_value
-            # Use getattr with default value from the dataclass for potentially missing attributes
             else:
-                # Get the field to check its default value
                 field = dataclasses.fields(cls)[next(i for i, f in enumerate(dataclasses.fields(cls))
                                                      if f.name == attr)]
 
-                # Check if the attribute is provided in args
                 if hasattr(args, attr):
                     value = getattr(args, attr)
                 else:
-                    # Use the field's default value
                     if field.default_factory is not dataclasses.MISSING:
                         value = field.default_factory()
                     elif field.default is not dataclasses.MISSING:
                         value = field.default
                     else:
-                        # No default value, use None
                         value = None
 
                 kwargs[attr] = value
@@ -1318,7 +1121,6 @@ class TrainingArgs(FastVideoArgs):
         parser.add_argument("--num-width", type=int, required=True, help="Number of widths")
         parser.add_argument("--num-frames", type=int, required=True, help="Number of frames")
 
-        # Training batch and model configuration
         parser.add_argument("--train-batch-size", type=int, required=True, help="Training batch size")
         parser.add_argument("--num-latent-t", type=int, required=True, help="Number of latent time steps")
         parser.add_argument("--group-frame", action=StoreBoolean, help="Whether to group frames during training")
@@ -1326,7 +1128,6 @@ class TrainingArgs(FastVideoArgs):
                             action=StoreBoolean,
                             help="Whether to group resolutions during training")
 
-        # Model paths
         parser.add_argument("--pretrained-model-name-or-path",
                             type=str,
                             required=True,
@@ -1337,7 +1138,6 @@ class TrainingArgs(FastVideoArgs):
                             help="Path to DiT model or model name")
         parser.add_argument("--cache-dir", type=str, help="Directory to cache models")
 
-        # DMD model paths - separate paths for each network
         parser.add_argument("--generator-model-path",
                             type=str,
                             help="Path to generator (student) model for DMD distillation")
@@ -1348,7 +1148,6 @@ class TrainingArgs(FastVideoArgs):
                             type=str,
                             help="Path to fake score (critic) model for DMD distillation")
 
-        # Diffusion settings
         parser.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay rate")
         parser.add_argument("--ema-start-step", type=int, default=0, help="Step to start EMA")
         parser.add_argument("--training-cfg-rate", type=float, help="Classifier-free guidance scale")
@@ -1356,7 +1155,6 @@ class TrainingArgs(FastVideoArgs):
                             action=StoreBoolean,
                             help="Whether to precondition the outputs of the model")
 
-        # Validation and logging
         parser.add_argument("--validation-dataset-file", type=str, help="Path to unprocessed validation dataset")
         parser.add_argument("--validation-preprocessed-path", type=str, help="Path to processed validation dataset")
         parser.add_argument("--validation-sampling-steps", type=str, help="Validation sampling steps")
@@ -1368,7 +1166,6 @@ class TrainingArgs(FastVideoArgs):
         parser.add_argument("--wandb-run-name", type=str, help="Run name for wandb")
         parser.add_argument("--seed", type=int, default=42, help="Seed for deterministic training")
 
-        # Output configuration
         parser.add_argument("--output-dir", type=str, required=True, help="Output directory for checkpoints and logs")
         parser.add_argument("--checkpoints-total-limit", type=int, help="Maximum number of checkpoints to keep")
         parser.add_argument("--training-state-checkpointing-steps",
@@ -1380,7 +1177,6 @@ class TrainingArgs(FastVideoArgs):
         parser.add_argument("--resume-from-checkpoint", type=str, help="Path to checkpoint to resume from")
         parser.add_argument("--logging-dir", type=str, help="Directory for logging")
 
-        # Training configuration
         parser.add_argument("--num-train-epochs", type=int, help="Number of training epochs")
         parser.add_argument("--max-train-steps", type=int, help="Maximum number of training steps")
         parser.add_argument("--gradient-accumulation-steps", type=int, help="Number of steps to accumulate gradients")
@@ -1425,7 +1221,6 @@ class TrainingArgs(FastVideoArgs):
             help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
         )
 
-        # Additional training parameters
         parser.add_argument("--num-euler-timesteps", type=int, help="Number of Euler timesteps")
         parser.add_argument("--lr-num-cycles", type=int, help="Number of learning rate cycles")
         parser.add_argument("--lr-power", type=float, help="Learning rate power")
@@ -1452,7 +1247,6 @@ class TrainingArgs(FastVideoArgs):
                             help="Whether to disable CFG for Hunyuan teacher")
         parser.add_argument("--master-weight-type", type=str, help="Master weight type")
 
-        # VSA parameters for training with dense to sparse adaption
         parser.add_argument(
             "--VSA-decay-rate",  # decay rate, how much sparsity you want to decay each step
             type=float,
@@ -1480,7 +1274,6 @@ class TrainingArgs(FastVideoArgs):
             help="Probability of conditioning on the first frame during LTX-2 training",
         )
 
-        # V-MoBA parameters
         parser.add_argument(
             "--moba-config-path",
             type=str,
@@ -1488,7 +1281,6 @@ class TrainingArgs(FastVideoArgs):
             help="Path to a JSON file containing V-MoBA specific configurations.",
         )
 
-        # Distillation arguments
         parser.add_argument("--generator-update-interval",
                             type=int,
                             default=TrainingArgs.generator_update_interval,
@@ -1533,7 +1325,6 @@ class TrainingArgs(FastVideoArgs):
                             action=StoreBoolean,
                             help="Whether to warp denoising step according to the scheduler time shift")
 
-        # Self-forcing specific arguments
         parser.add_argument("--num-frame-per-block",
                             type=int,
                             default=TrainingArgs.num_frame_per_block,
