@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 # share a substring with Wan's "to_out"/"ffn.fc_in"/"ffn.fc_out") need to be
 # listed explicitly below.
 DEFAULT_FP4_LAYERS = (
+    # MiniMax-H3 names its FFN "ff.", not "ffn." -- without these the
+    # FFN is silently left dense and QAD only covers attention.
+    "ff.fc_in",
+    "ff.fc_out",
     "ffn.fc_in",
     "ffn.fc_out",
     "to_q",
