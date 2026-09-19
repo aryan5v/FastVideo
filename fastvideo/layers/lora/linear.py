@@ -18,6 +18,17 @@ from fastvideo.utils import get_mixed_precision_state
 torch._dynamo.config.recompile_limit = 16
 
 
+def _is_traceable_forward(layer: nn.Module) -> bool:
+    """Whether ``layer``'s forward can be handed to ``torch.compile``.
+
+    The quantized linear methods dispatch into flashinfer / cutlass custom ops
+    that Dynamo cannot trace; see ``BaseLayerWithLoRA.forward``.
+    """
+    method = getattr(layer, "quant_method", None)
+    name = type(method).__name__ if method is not None else ""
+    return "FP4" not in name and "FP8" not in name
+
+
 class BaseLayerWithLoRA(nn.Module):
 
     def __init__(
@@ -31,7 +42,18 @@ class BaseLayerWithLoRA(nn.Module):
         self.base_layer: nn.Module = base_layer
 
         self.merged: bool = False
-        self.cpu_weight = base_layer.weight.to("cpu")
+        # ``cpu_weight`` is a full host-RAM copy of the base weight, read only by
+        # ``unmerge_lora_weights`` to restore the pre-merge weight. Captured eagerly
+        # it costs a second copy of the whole model on the host (~40GB for 20B
+        # parameters) even though training never merges -- and on a sharded FP4-QAT
+        # base layer the copy itself faults. Capture it only where merging can
+        # happen (inference), and otherwise leave it lazy.
+        self._cpu_weight: torch.Tensor | None = None
+        self._capture_cpu_weight: bool = not training_mode
+        if self._capture_cpu_weight:
+            self._materialize_cpu_weight()
+        # FP4/FP8 base layers run through untraceable custom ops; see forward().
+        self._compile_forward: bool = _is_traceable_forward(base_layer)
         # indicates adapter weights don't contain this layer
         # (which shouldn't normally happen, but we want to separate it from the case of erroneous merging)
         self.disable_lora: bool = False
@@ -64,21 +86,28 @@ class BaseLayerWithLoRA(nn.Module):
             self.lora_A = None
             self.lora_B = None
 
+    def _materialize_cpu_weight(self) -> torch.Tensor:
+        """Populate the host copy of the base weight exactly once."""
+        with torch.no_grad():
+            self._cpu_weight = self.base_layer.weight.to("cpu")
+        return self._cpu_weight
+
+    @property
+    def cpu_weight(self) -> torch.Tensor:
+        """Host copy of the base weight, materialized on first use."""
+        if self._cpu_weight is None:
+            self._materialize_cpu_weight()
+        assert self._cpu_weight is not None
+        return self._cpu_weight
+
     @property
     def weight(self) -> torch.Tensor:
         """The wrapped layer's weight.
 
-        Model code reads ``layer.weight`` for perfectly ordinary reasons -- MiniMax H3's
-        AdaLN modulation casts its input with ``self.linear.weight.dtype``, and its
-        ``proj_in`` reads the tensor itself. Wrapping a layer should not change what
-        reading it looks like from outside, and without this the wrap turns those into
-        ``AttributeError`` at the first forward. Forcing every model to be listed in
-        ``lora_target_modules`` around its own attribute access is the wrong fix: the
-        list would have to be maintained against code it does not own, and getting it
-        wrong fails at generation time rather than at load.
-
-        Resolved through ``base_layer`` on each access rather than cached, because
-        merging replaces that module outright.
+        Wrapping replaces the layer, so callers that read ``self.linear.weight``
+        on a wrapped module would otherwise raise. H3's ``adaln_proj`` and
+        ``norm_out`` projections read ``.weight.dtype`` in their forward, so they
+        are only safe to target once this delegates to the base layer.
         """
         return self.base_layer.weight
 
@@ -88,7 +117,23 @@ class BaseLayerWithLoRA(nn.Module):
         return getattr(self.base_layer, "bias", None)
 
     @torch.compile()
+    def _forward_compiled(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compile only where the base layer's forward can actually be traced.
+
+        The FP4/FP8 quantized paths call into flashinfer and cutlass custom
+        ops. flashinfer's ``fp4_quantize`` does ``input.stride(-2)`` and Dynamo
+        raises (rather than falling back) building a ``ConstantVariable`` for
+        the resulting ``SymInt``, so a compiled wrapper turns a working
+        quantized forward into an AssertionError.
+        """
+        if self._compile_forward:
+            return self._forward_compiled(x)
+        return self._forward_impl(x)
+
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
         lora_A = self.lora_A
         lora_B = self.lora_B
         if isinstance(self.lora_B, DTensor):
@@ -103,7 +148,6 @@ class BaseLayerWithLoRA(nn.Module):
                 delta = delta * (
                     self.lora_alpha / self.lora_rank  # type: ignore
                 )  # type: ignore
-            delta = delta * self.lora_strength
             out, output_bias = self.base_layer(x)
             return out + delta, output_bias
         else:

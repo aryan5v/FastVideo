@@ -1,0 +1,150 @@
+# QAD stage 1 for MiniMax-H3: supervised quantization-aware finetune of the
+# bf16 checkpoint-1400 student onto the NVFP4 precision matrix.
+#
+# Ported from examples/train/scenario/qad_wan2_1_mixkit/stage1_attn_qat_finetune.yaml.
+#
+# DIFFERENCE FROM THE WAN TEMPLATE: Attn-QAT does not exist for H3.
+# MiniMaxH3Model._ALLOWED_ATTENTION_BACKENDS is
+#   (TORCH_SDPA, FLASH_ATTN, VIDEO_SPARSE_ATTN_H3)
+# and the model raises at config time on anything else, so
+# `attention_backend: ATTN_QAT_TRAIN` is impossible here. Attention therefore
+# stays bf16 and quantization is restricted to the LINEAR layers through the
+# per-role `construction_quant_config`. Attn-QAT is deliberately deferred: it
+# only matters if attention itself is quantized, which it is not in this recipe.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3Model
+    # bf16 4-call distilled release candidate. Stage 1 adapts THIS model to
+    # NVFP4; it is not a retrain of the base H3.
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-dmd2-v12-corrected-c4-parent750-32gpu-4000-v3/job-paired8972-8975-4000-v3/inference/checkpoint-1400
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    # Dense bf16 attention. FLASH_ATTN is also legal for H3; TORCH_SDPA matches
+    # every existing H3 training config in this tree and the FASTVIDEO_ATTENTION_BACKEND
+    # the H3 launchers export.
+    attention_backend: TORCH_SDPA
+    # The whole point of stage 1: NVFP4 fake-quantized linears with an STE
+    # backward into dense fp32 masters. NVFP4QATTrainConfig adds no parameters
+    # or buffers, so FSDP sharding, checkpointing and export are unchanged.
+    construction_quant_config: nvfp4_qat_train
+
+# Supervised flow-matching loss over video and audio. The Wan template uses the
+# same method; note that the H3 implementation couples the two modalities
+# (video 12.0 / audio 3.0 scheduler shifts, equal weight on both MSE terms).
+method:
+  _target_: fastvideo.train.methods.fine_tuning.finetune.FineTuneMethod
+
+training:
+  distributed:
+    # Mirrors the proven H3 32-GPU geometry (qad_nvfp4_4call_r768.yaml):
+    # SP=4 for activation memory, full-world HSDP shard for the 20B weights.
+    num_gpus: 32
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 32
+    pin_cpu_memory: true
+
+  data:
+    # Stage 1 is supervised, so it needs REAL paired video+audio latents:
+    # FineTuneMethod requires TrainingBatch.latents. The text_only schema used
+    # by the stage-2 DMD2 lane carries prompt conditioning only and would fail
+    # prepare_batch with latents_source="data".
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_5s_768p/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_mixed_res_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_fastgen_vidprom_150k/data
+    preprocessed_data_type: t2va
+    # Required for this data: the sources carry several resolution/length
+    # buckets, and the loader synchronizes one exact-shape bucket across all DP
+    # ranks before each micro-step. This is the setting the data-consuming H3
+    # recipe (dmd2_sp1_fsdp32_v10_dataonly_mixed_vsa64.yaml) ships with.
+    native_shape_bucketing: true
+    dataloader_num_workers: 0
+    # MiniMaxH3Model hard-requires 1 and cfg_rate 0.0.
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    # Fallback/contract values only; native-shape rows carry their own sizes.
+    num_latent_t: 37
+    num_height: 480
+    num_width: 832
+    num_frames: 124
+
+  optimizer:
+    # Carried from the Wan stage-1 template verbatim.
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    # Carried from the Wan stage-1 template verbatim.
+    max_train_steps: 4000
+    # ALSO from the template. NOTE: the H3 production lane ran global batch 256
+    # (32 GPUs x accumulation 8). run_stage1.sh exposes GRAD_ACCUM so this can
+    # be raised to 8 without touching the YAML.
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-qad2s-nvfp4-qat-stage1-v1
+    resume_from_checkpoint: ''
+    # Template cadence is 500. Kept, because a 20B fp32-master DCP is ~tens of
+    # GB and this lands on shared NFS.
+    training_state_checkpointing_steps: 500
+    checkpoints_total_limit: 3
+    # The stage-1 -> stage-2 handoff reads a *complete* DCP checkpoint.
+    require_complete_training_checkpoint: true
+    save_inference_checkpoint_on_validation: true
+
+  tracker:
+    trackers:
+      - wandb
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: qad2s-stage1-nvfp4-qat
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+    enable_torch_compile: false
+
+  # Matches qad_nvfp4_4call_r768.yaml: the NVFP4-QAT linears keep fp32
+  # optimizer masters. MiniMaxH3Model rejects a trainable role whose
+  # construction_precision differs from this value.
+  dit_precision: fp32
+  vsa: null
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    dataset_file: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/code/release20b-dmd2-v12-corrected-v17/examples/train/configs/distribution_matching/minimax_h3/release20b_validation_five.json
+    # Template stage-1 cadence. H3 validation is expensive (text encoder + VAE
+    # pipeline load is offloaded/unloaded around each run) so raise this if the
+    # run is wall-clock bound.
+    every_steps: 50
+    run_at_start: false
+    # The student is already a 4-call distilled model, so validate on the
+    # release schedule rather than the template's 50-step base-model schedule.
+    sampling_steps:
+      - 4
+    guidance_scale: 1.0
+    use_record_dimensions: true
+    max_record_num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    unload_pipeline_after_validation: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false
