@@ -1,0 +1,197 @@
+# QAD stage 2 for MiniMax-H3: DMD2 distillation on top of the STAGE-1 output.
+#
+# Ported from examples/train/scenario/qad_wan2_1_mixkit/stage2_attn_qat_dmd.yaml,
+# but the body is our proven H3 DMD2 recipe
+# (configs/distribution_matching/minimax_h3/qad_nvfp4_4call_r768.yaml) with the
+# student re-based onto the stage-1 export. That is the whole point of this
+# sprint: the previous H3 QAD run did stage 2 ONLY, distilling straight onto an
+# unadapted quantized student, and drifted.
+#
+# DIFFERENCE FROM THE WAN TEMPLATE: no Attn-QAT. MiniMaxH3Model raises on
+# attention_backend: ATTN_QAT_TRAIN (see stage1_qat_finetune.yaml), so the
+# student keeps dense bf16 attention and NVFP4 applies to the linears only.
+#
+# HANDOFF: stage 1 -> `dcp_to_diffusers` -> `<stage1_output_dir>/diffusers`,
+# which holds a single-file `transformer/model.safetensors`. run_stage2.sh
+# points models.student.transformer_override_safetensor at that file.
+#
+# IMPORTANT: models.student.init_from deliberately stays on the *bf16* student
+# rather than on the stage-1 export dir. `load_run_config` resolves the pipeline
+# config class through `PipelineConfig.from_kwargs -> get_pipeline_config_cls_from_name`,
+# which reads `<init_from>/model_index.json`; pointing init_from at a directory
+# that stage 1 has not produced yet makes the stage-2 YAML unparseable ("Repo id
+# must be in the form 'repo_name' or 'namespace/repo_name'"). This is exactly
+# why the Wan template keeps init_from on the always-resolvable base model and
+# carries the stage-1 result only in transformer_override_safetensor.
+# The pipeline components of the export are hardlinks/symlinks of this same
+# directory, so nothing else changes.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    # Same 4-call bf16 student stage 1 started from; supplies the pipeline
+    # components (vae, audio_vae, text_encoder, schedulers) and the arch config.
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-dmd2-v12-corrected-c4-parent750-32gpu-4000-v3/job-paired8972-8975-4000-v3/inference/checkpoint-1400
+    # Mirrors the Wan template's stage-2 override. `load_module_from_path`
+    # forwards this to fastvideo_args.init_weights_from_safetensors, which
+    # accepts a single .safetensors file (what dcp_to_diffusers writes) or a
+    # directory. It is ignored by any role loaded with
+    # disable_custom_init_weights, i.e. teacher and critic.
+    # run_stage2.sh hard-fails when this file is absent, because
+    # component_loader silently falls back to init_from when the override path
+    # does not exist -- which would train the unadapted student and reproduce
+    # the exact failure this recipe exists to fix.
+    transformer_override_safetensor: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-qad2s-nvfp4-qat-stage1-v1/diffusers/transformer/model.safetensors
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+    # Student-only quantization scope, exactly as in the proven QAD config.
+    construction_quant_config: nvfp4_qat_train
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/release-candidates/base-h3-teacher-complete-v1
+    trainable: false
+    disable_custom_init_weights: true
+    attention_backend: TORCH_SDPA
+    # Frozen role: bf16 construction saves memory with no change to its compute.
+    construction_precision: bf16
+  critic:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3DMDModel
+    init_from: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/release-candidates/base-h3-teacher-complete-v1
+    trainable: true
+    disable_custom_init_weights: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: TORCH_SDPA
+    # Critic stays dense on purpose: component_loader drops quant_config on the
+    # teacher/critic path, and load_module_from_path raises if a quant request
+    # is combined with disable_custom_init_weights.
+
+method:
+  _target_: fastvideo.train.methods.distribution_matching.dmd2.DMD2Method
+  # Proven H3 settings, carried verbatim from qad_nvfp4_4call_r768.yaml.
+  rollout_mode: simulate
+  rollout_carry: true
+  rollout_carry_slots: 8
+  rollout_sample_type: ode
+  generator_update_interval: 5
+  real_score_guidance_scale: 1.0
+  # PROVEN 4-call H3 ladder. NOTE: the Wan template distills to 3 steps
+  # ([1000, 757, 522]). Kept at 4 calls so the only change against the existing
+  # H3 QAD baseline is the addition of stage 1 -- a clean A/B.
+  dmd_denoising_steps:
+    - 999
+    - 749
+    - 500
+    - 250
+  min_timestep_ratio: 0.001
+  max_timestep_ratio: 0.999
+  score_timestep_shift: 2.4
+  score_timestep_warp_max: 0.999
+  score_timestep_continuous: true
+  fake_score_loss_space: x0
+  # Audio parity is a hard requirement of the recipe: do not down-weight it.
+  modality_loss_weights:
+    video: 1.0
+    audio: 1.0
+  dmd_denom_floor_ratio: 0.05
+  dmd_grad_cap: 100.0
+  cfg_uncond:
+    text: zero
+  fake_score_learning_rate: 2.0e-06
+  fake_score_betas:
+    - 0.9
+    - 0.999
+  fake_score_lr_scheduler: constant
+
+training:
+  distributed:
+    num_gpus: 32
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 32
+    pin_cpu_memory: true
+
+  data:
+    # Stage 2 is data-free (rollout_mode: simulate synthesizes latents from the
+    # config shapes), so the text_only schema is correct here and matches the
+    # proven QAD config.
+    data_path:
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_50k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_5s_768p/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_720_mixed_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_video_nuva_10k_mixed_res_len/data
+      - /mnt/lustre/vlm-shared/h3_t2av_preprocessed/v10_mixed_native_v3/h3_t2av_fastgen_vidprom_150k/data
+    preprocessed_data_type: text_only
+    native_shape_bucketing: false
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 37
+    num_height: 480
+    num_width: 832
+    num_frames: 124
+
+  optimizer:
+    learning_rate: 2.0e-06
+    betas:
+      - 0.9
+      - 0.999
+    weight_decay: 0.01
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    # Wan stage-2 template value. The H3 launcher overrides this with
+    # PRODUCTION_TARGET (the existing QAD lane used 200 short/checked runs).
+    max_train_steps: 2000
+    gradient_accumulation_steps: 8
+
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-qad2s-nvfp4-dmd2-stage2-v1
+    resume_from_checkpoint: ''
+    training_state_checkpointing_steps: 25
+    require_complete_training_checkpoint: true
+    checkpoints_total_limit: 24
+    save_inference_checkpoint_on_validation: true
+
+  tracker:
+    trackers:
+      - wandb
+    project_name: fasth3-14b-2step-qad-sprint
+    run_name: qad2s-stage2-nvfp4-dmd2
+
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+    enable_torch_compile: false
+
+  dit_precision: fp32
+  vsa: null
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+  validation:
+    _target_: fastvideo.train.callbacks.validation.ValidationCallback
+    pipeline_target: fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline.MiniMaxH3Pipeline
+    dataset_file: /mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/code/release20b-dmd2-v12-corrected-v17/examples/train/configs/distribution_matching/minimax_h3/release20b_validation_five.json
+    every_steps: 25
+    run_at_start: false
+    sampling_steps:
+      - 4
+    guidance_scale: 1.0
+    use_record_dimensions: true
+    max_record_num_frames: 124
+    num_videos_per_prompt: 1
+    use_validation_media_conditioning: false
+    offload_training_state: true
+    unload_pipeline_after_validation: true
+    text_encoder_cpu_offload: true
+    vae_cpu_offload: true
+
+pipeline:
+  dit_config:
+    uniform_parameter_dtype: false
