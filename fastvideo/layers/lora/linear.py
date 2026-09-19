@@ -100,6 +100,22 @@ class BaseLayerWithLoRA(nn.Module):
         assert self._cpu_weight is not None
         return self._cpu_weight
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """The wrapped layer's weight.
+
+        Wrapping replaces the layer, so callers that read ``self.linear.weight``
+        on a wrapped module would otherwise raise. H3's ``adaln_proj`` and
+        ``norm_out`` projections read ``.weight.dtype`` in their forward, so they
+        are only safe to target once this delegates to the base layer.
+        """
+        return self.base_layer.weight
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        """The wrapped layer's bias, or ``None`` when it has none."""
+        return getattr(self.base_layer, "bias", None)
+
     @torch.compile()
     def _forward_compiled(self, x: torch.Tensor) -> torch.Tensor:
         return self._forward_impl(x)

@@ -18,8 +18,13 @@ cd "${REPO_ROOT}"
 # "use the five t2va subtrees declared in the YAML".
 DATA_DIR=${DATA_DIR:-}
 NUM_GPUS=${NUM_GPUS:-32}
-# Stage-1 effective batch. The YAML carries the Wan template's 1; the H3
-# production lane ran 256/NUM_GPUS = 8. Left at the YAML value by default.
+# Stage-1 effective batch. Deliberately 1, matching the Wan template this is
+# ported from, and NOT the 8 that the H3 DMD2 lane ran: those are different
+# stages. DMD2 needs a large batch because its gradient is a noisy
+# distribution-matching estimate; a supervised finetune regressing on real
+# targets does not. Accumulating 8 here would also multiply the step budget by
+# eight (4000 steps x 8 microbatches), turning an ~11h stage into days. Raise it
+# only with a matching reduction in max_train_steps.
 GRAD_ACCUM=${GRAD_ACCUM:-1}
 SP_SIZE=${SP_SIZE:-4}
 
