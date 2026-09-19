@@ -86,6 +86,27 @@ Two H3-specific notes:
   `component_loader` silently ignores an override path that does not exist and
   would then train the unadapted student.
 
+## Smoke-tested, and one dead end
+
+`smoke_stage1.sbatch` runs the real stage-1 config for 2 steps on one 4-GPU
+node. It passes, and the log shows `NVFP4 QAT: attached 264 linears (51 skipped
+by prefix filter)`, so the QAT scope is real for H3 rather than a dense run
+wearing a QAD name.
+
+`smoke_stage2.sbatch` proves model construction and the handoff: the student
+loads its weights from `models.student.transformer_override_safetensor` (the log
+names the override path, not `init_from`), and the teacher/critic stay dense in
+bf16/fp32. It does **not** reach an optimizer step on a 4-GPU node: DMD2's
+finite-update guard raises `No finite FP32 Adam update for student`.
+
+That is a property of the one-node smoke geometry, not of these configs. The
+sprint's own `qad_smoke_1node.yaml`, run unmodified on the same node, fails
+identically at the same point -- and its output dir did not exist, so that smoke
+path had never actually passed. The guard does pass at production geometry: the
+existing `release20b-qad-nvfp4-r768-32gpu-v1` run wrote its
+`dmd2_update_*_rank*.json` receipts. Treat the one-node stage-2 smoke as
+unavailable until someone fixes it; stage 2 is only proven at launch geometry.
+
 ## Validation
 
 `validate_configs.py` runs `load_run_config` on both YAMLs and then asserts

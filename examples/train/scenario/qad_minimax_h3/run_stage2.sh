@@ -21,6 +21,10 @@ STAGE1_OUT=${STAGE1_OUT:-${SPRINT_ROOT}/runs/release20b-qad2s-nvfp4-qat-stage1-v
 
 STAGE1_DIFFUSERS=${1:-${STAGE1_OUT}/diffusers}
 INIT_WEIGHTS=${2:-${STAGE1_DIFFUSERS}/transformer/model.safetensors}
+# Consume the two positional arguments so they are not forwarded to run.sh as
+# bare tokens (run.sh's override parser rejects anything not shaped like
+# --dotted.key). NOTE: the Wan template this is modelled on has this bug.
+if (( $# > 2 )); then EXTRA=("${@:3}"); else EXTRA=(); fi
 STUDENT_BASE=${STUDENT_BASE:-/mnt/nfs/vlm-aryan/fasth3-14b-2step-qad-20260829/runs/release20b-dmd2-v12-corrected-c4-parent750-32gpu-4000-v3/job-paired8972-8975-4000-v3/inference/checkpoint-1400}
 TEACHER_BASE=${TEACHER_BASE:-${SPRINT_ROOT}/release-candidates/base-h3-teacher-complete-v1}
 NUM_GPUS=${NUM_GPUS:-32}
@@ -29,7 +33,9 @@ GRAD_ACCUM=${GRAD_ACCUM:-8}
 # The proven H3 QAD lane ran a short 200-step production target.
 PRODUCTION_TARGET=${PRODUCTION_TARGET:-200}
 
-if [[ ! -f "${INIT_WEIGHTS}" ]]; then
+# -e, not -f: component_loader accepts either a single .safetensors file (what
+# dcp_to_diffusers writes) or a directory of shards.
+if [[ ! -e "${INIT_WEIGHTS}" ]]; then
     echo "Missing exported stage-1 weights: ${INIT_WEIGHTS}" >&2
     echo "Run export_stage1.sh before stage 2." >&2
     exit 1
@@ -62,4 +68,4 @@ bash "${REPO_ROOT}/examples/train/run.sh" \
     --training.loop.gradient_accumulation_steps "${GRAD_ACCUM}" \
     --training.loop.max_train_steps "${PRODUCTION_TARGET}" \
     --method.rollout_carry_slots "${GRAD_ACCUM}" \
-    "$@"
+    ${EXTRA[@]+"${EXTRA[@]}"}
