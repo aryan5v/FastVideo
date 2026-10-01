@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from fastvideo import envs
 from fastvideo.attention import get_attn_backend
 from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEConfig
 from fastvideo.platforms import AttentionBackendEnum
@@ -816,6 +817,14 @@ class AutoencoderKLMiniMaxH3(nn.Module):
                 )
 
             ratio = self.spatial_compression_ratio
+            tiles_per_call = envs.FASTVIDEO_H3_VAE_TILE_BATCH
+            if tiles_per_call > 1 and len(set(y_lengths)) == 1 and len(set(x_lengths)) == 1:
+                with nvtx_range("minimax_h3.vae.decode_clip.decode_tile_batches"):
+                    rows = self._decode_tile_grid_batched(z, y_indices, y_lengths, x_indices, x_lengths,
+                                                          tiles_per_call)
+                with nvtx_range("minimax_h3.vae.decode_clip.stitch_tiles"):
+                    stitched = self._stitch_tiles(rows, y_overlaps, x_overlaps)
+                    return stitched.clone() if self._tile_helpers_compiled else stitched
             rows = []
             # The eager tile driver owns NVTX so each marker remains outside
             # the compiled decoder graph.
@@ -847,6 +856,36 @@ class AutoencoderKLMiniMaxH3(nn.Module):
                     # copy per chunk.)
                     stitched = stitched.clone()
                 return stitched
+
+    def _decode_tile_grid_batched(
+        self,
+        z: torch.Tensor,
+        y_indices: list[int],
+        y_lengths: list[int],
+        x_indices: list[int],
+        x_lengths: list[int],
+        tiles_per_call: int,
+    ) -> list[list[torch.Tensor]]:
+        """Decode an equal-shaped spatial tile grid ``tiles_per_call`` tiles at a time.
+
+        The ViT decoder treats batch entries independently (per-entry tokens,
+        registers and attention), so stacking tiles on the batch axis gives
+        the same tiles as decoding them one by one, in far fewer and larger
+        calls: a 1344x768 clip is a 4x7 grid, i.e. one call instead of 28.
+        """
+        ratio = self.spatial_compression_ratio
+        latent_tiles = [
+            z[..., y_position // ratio:y_position // ratio + y_length // ratio,
+              x_position // ratio:x_position // ratio + x_length // ratio]
+            for y_position, y_length in zip(y_indices, y_lengths, strict=True)
+            for x_position, x_length in zip(x_indices, x_lengths, strict=True)
+        ]
+        decoded: list[torch.Tensor] = []
+        for start in range(0, len(latent_tiles), tiles_per_call):
+            batch = torch.cat(latent_tiles[start:start + tiles_per_call], dim=0)
+            decoded.extend(self.decoder(self._project_decoder_tile(batch)).split(z.shape[0], dim=0))
+        columns = len(x_indices)
+        return [decoded[index:index + columns] for index in range(0, len(decoded), columns)]
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         clip_length = self.config.clip_length
