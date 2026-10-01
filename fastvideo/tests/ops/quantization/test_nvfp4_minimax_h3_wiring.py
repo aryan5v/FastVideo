@@ -261,3 +261,33 @@ def test_set_lora_adapter_mxfp8_requantizes_after_adapter_merge(monkeypatch: pyt
     LoRAPipeline.set_lora_adapter(pipeline, "second-adapter")
 
     assert events == ["adapter merged", "weights requantized"]
+
+
+_H3_ATTN = "minimax_h3.transformer_blocks.3.attn.to_q"
+_H3_OUT = "minimax_h3.transformer_blocks.3.attn.to_out"
+_H3_GATE = "minimax_h3.transformer_blocks.3.attn.to_gate_compress"
+_H3_FC_IN = "minimax_h3.transformer_blocks.3.ff.fc_in"
+_H3_REFINER = "minimax_h3.token_refiner.refiner_blocks.0.attn.to_q"
+_H3_ADALN = "minimax_h3.transformer_blocks.3.adaln_proj.linear"
+
+
+@pytest.mark.parametrize(
+    ("layer_profile", "expected"),
+    [
+        ("h3_dit", {_H3_ATTN, _H3_OUT, _H3_FC_IN}),
+        ("h3_dit_ffn", {_H3_FC_IN}),
+        ("h3_dit_vsa", {_H3_ATTN, _H3_OUT, _H3_GATE, _H3_FC_IN}),
+        ("refine", {_H3_FC_IN}),
+    ],
+)
+def test_is_nvfp4_profile_linear_minimax_h3_sets(layer_profile: str, expected: set[str]) -> None:
+    prefixes = (_H3_ATTN, _H3_OUT, _H3_GATE, _H3_FC_IN, _H3_REFINER, _H3_ADALN)
+    tagged = {prefix for prefix in prefixes if nvfp4.is_nvfp4_profile_linear(layer_profile, prefix)}
+    assert tagged == expected
+
+
+def test_nvfp4config_accepts_packed_h3_profiles() -> None:
+    for layer_profile in ("h3_dit", "h3_dit_ffn", "h3_dit_vsa"):
+        assert nvfp4.NVFP4Config(layer_profile=layer_profile).layer_profile == layer_profile
+    with pytest.raises(ValueError, match="layer_profile"):
+        nvfp4.NVFP4Config(layer_profile="h3_dit_gate")

@@ -252,6 +252,12 @@ class MiniMaxH3Attention(nn.Module):
             return
         if self._gate_compress_active is None:
             weight = self.to_gate_compress.weight
+            if weight is None:
+                # Packed NVFP4 gate: any nonzero E2M1 magnitude (bits 0x7 of
+                # either nibble) makes the branch live.
+                packed = self.to_gate_compress._nvfp4_weight
+                self._gate_compress_active = bool((packed & 0x77).any())
+                return
             # bool() on a DTensor reduction resolves collectively, so every
             # rank caches the same answer.
             self._gate_compress_active = bool((weight != 0).any())
