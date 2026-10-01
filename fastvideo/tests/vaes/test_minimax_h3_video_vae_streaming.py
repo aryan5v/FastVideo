@@ -166,3 +166,26 @@ def test_decode_to_pixels_rejects_incomplete_output(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="wrote 0 frames"):
         vae.decode_to_pixels(latents, output)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("tiles_per_call", [2, 3, 64])
+def test_batched_tile_decode_matches_per_tile(monkeypatch, tiles_per_call: int) -> None:
+    """FASTVIDEO_H3_VAE_TILE_BATCH decodes the same equal-shaped tile grid, call-count aside."""
+    import fastvideo.envs as envs
+
+    torch.manual_seed(20261001)
+    vae = _tiny_vae()
+    vae.use_tiling = True
+    vae.tile_sample_min_height = 8
+    vae.tile_sample_min_width = 8
+    vae.tile_sample_min_overlap_height = 4
+    vae.tile_sample_min_overlap_width = 4
+    z = torch.randn(1, 4, 3, 5, 7)
+
+    monkeypatch.setenv("FASTVIDEO_H3_VAE_TILE_BATCH", "1")
+    per_tile = vae._decode_clip(z)
+    monkeypatch.setenv("FASTVIDEO_H3_VAE_TILE_BATCH", str(tiles_per_call))
+    assert tiles_per_call == envs.FASTVIDEO_H3_VAE_TILE_BATCH
+    batched = vae._decode_clip(z)
+    assert_close(batched, per_tile, atol=1e-5, rtol=1e-5)

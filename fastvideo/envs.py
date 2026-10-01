@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     FASTVIDEO_MINIMAX_H3_FA4_PACKED_VARLEN: bool = False
     FASTVIDEO_INFERENCE_TORCH_COMPILE: bool = False
     FASTVIDEO_MINIMAX_H3_FUSIONS: str = ""
+    FASTVIDEO_H3_VSA_FP4: bool = False
+    FASTVIDEO_H3_VAE_TILE_BATCH: int = 1
+    FASTVIDEO_NVFP4_MM_BACKEND: str = "auto"
     FASTVIDEO_VAE_PARALLEL_DECODE: bool = False
     FASTVIDEO_VAE_PARALLEL_ENCODE: bool = False
     FASTVIDEO_VAE_PARALLEL_DECODE_STRATEGY: str | None = None
@@ -262,6 +265,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (the default), `0`, or `none` keeps the eager implementation.
     "FASTVIDEO_MINIMAX_H3_FUSIONS":
     lambda: os.getenv("FASTVIDEO_MINIMAX_H3_FUSIONS", ""),
+
+    # If set (=1), MiniMax-H3 VSA attention runs on the block-sparse FP4
+    # SageAttention3 kernel (Blackwell sm_120, fastvideo-kernel built with
+    # attn_qat_infer) instead of the BF16 Triton kernels. VSA-H3's own tile
+    # selection, exempt prefix and gated compression branch are unchanged.
+    # Inference only: grad, torch.compile and sequence-parallel runs keep
+    # the generic path. See docs/inference/fasth3_rtx_pro_6000.md.
+    "FASTVIDEO_H3_VSA_FP4":
+    lambda: os.getenv("FASTVIDEO_H3_VSA_FP4", "0") != "0",
+
+    # Spatial tiles the MiniMax-H3 video VAE decodes per decoder call. The
+    # ViT decoder treats batch entries independently, so values >1 decode a
+    # clip's equal-shaped tile grid in a few large calls (28 covers a full
+    # 1344x768 grid) instead of one small call per tile. 1 keeps per-tile.
+    "FASTVIDEO_H3_VAE_TILE_BATCH":
+    lambda: max(1, int(os.getenv("FASTVIDEO_H3_VAE_TILE_BATCH", "1"))),
+
+    # FlashInfer ``mm_fp4`` backend for NVFP4 linears: auto, cutlass, cudnn.
+    # On sm_120 ``auto`` picks a kernel about 2x slower than cutlass/cudnn
+    # once activations reach tens of thousands of rows (measured at 73k rows
+    # on an RTX PRO 6000); short sequences are unaffected.
+    "FASTVIDEO_NVFP4_MM_BACKEND":
+    lambda: os.getenv("FASTVIDEO_NVFP4_MM_BACKEND", "auto"),
 
     # Sequence-parallel all-to-all backend.
     # - "off" (default): the NCCL path in DistributedAutograd.AllToAll4D
