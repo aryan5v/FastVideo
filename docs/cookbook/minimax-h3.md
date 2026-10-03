@@ -11,6 +11,11 @@ a full model, not a demo. **V2** is the eight-step checkpoint. More forwards
 is why V2 is the higher-quality FastH3. The V2 schedule contract is in
 [FastH3 distilled checkpoint schedules](../inference/fasth3-distilled.md).
 
+The 42-block pruned checkpoint has an [MLX INT8/INT6 conversion and
+eight-forward T2VA command](../getting_started/installation/mlx.md#pruned-eight-forward-checkpoint).
+It reads `fastvideo_inference.json` for the trained schedule. The command
+uses native 832x480 resolution and all requested frames.
+
 <div class="cookbook-shell cookbook-family-page" data-cookbook data-family="minimax_h3" data-default-recipe="fasth3-preview-cuda" data-recipes="../../assets/cookbook-recipes.json?v=11">
   <header class="cookbook-family-header">
     <a class="cookbook-back-link" href="../"><span aria-hidden="true">←</span> All model families</a>
