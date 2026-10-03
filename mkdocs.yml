@@ -151,7 +151,7 @@ nav:
   - Home: index.md
   - Getting Started:
     - Installation: getting_started/installation.md
-    - Apple Silicon FastWan: getting_started/installation/mps.md
+    - Apple Silicon (MLX): getting_started/installation/mlx.md
     - NVIDIA DGX Spark: getting_started/installation/spark.md
     - Pair two DGX Sparks: getting_started/installation/spark_pair.md
     - Quick Start: getting_started/quick_start.md
@@ -237,6 +237,7 @@ nav:
     - Pull Requests: contributing/pull_requests.md
     - CI/CD Architecture: contributing/ci_architecture.md
     - Testing: contributing/testing.md
+    - Environment Variables: contributing/env_vars.md
     - Performance Benchmarks: contributing/performance_benchmarks.md
     - Profiling: contributing/profiling.md
     - Activation Trace: contributing/activation_trace.md

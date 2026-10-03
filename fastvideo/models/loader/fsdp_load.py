@@ -5,7 +5,6 @@
 # Copyright 2025 The FastVideo Authors.
 
 from __future__ import annotations
-import os
 import contextlib
 import re
 from collections.abc import Callable, Generator
@@ -19,6 +18,7 @@ from torch.distributed._tensor import distribute_tensor
 from torch.distributed.fsdp import (CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard)
 from torch.nn.modules.module import _IncompatibleKeys
 
+import fastvideo.envs as envs
 from fastvideo.logger import init_logger
 from fastvideo.models.loader.lora_patch import DenseLoRAPatch
 from fastvideo.models.loader.utils import (get_param_names_mapping, hf_to_custom_state_dict)
@@ -491,10 +491,10 @@ def _regional_compile_unsupported_reason(
     resolved = getattr(config, "_resolved_attention_backend", None)
     resolved_name = getattr(resolved, "name", "")
     if resolved_name == "VIDEO_SPARSE_ATTN_H3":
-        if os.environ.get("FASTVIDEO_H3_VSA_PROBE"):
+        if envs.FASTVIDEO_H3_VSA_PROBE.get():
             return ("FASTVIDEO_H3_VSA_PROBE records tensors and files from the VSA-H3 attention body, which "
                     "regional fullgraph compile cannot capture; this model stays eager")
-        if os.environ.get("FASTVIDEO_VSA_SM100A", "0") != "1":
+        if not envs.FASTVIDEO_VSA_SM100A.get():
             return ("VIDEO_SPARSE_ATTN_H3 regional compile requires the compile-safe sm_100a route "
                     "(FASTVIDEO_VSA_SM100A=1); Triton/CuTe VSA stays eager")
         if vsa_tile_size != 64:
@@ -607,7 +607,7 @@ def shard_model(
         ValueError: If no layer modules were sharded, indicating that no shard_condition was triggered.
     """
     # Check if we should use size-based filtering
-    use_size_filtering = os.environ.get("FASTVIDEO_FSDP2_AUTOWRAP", "0") == "1"
+    use_size_filtering = envs.FASTVIDEO_FSDP2_AUTOWRAP.get()
 
     if not fsdp_shard_conditions:
         logger.warning("No FSDP shard conditions provided; nothing will be sharded.")
@@ -642,7 +642,7 @@ def shard_model(
 
     if use_size_filtering:
         # Size-based filtering mode
-        min_params = int(os.environ.get("FASTVIDEO_FSDP2_MIN_PARAMS", "10000000"))
+        min_params = envs.FASTVIDEO_FSDP2_MIN_PARAMS.get()
         logger.info("Using size-based filtering with threshold: %.2fM", min_params / 1e6)
 
         for n, m in reversed(named_modules):
