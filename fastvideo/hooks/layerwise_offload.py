@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from itertools import chain
 from typing import Any
 import torch
 from torch import nn
@@ -12,6 +13,30 @@ def _tensor_placeholder(tensor: torch.Tensor, device: torch.device) -> torch.Ten
     """Create a rank-preserving empty placeholder on the specified device."""
     shape = (0, ) if tensor.ndim <= 0 else (0, ) * tensor.ndim
     return torch.empty(shape, device=device, dtype=tensor.dtype)
+
+
+# Buffers at least this large also stream (e.g. packed NVFP4 weights registered as buffers);
+# small ones (scales, caches) stay resident. Opt in with FASTVIDEO_LAYERWISE_OFFLOAD_BUFFERS=1.
+_BUFFER_OFFLOAD_MIN_BYTES = 1 << 20
+
+
+def _offload_tensors(module: nn.Module, names: dict[str, torch.Tensor] | None = None):
+    """``(name, tensor)`` for every parameter and, when enabled, every large buffer.
+
+    ``names`` restricts the walk to the tensors chosen at init: an offloaded buffer is a
+    zero-element placeholder afterwards and would fail the size test.
+    """
+    import os
+    if names is not None:
+        for name, tensor in chain(module.named_parameters(), module.named_buffers()):
+            if name in names:
+                yield name, tensor
+        return
+    yield from module.named_parameters()
+    if os.environ.get("FASTVIDEO_LAYERWISE_OFFLOAD_BUFFERS") == "1":
+        for name, buf in module.named_buffers():
+            if buf is not None and buf.numel() * buf.element_size() >= _BUFFER_OFFLOAD_MIN_BYTES:
+                yield name, buf
 
 
 class LayerwiseOffloadState:
@@ -35,7 +60,7 @@ class LayerwiseOffloadState:
     @torch.compiler.disable
     def on_init(self, module: nn.Module):
         self.module_ref = module
-        for name, param in self.module_ref.named_parameters():
+        for name, param in _offload_tensors(self.module_ref):
             if self._will_offload(name):
                 self.cpu_named_parameters[name] = (param.data.detach().to("cpu").pin_memory())
                 param.data = _tensor_placeholder(param.data, self.device)
@@ -44,7 +69,7 @@ class LayerwiseOffloadState:
     def wait_and_replace_params(self):
         torch.cuda.current_stream().wait_stream(self.async_copy_stream)
         # now gpu_named_parameters are ready
-        for name, param in self.module_ref.named_parameters():
+        for name, param in _offload_tensors(self.module_ref, self.cpu_named_parameters):
             if not self._will_offload(name):
                 continue
             if name not in self.gpu_named_parameters:
@@ -56,7 +81,7 @@ class LayerwiseOffloadState:
     def prefetch_params(self):
         compute_stream = torch.cuda.current_stream()
         with torch.cuda.stream(self.async_copy_stream):
-            for name, param in self.module_ref.named_parameters():
+            for name, param in _offload_tensors(self.module_ref, self.cpu_named_parameters):
                 if not self._will_offload(name):
                     continue
                 assert name not in self.gpu_named_parameters
@@ -66,7 +91,7 @@ class LayerwiseOffloadState:
 
     @torch.compiler.disable
     def release_gpu_params(self):
-        for name, param in self.module_ref.named_parameters():
+        for name, param in _offload_tensors(self.module_ref, self.cpu_named_parameters):
             if self._will_offload(name):
                 param.data = _tensor_placeholder(param.data, self.device)
                 del self.gpu_named_parameters[name]
@@ -83,7 +108,7 @@ class LayerwiseOffloadHook(ForwardHook):
         self.state.on_init(module)  # pyright: ignore
 
     def on_detach(self, module: nn.Module):
-        named_parameters = dict(module.named_parameters())
+        named_parameters = dict(_offload_tensors(module, self.state.cpu_named_parameters))
         for name, cpu_tensor in self.state.cpu_named_parameters.items():
             if name not in self.state.gpu_named_parameters:
                 if name in named_parameters:
@@ -142,9 +167,20 @@ def enable_layerwise_offload(model: nn.Module, is_replace: bool = False):
         return
     state_list = []
     async_stream = torch.cuda.Stream()
+    # The first N entries skip offloading and stay wherever the model is placed (normally the
+    # GPU), so a GPU with spare memory streams only the remainder over PCIe.
+    import os
+    try:
+        resident = max(0, int(os.environ.get("FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS", "0")))
+    except ValueError:
+        logger.warning("Ignoring malformed FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS=%r",
+                       os.environ.get("FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS"))
+        resident = 0
     for name, submodule in model.named_children():
         if isinstance(submodule, nn.ModuleList):
             for idx, module_entry in enumerate(submodule):
+                if idx < resident:
+                    continue
                 state = LayerwiseOffloadState(async_copy_stream=async_stream, device=device)
                 state_list.append(state)
                 hook_mgr = ModuleHookManager.get_from_or_default(module_entry)
@@ -159,6 +195,10 @@ def enable_layerwise_offload(model: nn.Module, is_replace: bool = False):
                     hook_mgr.append_forward_hook(hook)
             break
     if len(state_list) == 0:
+        if resident > 0:
+            logger.info("FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS=%d keeps every block resident; nothing to offload",
+                        resident)
+            return
         raise ValueError("No nn.ModuleList found in the model for layerwise offloading.")
 
     # circular linking of states

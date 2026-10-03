@@ -469,7 +469,13 @@ class TextEncoderLoader(ComponentLoader):
 
             from fastvideo.platforms import current_platform
 
-            if use_cpu_offload:
+            if use_cpu_offload and checkpoint_quant_config is not None:
+                logger.info(
+                    "Skipping FSDP CPU offload for serialized %s text encoder; "
+                    "packed uint8 weights are not FSDP-shardable",
+                    checkpoint_quant_config.get_name(),
+                )
+            elif use_cpu_offload:
                 pin_cpu_memory = fastvideo_args.pin_cpu_memory and is_pin_memory_available()
                 # Disable FSDP for MPS as it's not compatible
                 if current_platform.is_mps():
@@ -876,6 +882,14 @@ class VAELoader(ComponentLoader):
 
         # Find all safetensors files
         safetensors_list = glob.glob(os.path.join(str(model_path), "*.safetensors"))
+        int8_convrot_path = None
+        if class_name == "AutoencoderKLMiniMaxH3":
+            from fastvideo.models.vaes.minimax_h3_int8_convrot import (
+                dense_vae_safetensors,
+                find_int8_convrot_vae_path,
+            )
+            int8_convrot_path = find_int8_convrot_vae_path(model_path)
+            safetensors_list = dense_vae_safetensors(safetensors_list)
         if not safetensors_list:
             raise ValueError(f"No safetensors files found in {model_path}")
         # Common case: a single `.safetensors` checkpoint file.
@@ -911,6 +925,9 @@ class VAELoader(ComponentLoader):
         # strictly so missing/unexpected keys are surfaced early.
         strict_load = class_name in {"AutoencoderKL", "AutoencoderKLMiniMaxH3"}
         vae.load_state_dict(loaded, strict=strict_load)
+        if class_name == "AutoencoderKLMiniMaxH3" and int8_convrot_path is not None:
+            from fastvideo.models.vaes.minimax_h3_int8_convrot import overlay_minimax_h3_int8_convrot_decoder
+            overlay_minimax_h3_int8_convrot_decoder(vae, int8_convrot_path)
         if (class_name == "AutoencoderKLWan" and getattr(vae.config, "use_light_vae", False)
                 and target_device.type == "cuda" and hasattr(vae, "optimize_memory_format")):
             vae.optimize_memory_format()
@@ -1068,6 +1085,8 @@ class TransformerLoader(ComponentLoader):
         safetensors_list = glob.glob(os.path.join(str(model_path), "*.safetensors"))
         if not safetensors_list:
             raise ValueError(f"No safetensors files found in {model_path}")
+        from fastvideo.layers.quantization.nvfp4_config import dense_transformer_safetensors
+        safetensors_list = dense_transformer_safetensors(safetensors_list)
 
         # arch_config can infer architecture from weight keys (e.g. Flux2 layer counts)
         update_fn = getattr(dit_config.arch_config, "update_from_weight_keys", None)
@@ -1120,6 +1139,16 @@ class TransformerLoader(ComponentLoader):
                         os.environ.get("RANK", "0"),
                         resolved.name if resolved else "automatic selection",
                         local_main_process_only=False)
+            # Layerwise offload keeps every block's weights in pinned host memory, so load them on the CPU and
+            # attach the hooks before anything moves to the GPU; loading on the GPU first would need the whole
+            # DiT resident once, which is exactly what offload exists to avoid on small cards.
+            layerwise_load = (fastvideo_args.inference_mode and fastvideo_args.dit_layerwise_offload
+                              and not fastvideo_args.use_fsdp_inference)
+            # The AdaLN host cache also needs the projection weights to stay off the device from the start.
+            adaln_table = os.environ.get("FASTVIDEO_H3_ADALN_TABLE") or None
+            adaln_host_cache = (fastvideo_args.inference_mode and not fastvideo_args.use_fsdp_inference
+                                and (os.environ.get("FASTVIDEO_H3_ADALN_CACHE") == "1" or adaln_table is not None))
+            layerwise_load = layerwise_load or adaln_host_cache
             model = maybe_load_fsdp_model(
                 model_cls=model_cls,
                 init_params={
@@ -1127,7 +1156,7 @@ class TransformerLoader(ComponentLoader):
                     "hf_config": hf_config
                 },
                 weight_dir_list=safetensors_list,
-                device=get_local_torch_device(),
+                device=torch.device("cpu") if layerwise_load else get_local_torch_device(),
                 hsdp_replicate_dim=fastvideo_args.hsdp_replicate_dim,
                 hsdp_shard_dim=fastvideo_args.hsdp_shard_dim,
                 strict=strict_load,
@@ -1161,15 +1190,40 @@ class TransformerLoader(ComponentLoader):
 
         model = model.eval()
 
+        if adaln_host_cache and hasattr(model, "enable_adaln_host_cache"):
+            model.enable_adaln_host_cache(adaln_table)
+            logger.info("AdaLN modulation: %s", "precomputed tables from " + adaln_table if adaln_table
+                        else "projections in pinned host memory behind a per-timestep cache")
+        if layerwise_load and not fastvideo_args.dit_layerwise_offload:
+            model = model.to(get_local_torch_device())
+
         if fastvideo_args.inference_mode and fastvideo_args.dit_layerwise_offload:
             # Check if model has nn.ModuleList for layerwise offload compatibility
             has_module_list = any(isinstance(m, nn.ModuleList) for m in model.children())
             if has_module_list:
                 enable_layerwise_offload(model)
+                # Blocks now hold placeholders; the remaining (non-block) weights and buffers belong on the GPU.
+                model = model.to(get_local_torch_device())
             else:
                 logger.warning(
                     "Layerwise offload requested but model %s does not have "
                     "nn.ModuleList structure. Skipping layerwise offload.", cls_name)
+                if layerwise_load:
+                    model = model.to(get_local_torch_device())
+        # FASTVIDEO_H3_SPLICE_TRANSFORMER=<transformer dir>: a second checkpoint of the same architecture
+        # runs denoising steps FASTVIDEO_H3_SPLICE_FROM_STEP (default 4) onward.
+        # Only the primary ``transformer`` component splices; the spliced load itself never does.
+        splice_path = os.environ.get("FASTVIDEO_H3_SPLICE_TRANSFORMER")
+        if (splice_path and not getattr(self, "_loading_splice", False) and hasattr(model, "attach_step_splice")
+                and os.path.basename(os.path.normpath(model_path)) == "transformer"):
+            self._loading_splice = True
+            try:
+                late = self.load(splice_path, fastvideo_args)
+            finally:
+                self._loading_splice = False
+            from_step = int(os.environ.get("FASTVIDEO_H3_SPLICE_FROM_STEP", "4"))
+            model.attach_step_splice(late, from_step)
+            logger.info("Step splice: steps >= %d run the transformer from %s", from_step, splice_path)
         return model
 
 
