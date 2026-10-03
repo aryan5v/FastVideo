@@ -17,6 +17,7 @@ from fastvideo.configs.models.vaes.minimax_h3_audio import MiniMaxH3AudioVAEArch
 from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEArchConfig
 from fastvideo.configs.pipelines.minimax_h3 import MiniMaxH3PipelineConfig
 from fastvideo.fastvideo_args import FastVideoArgs
+from fastvideo.hooks.pinned_memory import PinnedTensorArena
 from fastvideo.logger import init_logger
 from fastvideo.models.hf_transformer_utils import get_diffusers_config
 from fastvideo.pipelines.basic.minimax_h3.stages import (
@@ -45,18 +46,26 @@ def _pinned_swap(module: Any, device: torch.device) -> None:
     """
     store = module.__dict__.setdefault("_pinned_host_tensors", {})
     params = dict(module.named_parameters())
-    for name, tensor in list(params.items()) + list(module.named_buffers()):
+    tensors = list(params.items()) + list(module.named_buffers())
+    if device.type == "cpu":
+        missing = [(name, tensor) for name, tensor in tensors
+                   if tensor is not None and tensor.device.type != "cpu" and (
+                       name not in store or store[name].shape != tensor.shape or store[name].dtype != tensor.dtype)]
+        arena = PinnedTensorArena(missing) if missing else None
+    for name, tensor in tensors:
         if tensor is None:
             continue
         if device.type == "cpu":
             if tensor.device.type == "cpu":
                 continue
-            host = store.get(name) if name in params else None
+            host = store.get(name)
             if host is None or host.shape != tensor.shape or host.dtype != tensor.dtype:
-                host = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True)
+                assert arena is not None
+                host = arena.empty_like(name, tensor)
                 host.copy_(tensor)
-                if name in params:
-                    store[name] = host
+                store[name] = host
+            elif name not in params:
+                host.copy_(tensor)
             tensor.data = host
         elif tensor.device != device:
             tensor.data = tensor.data.to(device, non_blocking=True)
