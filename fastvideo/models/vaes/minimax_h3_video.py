@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+import fastvideo.envs as envs
 from fastvideo.attention import get_attn_backend
 from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEConfig
 from fastvideo.platforms import AttentionBackendEnum
@@ -525,7 +526,7 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
 
 def _tile_batch_size() -> int:
     """Spatial tiles decoded per decoder call (``FASTVIDEO_H3_VAE_TILE_BATCH``, default 1 = per tile)."""
-    return max(1, int(os.environ.get("FASTVIDEO_H3_VAE_TILE_BATCH", "1")))
+    return max(1, envs.FASTVIDEO_H3_VAE_TILE_BATCH.get())
 
 
 def _is_minimax_h3_video_vae_decoder(name: str, submodule: nn.Module) -> bool:

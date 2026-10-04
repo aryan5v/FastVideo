@@ -28,6 +28,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+import fastvideo.envs as envs
 from fastvideo.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -209,7 +210,7 @@ def _register_ops_once() -> None:
         if spark:
             # With FlashInfer 0.6.18 on GB10, queued activation quantization
             # plus GEMM can diverge. Completing quantization while its padded
-            # input is alive restores identical native H3 requests.
+            # input is alive prevents the observed intermittent corruption.
             torch.cuda.current_stream(x.device).synchronize()
         return quantized, scales
 
@@ -366,7 +367,7 @@ def _mm_fp4_backend() -> str:
     ``cudnn`` once activations reach tens of thousands of rows (measured at
     73k rows on an RTX PRO 6000); short sequences are unaffected.
     """
-    return os.environ.get("FASTVIDEO_NVFP4_MM_BACKEND", "auto")
+    return envs.FASTVIDEO_NVFP4_MM_BACKEND.get()
 
 
 def _coerce_fp4_input_dtype(x: torch.Tensor) -> torch.Tensor:
