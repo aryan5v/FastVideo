@@ -301,6 +301,11 @@ def _nvfp4_quantize(
         x_for_quant = F.pad(x, (0, 0, 0, pad_rows))
 
     quantized, scales = torch.ops.fastvideo_fp4.nvfp4_quantize(x_for_quant, global_sf, sf_layout, do_shuffle)
+    if x.is_cuda and torch.cuda.get_device_capability(x.device) == (12, 1):
+        # On GB10 with FlashInfer 0.6.18, identical native H3 requests can
+        # diverge unless quantization completes before its padded input is
+        # released. Fence this boundary rather than every CUDA launch.
+        torch.cuda.current_stream(x.device).synchronize()
     if sf_layout != SfLayout.layout_linear.value:
         quantized = quantized.narrow(0, 0, logical_rows)
     return quantized, scales
@@ -380,6 +385,8 @@ def _load_amax_table(path: str) -> dict[str, float]:
 
 class NVFP4QuantizeMethod(QuantizeMethodBase):
 
+    _static_sf: torch.Tensor | None
+
     def __init__(self, layer_prefix: str = ""):
         super().__init__()
         self.weight_fp4 = None
@@ -418,8 +425,7 @@ class NVFP4QuantizeMethod(QuantizeMethodBase):
             keys = [prefix] + ([f"b{match.group(1)}.{match.group(2)}"] if match else [])
             amax = next((table[k] for k in keys if k in table), None)
             if amax is not None:
-                self._static_sf = torch.tensor((448.0 * 6.0) / max(amax, 1e-12), dtype=torch.float32,
-                                               device="cuda")
+                self._static_sf = torch.tensor((448.0 * 6.0) / max(amax, 1e-12), dtype=torch.float32, device="cuda")
         return self._static_sf
 
     def _dynamic_activation_scale(self) -> bool:
