@@ -71,6 +71,7 @@ def main():
     ap.add_argument("--resident-encoder", action="store_true")
     ap.add_argument("--tile-batch", default=None)
     ap.add_argument("--frames", type=int, default=243)
+    ap.add_argument("--seed", type=int, default=20260929)
     ap.add_argument("--height", type=int, default=768)
     ap.add_argument("--width", type=int, default=1344)
     ap.add_argument("--warmup", type=int, default=1)
@@ -137,7 +138,7 @@ def main():
     hardware = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=name,memory.total,driver_version,pci.bus_id", "--format=csv,noheader"], text=True
     ).strip()
-    sampling = {"seed": 20260929, "height": a.height, "width": a.width, "num_frames": a.frames, "fps": 24,
+    sampling = {"seed": a.seed, "height": a.height, "width": a.width, "num_frames": a.frames, "fps": 24,
                 "num_inference_steps": 9, "guidance_scale": 1.0, "batch_cfg": False}
     results = {"name": a.name, "quant": a.quant, "command": shlex.join([sys.executable, "-P", *sys.argv]),
                "env": {k: v for k, v in os.environ.items() if k.startswith(("FASTVIDEO_", "PYTORCH_"))
