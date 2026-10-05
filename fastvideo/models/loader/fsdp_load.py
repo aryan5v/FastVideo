@@ -360,7 +360,9 @@ def maybe_load_fsdp_model(
                 packed_nvfp4_export,
             )
             packed_nvfp4_export = None
-    load_weights_to_cpu = cpu_offload or packed_nvfp4_export is not None
+    # CPU-targeted layerwise/table loads must not stage the full checkpoint on
+    # the GPU before offload hooks or skipped projection weights are applied.
+    load_weights_to_cpu = device.type == "cpu" or cpu_offload or packed_nvfp4_export is not None
     weight_iterator = safetensors_weights_iterator(weight_dir_list, to_cpu=load_weights_to_cpu)
     logger.info("Loading transformer weights with to_cpu=%s", load_weights_to_cpu)
     param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
