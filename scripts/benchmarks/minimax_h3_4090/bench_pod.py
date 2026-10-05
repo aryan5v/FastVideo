@@ -72,6 +72,15 @@ class HostMemoryPeak:
         if self._nvml_shutdown is not None:
             self._nvml_shutdown()
 
+    def metrics(self):
+        return {
+            "peak_gpu_used_gib": (round(self.peak_gpu_bytes / 2**30, 3)
+                                  if self.peak_gpu_bytes is not None else None),
+            "peak_host_cgroup_gib": (round(self.peak_bytes / 2**30, 3) if self.host_error is None else None),
+            "peak_host_anon_gib": (round(self.peak_anon_bytes / 2**30, 3) if self.host_error is None else None),
+            "host_memory_error": self.host_error,
+        }
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -173,19 +182,21 @@ def main():
                        "output": {"output_path": str(out_dir / f"{i:02d}_{pid}.mp4"), "save_video": True,
                                   "return_frames": False}}
             t = time.perf_counter()
-            with HostMemoryPeak() as host_peak:
-                generator.generate(request)
+            try:
+                with HostMemoryPeak() as host_peak:
+                    generator.generate(request)
+            except Exception as exc:
+                failed = {"prompt": pid, "warmup": i < a.warmup,
+                          "wall_s": round(time.perf_counter() - t, 2),
+                          "error": f"{type(exc).__name__}: {exc}", **host_peak.metrics()}
+                results.setdefault("failed_runs", []).append(failed)
+                print("RUN_FAILED", json.dumps(failed), flush=True)
+                (out_dir / "results.json").write_text(json.dumps(results, indent=1))
+                raise
             wall = round(time.perf_counter() - t, 2)
             results["runs"].append({"prompt": pid, "warmup": i < a.warmup, "wall_s": wall,
                                     "clip": request["output"]["output_path"],
-                                    "peak_gpu_used_gib": (round(host_peak.peak_gpu_bytes / 2**30, 3)
-                                                          if host_peak.peak_gpu_bytes is not None else None),
-                                    # None when sampling failed: an unmeasured run must not read as 0 GiB.
-                                    "peak_host_cgroup_gib": (round(host_peak.peak_bytes / 2**30, 3)
-                                                             if host_peak.host_error is None else None),
-                                    "peak_host_anon_gib": (round(host_peak.peak_anon_bytes / 2**30, 3)
-                                                           if host_peak.host_error is None else None),
-                                    "host_memory_error": host_peak.host_error})
+                                    **host_peak.metrics()})
             timed = [run["wall_s"] for run in results["runs"] if not run["warmup"]]
             if timed:
                 results["median_e2e_s"] = statistics.median(timed)

@@ -1,5 +1,6 @@
 """Benchmark capacity sampling supports both pod cgroup versions, without CUDA."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -63,3 +64,53 @@ def test_malformed_host_counters_do_not_report_a_measured_zero(tmp_path, monkeyp
     peak = sample(tmp_path, monkeypatch)
     assert peak.host_error is not None
     assert peak.peak_gpu_bytes == 8192
+    assert peak.metrics()["peak_host_cgroup_gib"] is None
+    assert peak.metrics()["peak_host_anon_gib"] is None
+
+
+def test_failed_generation_preserves_sampled_memory_and_shuts_down(tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "fastvideo_inference.json").write_text("{}")
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text('{"ceramics": "test"}')
+    shutdown = []
+
+    class FailingGenerator:
+        def generate(self, _request):
+            raise RuntimeError("CUDA out of memory")
+
+        def shutdown(self):
+            shutdown.append(True)
+
+    class Memory:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def metrics(self):
+            return {"peak_gpu_used_gib": 11.9, "peak_host_cgroup_gib": 28.3,
+                    "peak_host_anon_gib": 20.1, "host_memory_error": None}
+
+    fake_torch = SimpleNamespace(__version__="test", version=SimpleNamespace(cuda="test"),
+                                 cuda=SimpleNamespace(get_device_name=lambda _index: "test GPU"))
+    fake_video = SimpleNamespace(VideoGenerator=SimpleNamespace(from_config=lambda _config: FailingGenerator()))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "fastvideo", fake_video)
+    monkeypatch.setattr(BENCH, "HostMemoryPeak", Memory)
+    monkeypatch.setattr(BENCH.subprocess, "check_output", lambda *_args, **_kwargs: "test GPU")
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "failure", str(model), "fp8", "--prompt-file", str(prompts),
+                                      "--output-root", str(tmp_path / "outputs")])
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        BENCH.main()
+    raw = json.loads((tmp_path / "outputs/failure/results.json").read_text())
+    assert raw["runs"] == []
+    assert len(raw["failed_runs"]) == 1
+    failed = raw["failed_runs"][0]
+    assert failed["peak_gpu_used_gib"] == 11.9
+    assert failed["peak_host_cgroup_gib"] == 28.3
+    assert failed["warmup"]
+    assert "CUDA out of memory" in failed["error"]
+    assert shutdown == [True]
