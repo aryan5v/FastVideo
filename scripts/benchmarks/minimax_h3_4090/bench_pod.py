@@ -105,8 +105,9 @@ def main():
     ap.add_argument("--decode", default="h3-vae")
     ap.add_argument("--lazy", action="store_true", help="lazy_module_load: reload released modules per request")
     ap.add_argument("--prompts", default=None, help="comma-separated prompt ids (default: both)")
+    ap.add_argument("--once", action="store_true", help="render each selected prompt once, without extra warmup clips")
     a = ap.parse_args()
-    if a.timed < 2 or a.warmup < 1:
+    if not a.once and (a.timed < 2 or a.warmup < 1):
         ap.error("Use at least one warmup and two timed runs")
     if not pathlib.Path(a.model, "fastvideo_inference.json").is_file():
         ap.error("The model directory must contain fastvideo_inference.json for the 8-step DMD contract")
@@ -168,13 +169,15 @@ def main():
                "hardware": hardware, "model_revision": model_revision,
                "model_contract": json.loads((model_root / "fastvideo_inference.json").read_text()),
                "source_commit": os.environ.get("FASTVIDEO_SOURCE_COMMIT"),
-               "gpu": torch.cuda.get_device_name(0), "config": config, "sampling": sampling, "runs": []}
+               "gpu": torch.cuda.get_device_name(0), "config": config, "sampling": sampling,
+               "mode": "showcase_once" if a.once else "benchmark", "runs": []}
     (out_dir / "results.json").write_text(json.dumps(results, indent=2))
     t0 = time.perf_counter()
     generator = VideoGenerator.from_config(config)
     results["load_s"] = round(time.perf_counter() - t0, 1)
     ids = a.prompts.split(",") if a.prompts else list(texts)
-    order = [ids[i % len(ids)] for i in range(a.warmup + a.timed)]
+    order = ids if a.once else [ids[i % len(ids)] for i in range(a.warmup + a.timed)]
+    warmup = 1 if a.once else a.warmup
     try:
         for i, pid in enumerate(order):
             request = {"prompt": texts[pid], "negative_prompt": "",
@@ -186,7 +189,7 @@ def main():
                 with HostMemoryPeak() as host_peak:
                     generator.generate(request)
             except Exception as exc:
-                failed = {"prompt": pid, "warmup": i < a.warmup,
+                failed = {"prompt": pid, "warmup": i < warmup,
                           "wall_s": round(time.perf_counter() - t, 2),
                           "error": f"{type(exc).__name__}: {exc}", **host_peak.metrics()}
                 results.setdefault("failed_runs", []).append(failed)
@@ -194,12 +197,13 @@ def main():
                 (out_dir / "results.json").write_text(json.dumps(results, indent=1))
                 raise
             wall = round(time.perf_counter() - t, 2)
-            results["runs"].append({"prompt": pid, "warmup": i < a.warmup, "wall_s": wall,
+            results["runs"].append({"prompt": pid, "warmup": i < warmup, "wall_s": wall,
                                     "clip": request["output"]["output_path"],
                                     **host_peak.metrics()})
             timed = [run["wall_s"] for run in results["runs"] if not run["warmup"]]
             if timed:
                 results["median_e2e_s"] = statistics.median(timed)
+                results["mean_e2e_s"] = statistics.mean(timed)
             print("RUN", json.dumps(results["runs"][-1]), flush=True)
             (out_dir / "results.json").write_text(json.dumps(results, indent=1))
     finally:

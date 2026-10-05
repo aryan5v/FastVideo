@@ -68,17 +68,21 @@ def test_malformed_host_counters_do_not_report_a_measured_zero(tmp_path, monkeyp
     assert peak.metrics()["peak_host_anon_gib"] is None
 
 
-def test_failed_generation_preserves_sampled_memory_and_shuts_down(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fail,once", [(True, False), (False, False), (False, True)])
+def test_generation_receipts_preserve_memory_and_once_never_adds_clips(tmp_path, monkeypatch, fail, once):
     model = tmp_path / "model"
     model.mkdir()
     (model / "fastvideo_inference.json").write_text("{}")
     prompts = tmp_path / "prompts.json"
     prompts.write_text('{"ceramics": "test"}')
     shutdown = []
+    requests = []
 
     class FailingGenerator:
         def generate(self, _request):
-            raise RuntimeError("CUDA out of memory")
+            requests.append(_request)
+            if fail:
+                raise RuntimeError("CUDA out of memory")
 
         def shutdown(self):
             shutdown.append(True)
@@ -101,16 +105,33 @@ def test_failed_generation_preserves_sampled_memory_and_shuts_down(tmp_path, mon
     monkeypatch.setitem(sys.modules, "fastvideo", fake_video)
     monkeypatch.setattr(BENCH, "HostMemoryPeak", Memory)
     monkeypatch.setattr(BENCH.subprocess, "check_output", lambda *_args, **_kwargs: "test GPU")
-    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "failure", str(model), "fp8", "--prompt-file", str(prompts),
-                                      "--output-root", str(tmp_path / "outputs")])
-    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+    argv = [str(SCRIPT), "failure", str(model), "fp8", "--prompt-file", str(prompts),
+            "--output-root", str(tmp_path / "outputs")]
+    if once:
+        argv.append("--once")
+    monkeypatch.setattr(sys, "argv", argv)
+    if fail:
+        with pytest.raises(RuntimeError, match="CUDA out of memory"):
+            BENCH.main()
+    else:
         BENCH.main()
     raw = json.loads((tmp_path / "outputs/failure/results.json").read_text())
-    assert raw["runs"] == []
-    assert len(raw["failed_runs"]) == 1
-    failed = raw["failed_runs"][0]
-    assert failed["peak_gpu_used_gib"] == 11.9
-    assert failed["peak_host_cgroup_gib"] == 28.3
-    assert failed["warmup"]
-    assert "CUDA out of memory" in failed["error"]
+    if fail:
+        assert raw["runs"] == []
+        assert len(raw["failed_runs"]) == 1
+        failed = raw["failed_runs"][0]
+        assert failed["peak_gpu_used_gib"] == 11.9
+        assert failed["peak_host_cgroup_gib"] == 28.3
+        assert failed["warmup"]
+        assert "CUDA out of memory" in failed["error"]
+    else:
+        assert len(requests) == len(raw["runs"]) == (1 if once else 3)
+        assert raw["runs"][0]["warmup"]
+        assert all(run["peak_gpu_used_gib"] == 11.9 for run in raw["runs"])
+        if once:
+            assert "median_e2e_s" not in raw
+            assert "mean_e2e_s" not in raw
+        else:
+            assert not any(run["warmup"] for run in raw["runs"][1:])
+            assert "mean_e2e_s" in raw
     assert shutdown == [True]
