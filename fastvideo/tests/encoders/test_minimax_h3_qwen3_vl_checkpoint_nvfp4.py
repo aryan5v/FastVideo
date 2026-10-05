@@ -454,10 +454,13 @@ def _tiny_conditioner_config(keep_bf16: tuple[str, ...] = ("mlp.down_proj", )) -
     return config
 
 
-def test_conditioner_loads_converter_named_tensors_end_to_end(distributed_setup) -> None:
+@pytest.mark.parametrize("checkpoint_backed", [False, True])
+def test_conditioner_loads_converter_named_tensors_end_to_end(distributed_setup, checkpoint_backed) -> None:
     """The real chain: a conditioner built with the NVFP4 config, checkpoint keys spelled the way the
     converter writes them, ``load_weights``, the strict missing-tensor check, then the post-load hook."""
     model = MiniMaxH3Qwen3VLConditioner(_tiny_conditioner_config())
+    if checkpoint_backed:
+        model.enable_checkpoint_backed_cpu_load()
     layer = model.language_model.layers[0]
     assert isinstance(layer.self_attn.q_proj.quant_method, MiniMaxH3SerializedNVFP4LinearMethod)
     assert isinstance(layer.self_attn.o_proj.quant_method, MiniMaxH3SerializedNVFP4LinearMethod)
@@ -482,6 +485,9 @@ def test_conditioner_loads_converter_named_tensors_end_to_end(distributed_setup)
     loaded = model.load_weights(iter(checkpoint.items()))
     assert loaded == expected
     assert _process_quantized_text_encoder_weights(model, torch.device("cpu")) == 6
+    if checkpoint_backed:
+        for name, parameter in model.named_parameters():
+            assert parameter.data_ptr() == checkpoint[f"model.{name}"].data_ptr()
     assert layer.self_attn.q_proj._nvfp4_alpha.item() == pytest.approx(0.5)
     assert layer.mlp.up_proj._nvfp4_alpha.item() == pytest.approx(0.5)
 
@@ -504,3 +510,19 @@ def test_conditioner_loads_converter_named_tensors_end_to_end(distributed_setup)
     stray["model.language_model.layers.0.self_attn.q_proj.weight"] = torch.zeros(128, 128)
     with pytest.raises(ValueError, match="Unexpected"):
         model.load_weights(iter(stray.items()))
+
+
+def test_checkpoint_backed_load_keeps_custom_loader_semantics(distributed_setup) -> None:
+    model = MiniMaxH3Qwen3VLConditioner(_tiny_conditioner_config())
+    model.enable_checkpoint_backed_cpu_load()
+    name = "language_model.layers.0.input_layernorm.weight"
+    parameter = dict(model.named_parameters())[name]
+    source = torch.ones_like(parameter)
+
+    def custom_loader(target, value):
+        target.data.copy_(value + 1)
+
+    parameter.weight_loader = custom_loader
+    model.load_weights([(name, source)])
+    torch.testing.assert_close(parameter, source + 1, rtol=0, atol=0)
+    assert parameter.data_ptr() != source.data_ptr()

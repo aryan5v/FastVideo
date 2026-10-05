@@ -20,9 +20,9 @@ from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for encoder streaming")
 @pytest.mark.parametrize("quantized,fused", [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("pin_cpu_memory", [True, False])
+@pytest.mark.parametrize("pin_cpu_memory,checkpoint_backed", [(True, False), (False, False), (False, True)])
 def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup, monkeypatch, env_overrides, quantized,
-                                                               fused, pin_cpu_memory):
+                                                               fused, pin_cpu_memory, checkpoint_backed, tmp_path):
     # DiT residency must not accidentally keep encoder layers resident too.
     env_overrides.enter_context(envs.FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS.override(6))
     env_overrides.enter_context(envs.FASTVIDEO_H3_ENCODER_FUSED_DEQUANT.override(False))
@@ -55,6 +55,11 @@ def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup
         with patch.object(torch.Tensor, "item", side_effect=AssertionError("Unexpected device scalar read")):
             actual_linear = linear(x)[0]
         torch.testing.assert_close(actual_linear, expected_linear, rtol=0, atol=0)
+    checkpoint = tmp_path / "encoder.safetensors"
+    if checkpoint_backed:
+        from safetensors.torch import save_file
+        save_file({name: parameter.detach().cpu().contiguous() for name, parameter in model.named_parameters()},
+                  checkpoint)
     ids = torch.tensor([1, 7, 4, 21, 5, 31, 18], device="cuda")
     model.to("cuda")
     expected = model.encode_ids(ids)
@@ -64,6 +69,16 @@ def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup
             if hasattr(layer, "_nvfp4_fused_dequant"):
                 layer._nvfp4_fused_dequant = True
     model.to("cpu")
+    mapped = {}
+    if checkpoint_backed:
+        from safetensors.torch import load_file
+        mapped = load_file(checkpoint, device="cpu")
+        model.enable_checkpoint_backed_cpu_load()
+        model.load_weights(mapped.items())
+        if quantized:
+            _process_quantized_text_encoder_weights(model, torch.device("cpu"))
+        for name, parameter in model.named_parameters():
+            assert parameter.data_ptr() == mapped[name].data_ptr()
     model.prepare_layerwise_offload(torch.device("cuda"), pin_cpu_memory=pin_cpu_memory)
     model.prepare_layerwise_offload(torch.device("cuda"), pin_cpu_memory=pin_cpu_memory)  # repeated setup is harmless
     assert model.language_model.embed_tokens.weight.device.type == "cpu"
@@ -79,6 +94,10 @@ def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup
             assert not state.gpu_named_parameters
             assert state.pin_cpu_memory == pin_cpu_memory
             assert (state.cpu_arena is not None) == pin_cpu_memory
+            if checkpoint_backed:
+                for name, tensor in state.cpu_named_parameters.items():
+                    layer_name = next(key for key, value in model.named_modules() if value is layer)
+                    assert tensor.data_ptr() == mapped[f"{layer_name}.{name}"].data_ptr()
     with pytest.raises(ValueError, match="text-only"):
         model.encode_ids(ids, pixel_values=torch.zeros(1, device="cuda"),
                          image_grid_thw=torch.ones(1, 3, device="cuda", dtype=torch.int64))

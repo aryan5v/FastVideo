@@ -346,6 +346,7 @@ def _strict_dtype_loader(base_loader):
                              f"got {loaded_weight.dtype} for a {param.dtype} parameter of shape {tuple(param.shape)}")
         return base_loader(param, loaded_weight, *args, **kwargs)
 
+    load._h3_base_loader = base_loader
     return load
 
 

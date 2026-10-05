@@ -422,6 +422,12 @@ class TextEncoderLoader(ComponentLoader):
             with target_device:
                 model = model_cls(model_config)  # type: ignore
 
+            retain_checkpoint = getattr(model, "enable_checkpoint_backed_cpu_load", None)
+            checkpoint_backed_cpu = (target_device.type == "cpu" and envs.FASTVIDEO_H3_ENCODER_LAYERWISE.get()
+                                     and callable(retain_checkpoint) and not fastvideo_args.pin_cpu_memory)
+            if checkpoint_backed_cpu:
+                retain_checkpoint()
+
             weights_to_load = {name for name, _ in model.named_parameters()}
             if (use_text_encoder_override and fastvideo_args.override_text_encoder_safetensors is not None):
                 if os.path.isdir(checkpoint_path):
@@ -462,7 +468,11 @@ class TextEncoderLoader(ComponentLoader):
                                  f"checkpoint: {weights_not_loaded}")
 
             if checkpoint_quant_config is not None:
-                processed_linears = _process_quantized_text_encoder_weights(model, runtime_device)
+                # NVFP4 validation and scalar derivation work on the host. Moving
+                # packed layers to CUDA and back would discard checkpoint mappings.
+                process_device = (target_device if checkpoint_backed_cpu and checkpoint_quant_config.get_name() == "nvfp4"
+                                  else runtime_device)
+                processed_linears = _process_quantized_text_encoder_weights(model, process_device)
                 logger.info("Validated %d serialized %s text-encoder linears", processed_linears,
                             checkpoint_quant_config.get_name())
 

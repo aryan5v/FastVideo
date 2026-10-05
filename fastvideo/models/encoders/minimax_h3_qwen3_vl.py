@@ -805,9 +805,27 @@ class MiniMaxH3Qwen3VLConditioner(TextEncoder[torch.Tensor]):
                 raise ValueError(f"Unexpected MiniMax-H3 Qwen3-VL checkpoint key: {source_name}")
             parameter = parameters[name]
             loader = getattr(parameter, "weight_loader", default_weight_loader)
-            loader(parameter, tensor)
+            base_loader = getattr(loader, "_h3_base_loader", loader)
+            copy_only = (base_loader is default_weight_loader or getattr(base_loader, "__func__", None) in (
+                ColumnParallelLinear.weight_loader, RowParallelLinear.weight_loader,
+                VocabParallelEmbedding.weight_loader))
+            if (getattr(self, "_h3_checkpoint_backed_cpu", False) and copy_only
+                    and parameter.device.type == tensor.device.type == "cpu"
+                    and parameter.shape == tensor.shape and parameter.dtype == tensor.dtype):
+                # TP=1 loaders only copy already matching tensors. Keep the mapping
+                # so the OS can reclaim encoder checkpoint pages during denoising.
+                # Preserve the Parameter and its loader/quantization attributes.
+                parameter.data = tensor.detach()
+            else:
+                loader(parameter, tensor)
             loaded.add(name)
         return loaded
+
+    def enable_checkpoint_backed_cpu_load(self) -> None:
+        """Retain immutable CPU checkpoint storage for single-GPU streamed inference."""
+        if get_tp_world_size() != 1:
+            raise ValueError("Checkpoint-backed H3 encoder requires tensor parallel size 1")
+        self._h3_checkpoint_backed_cpu = True
 
     def _is_omitted_checkpoint_key(self, name: str) -> bool:
         """Return whether a valid checkpoint key belongs to an unbuilt layer."""
