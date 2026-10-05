@@ -19,6 +19,11 @@ tested before resorting to `--lazy`, which reloads components per request.
 Validate actual host and GPU peaks for each recipe; disabling pinning does
 not make ordinary heap allocations reclaimable checkpoint pages.
 
+The memory sampler supports cgroup v2 (`memory.current`, `anon`) and v1
+(`memory.usage_in_bytes`, anonymous RSS). Both report pod-wide usage including
+file cache separately from anonymous memory. If host counters cannot be read,
+the host peak is unknown and NVML GPU capacity sampling continues.
+
 The October 3, 2026 pod has one RTX 4090 (24,564 MiB), driver 580.126.20,
 a 99,999,997,952-byte host cgroup limit, and 150 GB disk. Its runtime is
 PyTorch 2.12.0+cu126, CUDA toolkit 12.6, and FlashInfer 0.7.1rc2.

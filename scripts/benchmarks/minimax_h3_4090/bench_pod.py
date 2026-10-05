@@ -18,7 +18,8 @@ import time
 class HostMemoryPeak:
     """Sample pod-wide cgroup usage; anon excludes cached checkpoint file pages."""
 
-    def __init__(self):
+    def __init__(self, cgroup_root=pathlib.Path("/sys/fs/cgroup")):
+        self.cgroup_root = cgroup_root
         self.stop = threading.Event()
         self.peak_bytes = 0
         self.peak_anon_bytes = 0
@@ -38,17 +39,27 @@ class HostMemoryPeak:
 
     def _sample(self):
         while not self.stop.is_set():
-            try:
-                root = pathlib.Path("/sys/fs/cgroup")
-                self.peak_bytes = max(self.peak_bytes, int((root / "memory.current").read_text()))
-                stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
-                self.peak_anon_bytes = max(self.peak_anon_bytes, int(stats["anon"]))
-                if self._gpu_used is not None:
-                    self.peak_gpu_bytes = max(self.peak_gpu_bytes or 0, self._gpu_used())
-            except (OSError, KeyError, ValueError) as exc:
-                self.host_error = f"{type(exc).__name__}: {exc}"
-                print(f"host memory sampling stopped: {self.host_error}", flush=True)
-                return
+            if self.host_error is None:
+                try:
+                    root = self.cgroup_root
+                    if (root / "memory.current").is_file():
+                        used = int((root / "memory.current").read_text())
+                        stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
+                        anon = int(stats["anon"])
+                    else:
+                        root = root / "memory"
+                        used = int((root / "memory.usage_in_bytes").read_text())
+                        stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
+                        # cgroup v1 RSS counts anonymous memory, excluding file cache.
+                        anon = int(stats["total_rss"] if "total_rss" in stats else stats["rss"])
+                    self.peak_bytes = max(self.peak_bytes, used)
+                    self.peak_anon_bytes = max(self.peak_anon_bytes, anon)
+                except (OSError, KeyError, ValueError) as exc:
+                    self.host_error = f"{type(exc).__name__}: {exc}"
+                    print(f"host memory sampling stopped: {self.host_error}", flush=True)
+            # Capacity verification must continue even if host counters are unavailable.
+            if self._gpu_used is not None:
+                self.peak_gpu_bytes = max(self.peak_gpu_bytes or 0, self._gpu_used())
             self.stop.wait(0.1)
 
     def __enter__(self):
