@@ -526,3 +526,16 @@ def test_checkpoint_backed_load_keeps_custom_loader_semantics(distributed_setup)
     model.load_weights([(name, source)])
     torch.testing.assert_close(parameter, source + 1, rtol=0, atol=0)
     assert parameter.data_ptr() != source.data_ptr()
+
+
+def test_checkpoint_backed_embedding_rejects_padded_checkpoint_rows(distributed_setup) -> None:
+    config = _tiny_conditioner_config()
+    config.arch_config.vocab_size = 63
+    model = MiniMaxH3Qwen3VLConditioner(config)
+    model.enable_checkpoint_backed_cpu_load()
+    weight = model.language_model.embed_tokens.weight
+    assert weight.shape[0] == 64
+    # Matching the allocated padded shape must not bypass the loader's check
+    # that checkpoint rows match the original unpadded vocabulary.
+    with pytest.raises(AssertionError):
+        model.load_weights([("language_model.embed_tokens.weight", torch.ones_like(weight))])

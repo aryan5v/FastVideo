@@ -809,6 +809,12 @@ class MiniMaxH3Qwen3VLConditioner(TextEncoder[torch.Tensor]):
             copy_only = (base_loader is default_weight_loader or getattr(base_loader, "__func__", None) in (
                 ColumnParallelLinear.weight_loader, RowParallelLinear.weight_loader,
                 VocabParallelEmbedding.weight_loader))
+            if getattr(base_loader, "__func__", None) is VocabParallelEmbedding.weight_loader:
+                output_dim = getattr(parameter, "output_dim", None)
+                copy_only = (not getattr(parameter, "is_gguf_weight_type", False)
+                             and getattr(parameter, "packed_dim", None) is None
+                             and (output_dim is None or (tensor.ndim > output_dim
+                                  and tensor.shape[output_dim] == base_loader.__self__.org_vocab_size)))
             if (getattr(self, "_h3_checkpoint_backed_cpu", False) and copy_only
                     and parameter.device.type == tensor.device.type == "cpu"
                     and parameter.shape == tensor.shape and parameter.dtype == tensor.dtype):
