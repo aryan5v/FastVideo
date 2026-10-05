@@ -473,7 +473,7 @@ class TextEncoderLoader(ComponentLoader):
             if envs.FASTVIDEO_H3_ENCODER_LAYERWISE.get() and callable(prepare_layerwise):
                 if target_device.type != "cpu":
                     raise ValueError("Layerwise H3 encoder requires text_encoder_cpu_offload=True")
-                prepare_layerwise(runtime_device)
+                prepare_layerwise(runtime_device, pin_cpu_memory=fastvideo_args.pin_cpu_memory)
                 use_cpu_offload = False
                 logger.info("Enabled text-only layerwise H3 encoder with CPU token embeddings")
 
@@ -1211,7 +1211,7 @@ class TransformerLoader(ComponentLoader):
             # Check if model has nn.ModuleList for layerwise offload compatibility
             has_module_list = any(isinstance(m, nn.ModuleList) for m in model.children())
             if has_module_list:
-                enable_layerwise_offload(model)
+                enable_layerwise_offload(model, pin_cpu_memory=fastvideo_args.pin_cpu_memory)
                 # Blocks now hold placeholders; the remaining (non-block) weights and buffers belong on the GPU.
                 model = model.to(get_local_torch_device())
             else:

@@ -20,8 +20,9 @@ from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for encoder streaming")
 @pytest.mark.parametrize("quantized,fused", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("pin_cpu_memory", [True, False])
 def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup, monkeypatch, env_overrides, quantized,
-                                                               fused):
+                                                               fused, pin_cpu_memory):
     # DiT residency must not accidentally keep encoder layers resident too.
     env_overrides.enter_context(envs.FASTVIDEO_LAYERWISE_RESIDENT_BLOCKS.override(6))
     env_overrides.enter_context(envs.FASTVIDEO_H3_ENCODER_FUSED_DEQUANT.override(False))
@@ -63,8 +64,8 @@ def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup
             if hasattr(layer, "_nvfp4_fused_dequant"):
                 layer._nvfp4_fused_dequant = True
     model.to("cpu")
-    model.prepare_layerwise_offload(torch.device("cuda"))
-    model.prepare_layerwise_offload(torch.device("cuda"))  # repeated setup is harmless
+    model.prepare_layerwise_offload(torch.device("cuda"), pin_cpu_memory=pin_cpu_memory)
+    model.prepare_layerwise_offload(torch.device("cuda"), pin_cpu_memory=pin_cpu_memory)  # repeated setup is harmless
     assert model.language_model.embed_tokens.weight.device.type == "cpu"
     assert next(model.visual.parameters()).device.type == "cpu"
     for _ in range(2):
@@ -74,7 +75,10 @@ def test_streamed_encoder_matches_resident_and_releases_layers(distributed_setup
             assert all(parameter.numel() == 0 for parameter in layer.parameters())
             manager = ModuleHookManager.get_from(layer)
             assert manager is not None
-            assert not manager.forward_hooks["LayerwiseOffloadHook"].state.gpu_named_parameters
+            state = manager.forward_hooks["LayerwiseOffloadHook"].state
+            assert not state.gpu_named_parameters
+            assert state.pin_cpu_memory == pin_cpu_memory
+            assert (state.cpu_arena is not None) == pin_cpu_memory
     with pytest.raises(ValueError, match="text-only"):
         model.encode_ids(ids, pixel_values=torch.zeros(1, device="cuda"),
                          image_grid_thw=torch.ones(1, 3, device="cuda", dtype=torch.int64))

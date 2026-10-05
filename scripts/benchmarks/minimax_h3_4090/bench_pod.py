@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--offload-buffers", action="store_true")
     ap.add_argument("--no-layerwise", action="store_true")
     ap.add_argument("--resident-encoder", action="store_true")
+    ap.add_argument("--pageable-host", action="store_true", help="retain file-backed CPU offload weights without pinning")
     ap.add_argument("--tile-batch", default=None)
     ap.add_argument("--frames", type=int, default=243)
     ap.add_argument("--seed", type=int, default=20260929)
@@ -120,7 +121,7 @@ def main():
     engine = {"num_gpus": 1, "use_fsdp_inference": False,
               "parallelism": {"tp_size": 1, "sp_size": 1},
               "offload": {"dit": False, "dit_layerwise": layerwise, "text_encoder": not a.resident_encoder,
-                          "vae": layerwise, "pin_cpu_memory": True, "lazy_module_load": a.lazy},
+                          "vae": layerwise, "pin_cpu_memory": not a.pageable_host, "lazy_module_load": a.lazy},
               "compile": {"enabled": False, "vae_enabled": not a.no_vae_compile}}
     if a.quant == "nvfp4":
         engine["quantization"] = {"transformer_quant": "NVFP4", "layer_profile": "h3_dit_vsa"}

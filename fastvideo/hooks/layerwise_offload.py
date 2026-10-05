@@ -47,6 +47,7 @@ class LayerwiseOffloadState:
         async_copy_stream: torch.cuda.Stream,
         device: torch.device,
         next_state: "LayerwiseOffloadState | None" = None,
+        pin_cpu_memory: bool = True,
     ) -> None:
         self.async_copy_stream = async_copy_stream
         self.next_state = next_state
@@ -55,6 +56,7 @@ class LayerwiseOffloadState:
         self.module_ref: nn.Module = None  # type: ignore
         self.device: torch.device = device
         self.cpu_arena: PinnedTensorArena | None = None
+        self.pin_cpu_memory = pin_cpu_memory
 
     def _will_offload(self, name: str) -> bool:
         return True
@@ -63,12 +65,18 @@ class LayerwiseOffloadState:
     def on_init(self, module: nn.Module):
         self.module_ref = module
         self.clear_cpu_storage()
-        self.cpu_arena = PinnedTensorArena(
-            (name, param) for name, param in _offload_tensors(module) if self._will_offload(name))
+        if self.pin_cpu_memory:
+            self.cpu_arena = PinnedTensorArena(
+                (name, param) for name, param in _offload_tensors(module) if self._will_offload(name))
         for name, param in _offload_tensors(self.module_ref):
             if self._will_offload(name):
-                host = self.cpu_arena.empty_like(name, param)
-                host.copy_(param.data.detach())
+                if self.cpu_arena is not None:
+                    host = self.cpu_arena.empty_like(name, param)
+                    host.copy_(param.data.detach())
+                else:
+                    # Retain checkpoint-backed CPU storage so the OS can reclaim
+                    # inactive file pages instead of holding an anonymous pinned copy.
+                    host = param.data.detach().to("cpu")
                 self.cpu_named_parameters[name] = host
                 param.data = _tensor_placeholder(param.data, self.device)
 
@@ -176,7 +184,13 @@ def enable_layerwise_offload(model: nn.Module,
                              is_replace: bool = False,
                              *,
                              resident_blocks: int | None = None,
-                             cyclic: bool = True):
+                             cyclic: bool = True,
+                             pin_cpu_memory: bool = True):
+    """Stream blocks, optionally retaining their existing pageable CPU storage.
+
+    Disabling pinning avoids a private copy of file-backed checkpoint tensors.
+    Transfers can be slower, but inactive checkpoint pages remain reclaimable.
+    """
     if torch.cuda.is_available():
         device = torch.device("cuda", torch.cuda.current_device())
     else:
@@ -199,7 +213,9 @@ def enable_layerwise_offload(model: nn.Module,
             for idx, module_entry in enumerate(submodule):
                 if idx < resident:
                     continue
-                state = LayerwiseOffloadState(async_copy_stream=async_stream, device=device)
+                state = LayerwiseOffloadState(async_copy_stream=async_stream,
+                                              device=device,
+                                              pin_cpu_memory=pin_cpu_memory)
                 state_list.append(state)
                 hook_mgr = ModuleHookManager.get_from_or_default(module_entry)
                 hook = LayerwiseOffloadHook(state)

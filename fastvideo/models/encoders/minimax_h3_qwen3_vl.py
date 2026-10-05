@@ -755,7 +755,7 @@ class MiniMaxH3Qwen3VLConditioner(TextEncoder[torch.Tensor]):
             raise RuntimeError(f"MiniMax-H3 language model returned unexpected shape={tuple(hidden_states.shape)}")
         return hidden_states[0]
 
-    def prepare_layerwise_offload(self, device: torch.device) -> None:
+    def prepare_layerwise_offload(self, device: torch.device, *, pin_cpu_memory: bool = True) -> None:
         """Stream language layers for text-only CUDA inference, retaining embeddings on CPU."""
         if getattr(self, "_h3_encoder_layerwise_device", None) is not None:
             return
@@ -770,7 +770,8 @@ class MiniMaxH3Qwen3VLConditioner(TextEncoder[torch.Tensor]):
         self.language_model.rotary_emb.to(device)
         if self.language_model.norm is not None:
             self.language_model.norm.to(device)
-        enable_layerwise_offload(self.language_model, resident_blocks=0, cyclic=False)
+        enable_layerwise_offload(self.language_model, resident_blocks=0, cyclic=False,
+                                 pin_cpu_memory=pin_cpu_memory)
         self._h3_encoder_layerwise_device = device
 
     def forward(
