@@ -422,6 +422,12 @@ class TextEncoderLoader(ComponentLoader):
             with target_device:
                 model = model_cls(model_config)  # type: ignore
 
+            retain_checkpoint = getattr(model, "enable_checkpoint_backed_cpu_load", None)
+            checkpoint_backed_cpu = (target_device.type == "cpu" and envs.FASTVIDEO_H3_ENCODER_LAYERWISE.get()
+                                     and callable(retain_checkpoint) and not fastvideo_args.pin_cpu_memory)
+            if checkpoint_backed_cpu:
+                retain_checkpoint()
+
             weights_to_load = {name for name, _ in model.named_parameters()}
             if (use_text_encoder_override and fastvideo_args.override_text_encoder_safetensors is not None):
                 if os.path.isdir(checkpoint_path):
@@ -462,7 +468,11 @@ class TextEncoderLoader(ComponentLoader):
                                  f"checkpoint: {weights_not_loaded}")
 
             if checkpoint_quant_config is not None:
-                processed_linears = _process_quantized_text_encoder_weights(model, runtime_device)
+                # NVFP4 validation and scalar derivation work on the host. Moving
+                # packed layers to CUDA and back would discard checkpoint mappings.
+                process_device = (target_device if checkpoint_backed_cpu and checkpoint_quant_config.get_name() == "nvfp4"
+                                  else runtime_device)
+                processed_linears = _process_quantized_text_encoder_weights(model, process_device)
                 logger.info("Validated %d serialized %s text-encoder linears", processed_linears,
                             checkpoint_quant_config.get_name())
 
@@ -473,7 +483,7 @@ class TextEncoderLoader(ComponentLoader):
             if envs.FASTVIDEO_H3_ENCODER_LAYERWISE.get() and callable(prepare_layerwise):
                 if target_device.type != "cpu":
                     raise ValueError("Layerwise H3 encoder requires text_encoder_cpu_offload=True")
-                prepare_layerwise(runtime_device)
+                prepare_layerwise(runtime_device, pin_cpu_memory=fastvideo_args.pin_cpu_memory)
                 use_cpu_offload = False
                 logger.info("Enabled text-only layerwise H3 encoder with CPU token embeddings")
 
@@ -1211,7 +1221,7 @@ class TransformerLoader(ComponentLoader):
             # Check if model has nn.ModuleList for layerwise offload compatibility
             has_module_list = any(isinstance(m, nn.ModuleList) for m in model.children())
             if has_module_list:
-                enable_layerwise_offload(model)
+                enable_layerwise_offload(model, pin_cpu_memory=fastvideo_args.pin_cpu_memory)
                 # Blocks now hold placeholders; the remaining (non-block) weights and buffers belong on the GPU.
                 model = model.to(get_local_torch_device())
             else:

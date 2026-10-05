@@ -6,6 +6,42 @@ DMD forwards. Preserve VSA sparsity 0.8 and tile size 64.
 
 ## Setup and validation
 
+The consumer launch uses seed 1234 and 124 frames for both resolutions.
+Pass `--seed 1234 --frames 124 --timed 4` with the two launch benchmark
+prompts to collect one warmup and two timed samples per prompt.
+
+On hosts with limited RAM, `--pageable-host` sets the existing engine
+`offload.pin_cpu_memory` option to false. Layerwise DiT and encoder offload
+then retain existing CPU storage instead of copying it into pinned arenas.
+Checkpoint-backed pages can be reclaimed by the OS, at the cost of slower
+host-to-device transfers. This also allows a cached-component recipe to be
+tested before resorting to `--lazy`, which reloads components per request.
+Validate actual host and GPU peaks for each recipe; disabling pinning does
+not make ordinary heap allocations reclaimable checkpoint pages.
+
+The memory sampler supports cgroup v2 (`memory.current`, `anon`) and v1
+(`memory.usage_in_bytes`, anonymous RSS). Both report pod-wide usage including
+file cache separately from anonymous memory. If host counters cannot be read,
+the host peak is unknown and NVML GPU capacity sampling continues.
+Failed generate calls retain sampled memory and an error in `failed_runs`,
+separately from completed timing samples.
+
+Full-rank V2 can replace its large AdaLN projection weights with exact outputs
+for the checkpoint's fixed T2AV DMD ladder:
+
+```bash
+python -P scripts/benchmarks/minimax_h3_4090/precompute_v2_adaln.py \
+  /workspace/vol/v2-fp8 /workspace/v2-adaln.pt --source-commit <fastvideo-sha>
+export FASTVIDEO_H3_ADALN_TABLE=/workspace/v2-adaln.pt
+```
+
+The helper checks every block/rung against the original modulation module,
+writes the exact inputs alongside the table, and records hashes and checkpoint
+provenance in a JSON sidecar. Validate the real pipeline timestep embeddings
+against the saved inputs before using a new table in headline measurements.
+Use the table with its matching checkpoint and T2AV contract; unsupported
+timestep keys raise rather than silently changing the schedule.
+
 The October 3, 2026 pod has one RTX 4090 (24,564 MiB), driver 580.126.20,
 a 99,999,997,952-byte host cgroup limit, and 150 GB disk. Its runtime is
 PyTorch 2.12.0+cu126, CUDA toolkit 12.6, and FlashInfer 0.7.1rc2.

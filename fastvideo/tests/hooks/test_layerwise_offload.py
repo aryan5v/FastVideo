@@ -45,6 +45,36 @@ class SimpleModelWithModuleList(nn.Module):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_pageable_offload_retains_mapped_storage_and_matches_repeated_forwards(tmp_path):
+    """File-backed weights stay reclaimable; GPU prefetch preserves their values."""
+    model = SimpleModelWithModuleList(num_blocks=3, hidden_size=32)
+    pointers = {}
+    for block_index, block in enumerate(model.blocks):
+        for name, parameter in block.named_parameters():
+            path = tmp_path / f"{block_index}-{name}.bin"
+            mapped = torch.from_file(str(path), shared=True, size=parameter.numel(), dtype=parameter.dtype)
+            mapped.copy_(parameter.detach().reshape(-1))
+            parameter.data = mapped.view_as(parameter)
+            pointers[block_index, name] = parameter.data_ptr()
+    reference = SimpleModelWithModuleList(num_blocks=3, hidden_size=32).cuda()
+    reference.load_state_dict(model.state_dict())
+    x = torch.randn(2, 9, 32, device="cuda")
+    with torch.inference_mode():
+        expected = reference(x)
+    enable_layerwise_offload(model, pin_cpu_memory=False)
+    for block_index, block in enumerate(model.blocks):
+        manager = ModuleHookManager.get_from(block)
+        state = manager.forward_hooks["LayerwiseOffloadHook"].state
+        assert state.cpu_arena is None
+        for name, host in state.cpu_named_parameters.items():
+            assert not host.is_pinned()
+            assert host.data_ptr() == pointers[block_index, name]
+    with torch.inference_mode():
+        for _ in range(3):
+            torch.testing.assert_close(model(x), expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_layerwise_offload_basic():
     """Test basic functionality of layerwise offloading."""
     device = torch.device("cuda")

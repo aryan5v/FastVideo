@@ -18,7 +18,8 @@ import time
 class HostMemoryPeak:
     """Sample pod-wide cgroup usage; anon excludes cached checkpoint file pages."""
 
-    def __init__(self):
+    def __init__(self, cgroup_root=pathlib.Path("/sys/fs/cgroup")):
+        self.cgroup_root = cgroup_root
         self.stop = threading.Event()
         self.peak_bytes = 0
         self.peak_anon_bytes = 0
@@ -38,17 +39,27 @@ class HostMemoryPeak:
 
     def _sample(self):
         while not self.stop.is_set():
-            try:
-                root = pathlib.Path("/sys/fs/cgroup")
-                self.peak_bytes = max(self.peak_bytes, int((root / "memory.current").read_text()))
-                stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
-                self.peak_anon_bytes = max(self.peak_anon_bytes, int(stats["anon"]))
-                if self._gpu_used is not None:
-                    self.peak_gpu_bytes = max(self.peak_gpu_bytes or 0, self._gpu_used())
-            except (OSError, KeyError, ValueError) as exc:
-                self.host_error = f"{type(exc).__name__}: {exc}"
-                print(f"host memory sampling stopped: {self.host_error}", flush=True)
-                return
+            if self.host_error is None:
+                try:
+                    root = self.cgroup_root
+                    if (root / "memory.current").is_file():
+                        used = int((root / "memory.current").read_text())
+                        stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
+                        anon = int(stats["anon"])
+                    else:
+                        root = root / "memory"
+                        used = int((root / "memory.usage_in_bytes").read_text())
+                        stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
+                        # cgroup v1 RSS counts anonymous memory, excluding file cache.
+                        anon = int(stats["total_rss"] if "total_rss" in stats else stats["rss"])
+                    self.peak_bytes = max(self.peak_bytes, used)
+                    self.peak_anon_bytes = max(self.peak_anon_bytes, anon)
+                except (OSError, KeyError, ValueError) as exc:
+                    self.host_error = f"{type(exc).__name__}: {exc}"
+                    print(f"host memory sampling stopped: {self.host_error}", flush=True)
+            # Capacity verification must continue even if host counters are unavailable.
+            if self._gpu_used is not None:
+                self.peak_gpu_bytes = max(self.peak_gpu_bytes or 0, self._gpu_used())
             self.stop.wait(0.1)
 
     def __enter__(self):
@@ -61,6 +72,15 @@ class HostMemoryPeak:
         if self._nvml_shutdown is not None:
             self._nvml_shutdown()
 
+    def metrics(self):
+        return {
+            "peak_gpu_used_gib": (round(self.peak_gpu_bytes / 2**30, 3)
+                                  if self.peak_gpu_bytes is not None else None),
+            "peak_host_cgroup_gib": (round(self.peak_bytes / 2**30, 3) if self.host_error is None else None),
+            "peak_host_anon_gib": (round(self.peak_anon_bytes / 2**30, 3) if self.host_error is None else None),
+            "host_memory_error": self.host_error,
+        }
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -69,8 +89,10 @@ def main():
     ap.add_argument("--offload-buffers", action="store_true")
     ap.add_argument("--no-layerwise", action="store_true")
     ap.add_argument("--resident-encoder", action="store_true")
+    ap.add_argument("--pageable-host", action="store_true", help="retain file-backed CPU offload weights without pinning")
     ap.add_argument("--tile-batch", default=None)
     ap.add_argument("--frames", type=int, default=243)
+    ap.add_argument("--seed", type=int, default=20260929)
     ap.add_argument("--height", type=int, default=768)
     ap.add_argument("--width", type=int, default=1344)
     ap.add_argument("--warmup", type=int, default=1)
@@ -83,8 +105,9 @@ def main():
     ap.add_argument("--decode", default="h3-vae")
     ap.add_argument("--lazy", action="store_true", help="lazy_module_load: reload released modules per request")
     ap.add_argument("--prompts", default=None, help="comma-separated prompt ids (default: both)")
+    ap.add_argument("--once", action="store_true", help="render each selected prompt once, without extra warmup clips")
     a = ap.parse_args()
-    if a.timed < 2 or a.warmup < 1:
+    if not a.once and (a.timed < 2 or a.warmup < 1):
         ap.error("Use at least one warmup and two timed runs")
     if not pathlib.Path(a.model, "fastvideo_inference.json").is_file():
         ap.error("The model directory must contain fastvideo_inference.json for the 8-step DMD contract")
@@ -119,7 +142,7 @@ def main():
     engine = {"num_gpus": 1, "use_fsdp_inference": False,
               "parallelism": {"tp_size": 1, "sp_size": 1},
               "offload": {"dit": False, "dit_layerwise": layerwise, "text_encoder": not a.resident_encoder,
-                          "vae": layerwise, "pin_cpu_memory": True, "lazy_module_load": a.lazy},
+                          "vae": layerwise, "pin_cpu_memory": not a.pageable_host, "lazy_module_load": a.lazy},
               "compile": {"enabled": False, "vae_enabled": not a.no_vae_compile}}
     if a.quant == "nvfp4":
         engine["quantization"] = {"transformer_quant": "NVFP4", "layer_profile": "h3_dit_vsa"}
@@ -137,7 +160,7 @@ def main():
     hardware = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=name,memory.total,driver_version,pci.bus_id", "--format=csv,noheader"], text=True
     ).strip()
-    sampling = {"seed": 20260929, "height": a.height, "width": a.width, "num_frames": a.frames, "fps": 24,
+    sampling = {"seed": a.seed, "height": a.height, "width": a.width, "num_frames": a.frames, "fps": 24,
                 "num_inference_steps": 9, "guidance_scale": 1.0, "batch_cfg": False}
     results = {"name": a.name, "quant": a.quant, "command": shlex.join([sys.executable, "-P", *sys.argv]),
                "env": {k: v for k, v in os.environ.items() if k.startswith(("FASTVIDEO_", "PYTORCH_"))
@@ -146,13 +169,15 @@ def main():
                "hardware": hardware, "model_revision": model_revision,
                "model_contract": json.loads((model_root / "fastvideo_inference.json").read_text()),
                "source_commit": os.environ.get("FASTVIDEO_SOURCE_COMMIT"),
-               "gpu": torch.cuda.get_device_name(0), "config": config, "sampling": sampling, "runs": []}
+               "gpu": torch.cuda.get_device_name(0), "config": config, "sampling": sampling,
+               "mode": "showcase_once" if a.once else "benchmark", "runs": []}
     (out_dir / "results.json").write_text(json.dumps(results, indent=2))
     t0 = time.perf_counter()
     generator = VideoGenerator.from_config(config)
     results["load_s"] = round(time.perf_counter() - t0, 1)
     ids = a.prompts.split(",") if a.prompts else list(texts)
-    order = [ids[i % len(ids)] for i in range(a.warmup + a.timed)]
+    order = ids if a.once else [ids[i % len(ids)] for i in range(a.warmup + a.timed)]
+    warmup = 1 if a.once else a.warmup
     try:
         for i, pid in enumerate(order):
             request = {"prompt": texts[pid], "negative_prompt": "",
@@ -160,22 +185,25 @@ def main():
                        "output": {"output_path": str(out_dir / f"{i:02d}_{pid}.mp4"), "save_video": True,
                                   "return_frames": False}}
             t = time.perf_counter()
-            with HostMemoryPeak() as host_peak:
-                generator.generate(request)
+            try:
+                with HostMemoryPeak() as host_peak:
+                    generator.generate(request)
+            except Exception as exc:
+                failed = {"prompt": pid, "warmup": i < warmup,
+                          "wall_s": round(time.perf_counter() - t, 2),
+                          "error": f"{type(exc).__name__}: {exc}", **host_peak.metrics()}
+                results.setdefault("failed_runs", []).append(failed)
+                print("RUN_FAILED", json.dumps(failed), flush=True)
+                (out_dir / "results.json").write_text(json.dumps(results, indent=1))
+                raise
             wall = round(time.perf_counter() - t, 2)
-            results["runs"].append({"prompt": pid, "warmup": i < a.warmup, "wall_s": wall,
+            results["runs"].append({"prompt": pid, "warmup": i < warmup, "wall_s": wall,
                                     "clip": request["output"]["output_path"],
-                                    "peak_gpu_used_gib": (round(host_peak.peak_gpu_bytes / 2**30, 3)
-                                                          if host_peak.peak_gpu_bytes is not None else None),
-                                    # None when sampling failed: an unmeasured run must not read as 0 GiB.
-                                    "peak_host_cgroup_gib": (round(host_peak.peak_bytes / 2**30, 3)
-                                                             if host_peak.host_error is None else None),
-                                    "peak_host_anon_gib": (round(host_peak.peak_anon_bytes / 2**30, 3)
-                                                           if host_peak.host_error is None else None),
-                                    "host_memory_error": host_peak.host_error})
+                                    **host_peak.metrics()})
             timed = [run["wall_s"] for run in results["runs"] if not run["warmup"]]
             if timed:
                 results["median_e2e_s"] = statistics.median(timed)
+                results["mean_e2e_s"] = statistics.mean(timed)
             print("RUN", json.dumps(results["runs"][-1]), flush=True)
             (out_dir / "results.json").write_text(json.dumps(results, indent=1))
     finally:
