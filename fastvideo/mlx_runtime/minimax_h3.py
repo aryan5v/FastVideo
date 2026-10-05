@@ -62,7 +62,7 @@ from fastvideo.mlx_runtime.fastwan import (
     QuantizedMatrix,
     ensure_quantization_supported,
     linear as _shared_linear,
-    quantize_matrix,
+    quantize_matrix as _shared_quantize_matrix,
     silu,
     timestep_embedding,
     weight_dtype,
@@ -85,6 +85,11 @@ logger = init_logger(__name__)
 def linear(x, weight, bias=None):
     """Run an H3 linear with its measured wide-row affine dispatch enabled."""
     return _shared_linear(x, weight, bias, use_affine_dq_gemm=True)
+
+
+def quantize_matrix(weight, spec: MLXQuantizationSpec | None):
+    """Use a global NVFP4 scale for H3's small transformer weights."""
+    return _shared_quantize_matrix(weight, spec, use_nvfp4_global_scale=True)
 
 
 # ---------------------------------------------------------------------------
@@ -766,12 +771,12 @@ def _feed_forward(weights: dict[str, Any], x):
     return linear(value * silu(gate), weights["ff.net.2.weight"])
 
 
-def _adaln_tables(weights: dict[str, Any], temb):
+def _adaln_tables(weights: dict[str, Any], temb, *, apply_silu: bool = True):
     """Six (n_t * 3, hidden) modulation tables from (n_t, time_embed_dim)."""
     import mlx.core as mx
 
     projected = linear(
-        silu(temb).astype(weight_dtype(weights["adaln_proj.linear.weight"])),
+        (silu(temb) if apply_silu else temb).astype(weight_dtype(weights["adaln_proj.linear.weight"])),
         weights["adaln_proj.linear.weight"],
         weights["adaln_proj.linear.bias"],
     )
@@ -914,6 +919,7 @@ class MLXMiniMaxH3DiT:
         self.qk_norm_eps = float(config["qk_norm_eps"])
         self.final_norm_eps = float(config["final_norm_eps"])
         self.patch_dim = self.in_channels * math.prod(self.patch_size)
+        self.adaln_rank = config.get("adaln_rank")
         self._adaln_cache: MiniMaxH3StepCache | None = None
         self.vsa_config = MiniMaxH3VSAConfig()
         self._vsa_geometry: MiniMaxH3VSAGeometry | None = None
@@ -932,11 +938,15 @@ class MLXMiniMaxH3DiT:
             self.weights["time_embedder.linear_1.weight"],
             self.weights["time_embedder.linear_1.bias"],
         )
-        return linear(
+        temb = linear(
             silu(temb),
             self.weights["time_embedder.linear_2.weight"],
             self.weights["time_embedder.linear_2.bias"],
         )
+        if self.adaln_rank is not None:
+            temb = linear(
+                silu(temb).astype(weight_dtype(self.weights["adaln_basis.weight"])), self.weights["adaln_basis.weight"])
+        return temb
 
     def refine_text(self, text_rows):
         hidden = linear(
@@ -969,9 +979,10 @@ class MLXMiniMaxH3DiT:
 
         timesteps = np.unique(np.asarray(timesteps, dtype=np.float32))
         temb = self.compute_temb(mx.array(timesteps))
-        block_tables = [_adaln_tables(block, temb) for block in self.blocks]
+        block_tables = [_adaln_tables(block, temb, apply_silu=self.adaln_rank is None) for block in self.blocks]
         shift_scale = linear(
-            silu(temb).astype(weight_dtype(self.weights["norm_out.linear.weight"])),
+            (silu(temb) if self.adaln_rank is None else temb).astype(
+                weight_dtype(self.weights["norm_out.linear.weight"])),
             self.weights["norm_out.linear.weight"],
             self.weights["norm_out.linear.bias"],
         )
@@ -1107,7 +1118,7 @@ class MLXMiniMaxH3DiT:
         adaln_indices = (timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags).astype(mx.int32)
 
         for block_index, block in enumerate(self.blocks):
-            tables = _adaln_tables(block, temb)
+            tables = _adaln_tables(block, temb, apply_silu=self.adaln_rank is None)
             packed = _transformer_block(
                 block,
                 packed,
@@ -1124,7 +1135,8 @@ class MLXMiniMaxH3DiT:
             mx.eval(packed)  # per-block sync: see forward_with_cache note
 
         shift_scale = linear(
-            silu(temb).astype(weight_dtype(self.weights["norm_out.linear.weight"])),
+            (silu(temb) if self.adaln_rank is None else temb).astype(
+                weight_dtype(self.weights["norm_out.linear.weight"])),
             self.weights["norm_out.linear.weight"],
             self.weights["norm_out.linear.bias"],
         )
@@ -1353,10 +1365,10 @@ def mlx_h3_dit_from_diffusers_safetensors(
         for shard in _safetensors_shards(transformer_path):
             shard_arrays = mx.load(str(shard))
             for key, source in shard_arrays.items():
-                if not key.startswith("time_embedder."):
+                if not (key.startswith("time_embedder.") or key == "adaln_basis.weight"):
                     continue
                 keep_fp32 = key.split(".", 1)[0] in FP32_MODULE_PREFIXES
-                target_dtype = mx.float32 if keep_fp32 else cast_dtype
+                target_dtype = mx.float32 if keep_fp32 else (mx.float16 if key == "adaln_basis.weight" else cast_dtype)
                 assign(key, _load_array(source, target_dtype))
             del shard_arrays
         required_time_keys = {
@@ -1373,15 +1385,21 @@ def mlx_h3_dit_from_diffusers_safetensors(
             weight_dtype(weights["time_embedder.linear_1.weight"]))
         temb = linear(t_freq, weights["time_embedder.linear_1.weight"], weights["time_embedder.linear_1.bias"])
         temb = linear(silu(temb), weights["time_embedder.linear_2.weight"], weights["time_embedder.linear_2.bias"])
+        if config.get("adaln_rank") is not None:
+            if "adaln_basis.weight" not in weights:
+                raise KeyError("Rank-reduced AdaLN checkpoint is missing adaln_basis.weight")
+            temb = linear(silu(temb).astype(weight_dtype(weights["adaln_basis.weight"])), weights["adaln_basis.weight"])
         mx.eval(temb)
         cached_block_tables = [None] * num_blocks
 
     for shard in _safetensors_shards(transformer_path):
         shard_arrays = mx.load(str(shard))
         for key, source in shard_arrays.items():
+            if key.endswith(".weight_scale"):
+                continue  # paired with its FP8 weight
             if _is_ignored_dense_key(key, include_vsa=include_vsa):
                 continue
-            if temb is not None and key.startswith("time_embedder."):
+            if temb is not None and (key.startswith("time_embedder.") or key == "adaln_basis.weight"):
                 continue
             if key.startswith("transformer_blocks."):
                 index = int(key.split(".")[1])
@@ -1390,15 +1408,27 @@ def mlx_h3_dit_from_diffusers_safetensors(
             if key.startswith("rope."):
                 continue  # non-persistent analytic buffer, rebuilt on the fly
             keep_fp32 = key.split(".", 1)[0] in FP32_MODULE_PREFIXES
-            target_dtype = mx.float32 if keep_fp32 else cast_dtype
-            array = _load_array(source, target_dtype)
+            factorized_adaln = config.get("adaln_rank") is not None and (".adaln_proj." in key or key.startswith(
+                ("norm_out.linear.", "adaln_basis.")))
+            target_dtype = mx.float32 if keep_fp32 else (mx.float16 if factorized_adaln else cast_dtype)
+            if source.dtype == mx.uint8 and key.endswith(".weight"):
+                scale_key = key + "_scale"
+                if scale_key not in shard_arrays:
+                    raise KeyError(f"FP8 weight {key} needs {scale_key} in the same safetensors shard")
+                scale = shard_arrays[scale_key].astype(mx.float32)
+                if scale.size != source.shape[0]:
+                    raise ValueError(f"FP8 scale for {key} has {scale.size} entries, expected {source.shape[0]}")
+                array = (mx.from_fp8(source, dtype=mx.float16) * scale.reshape(-1, 1)).astype(target_dtype)
+                mx.eval(array)
+            else:
+                array = _load_array(source, target_dtype)
             if temb is not None and ".adaln_proj.linear." in key:
                 _, index_str, sub = key.split(".", 2)
                 index = int(index_str)
                 block_pending = pending_adaln.setdefault(index, {})
                 block_pending[sub] = array
                 if {"adaln_proj.linear.weight", "adaln_proj.linear.bias"} <= block_pending.keys():
-                    tables = _adaln_tables(block_pending, temb)
+                    tables = _adaln_tables(block_pending, temb, apply_silu=config.get("adaln_rank") is None)
                     mx.eval(tables)
                     assert cached_block_tables is not None
                     cached_block_tables[index] = tables
@@ -1428,7 +1458,8 @@ def mlx_h3_dit_from_diffusers_safetensors(
         if missing_cache_blocks:
             raise KeyError(f"Missing AdaLN cache tables for blocks {missing_cache_blocks}")
         shift_scale = linear(
-            silu(temb).astype(weight_dtype(weights["norm_out.linear.weight"])),
+            (silu(temb) if config.get("adaln_rank") is None else temb).astype(
+                weight_dtype(weights["norm_out.linear.weight"])),
             weights["norm_out.linear.weight"],
             weights["norm_out.linear.bias"],
         )
@@ -1467,6 +1498,7 @@ def mlx_h3_dit_from_diffusers_safetensors(
 
 
 H3_FORMAT_VERSION = 1
+H3_SCALED_NVFP4_FORMAT_VERSION = 2
 H3_WEIGHTS_FILENAME = "mlx_h3_dit.safetensors"
 H3_MANIFEST_FILENAME = "mlx_h3_dit.json"
 
@@ -1536,6 +1568,8 @@ def save_mlx_h3_checkpoint(dit: MLXMiniMaxH3DiT, checkpoint_dir: str | Path) -> 
                 "dequantized_dtype": _dtype_name(value.dequantized_dtype),
                 "has_biases": value.biases is not None,
             }
+            if value.global_scale != 1.0:
+                quantized[key]["global_scale"] = value.global_scale
         else:
             arrays[key] = value
 
@@ -1554,17 +1588,25 @@ def save_mlx_h3_checkpoint(dit: MLXMiniMaxH3DiT, checkpoint_dir: str | Path) -> 
         arrays["__adaln_cache.norm_out_scale"] = cache.norm_out_scale
 
     manifest = {
-        "format_version": H3_FORMAT_VERSION,
-        "config": dit.config,
-        "num_blocks": len(dit.blocks),
-        "num_refiner_blocks": len(dit.refiner),
-        "quantization": None if spec is None else {
+        "format_version":
+        (H3_SCALED_NVFP4_FORMAT_VERSION if any("global_scale" in info
+                                               for info in quantized.values()) else H3_FORMAT_VERSION),
+        "config":
+        dit.config,
+        "num_blocks":
+        len(dit.blocks),
+        "num_refiner_blocks":
+        len(dit.refiner),
+        "quantization":
+        None if spec is None else {
             "mode": spec.mode,
             "bits": spec.bits,
             "group_size": spec.group_size,
         },
-        "quantized_keys": quantized,
-        "adaln_cache": cache_manifest,
+        "quantized_keys":
+        quantized,
+        "adaln_cache":
+        cache_manifest,
         "vsa": {
             "capable":
             bool(dit.vsa_capable),
@@ -1603,9 +1645,9 @@ def load_mlx_h3_checkpoint(checkpoint_dir: str | Path) -> MLXMiniMaxH3DiT:
 
     manifest = json.loads(manifest_path.read_text())
     version = manifest.get("format_version")
-    if version != H3_FORMAT_VERSION:
+    if version not in (H3_FORMAT_VERSION, H3_SCALED_NVFP4_FORMAT_VERSION):
         raise ValueError(f"MLX H3 checkpoint {checkpoint_dir} has format_version={version}; "
-                         f"this build reads version {H3_FORMAT_VERSION}. Re-export the checkpoint.")
+                         f"this build reads versions 1 and 2. Re-export the checkpoint.")
 
     spec = None
     if manifest["quantization"] is not None:
@@ -1620,12 +1662,16 @@ def load_mlx_h3_checkpoint(checkpoint_dir: str | Path) -> MLXMiniMaxH3DiT:
             return arrays[key]
         info = quantized_keys[key]
         assert spec is not None, f"Quantized key '{key}' in a checkpoint without a quantization spec"
+        global_scale = float(info.get("global_scale", 1.0))
+        if not math.isfinite(global_scale) or global_scale <= 0:
+            raise ValueError(f"Invalid global scale for quantized H3 matrix {key}: {global_scale}")
         return QuantizedMatrix(
             weight=arrays[key],
             scales=arrays[f"{key}.scales"],
             biases=arrays[f"{key}.biases"] if info["has_biases"] else None,
             spec=spec,
             dequantized_dtype=_name_to_dtype(info["dequantized_dtype"]),
+            global_scale=global_scale,
         )
 
     weights: dict[str, Any] = {}

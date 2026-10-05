@@ -18,6 +18,17 @@ Add ``--include-vsa`` to keep them, quantize them with the selected affine
 INT8/INT6/INT4 grid, and record ``vsa.capable`` in the manifest. Write VSA
 checkpoints to a new directory — do not overwrite an existing dense export.
 
+An FP8 transformer with per-channel ``weight_scale`` can also be a source.
+The loader dequantizes each FP8 matrix before applying the requested MLX
+quantization. This saves download bytes but quantizes twice; compare its clips
+with the BF16-sourced export before using it for release.
+
+``--formats "mxfp8 mxfp4 nvfp4"`` tries native MLX floating-point quantized
+storage and matrix multiplication. These formats are experimental and require
+operator support from the installed MLX build. This converts BF16 or FP8 source
+weights; it does not import CUDA-packed NVFP4 DiT exports. The default formats
+remain affine INT8/INT6/INT4.
+
     python scripts/checkpoint_conversion/convert_minimax_h3_mlx.py \\
         --model-root ~/models/FastH3-Preview-v0.2/transformer \\
         --out ~/models/FastH3-MLX-vsa \\
@@ -53,8 +64,8 @@ from fastvideo.mlx_runtime.minimax_h3 import (
 
 logger = init_logger(__name__)
 
-SUPPORTED_FORMATS = ("int8", "int6", "int4")
-DEFAULT_FORMATS = " ".join(SUPPORTED_FORMATS)
+SUPPORTED_FORMATS = ("int8", "int6", "int4", "mxfp8", "mxfp4", "nvfp4")
+DEFAULT_FORMATS = "int8 int6 int4"
 
 
 def _adaln_cache_timesteps(model_root: str | Path | None = None) -> np.ndarray:
@@ -90,6 +101,10 @@ def parse_args() -> argparse.Namespace:
         help=("retain and quantize transformer_blocks.*.attn.to_gate_compress.weight "
               "(required for MLX VSA inference; omitted by dense conversion)"),
     )
+    parser.add_argument("--nvfp4-conditioner-root", type=Path,
+                        help="also cache the released packed encoder in native MLX layout, without requantization")
+    parser.add_argument("--nvfp4-conditioner-out", type=Path,
+                        help="empty encoder-cache output directory; defaults to OUT/nvfp4-encoder")
     return parser.parse_args()
 
 
@@ -143,6 +158,15 @@ def main() -> None:
         gc.collect()
         if hasattr(mx, "clear_cache"):
             mx.clear_cache()
+
+    if args.nvfp4_conditioner_root is not None:
+        from fastvideo.mlx_runtime.minimax_h3_conditioner import export_mlx_h3_nvfp4_encoder
+
+        encoder_out = args.nvfp4_conditioner_out or out_base / "nvfp4-encoder"
+        started = time.perf_counter()
+        export_mlx_h3_nvfp4_encoder(args.nvfp4_conditioner_root, encoder_out)
+        print(f"[encoder] cached packed NVFP4 encoder in {time.perf_counter() - started:.1f}s at {encoder_out}",
+              flush=True)
 
 
 if __name__ == "__main__":

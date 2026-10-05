@@ -28,6 +28,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+import fastvideo.envs as envs
 from fastvideo.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -191,8 +192,27 @@ def _register_ops_once() -> None:
         sf_layout: int,
         do_shuffle: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        spark = torch.cuda.get_device_capability(x.device) == (12, 1)
+        if spark and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("NVFP4 activation quantization on DGX Spark requires a completion fence; "
+                               "disable CUDA graph capture.")
         SfLayout, _, nvfp4_quantize = _require_flashinfer()
-        return nvfp4_quantize(x, global_sf, sfLayout=SfLayout(sf_layout), do_shuffle=do_shuffle)
+        if spark:
+            # FlashInfer's PDL kernel reads the global scale before its
+            # dependency wait. Fresh dynamic scales require normal ordering.
+            quantized, scales = nvfp4_quantize(x,
+                                               global_sf,
+                                               sfLayout=SfLayout(sf_layout),
+                                               do_shuffle=do_shuffle,
+                                               enable_pdl=False)
+        else:
+            quantized, scales = nvfp4_quantize(x, global_sf, sfLayout=SfLayout(sf_layout), do_shuffle=do_shuffle)
+        if spark:
+            # With FlashInfer 0.6.18 on GB10, queued activation quantization
+            # plus GEMM can diverge. Completing quantization while its padded
+            # input is alive prevents the observed intermittent corruption.
+            torch.cuda.current_stream(x.device).synchronize()
+        return quantized, scales
 
     @_nvfp4_quantize_op.register_fake
     def _nvfp4_quantize_op_fake(
@@ -347,7 +367,7 @@ def _mm_fp4_backend() -> str:
     ``cudnn`` once activations reach tens of thousands of rows (measured at
     73k rows on an RTX PRO 6000); short sequences are unaffected.
     """
-    return os.environ.get("FASTVIDEO_NVFP4_MM_BACKEND", "auto")
+    return envs.FASTVIDEO_NVFP4_MM_BACKEND.get()
 
 
 def _coerce_fp4_input_dtype(x: torch.Tensor) -> torch.Tensor:
@@ -379,6 +399,8 @@ def _load_amax_table(path: str) -> dict[str, float]:
 
 
 class NVFP4QuantizeMethod(QuantizeMethodBase):
+
+    _static_sf: torch.Tensor | None
 
     def __init__(self, layer_prefix: str = ""):
         super().__init__()
@@ -418,8 +440,7 @@ class NVFP4QuantizeMethod(QuantizeMethodBase):
             keys = [prefix] + ([f"b{match.group(1)}.{match.group(2)}"] if match else [])
             amax = next((table[k] for k in keys if k in table), None)
             if amax is not None:
-                self._static_sf = torch.tensor((448.0 * 6.0) / max(amax, 1e-12), dtype=torch.float32,
-                                               device="cuda")
+                self._static_sf = torch.tensor((448.0 * 6.0) / max(amax, 1e-12), dtype=torch.float32, device="cuda")
         return self._static_sf
 
     def _dynamic_activation_scale(self) -> bool:

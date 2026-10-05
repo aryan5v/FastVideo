@@ -161,14 +161,16 @@ is power-cycled. To avoid it:
   on: "CPU" offload uses the same unified RAM. Multi-GPU FSDP sharding remains
   available because it partitions weights without parking them in a separate
   host pool.
-- **MiniMax H3 / FastH3** still needs deferred loading on one GB10. The Qwen3-VL
-  conditioner is tens of gigabytes of BF16. If the DiT and VAEs load while that
-  encoder is still resident, the process is a typical `earlyoom` kill (Python is
-  preferred). On unified memory, `lazy_module_load` auto-enables and owns that
+- **Older MiniMax H3 / FastH3 bf16 weights** need deferred loading on one GB10.
+  The full Qwen3-VL conditioner is tens of gigabytes of BF16. If the DiT and
+  VAEs load while that encoder is still resident, the process can be killed by
+  `earlyoom`. On unified memory, `lazy_module_load` auto-enables and owns that
   split (encoder, then DiT, then VAE; DiT can drop before decode). Sequential
-  load is the H3-only fallback when lazy is off; do not pass
-  `--no-lazy-module-load` here. Geometry scalars come from checkpoint
-  `config.json`, not live weights. See [Offloading](../../inference/offloading.md).
+  load is the H3-only fallback when lazy is off. Keep deferred loading for
+  those older checkpoints. The trimmed NVFP4 encoder and light VAE in the
+  [V2 resident recipe](#fasth3-v2-nvfp4-on-one-spark) are a different memory
+  profile. Geometry scalars come from checkpoint `config.json`, not live
+  weights. See [Offloading](../../inference/offloading.md).
 - **FastH3 TAEH3** (`--video-decode-backend taeh3`) is an opt-in preview decoder.
   T2VA never materializes the 9.7 GiB video VAE (DiT still loads after Qwen via
   sequential start). On this box, alpine 768×1344×124 decoded in **2.4 s** versus
@@ -206,6 +208,147 @@ A few things that surprise people on this box (beyond the memory notes above):
   `lazy_module_load owns deferral` (or, if lazy is off, sequential
   `Released MiniMax-H3 text encoder after conditioning` before
   `Loading MiniMax-H3 denoise modules`).
+
+## FastH3 V2 NVFP4 on one Spark
+
+This recipe uses the full V2 eight-forward transformer, the 50-layer NVFP4
+Qwen3-VL encoder, and the light H3 video VAE. Its configuration keeps all
+three resident on one GB10. This stack fits in the Spark's unified memory;
+benchmark your installed runtime and review the clips before publishing a
+speed claim. The earlier bf16 H3 memory guidance above concerns a larger checkpoint.
+
+Install FastVideo from a checkout that includes the ModelOpt converter and
+FlashInfer FP4 support, following [the Spark install guide](spark.md). Sign in
+to Hugging Face with access to the FastVideo model repositories. Download the
+V2 scheduler and audio components, the compact encoder and VAE from the pruned
+repo, and the ModelOpt V2 transformer. The pruned model's encoder and VAE are
+the same components used by V2.
+
+```bash
+SPARK_STACK=./FastH3-V2-Spark-NVFP4
+V2_FP4_SRC=./FastH3-V2-ModelOpt-NVFP4
+
+hf download FastVideo/FastVideo-FastH3-8-Step-V2 \
+  --local-dir "$SPARK_STACK" \
+  --exclude 'transformer/*' --exclude 'text_encoder/*' --exclude 'vae/*'
+hf download FastVideo/FastH3-Pruned-8Step-BF16-ckpt300 \
+  --local-dir "$SPARK_STACK" \
+  --include 'text_encoder/*' --include 'vae/*'
+hf download FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4 \
+  --local-dir "$V2_FP4_SRC" --include 'transformer/*'
+
+nice -n 19 python scripts/checkpoint_conversion/convert_minimax_h3_modelopt_nvfp4_dit.py \
+  --src "$V2_FP4_SRC/transformer" --dst "$SPARK_STACK/transformer" \
+  --quantize-attention --quantize-gate
+
+test -f "$SPARK_STACK/transformer/nvfp4_weights.safetensors"
+test -f "$SPARK_STACK/text_encoder/config.json"
+test -f "$SPARK_STACK/vae/config.json"
+test -f "$SPARK_STACK/fastvideo_inference.json"
+python -m json.tool "$SPARK_STACK/fastvideo_inference.json" >/dev/null
+```
+
+The converter probes each packed linear through FlashInfer `mm_fp4`. If that
+probe fails on `sm_121`, convert the transformer on another Blackwell GPU and
+copy the resulting `transformer/` directory to the Spark. Do not omit
+`fastvideo_inference.json`: it supplies V2's trained denoising ladder. The
+recipe's `num_inference_steps: 9` means nine sigma points and eight DiT
+forwards.
+
+The converter preserves ModelOpt's calibrated `input_scale` as the reciprocal
+`_nvfp4_input_global_sf`. Reconvert older exports that discarded this scale:
+unit activation scaling clips inputs above 2688. An explicit `--act-amax`
+table overrides the source calibration.
+
+On GB10 with FlashInfer 0.6.18, FastVideo fences activation quantization before
+releasing its padded input. Without this completion fence, identical H3
+requests produced different DiT latents and occasionally corrupt video.
+The fence applies to `sm_121`; other architectures retain asynchronous execution.
+
+Run `examples/inference/basic/basic_fasth3_spark_v2_nvfp4.yaml` from the
+repository root. It uses 832x480, 243 frames, VSA sparsity 0.8 with
+64-token tiles, and the light H3 VAE through the `h3-vae` decode backend.
+It does not use frame dropping or spatial upscaling.
+
+```bash
+FASTVIDEO_MINIMAX_H3_FUSIONS=all \
+FASTVIDEO_NVFP4_MM_BACKEND=cutlass \
+FASTVIDEO_H3_VAE_TILE_BATCH=1 \
+FASTVIDEO_VSA_TRITON=1 FASTVIDEO_VSA_SM100A=0 FASTVIDEO_FA4=0 \
+FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3 \
+FASTVIDEO_STAGE_LOGGING=1 \
+nice -n 19 fastvideo generate \
+  --config examples/inference/basic/basic_fasth3_spark_v2_nvfp4.yaml
+```
+
+For a roughly five-second clip, set `--request.sampling.num_frames 124` and
+write to a separate output path. H3 permits frame counts of `17n+5`; 124 is
+the closest legal count above five seconds at 24 fps. For the secondary
+10-second setting, set `--request.sampling.width 1344` and
+`--request.sampling.height 768`, keeping 243 frames. Use the two prompts in
+`handoff_spark_mac/benchmark_prompts.json` from the local release handoff.
+The benchmark script runs one warmup and at least two timed generations for
+each prompt in one process. It saves the MP4s and prints the wall time, stage
+times, peak memory, and median. Set the Spark environment before running it:
+
+```bash
+export FASTVIDEO_MINIMAX_H3_FUSIONS=all
+export FASTVIDEO_NVFP4_MM_BACKEND=cutlass FASTVIDEO_H3_VAE_TILE_BATCH=1
+export FASTVIDEO_VSA_TRITON=1 FASTVIDEO_VSA_SM100A=0 FASTVIDEO_FA4=0
+export FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3 FASTVIDEO_STAGE_LOGGING=1
+nice -n 19 python examples/inference/basic/benchmark_fasth3_spark_nvfp4.py \
+  --config examples/inference/basic/basic_fasth3_spark_v2_nvfp4.yaml \
+  --prompts /path/to/fasth3-local-release/handoff_spark_mac/benchmark_prompts.json \
+  --output-dir outputs/fasth3_spark_v2_nvfp4/benchmark-243 --frames 243
+
+# Repeat with --frames 124 and a different output directory for the five-second check.
+```
+
+Record the exact command and commit with the measurements. Review every clip's
+video and audio before publishing a quality or speed claim.
+
+After the V2 baseline works, sweep `FASTVIDEO_H3_VAE_TILE_BATCH` and
+`FASTVIDEO_NVFP4_MM_BACKEND` on the same prompts. Compare the optional AdaLN
+table and VAE compile only with the same frame count, schedule, and VSA
+sparsity. The V2 converter packs VSA gates, so its `h3_dit_vsa` profile must
+match the recipe. A later pruned NVFP4 transformer uses the separate
+`h3_dit_ffn` profile, with attention and VSA gates left dense.
+
+### Native FastH3 release measurements
+
+Measured on October 4, 2026, with the trained eight-forward ladder, VSA 0.8,
+832x480 native video, the 50-layer NVFP4 encoder and light video/audio VAEs
+resident. Each cell is the median of two timed calls after one warmup, in
+seconds, for `latency-ceramics-005` / `latency-harbor-005`, seed 2026.
+
+| Model | Frames | One Spark | Two Sparks, SP2 |
+|---|---:|---:|---:|
+| Pruned ckpt300, FFN NVFP4 | 124 | 134.361 / 134.675 | **78.245 / 78.272** |
+| Pruned ckpt300, FFN NVFP4 | 243 | 284.188 / 280.593 | **165.987 / 163.001** |
+| Full V2, NVFP4 FFN/attention/gates | 124 | 142.460 / 140.425 | **88.356 / 86.101** |
+| Full V2, NVFP4 FFN/attention/gates | 243 | 308.204 / 306.141 | **179.876 / 180.213** |
+
+The base integrates upstream main `0cc41a22` with experimental NVFP4 support.
+One-Spark tested commits are `6d6b57fe` (pruned 124), `3f24557a` (pruned 243,
+with `CUDA_LAUNCH_BLOCKING=1`), `f5126f78` (V2 124) and `6e9d7a0b` (V2 243).
+The final pair uses `715d4a5f`, with matching actual-worker code fingerprints,
+CUTLASS FP4 GEMMs and Triton VSA. Light-VAE tile batch is 8 on one Spark and 1
+on the pair; pair batch 8 was slower at 124 frames (79.993 / 80.022 s pruned).
+All offload/deferred-loading and compile options are disabled. The pair uses
+QSFP RoCE, SP2/TP1 and parallel VAE gathering. See the pair configs
+`basic_fasth3_spark_pair_pruned_nvfp4.yaml` and
+`basic_fasth3_spark_pair_v2_nvfp4.yaml` beside the benchmark script.
+
+Every final pair warmup and repeat has correct dimensions/frame count, coherent
+sampled frames and identical full decoded-video hashes within its prompt.
+The V2 one-Spark 124-frame harbor warmup differs from the timed clips but remains
+coherent. These checks establish repeat reliability for the tested recipes;
+BF16 reference parity, speech accuracy and lip sync need separate review.
+
+The [older H3 local blog](https://haoailab.com/blogs/fasth3-local/) reports
+243 s on one Spark and 209 s on two Sparks at 124 frames. It uses the four-step
+Preview checkpoint and full VAE, so the old and new values are context, not a
+matched optimization comparison. It has no matching 243-frame baseline.
 
 ## Reproduce these numbers
 
