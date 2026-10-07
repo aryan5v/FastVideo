@@ -333,3 +333,22 @@ def test_cutlass_fp4_tactics_are_bit_identical(rows, out_features, in_features):
         module.fp4_gemm(quantized[0], packed, quantized[1], inv_scale, alpha, out, _gemm_workspace(out.device.index),
                         tactic)
         assert torch.equal(out, expected), f"tactic {tactic}"
+
+
+@_needs_fp4
+def test_fused_decoder_cuda_graph_replay_matches_eager():
+    decoder = _fused_test_decoder("unit")
+    fused = decoder.fused_blocks_forward
+    inputs = [torch.randn(2, 24, 3, 8, 8, device="cuda") for _ in range(4)]
+
+    def run(latents):
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            return decoder(latents)
+
+    # Call 1 warms up eagerly, call 2 captures the graph, calls 3-4 replay it on new inputs.
+    fused_outs = [run(latents) for latents in inputs]
+    assert len(decoder.transformer_blocks.__dict__["_nvfp4_cuda_graphs"]) == 2
+    decoder.fused_blocks_forward = None
+    for latents, fused_out in zip(inputs, fused_outs, strict=True):
+        assert torch.equal(fused_out, run(latents))
+    decoder.fused_blocks_forward = fused

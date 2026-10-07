@@ -596,6 +596,10 @@ FASTVIDEO_H3_VAE_NVFP4_FUSED = EnvBool(True,
                                        category="performance",
                                        doc="Run NVFP4 MiniMax-H3 VAE decoder blocks through the bit-exact fused "
                                        "Triton kernels at inference.")
+FASTVIDEO_H3_VAE_NVFP4_CUDA_GRAPH = EnvBool(True,
+                                            category="performance",
+                                            doc="Replay small fused NVFP4 MiniMax-H3 VAE decoder calls (at most "
+                                            "four 1797-token tiles) as per-shape CUDA graphs.")
 FASTVIDEO_H3_VAE_INT8_SHARED_QKV = EnvBool(False,
                                            category="performance",
                                            doc="Share the INT8 activation rotation and quantization across the "

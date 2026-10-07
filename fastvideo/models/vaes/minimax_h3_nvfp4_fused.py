@@ -25,9 +25,9 @@ from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-from triton.language.extra.cuda import libdevice
 
 import fastvideo.envs as envs
 from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import NVFP4DecoderLinear, NVFP4FusedState
@@ -207,9 +207,12 @@ def _quantize_kernel(x_ptr, gsf_ptr, q_ptr, sf_ptr, M, M_PAD, K: tl.constexpr, R
 
 
 @triton.jit
-def _swiglu_quantize_kernel(o_ptr, bias_ptr, gsf_ptr, q_ptr, sf_ptr, M, M_PAD, F: tl.constexpr, R: tl.constexpr,
-                            BN: tl.constexpr):
-    """NVFP4(bf16(bf16(value + b) * bf16(silu(bf16(gate + b))))) on a value-first packed projection."""
+def _swiglu_quantize_kernel(o_ptr, bias_ptr, silu_ptr, gsf_ptr, q_ptr, sf_ptr, M, M_PAD, F: tl.constexpr,
+                            R: tl.constexpr, BN: tl.constexpr):
+    """NVFP4(bf16(bf16(value + b) * silu(bf16(gate + b)))) on a value-first packed projection.
+
+    ``silu_ptr`` maps every bf16 bit pattern to eager ``F.silu`` of it, so SiLU costs one cached load.
+    """
     rows = tl.program_id(0) * R + tl.arange(0, R)
     cols = tl.program_id(1) * BN + tl.arange(0, BN)
     row_ok = rows < M
@@ -217,10 +220,9 @@ def _swiglu_quantize_kernel(o_ptr, bias_ptr, gsf_ptr, q_ptr, sf_ptr, M, M_PAD, F
     value = _bf16(
         tl.load(o_ptr + offs, mask=row_ok[:, None], other=0.0).to(tl.float32) +
         tl.load(bias_ptr + cols).to(tl.float32)[None, :])
-    gate = _bf16(
-        tl.load(o_ptr + offs + F, mask=row_ok[:, None], other=0.0).to(tl.float32) +
-        tl.load(bias_ptr + F + cols).to(tl.float32)[None, :])
-    silu = _bf16(libdevice.div_rn(gate, 1.0 + libdevice.exp(-gate)))
+    gate = (tl.load(o_ptr + offs + F, mask=row_ok[:, None], other=0.0).to(tl.float32) +
+            tl.load(bias_ptr + F + cols).to(tl.float32)[None, :]).to(tl.bfloat16)
+    silu = tl.load(silu_ptr + gate.to(tl.uint16, bitcast=True).to(tl.int32)).to(tl.float32)
     # Padding rows (only their zero block scales are stored) must not pick up the bias.
     hidden = tl.where(row_ok[:, None], _bf16(value * silu), 0.0)
     packed, sf_bits = _quantize_tile(hidden, tl.load(gsf_ptr), R, BN)
@@ -340,7 +342,14 @@ def quantize(x: torch.Tensor, gsf: torch.Tensor, rows_per_program: int = 8,
     return quantized
 
 
-def swiglu_quantize(o: torch.Tensor, bias: torch.Tensor, gsf: torch.Tensor, rows_per_program: int = 8,
+@functools.cache
+def _silu_table(device_index: int) -> torch.Tensor:
+    """Eager ``F.silu`` of every bf16 value, indexed by its 16-bit pattern."""
+    patterns = torch.arange(1 << 16, dtype=torch.int32, device=torch.device("cuda", device_index))
+    return F.silu(patterns.to(torch.int16).view(torch.bfloat16))  # int32 -> int16 wraps to the bit pattern
+
+
+def swiglu_quantize(o: torch.Tensor, bias: torch.Tensor, gsf: torch.Tensor, rows_per_program: int = 2,
                     block_n: int = 512) -> tuple[torch.Tensor, torch.Tensor]:
     """NVFP4 of the H3 SwiGLU of a value-first packed projection ``o`` [M, 2F] (bias not yet added)."""
     m, two_f = o.shape
@@ -349,6 +358,7 @@ def swiglu_quantize(o: torch.Tensor, bias: torch.Tensor, gsf: torch.Tensor, rows
     grid = (triton.cdiv(_padded_rows(m), rows_per_program), triton.cdiv(f, block_n))
     _swiglu_quantize_kernel[grid](o,
                                   bias,
+                                  _silu_table(o.device.index),
                                   gsf,
                                   quantized[0],
                                   quantized[1],
@@ -356,7 +366,8 @@ def swiglu_quantize(o: torch.Tensor, bias: torch.Tensor, gsf: torch.Tensor, rows
                                   _padded_rows(m),
                                   F=f,
                                   R=rows_per_program,
-                                  BN=block_n)
+                                  BN=block_n,
+                                  num_warps=2)
     return quantized
 
 
@@ -499,10 +510,14 @@ def _gemm(quantized: tuple[torch.Tensor, torch.Tensor], state: NVFP4FusedState) 
     x_fp4, x_inv_scale = quantized
     out = torch.empty((x_fp4.shape[0], state.out_features), device=x_fp4.device, dtype=torch.bfloat16)
     module = _sm100_cutlass_fp4_module(out.device.index)
-    if module is not None and not torch.cuda.is_current_stream_capturing():
+    if module is not None:
         # mm_fp4(backend="cutlass") hands the module the same operands (it transposes b and b's scales back).
         args = (x_fp4, state.packed, x_inv_scale, state.inv_scale, state.alpha)
-        module.fp4_gemm(*args, out, _gemm_workspace(out.device.index), _gemm_tactic(module, args, out))
+        key = (out.device.index, out.shape[0], out.shape[1], x_fp4.shape[1])
+        # Tuning synchronizes, so a CUDA graph capture uses an already tuned (or the default) tactic.
+        tactic = (_GEMM_TACTICS.get(key, -1)
+                  if torch.cuda.is_current_stream_capturing() else _gemm_tactic(module, args, out))
+        module.fp4_gemm(*args, out, _gemm_workspace(out.device.index), tactic)
         return out
     import flashinfer
 
@@ -519,19 +534,8 @@ def _gemm(quantized: tuple[torch.Tensor, torch.Tensor], state: NVFP4FusedState) 
     return out
 
 
-def fused_nvfp4_blocks_forward(blocks: nn.ModuleList, hidden: torch.Tensor,
-                               rotary_emb: tuple[torch.Tensor, torch.Tensor] | None) -> torch.Tensor | None:
-    """Run every decoder block through the fused kernels; None (caller runs the blocks) when not applicable.
-
-    Applies at inference (no grad, not compiling) to fp32 residual streams on CUDA when every block's linears
-    are NVFP4 with a precomputed activation scale. Bit-identical to the eager block loop.
-    """
-    if (torch.compiler.is_compiling() or torch.is_grad_enabled() or not envs.FASTVIDEO_H3_VAE_NVFP4_FUSED.get()
-            or rotary_emb is None or len(blocks) == 0 or hidden.dtype != torch.float32 or not hidden.is_cuda):
-        return None
-    plans = [_block_plan(block) for block in blocks]
-    if any(plan is None for plan in plans):
-        return None
+def _run_blocks(plans: list[_BlockPlan], hidden: torch.Tensor, rotary_emb: tuple[torch.Tensor,
+                                                                                  torch.Tensor]) -> torch.Tensor:
     batch, seq, dim = hidden.shape
     rows = batch * seq
     cos, sin = (t.to(torch.bfloat16).expand(batch, seq, 1, -1).reshape(rows, -1).contiguous() for t in rotary_emb)
@@ -559,3 +563,67 @@ def fused_nvfp4_blocks_forward(blocks: nn.ModuleList, hidden: torch.Tensor,
                                            (*following.norm1, following.qkv[0].global_sf_x))
         del out
     return h.view(batch, seq, dim)
+
+
+# Calls up to this many tokens are launch-bound (a 1797-token tile runs ~400 kernels in ~5 ms of GPU
+# time), so their block stack is captured once per shape and replayed as a CUDA graph. Larger calls
+# are GPU-bound and run directly, without holding a graph memory pool.
+GRAPH_MAX_ROWS = 4 * 1797
+
+
+class _GraphedStack(NamedTuple):
+    plan_ids: tuple[int, ...]
+    graph: torch.cuda.CUDAGraph
+    hidden: torch.Tensor
+    cos: torch.Tensor
+    sin: torch.Tensor
+    out: torch.Tensor
+
+
+def _graphed_blocks(blocks: nn.ModuleList, plans: list[_BlockPlan], hidden: torch.Tensor,
+                    rotary_emb: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    """``_run_blocks`` through a CUDA graph captured per input geometry (same kernels, same bits)."""
+    key = (hidden.device, tuple(hidden.shape), tuple(rotary_emb[0].shape), rotary_emb[0].dtype)
+    graphs: dict = blocks.__dict__.setdefault("_nvfp4_cuda_graphs", {})
+    plan_ids = tuple(id(plan) for plan in plans)
+    entry = graphs.get(key)
+    if entry is None or entry.plan_ids != plan_ids:
+        if graphs.get(("warm", key)) != plan_ids:
+            # First call: run eagerly so Triton compiles, GEMM tactics are tuned and lazy tables exist.
+            graphs[("warm", key)] = plan_ids
+            return _run_blocks(plans, hidden, rotary_emb)
+        static_hidden = hidden.clone()
+        static_cos, static_sin = (t.clone() for t in rotary_emb)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_out = _run_blocks(plans, static_hidden, (static_cos, static_sin))
+        entry = _GraphedStack(plan_ids, graph, static_hidden, static_cos, static_sin, static_out)
+        graphs[key] = entry
+    entry.hidden.copy_(hidden)
+    entry.cos.copy_(rotary_emb[0])
+    entry.sin.copy_(rotary_emb[1])
+    entry.graph.replay()
+    return entry.out.clone()
+
+
+@torch.compiler.disable
+def fused_nvfp4_blocks_forward(blocks: nn.ModuleList, hidden: torch.Tensor,
+                               rotary_emb: tuple[torch.Tensor, torch.Tensor] | None) -> torch.Tensor | None:
+    """Run every decoder block through the fused kernels; None (caller runs the blocks) when not applicable.
+
+    Applies at inference (no grad) to fp32 residual streams on CUDA when every block's linears are NVFP4
+    with a precomputed activation scale. Bit-identical to the eager block loop. ``torch.compile`` treats it
+    as a boundary: a compiled decoder compiles the code around the block stack and runs the stack here.
+    Calls of at most ``GRAPH_MAX_ROWS`` tokens replay a per-shape CUDA graph
+    (``FASTVIDEO_H3_VAE_NVFP4_CUDA_GRAPH``).
+    """
+    if (torch.compiler.is_compiling() or torch.is_grad_enabled() or not envs.FASTVIDEO_H3_VAE_NVFP4_FUSED.get()
+            or rotary_emb is None or len(blocks) == 0 or hidden.dtype != torch.float32 or not hidden.is_cuda):
+        return None
+    plans = [_block_plan(block) for block in blocks]
+    if any(plan is None for plan in plans):
+        return None
+    if (hidden.shape[0] * hidden.shape[1] <= GRAPH_MAX_ROWS and envs.FASTVIDEO_H3_VAE_NVFP4_CUDA_GRAPH.get()
+            and not torch.cuda.is_current_stream_capturing()):
+        return _graphed_blocks(blocks, plans, hidden, rotary_emb)
+    return _run_blocks(plans, hidden, rotary_emb)
