@@ -905,6 +905,10 @@ class VAELoader(ComponentLoader):
                 find_int8_convrot_vae_path,
             )
             int8_convrot_path = find_int8_convrot_vae_path(model_path)
+            if int8_convrot_path is not None and not envs.FASTVIDEO_H3_VAE_INT8_OVERLAY.get():
+                logger.info("Skipping MiniMax-H3 INT8 ConvRot VAE overlay %s (FASTVIDEO_H3_VAE_INT8_OVERLAY=0); "
+                            "decoding with the dense weights", int8_convrot_path)
+                int8_convrot_path = None
             safetensors_list = dense_vae_safetensors(safetensors_list)
         if not safetensors_list:
             raise ValueError(f"No safetensors files found in {model_path}")

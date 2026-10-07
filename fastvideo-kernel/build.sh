@@ -171,11 +171,11 @@ if [ "${GPU_BACKEND}" = "CUDA" ] && ! (( PYTHON_ONLY )); then
             # Data-center Blackwell VSA uses architecture-conditional tcgen05
             # instructions and therefore requires the 'a' target.
             export TORCH_CUDA_ARCH_LIST="${cc_major}.${cc_minor}a"
-        elif [ "${cc_major}" = "12" ] && [ "${cc_minor}" = "0" ]; then
-            # Blackwell sm_120 needs the arch-conditional 'a' suffix so CMake's
-            # AUTO gate (matches 12.0a/120a/sm_120a) builds the attn_qat_infer
+        elif [ "${cc_major}" = "12" ] && { [ "${cc_minor}" = "0" ] || [ "${cc_minor}" = "1" ]; }; then
+            # Blackwell sm_120 (RTX) and sm_121 (GB10) need the arch-conditional
+            # 'a' suffix so CMake's AUTO gate builds the attn_qat_infer
             # (modified SageAttention3 FP4) kernels instead of silently skipping.
-            export TORCH_CUDA_ARCH_LIST="12.0a"
+            export TORCH_CUDA_ARCH_LIST="${cc_major}.${cc_minor}a"
         else
             export TORCH_CUDA_ARCH_LIST="${cc_major}.${cc_minor}"
         fi

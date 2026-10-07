@@ -172,11 +172,12 @@ jobs:
           #   * x86_64 cu130 = Hopper TK + data-center Blackwell sm_100a/sm_103a VSA
           #     + consumer Blackwell sm_120a FP4.
           #   * x86_64 cu126 = Hopper TK only (older drivers; CUDA < 12.8 has no FP4).
-          # The per-arch split in CMakeLists pins the FP4 targets to sm_120a and builds
+          # The per-arch split in CMakeLists builds the FP4 targets for the sm_120a/sm_121a
+          # (GB10) entries of the arch list and builds
           # the main extension for the full arch list. CMAKE_BUILD_PARALLEL_LEVEL caps
           # Ninja so heavy CUTLASS/TK template TUs don't OOM the 16 GB runner (exit 143).
           if [ "${{ matrix.platform.arch }}" = "aarch64" ]; then
-            export TORCH_CUDA_ARCH_LIST="10.0a;10.3a;12.0a"
+            export TORCH_CUDA_ARCH_LIST="10.0a;10.3a;12.0a;12.1a"
             export CMAKE_ARGS="${CMAKE_ARGS:-} -DFASTVIDEO_KERNEL_BUILD_TK=OFF -DFASTVIDEO_KERNEL_BUILD_ATTN_QAT_INFER=ON"
             export CMAKE_BUILD_PARALLEL_LEVEL=1
           elif [ "${{ matrix.torch-cuda.torch-cuda-short }}" = "cu130" ]; then

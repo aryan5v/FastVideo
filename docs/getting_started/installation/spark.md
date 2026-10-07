@@ -55,10 +55,11 @@ Then jump to [Verify the install](#verify-the-install).
 ## Building without a visible GPU (CI / Docker)
 
 With no GPU visible the kernel build can't probe the arch and `auto` can't detect
-the driver — name both explicitly:
+the driver — name both explicitly. The `a` suffix builds the GB10 FP4 attention
+kernels (`attn_qat_infer`); plain `12.1` skips them:
 
 ```bash
-UV_TORCH_BACKEND=cu130 TORCH_CUDA_ARCH_LIST=12.1 uv pip install -e .
+UV_TORCH_BACKEND=cu130 TORCH_CUDA_ARCH_LIST=12.1a uv pip install -e .
 ```
 
 ## Verify the install
@@ -128,7 +129,7 @@ uv pip install "https://github.com/mjun0812/flash-attention-prebuild-wheels/rele
 |---|---|
 | `Could NOT find Python (missing: ... Development.Module)` | venv built from system Python without headers. Recreate with `--python-preference only-managed` (add `--clear` to reuse the path), or `sudo apt install python3.12-dev`. |
 | kernel build can't find cutlass headers | Submodules not initialised — run the `git submodule update` step. |
-| `fastvideo-kernel: could not determine the target CUDA architecture` | The build couldn't see a GPU and no arch was given. Build on the Spark itself, or pass `TORCH_CUDA_ARCH_LIST=12.1` (see [Building without a visible GPU](#building-without-a-visible-gpu-ci--docker)). |
+| `fastvideo-kernel: could not determine the target CUDA architecture` | The build couldn't see a GPU and no arch was given. Build on the Spark itself, or pass `TORCH_CUDA_ARCH_LIST=12.1a` (see [Building without a visible GPU](#building-without-a-visible-gpu-ci--docker)). |
 | `nvcc fatal: Unsupported gpu architecture 'compute_121'` | `nvcc` older than CUDA 12.9/13. Confirm `nvcc --version` is 13.x and `CUDACXX=/usr/local/cuda/bin/nvcc`. |
 | `ninja: command not found` (manual build only) | `uv pip install scikit-build-core cmake ninja setuptools wheel`. |
 
