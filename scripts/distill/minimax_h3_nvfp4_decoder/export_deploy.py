@@ -18,7 +18,10 @@ from pathlib import Path
 
 import torch
 
-from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import DECODER_BLOCK_LINEAR
+# Same pattern as minimax_h3_nvfp4_decoder.DECODER_BLOCK_LINEAR; inlined so the export runs on GPU-less hosts
+# (importing fastvideo initializes Triton, which needs a driver).
+DECODER_BLOCK_LINEAR = re.compile(r"^transformer_blocks\.(\d+)\.(attn\.to_q|attn\.to_k|attn\.to_v|attn\.to_out\.0"
+                                  r"|ff\.net\.0\.proj|ff\.net\.2)$")
 
 
 def main() -> None:
