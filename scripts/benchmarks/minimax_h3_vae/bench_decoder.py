@@ -11,6 +11,9 @@ or ``light`` (26-layer), plus ``taeh3``. Modifiers:
   fp32      no autocast (``full_fp32`` is the fidelity reference)
   prod      fp16 autocast, as the H3 decode stage runs (default when no precision modifier)
   fp16w     decoder linears stored fp16
+  bf16      decoder linears stored bf16, bf16 autocast
+  int8q     quantize the decoder block linears to INT8 ConvRot here (Hadamard 256, per-channel abs-max),
+            run by the same kernels as the shipped overlay; works for any decoder (e.g. full_int8q)
   int8      INT8 ConvRot overlay (V2 / Trim release decode)
   nvfp4     NVFP4 block linears (post-training, or --nvfp4-checkpoint), bf16 autocast
   r<N>      Hadamard rotation group N for nvfp4 (e.g. r256)
@@ -73,11 +76,35 @@ def load_h3_vae(vae_dir: str, device: torch.device, *, int8_overlay: bool = Fals
     return vae.eval().requires_grad_(False)
 
 
-def store_decoder_linears_fp16(vae: nn.Module) -> None:
-    """Keep decoder GEMM weights in fp16 so autocast does not recast them per call."""
+def store_decoder_linears_fp16(vae: nn.Module, dtype: torch.dtype = torch.float16) -> None:
+    """Keep decoder GEMM weights in ``dtype`` so autocast does not recast them per call."""
     for module in vae.decoder.modules():
         if type(module) is nn.Linear:
-            nn.Module.to(module, dtype=torch.float16)
+            nn.Module.to(module, dtype=dtype)
+
+
+@torch.no_grad()
+def quantize_decoder_int8_convrot(vae: nn.Module, group_size: int = 256) -> int:
+    """Replace decoder block linears with INT8 ConvRot linears (per-channel abs-max scales)."""
+    from fastvideo.models.vaes.minimax_h3_int8_convrot import _int8_linear_from_tensors, rotate_activation
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import nvfp4_decoder_linear_names
+
+    marker = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": group_size}
+    names = nvfp4_decoder_linear_names(vae.decoder)
+    for name in names:
+        parent_name, _, child = name.rpartition(".")
+        parent = vae.decoder.get_submodule(parent_name)
+        linear = parent[int(child)] if child.isdigit() else getattr(parent, child)
+        weight = rotate_activation(linear.weight.float(), group_size)
+        scale = weight.abs().amax(dim=1, keepdim=True).clamp(min=1e-12) / 127.0
+        codes = (weight / scale).round().clamp(-127, 127).to(torch.int8)
+        bias = linear.bias.float() if linear.bias is not None else None
+        replacement = _int8_linear_from_tensors(codes, scale, bias, marker).to(linear.weight.device)
+        if child.isdigit():
+            parent[int(child)] = replacement
+        else:
+            setattr(parent, child, replacement)
+    return len(names)
 
 
 def read_frames(path: str, num_frames: int) -> torch.Tensor:
@@ -260,7 +287,7 @@ def build_variant(name: str, args: argparse.Namespace, device: torch.device,
         raise ValueError(f"Unknown variant {name}")
     if family == "light" and not args.light_vae_dir:
         raise ValueError(f"{name} needs --light-vae-dir")
-    autocast: torch.dtype | None = torch.bfloat16 if "nvfp4" in mods else torch.float16
+    autocast: torch.dtype | None = torch.bfloat16 if ("nvfp4" in mods or "bf16" in mods) else torch.float16
     if "fp32" in mods:
         autocast = None
     if name not in cache:
@@ -272,6 +299,10 @@ def build_variant(name: str, args: argparse.Namespace, device: torch.device,
                 keep_blocks(vae.decoder, int(mod[1:]))
         if "fp16w" in mods:
             store_decoder_linears_fp16(vae)
+        if "bf16" in mods:
+            store_decoder_linears_fp16(vae, torch.bfloat16)
+        if "int8q" in mods:
+            quantize_decoder_int8_convrot(vae)
         if "nvfp4" in mods:
             from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import convert_decoder_to_nvfp4
 
