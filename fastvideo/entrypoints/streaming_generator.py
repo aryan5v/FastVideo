@@ -13,7 +13,7 @@ from fastvideo.entrypoints.video_generator import VideoGenerator
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.pipelines import ForwardBatch
-from fastvideo.utils import align_to, shallow_asdict
+from fastvideo.utils import align_to, pixels_to_uint8, shallow_asdict
 from fastvideo.worker.executor import Executor
 from fastvideo.worker.multiproc_executor import MultiprocExecutor
 
@@ -86,6 +86,12 @@ class StreamingVideoGenerator(VideoGenerator):
         self.sampling_param: SamplingParam | None = None
         self.batch: ForwardBatch | None = None
         self._use_queue_mode = use_queue_mode and isinstance(self.executor, MultiprocExecutor)
+        if use_queue_mode and not self._use_queue_mode:
+            logger.warning(
+                "use_queue_mode=True needs a MultiprocExecutor; %s falls back to per-step "
+                "in-process calls instead.",
+                type(self.executor).__name__,
+            )
         self.writer: IncrementalVideoWriter | None = None
         self.block_dir: str | None = None
         self.block_idx: int = 0
@@ -252,7 +258,7 @@ class StreamingVideoGenerator(VideoGenerator):
         for x in videos:
             x = torchvision.utils.make_grid(x, nrow=1)
             x = x.transpose(0, 1).transpose(1, 2).squeeze(-1)
-            frames.append((x * 255).cpu().numpy().astype(np.uint8))
+            frames.append(pixels_to_uint8(x).cpu().numpy())
 
         return frames
 

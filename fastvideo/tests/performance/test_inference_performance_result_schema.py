@@ -2,6 +2,7 @@
 
 import pytest
 
+import fastvideo.envs as envs
 from fastvideo.tests.performance import test_inference_performance as perf_test
 
 
@@ -60,15 +61,15 @@ def _identity_fields():
     }
 
 
-def test_build_result_record_emits_v2_wan_shape(monkeypatch):
-    monkeypatch.setenv("PERF_RUN_SOURCE", "scheduled_main")
-    monkeypatch.setenv("BUILDKITE_COMMIT", "a" * 40)
-    monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
-    monkeypatch.setenv("BUILDKITE_BRANCH", "main")
-    monkeypatch.setenv("TEST_SCOPE", "full")
-    monkeypatch.setenv("BUILDKITE_BUILD_URL", "https://buildkite.example/build")
-    monkeypatch.setenv("BUILDKITE_BUILD_ID", "build-1")
-    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-1")
+def test_build_result_record_emits_v2_wan_shape(monkeypatch, env_overrides):
+    env_overrides.enter_context(envs.override_external("PERF_RUN_SOURCE", "scheduled_main"))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_COMMIT", "a" * 40))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_PULL_REQUEST", "false"))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_BRANCH", "main"))
+    env_overrides.enter_context(envs.override_external("TEST_SCOPE", "full"))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_BUILD_URL", "https://buildkite.example/build"))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_BUILD_ID", "build-1"))
+    env_overrides.enter_context(envs.override_external("BUILDKITE_JOB_ID", "job-1"))
     monkeypatch.setattr(perf_test, "_build_identity_fields", lambda *_args: _identity_fields())
 
     record = perf_test._build_result_record(
@@ -107,9 +108,11 @@ def test_build_result_record_emits_v2_wan_shape(monkeypatch):
         },
         device_name="NVIDIA L40S",
         timestamp="2026-07-05T00:00:00+00:00",
+        worker_log_path="/tmp/worker_logs/worker_wan-t2v-1.3b-2gpu.log",
     )
 
     assert record["result_schema_version"] == perf_test.RESULT_SCHEMA_VERSION
+    assert record["worker_log_path"] == "/tmp/worker_logs/worker_wan-t2v-1.3b-2gpu.log"
     assert record["benchmark_id"] == "wan-t2v-1.3b-2gpu"
     assert record["workload_id"] == "wan-t2v"
     assert record["variant_id"] == "1.3b-sp2"
@@ -134,6 +137,28 @@ def test_build_result_record_emits_v2_wan_shape(monkeypatch):
     assert record["text_encoder_time_s"] == 1.1
     assert record["dit_time_s"] == 8.2
     assert record["vae_decode_time_s"] == 3.2
+
+
+def test_build_result_record_defaults_worker_log_path_to_none(monkeypatch, env_overrides):
+    env_overrides.enter_context(envs.override_external("PERF_RUN_SOURCE", "scheduled_main"))
+    record = perf_test._build_result_record(
+        cfg={"benchmark_id": "wan-t2v-1.3b-2gpu"},
+        model_info={},
+        init_kwargs={},
+        gen_kwargs={},
+        num_warmup=1,
+        num_measure=1,
+        thresholds={},
+        times=[10.0],
+        peak_memories=[10000.0],
+        all_component_times=[],
+        prompt="A cinematic video.",
+        runtime_identity={},
+        device_name="NVIDIA L40S",
+        timestamp="2026-07-05T00:00:00+00:00",
+    )
+
+    assert record["worker_log_path"] is None
 
 
 def test_validate_run_counts_rejects_zero_measurement_runs():

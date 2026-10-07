@@ -31,7 +31,10 @@ class BaseLayerWithLoRA(nn.Module):
         self.base_layer: nn.Module = base_layer
 
         self.merged: bool = False
-        self.cpu_weight = base_layer.weight.to("cpu")
+        # A frozen CPU snapshot is needed only to undo inference-time merging.
+        # Training never merges adapters; retaining every H3 projection here
+        # otherwise adds several GiB of host memory per HSDP rank.
+        self.cpu_weight = None if training_mode else base_layer.weight.detach().to("cpu").clone()
         # indicates adapter weights don't contain this layer
         # (which shouldn't normally happen, but we want to separate it from the case of erroneous merging)
         self.disable_lora: bool = False
@@ -64,6 +67,29 @@ class BaseLayerWithLoRA(nn.Module):
             self.lora_A = None
             self.lora_B = None
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """The wrapped layer's weight.
+
+        Model code reads ``layer.weight`` for perfectly ordinary reasons -- MiniMax H3's
+        AdaLN modulation casts its input with ``self.linear.weight.dtype``, and its
+        ``proj_in`` reads the tensor itself. Wrapping a layer should not change what
+        reading it looks like from outside, and without this the wrap turns those into
+        ``AttributeError`` at the first forward. Forcing every model to be listed in
+        ``lora_target_modules`` around its own attribute access is the wrong fix: the
+        list would have to be maintained against code it does not own, and getting it
+        wrong fails at generation time rather than at load.
+
+        Resolved through ``base_layer`` on each access rather than cached, because
+        merging replaces that module outright.
+        """
+        return self.base_layer.weight
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        """The wrapped layer's bias, or ``None`` when it has none."""
+        return getattr(self.base_layer, "bias", None)
+
     @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         lora_A = self.lora_A
@@ -80,6 +106,7 @@ class BaseLayerWithLoRA(nn.Module):
                 delta = delta * (
                     self.lora_alpha / self.lora_rank  # type: ignore
                 )  # type: ignore
+            delta = delta * self.lora_strength
             out, output_bias = self.base_layer(x)
             return out + delta, output_bias
         else:
@@ -182,6 +209,8 @@ class BaseLayerWithLoRA(nn.Module):
             raise ValueError("unmerge_lora_weights called but no LoRA is currently merged")
 
         # avoid precision loss
+        if self.cpu_weight is None:
+            raise RuntimeError("Training-mode LoRA layers do not retain an inference unmerge snapshot")
         if isinstance(self.base_layer.weight, DTensor):
             device = self.base_layer.weight.data.device
             self.base_layer.weight = nn.Parameter(self.cpu_weight.to(device, non_blocking=True))

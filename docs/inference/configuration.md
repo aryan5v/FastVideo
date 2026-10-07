@@ -12,6 +12,25 @@ generator = VideoGenerator.from_pretrained(
 )
 ```
 
+One node uses the multiprocessing executor (`execution_backend: mp`, the
+default). With `num_gpus=1`, `mp` automatically selects the in-process (`uni`)
+executor so weights load in the current process. Set `execution_backend: uni`
+to force that path. Two machines — for example two DGX Sparks, one GPU each —
+need Ray:
+
+```yaml
+generator:
+  engine:
+    num_gpus: 2
+    execution_backend: ray
+    parallelism:
+      sp_size: 2
+```
+
+Set `RAY_ADDRESS` and `FASTVIDEO_HOST_IP` to the interconnect IPs, not Wi-Fi.
+The FastH3 example selects Ray automatically when `RAY_ADDRESS` is set. Full
+bring-up: [Pair two NVIDIA DGX Sparks](../getting_started/installation/spark_pair.md).
+
 ## Customizing Generation
 
 - `PipelineConfig`: Initialization time parameters
