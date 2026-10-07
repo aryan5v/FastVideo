@@ -98,3 +98,17 @@ def test_training_forward_has_gradients():
     layer(x).float().square().mean().backward()
     assert layer.weight.grad is not None and torch.isfinite(layer.weight.grad).all()
     assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_global_scale_matches_reference_reduction(dtype):
+    from fastvideo.layers.fp4linear import _global_sf
+
+    torch.manual_seed(0)
+    x = (torch.randn(1797, 256) * 7).to(dtype)
+    expected = (448.0 * 6.0) / x.float().abs().nan_to_num().max().clamp(min=1e-12)
+    assert torch.equal(_global_sf(x), expected)
+    with_inf = x.clone()
+    with_inf[3, 5] = float("inf")
+    expected_inf = (448.0 * 6.0) / with_inf.float().abs().nan_to_num().max().clamp(min=1e-12)
+    assert torch.equal(_global_sf(with_inf), expected_inf)
