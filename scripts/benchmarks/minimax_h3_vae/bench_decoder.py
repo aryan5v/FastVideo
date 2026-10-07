@@ -14,6 +14,8 @@ or ``light`` (26-layer), plus ``taeh3``. Modifiers:
   int8      INT8 ConvRot overlay (V2 / Trim release decode)
   nvfp4     NVFP4 block linears (post-training, or --nvfp4-checkpoint), bf16 autocast
   r<N>      Hadamard rotation group N for nvfp4 (e.g. r256)
+  unit      nvfp4 activation global scale 1.0 (default: dynamic per call)
+  static    nvfp4 activation scale calibrated on the benchmark latents (one decode)
   d<K>      keep K evenly spaced decoder blocks (speed only unless trained)
   compile   torch.compile the ViT decoder
 
@@ -256,7 +258,11 @@ def build_variant(name: str, args: argparse.Namespace, device: torch.device,
             from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import convert_decoder_to_nvfp4
 
             rotation = next((int(m[1:]) for m in mods if m.startswith("r") and m[1:].isdigit()), None)
-            convert_decoder_to_nvfp4(vae.decoder, rotation_group=rotation, compute_dtype=torch.bfloat16)
+            act_scale = "unit" if "unit" in mods else "static" if "static" in mods else "dynamic"
+            convert_decoder_to_nvfp4(vae.decoder,
+                                     rotation_group=rotation,
+                                     compute_dtype=torch.bfloat16,
+                                     act_scale=act_scale)
             if args.nvfp4_checkpoint:
                 state = torch.load(args.nvfp4_checkpoint, map_location=device)
                 vae.decoder.load_state_dict(state["decoder"], strict=True)
@@ -315,6 +321,7 @@ def main() -> None:
     variants.insert(0, REFERENCE)
     profiled = set((args.profile or "").split(",")) - {""}
     done_profiles: set[str] = set()
+    calibrated: set[str] = set()
     for name in variants:
         for tile_batch in (int(v) for v in args.tile_batch.split(",")):
             for overlap in (int(v) for v in args.overlap.split(",")):
@@ -328,6 +335,10 @@ def main() -> None:
                     vae.tile_sample_min_overlap_height = overlap
                     vae.tile_sample_min_overlap_width = overlap
                     fn = decode_fn(vae, z, autocast=autocast)
+                    if "static" in name.split("_") and name not in calibrated and not args.nvfp4_checkpoint:
+                        from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import calibrate_static_scales
+                        calibrate_static_scales(vae, fn)
+                        calibrated.add(name)
                 torch.cuda.synchronize()
                 resident = torch.cuda.memory_allocated()
                 torch.cuda.reset_peak_memory_stats()

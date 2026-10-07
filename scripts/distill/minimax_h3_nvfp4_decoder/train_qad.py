@@ -42,10 +42,10 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, IterableDataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks" / "minimax_h3_vae"))
-from bench_decoder import Fidelity, load_h3_vae  # noqa: E402
+from bench_decoder import Fidelity, keep_blocks, load_h3_vae  # noqa: E402
 
 from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import (  # noqa: E402
-    NVFP4DecoderLinear, convert_decoder_to_nvfp4, nvfp4_decoder_metadata,
+    calibrate_static_scales, convert_decoder_to_nvfp4, nvfp4_decoder_metadata, nvfp4_linears,
 )
 
 STUDENT_AUTOCAST = torch.bfloat16
@@ -178,13 +178,17 @@ def to_unit_pixels(vae: nn.Module, sample: torch.Tensor) -> torch.Tensor:
 
 def build_student(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, list[str]]:
     vae = load_h3_vae(args.student_vae_dir, device)
+    if args.keep_blocks:
+        keep_blocks(vae.decoder, args.keep_blocks)
     names = convert_decoder_to_nvfp4(vae.decoder,
                                      rotation_group=args.rotation_group or None,
                                      skip_blocks=tuple(args.skip_blocks),
-                                     compute_dtype=STUDENT_AUTOCAST)
+                                     compute_dtype=STUDENT_AUTOCAST,
+                                     act_scale=args.act_scale)
     if args.init_checkpoint:
         state = torch.load(args.init_checkpoint, map_location=device)
         vae.decoder.load_state_dict(state["decoder"], strict=True)
+        vae.post_quant_conv.load_state_dict(state["post_quant_conv"], strict=True)
     vae.requires_grad_(False)
     for parameter in list(vae.decoder.parameters()) + list(vae.post_quant_conv.parameters()):
         parameter.requires_grad_(True)
@@ -193,9 +197,24 @@ def build_student(args: argparse.Namespace, device: torch.device) -> tuple[nn.Mo
 
 
 def invalidate_packed(module: nn.Module) -> None:
-    for sub in module.modules():
-        if isinstance(sub, NVFP4DecoderLinear):
-            sub.invalidate()
+    for layer in nvfp4_linears(module):
+        layer.invalidate()
+
+
+def calibrate(student: nn.Module, loader: Iterator[torch.Tensor], batches: int, margin: float,
+              device: torch.device) -> int:
+    """Static activation ranges from ``batches`` training batches per rank, max-reduced across ranks."""
+
+    def run() -> None:
+        for _ in range(batches):
+            with torch.autocast(device_type="cuda", dtype=STUDENT_AUTOCAST):
+                student(next(loader).to(device, non_blocking=True))
+
+    count = calibrate_static_scales(student, run, margin=margin)
+    if dist.is_initialized():
+        for layer in nvfp4_linears(student):
+            dist.all_reduce(layer.input_amax, op=dist.ReduceOp.MAX)
+    return count
 
 
 # ----------------------------------------------------------------------------- train / eval
@@ -270,6 +289,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--rotation-group", type=int, default=0, help="Hadamard group (0 = no rotation)")
     p.add_argument("--skip-blocks", type=int, nargs="*", default=[], help="decoder blocks kept in high precision")
+    p.add_argument("--keep-blocks", type=int, default=0, help="depth-cut the student to K evenly spaced blocks")
+    p.add_argument("--act-scale", choices=("dynamic", "unit", "static"), default="static")
+    p.add_argument("--calib-batches", type=int, default=32, help="per-rank batches for static calibration")
+    p.add_argument("--calib-margin", type=float, default=1.0)
     p.add_argument("--init-checkpoint")
     p.add_argument("--resume", action="store_true", help="resume from output-dir/last.pt if present")
     p.add_argument("--teacher-precision", choices=("fp32", "fp16-autocast"), default="fp16-autocast")
@@ -310,18 +333,18 @@ def main() -> None:  # noqa: C901 - one linear training script
     student_vae, names = build_student(args, device)
     student = DecoderTile(student_vae).train()
     metadata = {
-        **nvfp4_decoder_metadata(names, args.rotation_group or None, tuple(args.skip_blocks)),
+        **nvfp4_decoder_metadata(names, args.rotation_group or None, tuple(args.skip_blocks), args.act_scale),
         "student_vae_dir": args.student_vae_dir,
         "teacher_vae_dir": args.teacher_vae_dir,
         "student_layers": len(student_vae.decoder.transformer_blocks),
     }
-    ddp = DistributedDataParallel(student, device_ids=[local_rank], broadcast_buffers=False)
     params = [p for p in student.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.99), weight_decay=args.weight_decay)
 
     start_step = 0
     last_path = out_dir / "last.pt"
-    if args.resume and last_path.exists():
+    resumed = args.resume and last_path.exists()
+    if resumed:
         state = torch.load(last_path, map_location=device)
         student_vae.decoder.load_state_dict(state["decoder"])
         student_vae.post_quant_conv.load_state_dict(state["post_quant_conv"])
@@ -354,6 +377,13 @@ def main() -> None:  # noqa: C901 - one linear training script
         DataLoader(stream, batch_size=args.batch_tiles, num_workers=args.num_workers, pin_memory=True,
                    persistent_workers=args.num_workers > 0))
 
+    if args.act_scale == "static" and not resumed and not args.init_checkpoint:
+        count = calibrate(student, loader, args.calib_batches, args.calib_margin, device)
+        if is_main:
+            amax = [layer.input_amax.item() for layer in nvfp4_linears(student)]
+            print(json.dumps({"calibrated_linears": count, "amax_min": min(amax), "amax_max": max(amax)}), flush=True)
+    ddp = DistributedDataParallel(student, device_ids=[local_rank], broadcast_buffers=False)
+
     run = None
     if is_main and args.wandb_project:
         import wandb
@@ -370,7 +400,19 @@ def main() -> None:  # noqa: C901 - one linear training script
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
         if start_step == 0:
-            baseline = evaluate(student_vae, reference_videos, holdout_clips, fidelity, device)
+            dense = load_h3_vae(args.student_vae_dir, device)
+            if args.keep_blocks:
+                keep_blocks(dense.decoder, args.keep_blocks)
+            reference = {}
+            for clip, video in zip(holdout_clips, reference_videos, strict=True):
+                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
+                    sample = dense.decode(clip.to(device), return_dict=False)[0]
+                for key, value in fidelity(to_unit_pixels(dense, sample), video.to(device)).items():
+                    reference.setdefault(f"eval/dense_student_{key}", []).append(value)
+            del dense
+            torch.cuda.empty_cache()
+            baseline = {key: float(np.mean(values)) for key, values in reference.items()}
+            baseline.update(evaluate(student_vae, reference_videos, holdout_clips, fidelity, device))
             print(json.dumps({"step": 0, **baseline}), flush=True)
             if run is not None:
                 run.log(baseline, step=0)

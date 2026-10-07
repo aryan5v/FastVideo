@@ -73,13 +73,26 @@ def _fp4_available() -> bool:
     return True
 
 
+def test_rejects_unknown_activation_scale():
+    with pytest.raises(ValueError, match="act_scale"):
+        NVFP4DecoderLinear.from_linear(nn.Linear(32, 32), rotation_group=None, compute_dtype=torch.bfloat16,
+                                       act_scale="per-token")
+
+
 @pytest.mark.skipif(not _fp4_available(), reason="NVFP4 GEMM needs a Blackwell GPU and flashinfer")
+@pytest.mark.parametrize("act_scale", ["dynamic", "unit", "static"])
 @pytest.mark.parametrize("group", [None, 256])
-def test_inference_matches_training_forward_bitwise(group):
+def test_inference_matches_training_forward_bitwise(group, act_scale):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import calibrate_static_scales
+
     torch.manual_seed(0)
     linear = nn.Linear(2048, 768).cuda()
-    layer = NVFP4DecoderLinear.from_linear(linear, rotation_group=group, compute_dtype=torch.bfloat16).cuda()
+    layer = NVFP4DecoderLinear.from_linear(linear, rotation_group=group, compute_dtype=torch.bfloat16,
+                                           act_scale=act_scale).cuda()
     x = torch.randn(3, 300, 2048, device="cuda", dtype=torch.bfloat16)
+    if act_scale == "static":
+        assert calibrate_static_scales(layer, lambda: layer(x)) == 1
+        assert layer.input_amax.item() > 0
     with torch.enable_grad():
         train_out = layer(x)
     with torch.no_grad():
