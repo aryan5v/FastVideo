@@ -390,7 +390,7 @@ def main() -> None:  # noqa: C901 - one linear training script
     eval_sets: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
     if is_main:
         for spec in args.eval_latents or []:
-            name, _, pattern = spec.rpartition("=") if "=" in spec else ("generated", "", spec)
+            name, _, pattern = spec.partition("=") if "=" in spec else ("generated", "", spec)
             clips = [torch.load(path, map_location="cpu").float() for path in sorted(glob.glob(pattern))]
             if not clips:
                 raise FileNotFoundError(f"eval set {name!r}: no latents match {pattern}")
