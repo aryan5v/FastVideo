@@ -525,7 +525,7 @@ FASTVIDEO_FAD_REF_FEATURES = EnvStr(None,
 FASTVIDEO_H3_VSA_FP4 = EnvBool(False,
                                category="attention",
                                doc="Run MiniMax-H3 VSA attention on the block-sparse SageAttention3 FP4 kernel "
-                               "(sm_120, no-grad, single sequence-parallel rank).")
+                               "(sm_120 or GB10 sm_121, no-grad, single sequence-parallel rank).")
 FASTVIDEO_H3_VSA_TILE_FIRST = EnvBool(False,
                                       category="attention",
                                       doc="Single-rank MiniMax-H3 VSA with one tile gather of the block input "
@@ -592,6 +592,10 @@ FASTVIDEO_H3_VAE_TILE_BATCH = EnvInt(1,
                                      category="performance",
                                      doc="Spatial tiles per MiniMax-H3 video VAE decoder call; 1 decodes per "
                                      "tile.")
+FASTVIDEO_H3_VAE_INT8_OVERLAY = EnvBool(True,
+                                        category="performance",
+                                        doc="Apply the INT8 ConvRot decoder overlay when the MiniMax-H3 VAE folder "
+                                        "ships one; 0 decodes with the dense weights.")
 FASTVIDEO_H3_VAE_INT8_SHARED_QKV = EnvBool(False,
                                            category="performance",
                                            doc="Share the INT8 activation rotation and quantization across the "
