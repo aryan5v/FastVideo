@@ -302,3 +302,34 @@ def test_fused_decoder_falls_back_when_inapplicable():
         assert fused_nvfp4_blocks_forward(unit.transformer_blocks, hidden.bfloat16(), rotary) is None
     with torch.enable_grad():
         assert fused_nvfp4_blocks_forward(unit.transformer_blocks, hidden, rotary) is None
+
+
+@_needs_fp4
+@pytest.mark.parametrize("rows,out_features,in_features", [(1797, 2048, 2048), (3 * 1797, 4096, 2048),
+                                                             (1797, 2048, 8192)])
+def test_cutlass_fp4_tactics_are_bit_identical(rows, out_features, in_features):
+    import flashinfer
+
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import NVFP4FusedState, _quantized_weight
+    from fastvideo.models.vaes.minimax_h3_nvfp4_fused import (_gemm, _gemm_workspace, _sm100_cutlass_fp4_module,
+                                                              quantize)
+
+    torch.manual_seed(0)
+    sf = torch.ones((), device="cuda")
+    quantized = quantize(torch.randn(rows, in_features, device="cuda").bfloat16(), sf)
+    packed, inv_scale, global_sf_w = _quantized_weight(
+        (torch.randn(out_features, in_features, device="cuda") * 0.02).bfloat16())
+    alpha = 1.0 / (sf * global_sf_w)
+    expected = torch.empty(rows, out_features, device="cuda", dtype=torch.bfloat16)
+    flashinfer.mm_fp4(quantized[0], packed.T, quantized[1], inv_scale.T, alpha, torch.bfloat16, expected,
+                      block_size=16, use_8x4_sf_layout=False, backend="cutlass")
+    state = NVFP4FusedState(packed, inv_scale, sf, alpha, torch.zeros(out_features, device="cuda"), out_features)
+    assert torch.equal(_gemm(quantized, state), expected)
+    module = _sm100_cutlass_fp4_module(torch.cuda.current_device())
+    if module is None:
+        pytest.skip("the direct CUTLASS path is sm_100 only")
+    for tactic in range(module.fp4_gemm_tactic_num()):
+        out = torch.empty_like(expected)
+        module.fp4_gemm(quantized[0], packed, quantized[1], inv_scale, alpha, out, _gemm_workspace(out.device.index),
+                        tactic)
+        assert torch.equal(out, expected), f"tactic {tactic}"

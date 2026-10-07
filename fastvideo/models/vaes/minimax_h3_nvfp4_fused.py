@@ -20,6 +20,7 @@ decodes against the eager path with ``torch.equal``.
 """
 from __future__ import annotations
 
+import functools
 from typing import Any, NamedTuple
 
 import torch
@@ -93,12 +94,14 @@ def _e2m1x2(lo, hi):
 def _bf16(x):
     """Round fp32 to the nearest-even bf16 value (kept in fp32).
 
-    Integer arithmetic, because the compiler may fold a float ``truncf``/``extf`` round trip
-    into the following add and skip the rounding that eager applies. Inputs are finite.
+    Inline PTX, because the compiler may fold a float ``truncf``/``extf`` round trip into a
+    following add and skip the rounding that eager applies.
     """
-    bits = x.to(tl.uint32, bitcast=True)
-    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
-    return rounded.to(tl.float32, bitcast=True)
+    return tl.inline_asm_elementwise("{ .reg .b16 t; cvt.rn.bf16.f32 t, $1; cvt.f32.bf16 $0, t; }",
+                                     "=r,r", [x],
+                                     dtype=tl.float32,
+                                     is_pure=True,
+                                     pack=1)
 
 
 @triton.jit
@@ -437,12 +440,72 @@ def _block_plan(block: nn.Module) -> _BlockPlan | None:
     return plan
 
 
+_GEMM_WORKSPACE_BYTES = 40 << 20
+_GEMM_TUNING_REPEATS = 3
+
+
+@functools.cache
+def _sm100_cutlass_fp4_module(device_index: int) -> Any | None:
+    """FlashInfer's CUTLASS FP4 GEMM extension on sm_100, called without ``mm_fp4``'s per-call checks.
+
+    ``mm_fp4`` costs ~100 us of host time per call (a single 1797-token tile GEMM runs in ~12 us).
+    Other architectures keep ``mm_fp4``.
+    """
+    if torch.cuda.get_device_capability(device_index) != (10, 0):
+        return None
+    try:
+        from flashinfer.gemm.gemm_base import gen_gemm_sm100_module_cutlass_fp4
+
+        return gen_gemm_sm100_module_cutlass_fp4().build_and_load()
+    except (ImportError, AttributeError, RuntimeError):
+        return None
+
+
+@functools.cache
+def _gemm_workspace(device_index: int) -> torch.Tensor:
+    return torch.empty(_GEMM_WORKSPACE_BYTES, dtype=torch.uint8, device=torch.device("cuda", device_index))
+
+
+_GEMM_TACTICS: dict[tuple[int, int, int, int], int] = {}
+
+
+def _gemm_tactic(module: Any, args: tuple, out: torch.Tensor) -> int:
+    """Fastest CUTLASS tactic for this GEMM shape, measured once.
+
+    Every tactic computes the same K-ordered fp32 accumulation, so the choice changes speed only
+    (``test_cutlass_fp4_tactics_are_bit_identical`` checks this).
+    """
+    key = (out.device.index, out.shape[0], out.shape[1], args[0].shape[1])
+    if key not in _GEMM_TACTICS:
+        timings = []
+        for tactic in range(-1, module.fp4_gemm_tactic_num()):
+            try:
+                module.fp4_gemm(*args, out, _gemm_workspace(out.device.index), tactic)
+            except RuntimeError:
+                continue
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(_GEMM_TUNING_REPEATS):
+                module.fp4_gemm(*args, out, _gemm_workspace(out.device.index), tactic)
+            end.record()
+            end.synchronize()
+            timings.append((start.elapsed_time(end), tactic))
+        _GEMM_TACTICS[key] = min(timings)[1] if timings else -1
+    return _GEMM_TACTICS[key]
+
+
 def _gemm(quantized: tuple[torch.Tensor, torch.Tensor], state: NVFP4FusedState) -> torch.Tensor:
     """``nvfp4_linear_inference``'s GEMM (bias excluded) on an already quantized activation."""
-    import flashinfer
-
     x_fp4, x_inv_scale = quantized
     out = torch.empty((x_fp4.shape[0], state.out_features), device=x_fp4.device, dtype=torch.bfloat16)
+    module = _sm100_cutlass_fp4_module(out.device.index)
+    if module is not None and not torch.cuda.is_current_stream_capturing():
+        # mm_fp4(backend="cutlass") hands the module the same operands (it transposes b and b's scales back).
+        args = (x_fp4, state.packed, x_inv_scale, state.inv_scale, state.alpha)
+        module.fp4_gemm(*args, out, _gemm_workspace(out.device.index), _gemm_tactic(module, args, out))
+        return out
+    import flashinfer
+
     flashinfer.mm_fp4(x_fp4,
                       state.packed.T,
                       x_inv_scale,
