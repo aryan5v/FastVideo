@@ -305,7 +305,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--student-vae-dir", required=True)
     p.add_argument("--data-root", action="append", required=True, help="parquet root, optionally path::weight")
     p.add_argument("--holdout-root", action="append", help="roots the held-out clips come from (default: all)")
-    p.add_argument("--eval-latents", help="glob of raw NCTHW latents (e.g. DiT-generated) for a second eval set")
+    p.add_argument("--eval-latents",
+                   action="append",
+                   help="name=glob of raw NCTHW latents (e.g. DiT-generated) for a named eval set; repeatable. "
+                   "Checkpoint selection uses the mean LPIPS over these sets")
     p.add_argument("--latents-normalized", choices=("yes", "no"), required=True)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--rotation-group", type=int, default=0, help="Hadamard group (0 = no rotation)")
@@ -383,11 +386,15 @@ def main() -> None:  # noqa: C901 - one linear training script
     holdout_clips, holdout_ids = load_holdout(holdout_files, args.eval_clips, normalized,
                                               teacher_vae.latents_mean.cpu(), teacher_vae.latents_std.cpu())
     reference_videos = teacher_decodes(teacher_vae, holdout_clips, args.teacher_precision, device) if is_main else []
-    extra_clips: list[torch.Tensor] = []
-    extra_videos: list[torch.Tensor] = []
-    if args.eval_latents and is_main:
-        extra_clips = [torch.load(path, map_location="cpu").float() for path in sorted(glob.glob(args.eval_latents))]
-        extra_videos = teacher_decodes(teacher_vae, extra_clips, args.teacher_precision, device)
+    # Named eval sets of raw latents: "name=glob" (a bare glob is named "generated").
+    eval_sets: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+    if is_main:
+        for spec in args.eval_latents or []:
+            name, _, pattern = spec.rpartition("=") if "=" in spec else ("generated", "", spec)
+            clips = [torch.load(path, map_location="cpu").float() for path in sorted(glob.glob(pattern))]
+            if not clips:
+                raise FileNotFoundError(f"eval set {name!r}: no latents match {pattern}")
+            eval_sets[name] = (clips, teacher_decodes(teacher_vae, clips, args.teacher_precision, device))
     stream = LatentTileStream(roots,
                               rank=rank,
                               world=world,
@@ -440,9 +447,8 @@ def main() -> None:  # noqa: C901 - one linear training script
             torch.cuda.empty_cache()
             baseline = {key: float(np.mean(values)) for key, values in reference.items()}
             baseline.update(evaluate(student_vae, reference_videos, holdout_clips, fidelity, device))
-            if extra_clips:
-                baseline.update(
-                    evaluate(student_vae, extra_videos, extra_clips, fidelity, device, prefix="eval_generated"))
+            for name, (clips, videos) in eval_sets.items():
+                baseline.update(evaluate(student_vae, videos, clips, fidelity, device, prefix=f"eval_{name}"))
             print(json.dumps({"step": 0, **baseline}), flush=True)
             if run is not None:
                 run.log(baseline, step=0)
@@ -495,14 +501,14 @@ def main() -> None:  # noqa: C901 - one linear training script
             dist.barrier()
         if is_main and ((step + 1) % args.eval_every == 0 or step + 1 == args.steps):
             metrics = evaluate(student_vae, reference_videos, holdout_clips, fidelity, device)
-            if extra_clips:
-                metrics.update(
-                    evaluate(student_vae, extra_videos, extra_clips, fidelity, device, prefix="eval_generated"))
+            for name, (clips, videos) in eval_sets.items():
+                metrics.update(evaluate(student_vae, videos, clips, fidelity, device, prefix=f"eval_{name}"))
             print(json.dumps({"step": step + 1, **metrics}), flush=True)
             if run is not None:
                 run.log(metrics, step=step + 1)
             # Generated latents are the production distribution; select on them when available.
-            selector = metrics.get("eval_generated/lpips", metrics.get("eval/lpips", float("inf")))
+            generated = [metrics[f"eval_{name}/lpips"] for name in eval_sets if f"eval_{name}/lpips" in metrics]
+            selector = float(np.mean(generated)) if generated else metrics.get("eval/lpips", float("inf"))
             if selector < best_lpips:
                 best_lpips = selector
                 save_checkpoint(out_dir / "best.pt", student_vae, optimizer, step + 1, metadata)
