@@ -19,14 +19,12 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks" / "minimax_h3_vae"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bench_decoder import load_h3_vae, psnr  # noqa: E402
+from bench_decoder import load_h3_vae, psnr, read_frames  # noqa: E402
 from train_qad import LATENT_COLUMNS, row_latent  # noqa: E402
 
 
 def source_frames(path: str, num_frames: int, height: int, width: int) -> torch.Tensor:
-    from torchcodec.decoders import VideoDecoder
-
-    frames = VideoDecoder(path).get_frames_in_range(0, num_frames).data.float() / 255  # T, C, H, W
+    frames = read_frames(path, num_frames).float() / 255  # T, C, H, W
     frames = F.interpolate(frames, size=(height, width), mode="bilinear", antialias=True, align_corners=False)
     return frames.permute(1, 0, 2, 3).unsqueeze(0).clamp(0, 1)
 

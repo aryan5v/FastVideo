@@ -74,15 +74,32 @@ def store_decoder_linears_fp16(vae: nn.Module) -> None:
             nn.Module.to(module, dtype=torch.float16)
 
 
+def read_frames(path: str, num_frames: int) -> torch.Tensor:
+    """First ``num_frames`` RGB frames as ``[T, C, H, W]`` uint8 (torchcodec, else PyAV)."""
+    try:
+        from torchcodec.decoders import VideoDecoder
+
+        decoder = VideoDecoder(path)
+        if len(decoder) < num_frames:
+            raise ValueError(f"{path} has {len(decoder)} frames, need {num_frames}")
+        return decoder.get_frames_in_range(0, num_frames).data
+    except (ImportError, OSError, RuntimeError):
+        import av
+
+        frames = []
+        with av.open(path) as container:
+            for frame in container.decode(video=0):
+                frames.append(torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1))
+                if len(frames) == num_frames:
+                    break
+        if len(frames) < num_frames:
+            raise ValueError(f"{path} has {len(frames)} frames, need {num_frames}") from None
+        return torch.stack(frames)
+
+
 def read_video(path: str, num_frames: int, height: int, width: int) -> torch.Tensor:
     """Return ``[1, 3, T, H, W]`` uint8 on CPU, center-cropped and resized."""
-    from torchcodec.decoders import VideoDecoder
-
-    decoder = VideoDecoder(path)
-    available = len(decoder)
-    if available < num_frames:
-        raise ValueError(f"{path} has {available} frames, need {num_frames}")
-    frames = decoder.get_frames_in_range(0, num_frames).data  # T, C, H, W uint8
+    frames = read_frames(path, num_frames)  # T, C, H, W uint8
     _, _, src_h, src_w = frames.shape
     scale = max(height / src_h, width / src_w)
     resized = F.interpolate(frames.float(),
