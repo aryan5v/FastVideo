@@ -352,3 +352,13 @@ def test_fused_decoder_cuda_graph_replay_matches_eager():
     for latents, fused_out in zip(inputs, fused_outs, strict=True):
         assert torch.equal(fused_out, run(latents))
     decoder.fused_blocks_forward = fused
+
+
+def test_dense_bypass_runs_the_master_weight():
+    torch.manual_seed(0)
+    linear = nn.Linear(64, 32)
+    layer = NVFP4DecoderLinear.from_linear(linear, rotation_group=None, compute_dtype=torch.float32, act_scale="unit")
+    layer.dense_bypass = True
+    x = torch.randn(5, 64)
+    torch.testing.assert_close(layer(x), linear(x))
+    assert layer.fused_state() is None

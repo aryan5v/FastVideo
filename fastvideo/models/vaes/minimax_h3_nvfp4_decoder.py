@@ -27,6 +27,7 @@ from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from fastvideo.models.vaes.minimax_h3_int8_convrot import rotate_activation
 
@@ -146,6 +147,8 @@ class NVFP4DecoderLinear(nn.Module):
         self.compute_dtype = compute_dtype
         self.act_scale = act_scale
         self.calibrating = False
+        # Run the master weight densely (bf16) instead of NVFP4; for sensitivity analysis and mixed precision.
+        self.dense_bypass = False
         self.weight = nn.Parameter(weight.detach().clone())
         self.bias = nn.Parameter(bias.detach().clone()) if bias is not None else None
         self.register_buffer("input_amax", torch.zeros((), dtype=torch.float32, device=weight.device))
@@ -172,7 +175,7 @@ class NVFP4DecoderLinear(nn.Module):
         The fused kernels quantize with a precomputed global scale, so a dynamic (per-call abs-max)
         scale, calibration, and the activation rotation keep the eager path.
         """
-        if (self.rotation_group is not None or self.calibrating or self.act_scale == "dynamic"
+        if (self.dense_bypass or self.rotation_group is not None or self.calibrating or self.act_scale == "dynamic"
                 or self.compute_dtype != torch.bfloat16 or self.bias is None):
             return None
         version = self.input_amax._version
@@ -205,6 +208,9 @@ class NVFP4DecoderLinear(nn.Module):
         x = x.to(self.compute_dtype)
         if self.rotation_group is not None:
             x = rotate_activation(x, self.rotation_group)
+        if self.dense_bypass:
+            bias = self.bias.to(x.dtype) if self.bias is not None else None
+            return F.linear(x, self.weight.to(x.dtype), bias)
         global_sf_x = self._activation_global_sf(x)
         if torch.is_grad_enabled() and self.weight.requires_grad:
             self.invalidate()
