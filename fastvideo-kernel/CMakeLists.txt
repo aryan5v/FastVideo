@@ -113,7 +113,7 @@ if(NOT GPU_BACKEND STREQUAL "ROCM")
         else()
             # Best-effort probe of the visible GPU (mirrors build.sh detect_with_torch).
             execute_process(
-                COMMAND "${Python_EXECUTABLE}" -c "import torch; assert torch.cuda.is_available(); mj, mn = torch.cuda.get_device_capability(0); print(f'{mj}.{mn}a' if (mj, mn) in ((9, 0), (10, 0), (10, 3), (12, 0)) else f'{mj}.{mn}')"
+                COMMAND "${Python_EXECUTABLE}" -c "import torch; assert torch.cuda.is_available(); mj, mn = torch.cuda.get_device_capability(0); print(f'{mj}.{mn}a' if (mj, mn) in ((9, 0), (10, 0), (10, 3), (12, 0), (12, 1)) else f'{mj}.{mn}')"
                 OUTPUT_VARIABLE _FV_ARCH_LIST
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 RESULT_VARIABLE _fv_detect_rc
@@ -300,6 +300,34 @@ else()
     message(STATUS "ThunderKittens kernels: DISABLED (will use Triton fallbacks at runtime)")
 endif()
 
+# Blackwell consumer FP4 archs for the attn_qat_infer targets. The kernels use
+# arch-specific block-scaled MMA and `cvt.e2m1x2`, so they need the `a` variant
+# of each consumer Blackwell part: 120a (RTX 50 / RTX PRO) and 121a (GB10 /
+# DGX Spark). Arch-specific cubins do not run across minor versions, so pick
+# every one requested in TORCH_CUDA_ARCH_LIST, or the local device's.
+set(FASTVIDEO_FP4_CUDA_ARCHS "")
+if(TORCH_CUDA_ARCH_LIST)
+    foreach(_fp4_minor 0 1)
+        string(REGEX MATCH
+            "(^|[; ,])((12\\.${_fp4_minor}a)|(12${_fp4_minor}a)|(sm_12${_fp4_minor}a))([; ,]|$)"
+            _HAS_FP4_ARCH "${TORCH_CUDA_ARCH_LIST}")
+        if(_HAS_FP4_ARCH)
+            list(APPEND FASTVIDEO_FP4_CUDA_ARCHS "12${_fp4_minor}a")
+        endif()
+    endforeach()
+else()
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -c
+        "import torch; c = torch.cuda.get_device_capability() if (torch.cuda.is_available() and torch.version.cuda) else (0, 0); print(f'{c[0]}{c[1]}a' if c in ((12, 0), (12, 1)) else '')"
+        OUTPUT_VARIABLE FASTVIDEO_FP4_CUDA_ARCHS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+if(FASTVIDEO_KERNEL_BUILD_ATTN_QAT_INFER STREQUAL "ON" AND NOT FASTVIDEO_FP4_CUDA_ARCHS)
+    set(FASTVIDEO_FP4_CUDA_ARCHS "120a")
+endif()
+
 set(ENABLE_ATTN_QAT_INFER OFF)
 if(GPU_BACKEND STREQUAL "ROCM")
     message(STATUS "attn_qat_infer kernels: DISABLED (ROCm build)")
@@ -308,24 +336,8 @@ else()
     if(FASTVIDEO_KERNEL_BUILD_ATTN_QAT_INFER STREQUAL "ON")
         set(_WANTS_ATTN_QAT_INFER ON)
     elseif(FASTVIDEO_KERNEL_BUILD_ATTN_QAT_INFER STREQUAL "AUTO")
-        if(TORCH_CUDA_ARCH_LIST)
-            string(REGEX MATCH
-                "(^|[; ,])((12\\.0a)|(120a)|(sm_120a))([; ,]|$)"
-                _HAS_120A "${TORCH_CUDA_ARCH_LIST}")
-            if(_HAS_120A)
-                set(_WANTS_ATTN_QAT_INFER ON)
-            endif()
-        else()
-            execute_process(
-                COMMAND "${Python_EXECUTABLE}" -c
-                "import torch; print('1' if (torch.cuda.is_available() and torch.version.cuda and torch.cuda.get_device_capability()[0] >= 12) else '0')"
-                OUTPUT_VARIABLE _LOCAL_HAS_BLACKWELL
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET
-            )
-            if(_LOCAL_HAS_BLACKWELL STREQUAL "1")
-                set(_WANTS_ATTN_QAT_INFER ON)
-            endif()
+        if(FASTVIDEO_FP4_CUDA_ARCHS)
+            set(_WANTS_ATTN_QAT_INFER ON)
         endif()
     endif()
 
@@ -344,19 +356,20 @@ else()
     else()
         message(STATUS
             "attn_qat_infer kernels: DISABLED "
-            "(requires CUDA 12.8+ and Blackwell sm_120a)")
+            "(requires CUDA 12.8+ and Blackwell sm_120a or sm_121a)")
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
 # Per-arch split for the Blackwell FP4 (attn_qat_infer) build
 # ---------------------------------------------------------------------------
-# The FP4 kernels are sm_120a-only (they emit `cvt.e2m1x2` etc.), while the main
+# The FP4 kernels are sm_120a/sm_121a-only (they emit `cvt.e2m1x2` etc.), while the main
 # extension (Hopper-only TK + generic turbodiffusion) targets the full arch list.
 # find_package(Torch) injects ONE global -gencode list into CMAKE_CUDA_FLAGS that
 # forces every target onto every arch, so the FP4 sources also get the sm_90a pass
 # and ptxas rejects their Blackwell instructions. Strip that global list and drive
-# arch per target via CUDA_ARCHITECTURES instead (the fp4* targets pin 120a below;
+# arch per target via CUDA_ARCHITECTURES instead (the fp4* targets use
+# FASTVIDEO_FP4_CUDA_ARCHS below;
 # the main extension gets the full list). Only do this for the FP4 build with an
 # explicit arch list, so the cu126 / local autodetect paths stay untouched.
 if(ENABLE_ATTN_QAT_INFER AND TORCH_CUDA_ARCH_LIST)
@@ -368,7 +381,7 @@ if(ENABLE_ATTN_QAT_INFER AND TORCH_CUDA_ARCH_LIST)
     set(FASTVIDEO_MAIN_CUDA_ARCHS "${TORCH_CUDA_ARCH_LIST}")
     string(REPLACE "sm_" "" FASTVIDEO_MAIN_CUDA_ARCHS "${FASTVIDEO_MAIN_CUDA_ARCHS}")
     string(REPLACE "." "" FASTVIDEO_MAIN_CUDA_ARCHS "${FASTVIDEO_MAIN_CUDA_ARCHS}")
-    message(STATUS "[per-arch] main extension archs=${FASTVIDEO_MAIN_CUDA_ARCHS}, fp4* archs=120a")
+    message(STATUS "[per-arch] main extension archs=${FASTVIDEO_MAIN_CUDA_ARCHS}, fp4* archs=${FASTVIDEO_FP4_CUDA_ARCHS}")
 endif()
 
 # Compiler flags
@@ -576,7 +589,7 @@ if(ENABLE_ATTN_QAT_INFER)
         $<$<COMPILE_LANGUAGE:CUDA>:${ATTN_QAT_INFER_CUDA_FLAGS}>
     )
     set_target_properties(fp4attn_cuda PROPERTIES
-        CUDA_ARCHITECTURES "120a"
+        CUDA_ARCHITECTURES "${FASTVIDEO_FP4_CUDA_ARCHS}"
         CXX_STANDARD 17
         CUDA_STANDARD 17
     )
@@ -592,7 +605,7 @@ if(ENABLE_ATTN_QAT_INFER)
         $<$<COMPILE_LANGUAGE:CUDA>:${ATTN_QAT_INFER_CUDA_FLAGS}>
     )
     set_target_properties(fp4quant_cuda PROPERTIES
-        CUDA_ARCHITECTURES "120a"
+        CUDA_ARCHITECTURES "${FASTVIDEO_FP4_CUDA_ARCHS}"
         CXX_STANDARD 17
         CUDA_STANDARD 17
     )
@@ -615,6 +628,6 @@ message(STATUS "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}")
 message(STATUS "fastvideo_kernel_ops: ON  (turbodiffusion int8-gemm/quant/rmsnorm/layernorm, all listed archs)")
 message(STATUS "  + TK sta/block_sparse (sm_90a only):          ${ENABLE_TK_KERNELS}")
 message(STATUS "  + Ulysses NCCL-device all-to-all:             ${ENABLE_ULYSSES_A2A}")
-message(STATUS "fp4attn/fp4quant (sm_120a only, CUDA >= 12.8):  ${ENABLE_ATTN_QAT_INFER}")
+message(STATUS "fp4attn/fp4quant (sm_120a/121a, CUDA >= 12.8): ${ENABLE_ATTN_QAT_INFER} (${FASTVIDEO_FP4_CUDA_ARCHS})")
 message(STATUS "Triton fallbacks ship in python/fastvideo_kernel/triton_kernels regardless.")
 message(STATUS "============================================================")
