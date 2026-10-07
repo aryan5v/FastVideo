@@ -6,14 +6,16 @@ Every variant decodes identical latents. Fidelity is measured against the full
 source pixels when the latents come from ``--video``. Timing covers the decoder
 call only, after one warmup, synchronized on the device.
 
-Variants:
-  full_fp32     full VAE, FP32 weights, no autocast (fidelity reference)
-  full_prod     full VAE, FP32 weights, fp16 autocast (what the H3 decode stage runs)
-  full_fp16w    full VAE, decoder linears stored fp16, fp16 autocast
-  light_prod    26-layer light VAE, dense weights, fp16 autocast
-  light_int8    light VAE with the INT8 ConvRot overlay (V2 / Trim release decode)
-  light_fp16w   light VAE, decoder linears stored fp16, fp16 autocast
-  taeh3         TAEH3 preview decoder
+Variants are ``<family>_<modifier>_<modifier>...`` with family ``full`` (36-layer)
+or ``light`` (26-layer), plus ``taeh3``. Modifiers:
+  fp32      no autocast (``full_fp32`` is the fidelity reference)
+  prod      fp16 autocast, as the H3 decode stage runs (default when no precision modifier)
+  fp16w     decoder linears stored fp16
+  int8      INT8 ConvRot overlay (V2 / Trim release decode)
+  nvfp4     NVFP4 block linears (post-training, or --nvfp4-checkpoint), bf16 autocast
+  r<N>      Hadamard rotation group N for nvfp4 (e.g. r256)
+  d<K>      keep K evenly spaced decoder blocks (speed only unless trained)
+  compile   torch.compile the ViT decoder
 
 Example:
   python scripts/benchmarks/minimax_h3_vae/bench_decoder.py \\
@@ -163,11 +165,12 @@ class Fidelity:
         return result
 
 
-def decode_fn(vae: nn.Module, z: torch.Tensor, *, autocast: bool) -> Callable[[], torch.Tensor]:
-    ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if autocast else contextlib.nullcontext())
+def decode_fn(vae: nn.Module, z: torch.Tensor, *, autocast: torch.dtype | None) -> Callable[[], torch.Tensor]:
 
     @torch.no_grad()
     def run() -> torch.Tensor:
+        ctx = (torch.autocast(device_type="cuda", dtype=autocast)
+               if autocast is not None else contextlib.nullcontext())
         with ctx:
             sample = vae.decode(z, return_dict=False)[0]
         return vae.denormalize_pixels(sample.float()).clamp_(0, 1)
@@ -203,6 +206,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--save-videos", action="store_true")
+    parser.add_argument("--nvfp4-checkpoint", help="QAD checkpoint loaded into every nvfp4 variant")
+    parser.add_argument("--profile", help="comma list of variants to profile (first tile batch/overlap only)")
     parser.add_argument("--wandb-project", help="log every row and a summary table to this W&B project")
     parser.add_argument("--wandb-name")
     return parser.parse_args()
@@ -218,26 +223,62 @@ def flatten(row: dict, prefix: str = "") -> dict:
     return flat
 
 
+def keep_blocks(decoder: nn.Module, count: int) -> None:
+    """Keep ``count`` evenly spaced transformer blocks (first and last included)."""
+    total = len(decoder.transformer_blocks)
+    if not 1 <= count <= total:
+        raise ValueError(f"cannot keep {count} of {total} decoder blocks")
+    indices = sorted({round(i * (total - 1) / max(count - 1, 1)) for i in range(count)})
+    decoder.transformer_blocks = nn.ModuleList(decoder.transformer_blocks[i] for i in indices)
+
+
 def build_variant(name: str, args: argparse.Namespace, device: torch.device,
-                  cache: dict[str, nn.Module]) -> tuple[nn.Module, bool]:
-    """Return (vae, autocast) for a decoder variant; VAEs are cached by weight set."""
-    family, _, mode = name.partition("_")
-    if family == "full":
-        key, vae_dir, int8 = "full", args.full_vae_dir, False
-    elif family == "light":
-        if not args.light_vae_dir:
-            raise ValueError(f"{name} needs --light-vae-dir")
-        key, vae_dir, int8 = ("light_int8" if mode == "int8" else "light"), args.light_vae_dir, mode == "int8"
-    else:
+                  cache: dict[str, nn.Module]) -> tuple[nn.Module, torch.dtype | None]:
+    """Return (vae, autocast dtype or None) for a variant name; VAEs are cached by name."""
+    family, *mods = name.split("_")
+    if family not in ("full", "light"):
         raise ValueError(f"Unknown variant {name}")
-    if mode == "fp16w":
-        key += "_fp16w"
-    if key not in cache:
-        vae = load_h3_vae(vae_dir, device, int8_overlay=int8)
-        if mode == "fp16w":
+    if family == "light" and not args.light_vae_dir:
+        raise ValueError(f"{name} needs --light-vae-dir")
+    autocast: torch.dtype | None = torch.bfloat16 if "nvfp4" in mods else torch.float16
+    if "fp32" in mods:
+        autocast = None
+    if name not in cache:
+        vae = load_h3_vae(args.full_vae_dir if family == "full" else args.light_vae_dir,
+                          device,
+                          int8_overlay="int8" in mods)
+        for mod in mods:
+            if mod.startswith("d") and mod[1:].isdigit():
+                keep_blocks(vae.decoder, int(mod[1:]))
+        if "fp16w" in mods:
             store_decoder_linears_fp16(vae)
-        cache[key] = vae
-    return cache[key], mode != "fp32"
+        if "nvfp4" in mods:
+            from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import convert_decoder_to_nvfp4
+
+            rotation = next((int(m[1:]) for m in mods if m.startswith("r") and m[1:].isdigit()), None)
+            convert_decoder_to_nvfp4(vae.decoder, rotation_group=rotation, compute_dtype=torch.bfloat16)
+            if args.nvfp4_checkpoint:
+                state = torch.load(args.nvfp4_checkpoint, map_location=device)
+                vae.decoder.load_state_dict(state["decoder"], strict=True)
+                vae.post_quant_conv.load_state_dict(state["post_quant_conv"], strict=True)
+            vae.requires_grad_(False)
+        if "compile" in mods:
+            vae.decoder = torch.compile(vae.decoder, dynamic=False)
+        cache[name] = vae
+    return cache[name], autocast
+
+
+def profile_decode(fn: Callable[[], torch.Tensor], path: Path) -> None:
+    from torch.profiler import ProfilerActivity, profile
+
+    fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        fn()
+        torch.cuda.synchronize()
+    table = prof.key_averages().table(sort_by="cuda_time_total", row_limit=30)
+    path.write_text(table)
+    print(table, flush=True)
 
 
 def main() -> None:
@@ -272,6 +313,8 @@ def main() -> None:
     if REFERENCE in variants:
         variants.remove(REFERENCE)
     variants.insert(0, REFERENCE)
+    profiled = set((args.profile or "").split(",")) - {""}
+    done_profiles: set[str] = set()
     for name in variants:
         for tile_batch in (int(v) for v in args.tile_batch.split(",")):
             for overlap in (int(v) for v in args.overlap.split(",")):
@@ -285,14 +328,20 @@ def main() -> None:
                     vae.tile_sample_min_overlap_height = overlap
                     vae.tile_sample_min_overlap_width = overlap
                     fn = decode_fn(vae, z, autocast=autocast)
+                torch.cuda.synchronize()
+                resident = torch.cuda.memory_allocated()
                 torch.cuda.reset_peak_memory_stats()
                 video, times = timed(fn, args.repeats)
+                decode_peak = (torch.cuda.max_memory_allocated() - resident) / 2**30
+                if name in profiled and name not in done_profiles:
+                    profile_decode(fn, out_dir / f"profile_{name}_tb{tile_batch}_ov{overlap}.txt")
+                    done_profiles.add(name)
                 row = {
                     "variant": name,
                     "tile_batch": tile_batch,
                     "overlap": overlap,
                     "median_s": sorted(times)[len(times) // 2],
-                    "peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+                    "decode_peak_gib": decode_peak,
                     "shape": list(video.shape),
                 }
                 if reference is None:
