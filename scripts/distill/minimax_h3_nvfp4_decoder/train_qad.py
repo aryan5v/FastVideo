@@ -57,12 +57,21 @@ LATENT_COLUMNS = ["vae_latent_bytes", "vae_latent_shape", "vae_latent_dtype"]
 # ----------------------------------------------------------------------------- data
 
 
-def list_parquets(roots: list[str]) -> list[str]:
+def list_parquets(roots: list[str], allow_empty: bool = False) -> list[str]:
     files = sorted(f for root in roots for f in glob.glob(os.path.join(root, "**", "*.parquet"), recursive=True)
                    if "map_style_cache" not in f)
-    if not files:
+    if not files and not allow_empty:
         raise FileNotFoundError(f"No parquet files under {roots}")
     return files
+
+
+def parse_roots(specs: list[str]) -> list[tuple[str, float]]:
+    """``path`` or ``path::weight`` (default weight 1)."""
+    roots = []
+    for spec in specs:
+        path, _, weight = spec.partition("::")
+        roots.append((path, float(weight or 1.0)))
+    return roots
 
 
 def row_latent(row: dict) -> torch.Tensor:
@@ -92,10 +101,10 @@ def chunk_starts(latent_frames: int, chunk: int, overlap: int, token_drop: int) 
 class LatentTileStream(IterableDataset):
     """Endless stream of decoder-input tiles ``[C, chunk + overlap, 16, 16]`` (raw, denormalized latents)."""
 
-    def __init__(self, files: list[str], *, rank: int, world: int, seed: int, tiles_per_clip: int,
+    def __init__(self, roots: list[tuple[str, float]], *, rank: int, world: int, seed: int, tiles_per_clip: int,
                  chunk: int, overlap: int, token_drop: int, latent_mean: torch.Tensor, latent_std: torch.Tensor,
                  normalized: bool, holdout: set[tuple[str, int]]) -> None:
-        self.files = files
+        self.roots = roots
         self.rank, self.world, self.seed = rank, world, seed
         self.tiles_per_clip = tiles_per_clip
         self.chunk, self.overlap, self.token_drop = chunk, overlap, token_drop
@@ -110,13 +119,23 @@ class LatentTileStream(IterableDataset):
         worker, workers = (info.id, info.num_workers) if info else (0, 1)
         stream_id = self.rank * workers + worker
         rng = random.Random(self.seed * 100003 + stream_id)
-        files = self.files[stream_id::self.world * workers] or self.files
+        files: dict[str, list[str]] = {}
+        clips = 0
         while True:
-            path = rng.choice(files)
-            parquet = pq.ParquetFile(path)
-            group_index = rng.randrange(parquet.num_row_groups)
-            offset = sum(parquet.metadata.row_group(g).num_rows for g in range(group_index))
-            group = parquet.read_row_group(group_index, columns=LATENT_COLUMNS)
+            if clips % 64 == 0:  # generated datasets keep growing while we train
+                listed = {root: list_parquets([root], allow_empty=True) for root, _ in self.roots}
+                files = {root: paths for root, paths in listed.items() if paths}
+            live = [(root, weight) for root, weight in self.roots if root in files]
+            root = rng.choices([r for r, _ in live], weights=[w for _, w in live])[0]
+            path = rng.choice(files[root])
+            clips += 1
+            try:
+                parquet = pq.ParquetFile(path)
+                group_index = rng.randrange(parquet.num_row_groups)
+                offset = sum(parquet.metadata.row_group(g).num_rows for g in range(group_index))
+                group = parquet.read_row_group(group_index, columns=LATENT_COLUMNS)
+            except Exception:  # noqa: BLE001 - a shard mid-write; pick another
+                continue
             for index, row in enumerate(group.to_pylist()):
                 if (path, offset + index) in self.holdout:
                     continue
@@ -234,7 +253,7 @@ def lpips_frames(pixels: torch.Tensor, frame_index: torch.Tensor) -> torch.Tenso
 
 @torch.no_grad()
 def evaluate(student_vae: nn.Module, teacher_videos: list[torch.Tensor], clips: list[torch.Tensor],
-             fidelity: Fidelity, device: torch.device) -> dict[str, float]:
+             fidelity: Fidelity, device: torch.device, prefix: str = "eval") -> dict[str, float]:
     student_vae.eval()
     totals: dict[str, list[float]] = {}
     for clip, reference in zip(clips, teacher_videos, strict=True):
@@ -244,7 +263,7 @@ def evaluate(student_vae: nn.Module, teacher_videos: list[torch.Tensor], clips: 
         for key, value in fidelity(video, reference.to(device)).items():
             totals.setdefault(key, []).append(value)
     student_vae.train()
-    return {f"eval/{key}": float(np.mean(values)) for key, values in totals.items()}
+    return {f"{prefix}/{key}": float(np.mean(values)) for key, values in totals.items()}
 
 
 @torch.no_grad()
@@ -284,7 +303,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--teacher-vae-dir", required=True)
     p.add_argument("--student-vae-dir", required=True)
-    p.add_argument("--data-root", action="append", required=True)
+    p.add_argument("--data-root", action="append", required=True, help="parquet root, optionally path::weight")
+    p.add_argument("--holdout-root", action="append", help="roots the held-out clips come from (default: all)")
+    p.add_argument("--eval-latents", help="glob of raw NCTHW latents (e.g. DiT-generated) for a second eval set")
     p.add_argument("--latents-normalized", choices=("yes", "no"), required=True)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--rotation-group", type=int, default=0, help="Hadamard group (0 = no rotation)")
@@ -356,12 +377,18 @@ def main() -> None:  # noqa: C901 - one linear training script
     fidelity = Fidelity(device)
 
     config = teacher_vae.config
-    files = list_parquets(args.data_root)
+    roots = parse_roots(args.data_root)
+    holdout_files = list_parquets(args.holdout_root or [root for root, _ in roots])
     normalized = args.latents_normalized == "yes"
-    holdout_clips, holdout_ids = load_holdout(files, args.eval_clips, normalized, teacher_vae.latents_mean.cpu(),
-                                              teacher_vae.latents_std.cpu())
+    holdout_clips, holdout_ids = load_holdout(holdout_files, args.eval_clips, normalized,
+                                              teacher_vae.latents_mean.cpu(), teacher_vae.latents_std.cpu())
     reference_videos = teacher_decodes(teacher_vae, holdout_clips, args.teacher_precision, device) if is_main else []
-    stream = LatentTileStream(files,
+    extra_clips: list[torch.Tensor] = []
+    extra_videos: list[torch.Tensor] = []
+    if args.eval_latents and is_main:
+        extra_clips = [torch.load(path, map_location="cpu").float() for path in sorted(glob.glob(args.eval_latents))]
+        extra_videos = teacher_decodes(teacher_vae, extra_clips, args.teacher_precision, device)
+    stream = LatentTileStream(roots,
                               rank=rank,
                               world=world,
                               seed=args.seed + start_step,
@@ -413,6 +440,9 @@ def main() -> None:  # noqa: C901 - one linear training script
             torch.cuda.empty_cache()
             baseline = {key: float(np.mean(values)) for key, values in reference.items()}
             baseline.update(evaluate(student_vae, reference_videos, holdout_clips, fidelity, device))
+            if extra_clips:
+                baseline.update(
+                    evaluate(student_vae, extra_videos, extra_clips, fidelity, device, prefix="eval_generated"))
             print(json.dumps({"step": 0, **baseline}), flush=True)
             if run is not None:
                 run.log(baseline, step=0)
@@ -465,11 +495,16 @@ def main() -> None:  # noqa: C901 - one linear training script
             dist.barrier()
         if is_main and ((step + 1) % args.eval_every == 0 or step + 1 == args.steps):
             metrics = evaluate(student_vae, reference_videos, holdout_clips, fidelity, device)
+            if extra_clips:
+                metrics.update(
+                    evaluate(student_vae, extra_videos, extra_clips, fidelity, device, prefix="eval_generated"))
             print(json.dumps({"step": step + 1, **metrics}), flush=True)
             if run is not None:
                 run.log(metrics, step=step + 1)
-            if metrics.get("eval/lpips", float("inf")) < best_lpips:
-                best_lpips = metrics["eval/lpips"]
+            # Generated latents are the production distribution; select on them when available.
+            selector = metrics.get("eval_generated/lpips", metrics.get("eval/lpips", float("inf")))
+            if selector < best_lpips:
+                best_lpips = selector
                 save_checkpoint(out_dir / "best.pt", student_vae, optimizer, step + 1, metadata)
         if (step + 1) % args.eval_every == 0:
             dist.barrier()
