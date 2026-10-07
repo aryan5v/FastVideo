@@ -773,6 +773,24 @@ class VAELoader(ComponentLoader):
                 return directory
         return None
 
+    @staticmethod
+    def _apply_h3_nvfp4_decoder(vae: nn.Module, path: str, target_device: torch.device) -> None:
+        """Swap in an exported NVFP4 MiniMax-H3 decoder (``FASTVIDEO_H3_VAE_NVFP4_DECODER``)."""
+        from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import (
+            apply_nvfp4_decoder_checkpoint,
+            load_nvfp4_decoder_checkpoint,
+        )
+
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"FASTVIDEO_H3_VAE_NVFP4_DECODER={path} does not exist")
+        loaded_blocks = len(vae.decoder.transformer_blocks)
+        # Frozen layers hold only packed FP4 weights; packing needs the CUDA FP4 kernels.
+        metadata = apply_nvfp4_decoder_checkpoint(vae,
+                                                  load_nvfp4_decoder_checkpoint(path),
+                                                  freeze=target_device.type == "cuda")
+        logger.info("MiniMax-H3 VAE decoder: NVFP4 %s (%d of %d blocks, act_scale=%s), bf16 decode autocast", path,
+                    len(vae.decoder.transformer_blocks), loaded_blocks, metadata.get("act_scale"))
+
     def load(self, model_path: str, fastvideo_args: FastVideoArgs):
         """Load the VAE based on the model path, and inference args."""
         config = get_diffusers_config(model=model_path)
@@ -905,6 +923,11 @@ class VAELoader(ComponentLoader):
                 find_int8_convrot_vae_path,
             )
             int8_convrot_path = find_int8_convrot_vae_path(model_path)
+            nvfp4_decoder_path = envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.get()
+            if int8_convrot_path is not None and nvfp4_decoder_path:
+                logger.info("Skipping MiniMax-H3 INT8 ConvRot VAE overlay %s: FASTVIDEO_H3_VAE_NVFP4_DECODER "
+                            "replaces the decoder", int8_convrot_path)
+                int8_convrot_path = None
             if int8_convrot_path is not None and not envs.FASTVIDEO_H3_VAE_INT8_OVERLAY.get():
                 logger.info("Skipping MiniMax-H3 INT8 ConvRot VAE overlay %s (FASTVIDEO_H3_VAE_INT8_OVERLAY=0); "
                             "decoding with the dense weights", int8_convrot_path)
@@ -949,6 +972,8 @@ class VAELoader(ComponentLoader):
         if class_name == "AutoencoderKLMiniMaxH3" and int8_convrot_path is not None:
             from fastvideo.models.vaes.minimax_h3_int8_convrot import overlay_minimax_h3_int8_convrot_decoder
             overlay_minimax_h3_int8_convrot_decoder(vae, int8_convrot_path)
+        if class_name == "AutoencoderKLMiniMaxH3" and envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.get():
+            self._apply_h3_nvfp4_decoder(vae, envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.get(), target_device)
         if (class_name == "AutoencoderKLWan" and getattr(vae.config, "use_light_vae", False)
                 and target_device.type == "cuda" and hasattr(vae, "optimize_memory_format")):
             vae.optimize_memory_format()

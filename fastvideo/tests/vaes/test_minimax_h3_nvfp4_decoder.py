@@ -362,3 +362,216 @@ def test_dense_bypass_runs_the_master_weight():
     x = torch.randn(5, 64)
     torch.testing.assert_close(layer(x), linear(x))
     assert layer.fused_state() is None
+
+
+# Inference-only freeze: the packed weight replaces the master, outputs stay bit-identical.
+@_needs_fp4
+@pytest.mark.parametrize("fused", [True, False])
+def test_frozen_decoder_matches_unfrozen_bitwise(fused):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import freeze_nvfp4_linears, nvfp4_linears
+
+    decoder = _fused_test_decoder("unit")
+    if not fused:
+        decoder.fused_blocks_forward = None
+    latents = torch.randn(2, 24, 3, 8, 8, device="cuda")
+
+    def run():
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            return decoder(latents)
+
+    before = run()
+    master_bytes = sum(layer.weight.numel() * layer.weight.element_size() for layer in nvfp4_linears(decoder))
+    assert freeze_nvfp4_linears(decoder) == 2 * 6
+    layers = nvfp4_linears(decoder)
+    assert all(layer.frozen and layer.weight is None for layer in layers)
+    names = {name for name, module in decoder.named_modules() if isinstance(module, NVFP4DecoderLinear)}
+    assert not names & {key.rpartition(".")[0] for key in decoder.state_dict() if key.endswith(".weight")}
+    packed_bytes = sum(buf.numel() * buf.element_size() for layer in layers for buf in layer.buffers())
+    assert packed_bytes < master_bytes / 6
+    assert torch.equal(run(), before)
+    if fused:
+        assert all(block._nvfp4_fused_plan[1] is not None for block in decoder.transformer_blocks)
+    with pytest.raises(RuntimeError, match="frozen"):
+        layers[0].invalidate()
+
+
+@_needs_fp4
+def test_frozen_linear_survives_module_to():
+    torch.manual_seed(0)
+    layer = NVFP4DecoderLinear.from_linear(nn.Linear(256, 128), rotation_group=None, compute_dtype=torch.bfloat16,
+                                           act_scale="unit").cuda().requires_grad_(False)
+    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        expected = layer(x)
+        state = layer.fused_state()
+        layer.freeze()
+        assert torch.equal(layer(x), expected)
+        assert torch.equal(layer.fused_state().packed, state.packed)
+        layer.cpu().cuda()
+        assert torch.equal(layer(x), expected)
+        with torch.enable_grad():
+            assert torch.equal(layer(x), expected)
+
+
+# Loading an exported decoder (export_deploy.py format) into a dense H3 VAE.
+_TINY_HEAD_DIM = 16
+
+
+def _tiny_vae_arch(decoder_layers: int, heads: int = 2) -> dict:
+    return {
+        "_class_name": "AutoencoderKLMiniMaxH3",
+        "latent_channels": 4,
+        "block_out_channels": [32, 32],
+        "layers_per_block": 1,
+        "spatial_downsample_factors": [2, 2],
+        "temporal_downsample_factors": [2, 2],
+        "decoder_num_layers": decoder_layers,
+        "decoder_num_attention_heads": heads,
+        "decoder_attention_head_dim": _TINY_HEAD_DIM,
+        "decoder_num_register_tokens": 2,
+        "decoder_ffn_mult": 2,
+        "latents_mean": [0.0] * 4,
+        "latents_std": [1.0] * 4,
+    }
+
+
+def _tiny_h3_vae(arch: dict):
+    from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEArchConfig, MiniMaxH3VideoVAEConfig
+    from fastvideo.models.vaes.minimax_h3_video import AutoencoderKLMiniMaxH3
+
+    fields = {key: tuple(value) if isinstance(value, list) else value for key, value in arch.items() if key[0] != "_"}
+    return AutoencoderKLMiniMaxH3(MiniMaxH3VideoVAEConfig(arch_config=MiniMaxH3VideoVAEArchConfig(**fields))).eval()
+
+
+def _write_vae_dir(path, decoder_layers: int):
+    from safetensors.torch import save_file
+
+    torch.manual_seed(1)
+    path.mkdir()
+    arch = _tiny_vae_arch(decoder_layers)
+    (path / "config.json").write_text(__import__("json").dumps(arch))
+    save_file({key: value.contiguous() for key, value in _tiny_h3_vae(arch).state_dict().items()},
+              str(path / "diffusion_pytorch_model.safetensors"))
+
+
+def _write_deploy_checkpoint(path, student_layers: int, base_layers: int, heads: int = 2, **metadata):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import (NVFP4_DECODER_DEPLOY_FORMAT,
+                                                                keep_evenly_spaced_blocks)
+
+    torch.manual_seed(2)
+    vae = _tiny_h3_vae(_tiny_vae_arch(base_layers, heads))
+    keep_evenly_spaced_blocks(vae.decoder, student_layers)
+    names = convert_decoder_to_nvfp4(vae.decoder, compute_dtype=torch.bfloat16, act_scale="unit")
+    with torch.no_grad():
+        for parameter in vae.decoder.parameters():
+            parameter.normal_()
+    decoder = {}
+    for key, value in vae.decoder.state_dict().items():
+        module, _, param = key.rpartition(".")
+        decoder[key] = value.bfloat16() if module in names and param in ("weight", "bias") else value
+    torch.save(
+        {
+            "format": NVFP4_DECODER_DEPLOY_FORMAT,
+            "decoder": decoder,
+            "post_quant_conv": vae.post_quant_conv.state_dict(),
+            "metadata": {
+                "act_scale": "unit",
+                "rotation_group": None,
+                "skip_blocks": [],
+                "num_linears": len(names),
+                "student_layers": student_layers,
+                **metadata,
+            },
+        }, path)
+    return decoder
+
+
+def _load_h3_vae(vae_dir):
+    from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEConfig
+    from fastvideo.configs.pipelines import PipelineConfig
+    from fastvideo.fastvideo_args import FastVideoArgs
+    from fastvideo.models.loader.component_loader import VAELoader
+
+    args = FastVideoArgs(model_path=str(vae_dir),
+                         pipeline_config=PipelineConfig(vae_config=MiniMaxH3VideoVAEConfig(), vae_precision="fp32"))
+    args.vae_cpu_offload = True  # load on CPU
+    return VAELoader().load(str(vae_dir), args)
+
+
+def test_loader_applies_exported_nvfp4_decoder(tmp_path):
+    import fastvideo.envs as envs
+
+    _write_vae_dir(tmp_path / "vae", decoder_layers=5)
+    expected = _write_deploy_checkpoint(tmp_path / "d3.pt", student_layers=3, base_layers=5)
+    dense = _load_h3_vae(tmp_path / "vae")
+    assert len(dense.decoder.transformer_blocks) == 5 and dense.decode_autocast_dtype == torch.float16
+    with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / "d3.pt")):
+        vae = _load_h3_vae(tmp_path / "vae")
+    assert len(vae.decoder.transformer_blocks) == 3
+    assert vae.decode_autocast_dtype == torch.bfloat16
+    layer = vae.decoder.transformer_blocks[1].ff.net[2]
+    assert isinstance(layer, NVFP4DecoderLinear) and layer.act_scale == "unit" and not layer.frozen  # CPU
+    state = vae.decoder.state_dict()
+    for key, value in expected.items():
+        assert torch.equal(state[key].to(value.dtype), value), key
+    assert not any(parameter.requires_grad for parameter in vae.parameters())
+
+
+@pytest.mark.parametrize("student_layers,base_layers,heads,match", [(6, 6, 2, "needs 6 decoder blocks"),
+                                                                     (2, 2, 4, "does not fit")])
+def test_loader_refuses_incompatible_nvfp4_decoder(tmp_path, student_layers, base_layers, heads, match):
+    import fastvideo.envs as envs
+
+    _write_vae_dir(tmp_path / "vae", decoder_layers=4)
+    _write_deploy_checkpoint(tmp_path / "bad.pt", student_layers, base_layers, heads)
+    with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / "bad.pt")), pytest.raises(ValueError,
+                                                                                               match=match):
+        _load_h3_vae(tmp_path / "vae")
+
+
+def test_loader_rejects_non_deploy_checkpoint(tmp_path):
+    import fastvideo.envs as envs
+
+    _write_vae_dir(tmp_path / "vae", decoder_layers=2)
+    torch.save({"decoder": {}, "step": 3}, tmp_path / "train.pt")
+    with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / "train.pt")), pytest.raises(ValueError,
+                                                                                                 match="format"):
+        _load_h3_vae(tmp_path / "vae")
+    with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / "missing.pt")), pytest.raises(
+            FileNotFoundError):
+        _load_h3_vae(tmp_path / "vae")
+
+
+def test_keep_evenly_spaced_blocks_matches_the_f8_cut():
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import keep_evenly_spaced_blocks
+
+    decoder = _tiny_decoder(num_layers=26)
+    blocks = list(decoder.transformer_blocks)
+    assert keep_evenly_spaced_blocks(decoder, 8) == [0, 4, 7, 11, 14, 18, 21, 25]
+    assert list(decoder.transformer_blocks) == [blocks[i] for i in (0, 4, 7, 11, 14, 18, 21, 25)]
+
+
+@_needs_fp4
+@pytest.mark.parametrize("rows,out_features,in_features", [(1797, 2048, 2048), (12 * 1797, 16384, 2048),
+                                                             (12 * 1797, 2048, 8192)])
+def test_decoder_gemm_backend_matches_cutlass(rows, out_features, in_features):
+    import flashinfer
+
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import _quantized_weight, mm_fp4_backend
+    from fastvideo.models.vaes.minimax_h3_nvfp4_fused import quantize
+
+    backend = mm_fp4_backend(rows, out_features, in_features, torch.device("cuda"))
+    if backend == "cutlass":
+        pytest.skip("this GPU decodes with the CUTLASS backend")
+    torch.manual_seed(0)
+    sf = torch.ones((), device="cuda")
+    x_fp4, x_scale = quantize(torch.randn(rows, in_features, device="cuda").bfloat16(), sf)
+    packed, inv_scale, global_sf_w = _quantized_weight(
+        (torch.randn(out_features, in_features, device="cuda") * 0.02).bfloat16())
+    outs = []
+    for name in ("cutlass", backend):
+        out = torch.empty(rows, out_features, device="cuda", dtype=torch.bfloat16)
+        flashinfer.mm_fp4(x_fp4, packed.T, x_scale, inv_scale.T, 1.0 / (sf * global_sf_w), torch.bfloat16, out,
+                          block_size=16, use_8x4_sf_layout=False, backend=name)
+        outs.append(out)
+    assert torch.equal(outs[0], outs[1])

@@ -521,6 +521,10 @@ def _gemm(quantized: tuple[torch.Tensor, torch.Tensor], state: NVFP4FusedState) 
         return out
     import flashinfer
 
+    from fastvideo.models.vaes import minimax_h3_nvfp4_decoder
+
+    backend = minimax_h3_nvfp4_decoder.mm_fp4_backend(x_fp4.shape[0], state.out_features, 2 * x_fp4.shape[1],
+                                                      out.device)
     flashinfer.mm_fp4(x_fp4,
                       state.packed.T,
                       x_inv_scale,
@@ -530,7 +534,7 @@ def _gemm(quantized: tuple[torch.Tensor, torch.Tensor], state: NVFP4FusedState) 
                       out,
                       block_size=NVFP4_BLOCK,
                       use_8x4_sf_layout=False,
-                      backend="cutlass")
+                      backend=backend)
     return out
 
 

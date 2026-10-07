@@ -266,11 +266,9 @@ def flatten(row: dict, prefix: str = "") -> dict:
 
 def keep_blocks(decoder: nn.Module, count: int) -> None:
     """Keep ``count`` evenly spaced transformer blocks (first and last included)."""
-    total = len(decoder.transformer_blocks)
-    if not 1 <= count <= total:
-        raise ValueError(f"cannot keep {count} of {total} decoder blocks")
-    indices = sorted({round(i * (total - 1) / max(count - 1, 1)) for i in range(count)})
-    decoder.transformer_blocks = nn.ModuleList(decoder.transformer_blocks[i] for i in indices)
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import keep_evenly_spaced_blocks
+
+    keep_evenly_spaced_blocks(decoder, count)
 
 
 def variant_checkpoint(name: str, args: argparse.Namespace) -> str | None:

@@ -142,9 +142,11 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
                 )
             # Attribute the streamed decoder computation while retaining
             # per-chunk device-to-host transfer and pinned-buffer reuse.
+            # fp16 for the release decoders; NVFP4 decoders were trained under bf16.
+            autocast_dtype = getattr(self.vae, "decode_autocast_dtype", torch.float16)
             with (
                     nvtx_range("minimax_h3.vae"),
-                    torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"),
+                    torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=device.type == "cuda"),
             ):
                 if parallel:
                     strategy = fastvideo_args.vae_parallel_decode_strategy or DEFAULT_DECODE_GATHER_STRATEGY

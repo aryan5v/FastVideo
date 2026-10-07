@@ -8,7 +8,7 @@ quantization-aware training runs at deployment exactly as it was trained:
   ``dynamic`` (abs-max of every call), ``unit`` (1.0, the H3 DiT scheme), or
   ``static`` (a per-layer abs-max calibrated once and stored with the weights);
 * weights: the same scheme, quantized once at inference and cached;
-* GEMM: ``flashinfer.mm_fp4`` (cutlass), bias added in the activation dtype.
+* GEMM: ``flashinfer.mm_fp4`` (``mm_fp4_backend``), bias added in the activation dtype.
 
 Training runs through ``_NVFP4DecoderSTE``, whose forward *is* the inference
 function and whose backward is full precision (straight-through). An optional block Hadamard rotation (the regular
@@ -48,6 +48,20 @@ def _quantized_weight(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor,
     return packed, inv_scale, global_sf
 
 
+def mm_fp4_backend(rows: int, out_features: int, in_features: int, device: torch.device) -> str:
+    """FlashInfer ``mm_fp4`` backend for one decoder GEMM; the backends return identical outputs.
+
+    DGX Spark (GB10, sm_121) uses cuDNN: up to 1.4x faster than CUTLASS on the tile-batched
+    FFN input projection and on par elsewhere. Other GPUs use CUTLASS.
+    """
+    from fastvideo.layers.quantization.nvfp4_config import _is_dgx_spark
+
+    if device.type != "cuda":
+        return "cutlass"
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return "cudnn" if _is_dgx_spark(index) else "cutlass"
+
+
 ACT_SCALES = ("dynamic", "unit", "static")
 FP4_E4M3_RANGE = 448.0 * 6.0
 
@@ -76,7 +90,7 @@ def nvfp4_linear_inference(x: torch.Tensor, packed: torch.Tensor, inv_scale: tor
         out,
         block_size=NVFP4_BLOCK_SIZE,
         use_8x4_sf_layout=False,
-        backend="cutlass",
+        backend=mm_fp4_backend(x2d.shape[0], out_features, orig_shape[-1], x.device),
     )
     if bias is not None:
         out.add_(bias.to(x.dtype))
@@ -129,6 +143,9 @@ class NVFP4DecoderLinear(nn.Module):
     ``act_scale="static"`` uses the persistent ``input_amax`` buffer. Set
     ``calibrating = True`` to run dynamically while folding each call's
     abs-max into it.
+
+    ``freeze()`` turns the layer inference-only: the packed weight becomes a
+    buffer and the master ``weight`` is dropped (``weight is None``).
     """
 
     def __init__(self, weight: torch.Tensor, bias: torch.Tensor | None, rotation_group: int | None,
@@ -153,7 +170,7 @@ class NVFP4DecoderLinear(nn.Module):
         self.bias = nn.Parameter(bias.detach().clone()) if bias is not None else None
         self.register_buffer("input_amax", torch.zeros((), dtype=torch.float32, device=weight.device))
         self._packed: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-        self._fused: tuple[int, NVFP4FusedState] | None = None
+        self._fused: tuple[tuple[int, int], NVFP4FusedState] | None = None
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, *, rotation_group: int | None, compute_dtype: torch.dtype,
@@ -165,7 +182,41 @@ class NVFP4DecoderLinear(nn.Module):
         bias = linear.bias.detach().float() if linear.bias is not None else None
         return cls(weight, bias, rotation_group, compute_dtype, act_scale)
 
+    @property
+    def frozen(self) -> bool:
+        return self.weight is None
+
     def invalidate(self) -> None:
+        if self.frozen:
+            raise RuntimeError("a frozen NVFP4DecoderLinear has no master weight to re-quantize")
+        self._packed = None
+        self._fused = None
+
+    def _packed_weight(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.frozen:
+            return self.packed_weight, self.weight_inv_scale, self.weight_global_sf
+        if self._packed is None:
+            self._packed = _quantized_weight(self.weight.detach().to(self.compute_dtype))
+        return self._packed
+
+    @torch.no_grad()
+    def freeze(self) -> None:
+        """Pack the weight once and drop the full-precision master (inference only, irreversible).
+
+        Resident memory falls to the packed FP4 weight and its scales. Outputs are unchanged: the
+        same packed tensors feed the eager GEMM and ``fused_state()``. Buffers are non-persistent,
+        so a frozen layer's ``state_dict()`` holds only ``bias`` and ``input_amax``.
+        """
+        if self.frozen:
+            return
+        if self.dense_bypass or self.calibrating:
+            raise RuntimeError("cannot freeze an NVFP4DecoderLinear in dense-bypass or calibration mode")
+        packed, inv_scale, global_sf_w = self._packed_weight()
+        del self.weight
+        self.register_parameter("weight", None)
+        self.register_buffer("packed_weight", packed, persistent=False)
+        self.register_buffer("weight_inv_scale", inv_scale, persistent=False)
+        self.register_buffer("weight_global_sf", global_sf_w, persistent=False)
         self._packed = None
         self._fused = None
 
@@ -178,12 +229,11 @@ class NVFP4DecoderLinear(nn.Module):
         if (self.dense_bypass or self.rotation_group is not None or self.calibrating or self.act_scale == "dynamic"
                 or self.compute_dtype != torch.bfloat16 or self.bias is None):
             return None
-        version = self.input_amax._version
+        packed, inv_scale, global_sf_w = self._packed_weight()
+        # The data pointer re-keys the cache when a frozen layer's buffers move (``module.to``).
+        version = (self.input_amax._version, packed.data_ptr())
         if self._fused is None or self._fused[0] != version:
-            if self._packed is None:
-                self._packed = _quantized_weight(self.weight.detach().to(self.compute_dtype))
-            packed, inv_scale, global_sf_w = self._packed
-            global_sf_x = self._activation_global_sf(self.weight)
+            global_sf_x = self._activation_global_sf(self.input_amax)
             alpha = 1.0 / (global_sf_x * global_sf_w)
             state = NVFP4FusedState(packed, inv_scale, global_sf_x, alpha, self.bias.detach().to(self.compute_dtype),
                                     self.out_features)
@@ -192,7 +242,7 @@ class NVFP4DecoderLinear(nn.Module):
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
-                f"rotation_group={self.rotation_group}, act_scale={self.act_scale}")
+                f"rotation_group={self.rotation_group}, act_scale={self.act_scale}, frozen={self.frozen}")
 
     def _activation_global_sf(self, x: torch.Tensor) -> torch.Tensor | None:
         if self.calibrating:
@@ -209,15 +259,15 @@ class NVFP4DecoderLinear(nn.Module):
         if self.rotation_group is not None:
             x = rotate_activation(x, self.rotation_group)
         if self.dense_bypass:
+            if self.frozen:
+                raise RuntimeError("a frozen NVFP4DecoderLinear has no master weight for the dense bypass")
             bias = self.bias.to(x.dtype) if self.bias is not None else None
             return F.linear(x, self.weight.to(x.dtype), bias)
         global_sf_x = self._activation_global_sf(x)
-        if torch.is_grad_enabled() and self.weight.requires_grad:
+        if torch.is_grad_enabled() and not self.frozen and self.weight.requires_grad:
             self.invalidate()
             return _NVFP4DecoderSTE.apply(x, self.weight, self.bias, global_sf_x)
-        if self._packed is None:
-            self._packed = _quantized_weight(self.weight.detach().to(self.compute_dtype))
-        return nvfp4_linear_inference(x, *self._packed, self.bias, self.out_features, global_sf_x)
+        return nvfp4_linear_inference(x, *self._packed_weight(), self.bias, self.out_features, global_sf_x)
 
 
 def nvfp4_decoder_linear_names(decoder: nn.Module, skip_blocks: tuple[int, ...] = ()) -> list[str]:
@@ -298,3 +348,77 @@ def nvfp4_decoder_metadata(names: list[str], rotation_group: int | None, skip_bl
         "act_scale": act_scale,
         "num_linears": len(names),
     }
+
+
+def freeze_nvfp4_linears(module: nn.Module) -> int:
+    """``freeze()`` every NVFP4 linear under ``module`` (inference only); return how many."""
+    layers = nvfp4_linears(module)
+    for layer in layers:
+        layer.freeze()
+    return len(layers)
+
+
+def keep_evenly_spaced_blocks(decoder: nn.Module, count: int) -> list[int]:
+    """Depth-cut the decoder to ``count`` evenly spaced blocks (first and last kept); return the kept indices."""
+    total = len(decoder.transformer_blocks)
+    if not 1 <= count <= total:
+        raise ValueError(f"cannot keep {count} of {total} decoder blocks")
+    indices = sorted({round(i * (total - 1) / max(count - 1, 1)) for i in range(count)})
+    decoder.transformer_blocks = nn.ModuleList(decoder.transformer_blocks[i] for i in indices)
+    return indices
+
+
+# ``scripts/distill/minimax_h3_nvfp4_decoder/export_deploy.py`` output.
+NVFP4_DECODER_DEPLOY_FORMAT = "fastvideo_h3_decoder_nvfp4_deploy_v1"
+
+
+def load_nvfp4_decoder_checkpoint(path: str) -> dict[str, Any]:
+    """Read an exported NVFP4 decoder (tensors, plain metadata) and check its format."""
+    checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != NVFP4_DECODER_DEPLOY_FORMAT:
+        found = checkpoint.get("format") if isinstance(checkpoint, dict) else type(checkpoint).__name__
+        raise ValueError(f"{path} is not a {NVFP4_DECODER_DEPLOY_FORMAT} checkpoint (format: {found!r})")
+    missing = {"decoder", "post_quant_conv", "metadata"} - checkpoint.keys()
+    if missing:
+        raise ValueError(f"{path} is missing {sorted(missing)}")
+    return checkpoint
+
+
+def apply_nvfp4_decoder_checkpoint(vae: nn.Module, checkpoint: dict[str, Any], *, freeze: bool) -> dict[str, Any]:
+    """Turn a dense ``AutoencoderKLMiniMaxH3``'s decoder into an exported NVFP4 decoder, in place.
+
+    The VAE is depth-cut to the checkpoint's ``student_layers`` blocks when it has more (a light
+    or full VAE can host a shallower student), converted with the checkpoint's NVFP4 settings,
+    and loaded strictly, so an architecture mismatch fails here instead of decoding garbage.
+    ``freeze`` packs the weights and drops the masters (needs the VAE on a CUDA device).
+    Sets ``vae.decode_autocast_dtype`` to bf16, the dtype these decoders are trained and
+    validated under. Returns the checkpoint metadata.
+    """
+    metadata = checkpoint["metadata"]
+    decoder = vae.decoder
+    available = len(decoder.transformer_blocks)
+    student_layers = int(metadata.get("student_layers", available))
+    if student_layers > available:
+        raise ValueError(f"the NVFP4 decoder needs {student_layers} decoder blocks but the loaded VAE has "
+                         f"{available}; load a VAE with at least that many (e.g. the full MiniMax-H3 vae/)")
+    if student_layers < available:
+        keep_evenly_spaced_blocks(decoder, student_layers)
+    act_scale = metadata.get("act_scale", "dynamic")
+    names = convert_decoder_to_nvfp4(decoder,
+                                     rotation_group=metadata.get("rotation_group"),
+                                     skip_blocks=tuple(metadata.get("skip_blocks") or ()),
+                                     compute_dtype=torch.bfloat16,
+                                     act_scale=act_scale)
+    expected = metadata.get("num_linears")
+    if expected is not None and int(expected) != len(names):
+        raise ValueError(f"the NVFP4 decoder has {expected} NVFP4 linears, the converted VAE {len(names)}")
+    try:
+        decoder.load_state_dict(checkpoint["decoder"], strict=True)
+        vae.post_quant_conv.load_state_dict(checkpoint["post_quant_conv"], strict=True)
+    except RuntimeError as error:
+        raise ValueError(f"the NVFP4 decoder does not fit this VAE's architecture: {error}") from error
+    vae.requires_grad_(False)
+    if freeze:
+        freeze_nvfp4_linears(decoder)
+    vae.decode_autocast_dtype = torch.bfloat16
+    return metadata

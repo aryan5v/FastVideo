@@ -557,6 +557,8 @@ class AutoencoderKLMiniMaxH3(nn.Module):
     # ``prepare_for_compile`` flips this per instance when the pipeline opts
     # into ``enable_torch_compile_vae``; default instances stay fully eager.
     _tile_helpers_compiled = False
+    # Autocast dtype of the pipeline's decode stage; NVFP4 decoders (``apply_nvfp4_decoder_checkpoint``) use bf16.
+    decode_autocast_dtype: torch.dtype = torch.float16
 
     def __init__(self, config: MiniMaxH3VideoVAEConfig) -> None:
         super().__init__()

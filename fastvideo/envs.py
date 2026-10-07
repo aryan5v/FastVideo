@@ -600,6 +600,10 @@ FASTVIDEO_H3_VAE_NVFP4_CUDA_GRAPH = EnvBool(True,
                                             category="performance",
                                             doc="Replay small fused NVFP4 MiniMax-H3 VAE decoder calls (at most "
                                             "four 1797-token tiles) as per-shape CUDA graphs.")
+FASTVIDEO_H3_VAE_NVFP4_DECODER = EnvPath(None,
+                                         category="performance",
+                                         doc="Exported NVFP4 MiniMax-H3 video decoder (.pt) that replaces the "
+                                         "VAE decoder at load; skips the INT8 ConvRot overlay.")
 FASTVIDEO_H3_VAE_INT8_OVERLAY = EnvBool(True,
                                         category="performance",
                                         doc="Apply the INT8 ConvRot decoder overlay when the MiniMax-H3 VAE folder "
