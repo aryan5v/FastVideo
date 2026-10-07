@@ -592,6 +592,10 @@ FASTVIDEO_H3_VAE_TILE_BATCH = EnvInt(1,
                                      category="performance",
                                      doc="Spatial tiles per MiniMax-H3 video VAE decoder call; 1 decodes per "
                                      "tile.")
+FASTVIDEO_H3_VAE_NVFP4_FUSED = EnvBool(True,
+                                       category="performance",
+                                       doc="Run NVFP4 MiniMax-H3 VAE decoder blocks through the bit-exact fused "
+                                       "Triton kernels at inference.")
 FASTVIDEO_H3_VAE_INT8_SHARED_QKV = EnvBool(False,
                                            category="performance",
                                            doc="Share the INT8 activation rotation and quantization across the "

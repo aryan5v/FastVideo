@@ -16,6 +16,7 @@ or ``light`` (26-layer), plus ``taeh3``. Modifiers:
   r<N>      Hadamard rotation group N for nvfp4 (e.g. r256)
   unit      nvfp4 activation global scale 1.0 (default: dynamic per call)
   static    nvfp4 activation scale calibrated on the benchmark latents (one decode)
+  unfused   nvfp4 without the fused inference kernels (the op-by-op eager path)
   d<K>      keep K evenly spaced decoder blocks (speed only unless trained)
   compile   torch.compile the ViT decoder
 
@@ -246,7 +247,7 @@ def keep_blocks(decoder: nn.Module, count: int) -> None:
 
 
 def variant_checkpoint(name: str, args: argparse.Namespace) -> str | None:
-    base = "_".join(mod for mod in name.split("_") if mod != "compile")
+    base = "_".join(mod for mod in name.split("_") if mod not in ("compile", "unfused"))
     mapping = dict(item.split("=", 1) for item in args.checkpoint)
     return mapping.get(base) or mapping.get(name) or args.nvfp4_checkpoint
 
@@ -286,6 +287,8 @@ def build_variant(name: str, args: argparse.Namespace, device: torch.device,
                 vae.decoder.load_state_dict(state["decoder"], strict=True)
                 vae.post_quant_conv.load_state_dict(state["post_quant_conv"], strict=True)
             vae.requires_grad_(False)
+            if "unfused" in mods:
+                vae.decoder.fused_blocks_forward = None
         if "compile" in mods:
             vae.decoder = torch.compile(vae.decoder, dynamic=False)
         cache[name] = vae

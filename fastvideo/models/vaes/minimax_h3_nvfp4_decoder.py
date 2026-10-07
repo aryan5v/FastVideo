@@ -23,7 +23,7 @@ are.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -82,6 +82,20 @@ def nvfp4_linear_inference(x: torch.Tensor, packed: torch.Tensor, inv_scale: tor
     return out.reshape(*orig_shape[:-1], out_features)
 
 
+class NVFP4FusedState(NamedTuple):
+    """Everything the fused inference kernels need from one ``NVFP4DecoderLinear``.
+
+    Each tensor is computed with the same expression as ``nvfp4_linear_inference``, so a GEMM
+    fed from here matches the eager linear bit for bit.
+    """
+    packed: torch.Tensor
+    inv_scale: torch.Tensor
+    global_sf_x: torch.Tensor
+    alpha: torch.Tensor
+    bias: torch.Tensor
+    out_features: int
+
+
 class _NVFP4DecoderSTE(torch.autograd.Function):
     """Forward = ``nvfp4_linear_inference`` on a freshly quantized weight; backward = full precision."""
 
@@ -136,6 +150,7 @@ class NVFP4DecoderLinear(nn.Module):
         self.bias = nn.Parameter(bias.detach().clone()) if bias is not None else None
         self.register_buffer("input_amax", torch.zeros((), dtype=torch.float32, device=weight.device))
         self._packed: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self._fused: tuple[int, NVFP4FusedState] | None = None
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, *, rotation_group: int | None, compute_dtype: torch.dtype,
@@ -149,6 +164,28 @@ class NVFP4DecoderLinear(nn.Module):
 
     def invalidate(self) -> None:
         self._packed = None
+        self._fused = None
+
+    def fused_state(self) -> NVFP4FusedState | None:
+        """Cached inference state for the fused decoder kernels, or None when they cannot reproduce this layer.
+
+        The fused kernels quantize with a precomputed global scale, so a dynamic (per-call abs-max)
+        scale, calibration, and the activation rotation keep the eager path.
+        """
+        if (self.rotation_group is not None or self.calibrating or self.act_scale == "dynamic"
+                or self.compute_dtype != torch.bfloat16 or self.bias is None):
+            return None
+        version = self.input_amax._version
+        if self._fused is None or self._fused[0] != version:
+            if self._packed is None:
+                self._packed = _quantized_weight(self.weight.detach().to(self.compute_dtype))
+            packed, inv_scale, global_sf_w = self._packed
+            global_sf_x = self._activation_global_sf(self.weight)
+            alpha = 1.0 / (global_sf_x * global_sf_w)
+            state = NVFP4FusedState(packed, inv_scale, global_sf_x, alpha, self.bias.detach().to(self.compute_dtype),
+                                    self.out_features)
+            self._fused = (version, state)
+        return self._fused[1]
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
@@ -170,7 +207,7 @@ class NVFP4DecoderLinear(nn.Module):
             x = rotate_activation(x, self.rotation_group)
         global_sf_x = self._activation_global_sf(x)
         if torch.is_grad_enabled() and self.weight.requires_grad:
-            self._packed = None
+            self.invalidate()
             return _NVFP4DecoderSTE.apply(x, self.weight, self.bias, global_sf_x)
         if self._packed is None:
             self._packed = _quantized_weight(self.weight.detach().to(self.compute_dtype))
@@ -209,6 +246,10 @@ def convert_decoder_to_nvfp4(decoder: nn.Module,
             parent[int(child)] = replacement
         else:
             setattr(parent, child, replacement)
+    from fastvideo.models.vaes.minimax_h3_nvfp4_fused import fused_nvfp4_blocks_forward
+
+    # Inference runs eligible block stacks through the bit-exact fused kernels (see that module).
+    decoder.fused_blocks_forward = fused_nvfp4_blocks_forward
     return names
 
 

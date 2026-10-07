@@ -7,7 +7,7 @@ This module intentionally uses only PyTorch and FastVideo configuration types.
 """
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import torch
@@ -477,6 +477,8 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
         self.norm_out = nn.LayerNorm(dim, elementwise_affine=True, eps=norm_eps)
         self.proj_out = nn.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
         self.gradient_checkpointing = False
+        self.fused_blocks_forward: Callable[[nn.ModuleList, torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+                                            torch.Tensor | None] | None = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Decode one latent spatial input through the H3 video transformer."""
@@ -501,7 +503,12 @@ class MiniMaxH3VideoViTDecoder3d(nn.Module):
         suffix_ids = position_ids.new_zeros((batch_size, self.num_register_tokens + 1, 3))
         rotary_emb = self.rope(torch.cat([position_ids, suffix_ids], dim=1))
 
-        for block in self.transformer_blocks:
+        # Quantized decoders (e.g. NVFP4) may install a fused inference path; it returns None when inapplicable.
+        fused = self.fused_blocks_forward(self.transformer_blocks, hidden_states,
+                                          rotary_emb) if self.fused_blocks_forward is not None else None
+        if fused is not None:
+            hidden_states = fused
+        for block in self.transformer_blocks if fused is None else ():
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = checkpoint(block, hidden_states, rotary_emb, use_reentrant=False)
             else:
