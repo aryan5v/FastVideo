@@ -186,7 +186,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--save-videos", action="store_true")
+    parser.add_argument("--wandb-project", help="log every row and a summary table to this W&B project")
+    parser.add_argument("--wandb-name")
     return parser.parse_args()
+
+
+def flatten(row: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in row.items():
+        if isinstance(value, dict):
+            flat.update(flatten(value, f"{prefix}{key}/"))
+        elif not isinstance(value, list):
+            flat[f"{prefix}{key}"] = value
+    return flat
 
 
 def build_variant(name: str, args: argparse.Namespace, device: torch.device,
@@ -231,6 +243,11 @@ def main() -> None:
     z = z.to(device=device, dtype=torch.float32)
     print(f"latents {tuple(z.shape)}", flush=True)
 
+    run = None
+    if args.wandb_project:
+        import wandb
+        run = wandb.init(project=args.wandb_project, name=args.wandb_name, job_type="decoder-bench", config=vars(args))
+
     fidelity = Fidelity(device)
     rows = []
     reference = None
@@ -272,8 +289,15 @@ def main() -> None:
                                out_dir / f"{name}_tb{tile_batch}_ov{overlap}.pt")
                 rows.append(row)
                 print(json.dumps(row), flush=True)
+                if run is not None:
+                    run.log(flatten(row))
                 del video
     (out_dir / "results.json").write_text(json.dumps(rows, indent=2))
+    if run is not None:
+        flat_rows = [flatten(row) for row in rows]
+        columns = sorted({key for row in flat_rows for key in row})
+        run.log({"results": wandb.Table(columns=columns, data=[[row.get(c) for c in columns] for row in flat_rows])})
+        run.finish()
 
 
 if __name__ == "__main__":
