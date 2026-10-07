@@ -252,8 +252,11 @@ def convert_decoder_to_nvfp4(decoder: nn.Module,
             parent[int(child)] = replacement
         else:
             setattr(parent, child, replacement)
-    from fastvideo.models.vaes.minimax_h3_nvfp4_fused import fused_nvfp4_blocks_forward
-
+    try:
+        from fastvideo.models.vaes.minimax_h3_nvfp4_fused import fused_nvfp4_blocks_forward
+    except ImportError:
+        # Triton-less hosts (CPU, macOS) keep the eager NVFP4 path; the fused kernels are an exact speedup only.
+        return names
     # Inference runs eligible block stacks through the bit-exact fused kernels (see that module).
     decoder.fused_blocks_forward = fused_nvfp4_blocks_forward
     return names
