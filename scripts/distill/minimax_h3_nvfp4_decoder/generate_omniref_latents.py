@@ -99,14 +99,17 @@ def load_manifest(path: str, cases: list[str], max_frames: int) -> dict[tuple[st
     return groups
 
 
-def clip_plan(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """The full deterministic plan; shard ``s`` takes every ``num_shards``-th entry from ``s``."""
-    groups = load_manifest(args.manifest, args.cases, args.max_frames)
+def select_clips(groups: dict[tuple[str, str], list[dict[str, Any]]],
+                 seed: int,
+                 per_group: int,
+                 exclude_sources: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Per group: seeded shuffle, drop excluded source clips, take ``per_group``; interleave the groups."""
     picked = []
     for key in sorted(groups):
         entries = sorted(groups[key], key=lambda entry: entry["id"])
-        random.Random(f"{args.seed}:{key[0]}:{key[1]}").shuffle(entries)
-        picked.append(entries[:args.per_group])
+        random.Random(f"{seed}:{key[0]}:{key[1]}").shuffle(entries)
+        entries = [entry for entry in entries if entry["id"].split(":", 1)[-1] not in exclude_sources]
+        picked.append(entries[:per_group])
     plan = []
     for index in range(max((len(entries) for entries in picked), default=0)):
         for entries in picked:
@@ -116,11 +119,24 @@ def clip_plan(args: argparse.Namespace) -> list[dict[str, Any]]:
                 clip_id = f"omniref-{entry['case']}-{source_id}-{entry['resolution']}"
                 plan.append({
                     "id": clip_id,
+                    "source": source_id,
                     "case": entry["case"],
+                    "resolution": entry["resolution"],
                     "parquet": entry["parquet"],
-                    "seed": clip_seed(args.seed, clip_id)
+                    "seed": clip_seed(seed, clip_id)
                 })
-    return plan[args.shard::args.num_shards]
+    return plan
+
+
+def clip_plan(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """The full deterministic plan; shard ``s`` takes every ``num_shards``-th entry from ``s``."""
+    groups = load_manifest(args.manifest, args.cases, args.max_frames)
+    if args.eval_dir is None:
+        return select_clips(groups, args.seed, args.per_group)[args.shard::args.num_shards]
+    # A held-out set: no source clip (at either resolution) of the main plan.
+    main_plan = select_clips(groups, args.exclude_seed, args.exclude_per_group)
+    excluded = frozenset(clip["source"] for clip in main_plan)
+    return select_clips(groups, args.seed, args.per_group, excluded)[args.shard::args.num_shards]
 
 
 def existing_ids(data_dir: Path) -> set[str]:
@@ -374,11 +390,55 @@ def write_preview(driver: OmniRefLatentGenerator, clip: dict[str, Any], row: dic
 
 
 # --------------------------------------------------------------------------- main
+def run_eval(args: argparse.Namespace, plan: list[dict[str, Any]]) -> None:
+    """Write raw (denormalized) ``[1, 24, T, H, W]`` latents, as the decode stage decodes them, plus a manifest."""
+    eval_dir = Path(args.eval_dir)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = eval_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else []
+    done = {item["id"] for item in manifest}
+    driver = OmniRefLatentGenerator(args)
+    arch = driver.fastvideo_args.pipeline_config.vae_config.arch_config
+    mean = torch.tensor(arch.latents_mean, dtype=torch.float32).view(1, -1, 1, 1, 1)
+    std = torch.tensor(arch.latents_std, dtype=torch.float32).view(1, -1, 1, 1, 1)
+    for clip in plan:
+        if clip["id"] in done:
+            continue
+        start = time.perf_counter()
+        row = read_row(clip["parquet"])
+        raw = (driver.generate(row, clip["seed"])[None] * std + mean).contiguous()
+        if not bool(torch.isfinite(raw).all()):
+            print(json.dumps({"id": clip["id"], "error": "non-finite latent"}), flush=True)
+            continue
+        name = f"{clip['case']}_{clip['resolution']}_{clip['id']}.pt"
+        if driver.is_output_rank:
+            tmp = eval_dir / f"{name}.tmp"
+            torch.save(raw, tmp)
+            tmp.replace(eval_dir / name)
+            manifest.append({
+                "file": name,
+                **{key: clip[key] for key in ("id", "source", "case", "resolution", "parquet", "seed")},
+                "width": int(row["width"]),
+                "height": int(row["height"]),
+                "num_frames": int(row["num_frames"]),
+                "shape": list(raw.shape),
+                "dtype": "float32",
+                "space": "raw (denormalized; decode-stage input)",
+                "generator": args.generator_name,
+            })
+            tmp_manifest = manifest_path.with_suffix(".tmp")
+            tmp_manifest.write_text(json.dumps(manifest, indent=1))
+            tmp_manifest.replace(manifest_path)
+        print(json.dumps({"id": clip["id"], "shape": list(raw.shape), "seconds": round(time.perf_counter() - start, 1)}),
+              flush=True)
+    driver.shutdown()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model-path", required=True, help="composed FastH3 OmniRef PDD model directory")
     parser.add_argument("--manifest", required=True, help="OmniRef MANIFEST.jsonl (case, id, parquet, resolution)")
-    parser.add_argument("--output-dir", required=True, help="directory receiving the parquet parts")
+    parser.add_argument("--output-dir", default=None, help="directory receiving the parquet parts")
     parser.add_argument("--cases", nargs="+", default=list(CASES))
     parser.add_argument("--per-group", type=int, default=300, help="clips per (case, resolution)")
     parser.add_argument("--max-frames", type=int, default=243)
@@ -390,14 +450,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--preview-dir", default=None, help="decode the first --preview clips here as MP4")
     parser.add_argument("--preview", type=int, default=0)
+    parser.add_argument("--eval-dir",
+                        default=None,
+                        help="held-out mode: write raw [1, 24, T, H, W] .pt latents and manifest.json here, from "
+                        "source clips outside the main plan (--exclude-seed / --exclude-per-group)")
+    parser.add_argument("--exclude-seed", type=int, default=20261007)
+    parser.add_argument("--exclude-per-group", type=int, default=300)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    plan = clip_plan(args)
+    if args.eval_dir is not None:
+        print(json.dumps({"eval_clips": len(plan)}), flush=True)
+        run_eval(args, plan)
+        return
+    if args.output_dir is None:
+        raise SystemExit("--output-dir is required unless --eval-dir is given")
     data_dir = Path(args.output_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    plan = clip_plan(args)
     done = existing_ids(data_dir)
     todo = [clip for clip in plan if clip["id"] not in done]
     if args.limit:
