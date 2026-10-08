@@ -96,15 +96,15 @@ def generate(args: argparse.Namespace) -> None:
         return
     generator, pipeline, fastvideo_args, request = build(args)
     transformer = pipeline.get_module("transformer")
-    timer = TimedStage(pipeline._stage_name_mapping["denoising_stage"])
     trained_steps = list(fastvideo_args.pipeline_config.dmd_denoising_steps)
     sampling = dict(request["sampling"])
     frames = (args.num_frames - 5) // 17 * 5 + 2
     grid = (frames, args.height // 32, args.width // 32)
-    if args.warmup:
-        generator.generate(request={"prompt": PROMPTS[args.prompts[0]], "sampling": {**sampling, "seed": args.seed,
-                                    "width": args.width, "height": args.height, "num_frames": args.num_frames},
-                                    "output": {"save_video": False, "return_frames": True}})
+    # One untimed request: warms kernels and, under deferred loading, creates the denoise stages.
+    generator.generate(request={"prompt": PROMPTS[args.prompts[0]], "sampling": {**sampling, "seed": args.seed,
+                                "width": args.width, "height": args.height, "num_frames": args.num_frames},
+                                "output": {"save_video": False, "return_frames": True}})
+    timer = TimedStage(pipeline._stage_name_mapping["denoising_stage"])
     with open(out / f"runs-slot{args.slot}.jsonl", "a") as log:
         for variant, prompt in todo:
             compress = variant.get("compress")
@@ -256,7 +256,7 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--num-frames", type=int, default=124)
-    parser.add_argument("--warmup", action="store_true")
+    parser.add_argument("--warmup", action="store_true", help="accepted for compatibility; generate always warms up")
     parser.add_argument("--media-dir", help="grid output directory")
     parser.add_argument("--panels", default="reference=reference", help="comma list of variant=label (grid)")
     parser.add_argument("--grid-tag", default="grid")
