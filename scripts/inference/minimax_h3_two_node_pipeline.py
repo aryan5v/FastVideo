@@ -179,10 +179,25 @@ def _build(role: str, args: argparse.Namespace):
 
 
 # --------------------------------------------------------------------------- generation node
-def run_gen(args: argparse.Namespace) -> None:
+def denoise(pipeline, message: dict[str, Any], device: torch.device):
+    """Run the DiT pipeline on an encoded request; return the denoised ForwardBatch."""
     from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_latent_preparation import MINIMAX_H3_LAYOUT_KEY
     from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 
+    batch = ForwardBatch(data_type="video",
+                         prompt_embeds=[message["prompt_embeds"].to(device)],
+                         latents=message["video_latents"].to(device),
+                         audio_latents=message["audio_latents"].to(device),
+                         raw_latent_shape=tuple(message["raw_latent_shape"]),
+                         num_inference_steps=int(message["num_inference_steps"]),
+                         VSA_sparsity=float(message["vsa_sparsity"]),
+                         extra={MINIMAX_H3_LAYOUT_KEY: _layout_from_wire(message["layout"], device)})
+    batch = pipeline.run(("denoising_stage", ), batch)
+    torch.cuda.synchronize()
+    return batch
+
+
+def run_gen(args: argparse.Namespace) -> None:
     pipeline, _, fastvideo_args = _build("gen", args)
     device = torch.device("cuda")
     host, port = args.bind.rsplit(":", 1)
@@ -209,16 +224,7 @@ def run_gen(args: argparse.Namespace) -> None:
         if message is None or message.get("stop"):
             break
         start = time.perf_counter()
-        batch = ForwardBatch(data_type="video",
-                             prompt_embeds=[message["prompt_embeds"].to(device)],
-                             latents=message["video_latents"].to(device),
-                             audio_latents=message["audio_latents"].to(device),
-                             raw_latent_shape=tuple(message["raw_latent_shape"]),
-                             num_inference_steps=int(message["num_inference_steps"]),
-                             VSA_sparsity=float(message["vsa_sparsity"]),
-                             extra={MINIMAX_H3_LAYOUT_KEY: _layout_from_wire(message["layout"], device)})
-        batch = pipeline.run(("denoising_stage", ), batch)
-        torch.cuda.synchronize()
+        batch = denoise(pipeline, message, device)
         denoise_s = time.perf_counter() - start
         reply = {
             "clip": message["clip"],
