@@ -95,16 +95,16 @@ def generate(args: argparse.Namespace) -> None:
     if not todo:
         return
     generator, pipeline, fastvideo_args, request = build(args)
-    transformer = pipeline.get_module("transformer")
-    trained_steps = list(fastvideo_args.pipeline_config.dmd_denoising_steps)
     sampling = dict(request["sampling"])
     frames = (args.num_frames - 5) // 17 * 5 + 2
     grid = (frames, args.height // 32, args.width // 32)
-    # One untimed request: warms kernels and, under deferred loading, creates the denoise stages.
+    # One untimed request: post_init builds the stages and applies the checkpoint's DMD rungs; also warms kernels.
     generator.generate(request={"prompt": PROMPTS[args.prompts[0]], "sampling": {**sampling, "seed": args.seed,
                                 "width": args.width, "height": args.height, "num_frames": args.num_frames},
                                 "output": {"save_video": False, "return_frames": True}})
     timer = TimedStage(pipeline._stage_name_mapping["denoising_stage"])
+    transformer = pipeline.get_module("transformer")
+    trained_steps = list(fastvideo_args.pipeline_config.dmd_denoising_steps)
     with open(out / f"runs-slot{args.slot}.jsonl", "a") as log:
         for variant, prompt in todo:
             compress = variant.get("compress")
