@@ -78,3 +78,15 @@ svg .label { fill: var(--fg); font-size: 12px; }
 .card h2 { margin-top: 0; }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); padding: 8px 20px;
                  font-weight: 600; }
+.name-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.name-form input { flex: 1; min-width: 160px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+                   background: var(--bg); color: var(--fg); font: inherit; }
+.segmented { display: inline-flex; align-items: center; }
+.segmented .seg-label { margin-right: 6px; }
+.segmented button { border-radius: 0; margin-left: -1px; padding: 5px 12px; }
+.segmented button:first-of-type { border-radius: 6px 0 0 6px; }
+.segmented button:last-of-type { border-radius: 0 6px 6px 0; }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.speaker { font-size: 12px; font-weight: 600; color: var(--accent-fg); background: var(--accent); border-radius: 10px;
+           padding: 0 8px; }
+.viewport.audible { outline: 3px solid var(--accent); outline-offset: 2px; }

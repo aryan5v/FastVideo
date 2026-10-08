@@ -6,8 +6,10 @@ const videos = { left: $("video-left"), right: $("video-right") };
 const viewports = { left: $("vp-left"), right: $("vp-right") };
 const STORE = {
   voter: "blindab.voter", reveal: "blindab.reveal", loop: "blindab.loop", intro: "blindab.introSeen",
-  sessionPrefix: "blindab.session.",
+  sessionPrefix: "blindab.session.", audio: "blindab.audio",
 };
+const MAX_NAME_LEN = 64;
+const AUDIO_PROBE_S = 0.5;  // fallback detection: check decoded audio bytes after this much playback
 const DRIFT_TOLERANCE_S = 0.08;
 const SESSION_GOAL = 12;
 
@@ -19,27 +21,26 @@ let playedMs = 0;           // wall time spent playing for this ballot
 let lastTick = 0;
 let seeking = false;
 let totalVotes = null;      // this voter's votes across all sessions, from the server
+const AUDIO_CHOICES = ["off", "left", "right"];
+let audioChoice = "off";    // which side you hear (remembered across ballots)
+let clipHasAudio = false;   // whether the current clip has an audio track
+let audioProbePending = false;
 
 // ---------- settings ----------
 function loadSettings() {
   $("reveal-chk").checked = localStorage.getItem(STORE.reveal) !== "0";
   $("loop-chk").checked = localStorage.getItem(STORE.loop) !== "0";
-  muteBoth();
+  const saved = localStorage.getItem(STORE.audio);
+  audioChoice = AUDIO_CHOICES.includes(saved) ? saved : "off";
+  applyAudio();
 }
 function saveSetting(key, value) { localStorage.setItem(key, value); }
 
-function getVoter(forcePrompt) {
-  let name = localStorage.getItem(STORE.voter) || "";
-  while (forcePrompt || !name.trim()) {
-    const entered = window.prompt("Your name (stored in this browser, saved with each vote):", name);
-    if (entered === null && name.trim()) break;
-    name = (entered || "").trim().slice(0, 64);
-    forcePrompt = false;
-  }
-  localStorage.setItem(STORE.voter, name);
-  $("voter-btn").textContent = name;
+// ---------- voter name (required; blank or whitespace counts as missing) ----------
+function currentVoter() { return (localStorage.getItem(STORE.voter) || "").trim(); }
+function showVoter() {
+  $("voter-name-label").textContent = currentVoter() || "(not set)";
   updateProgress();
-  return name;
 }
 
 // ---------- sessions (goal of SESSION_GOAL votes, persisted per voter) ----------
@@ -93,20 +94,37 @@ function advance() {
 
 function showIntro() {
   pause();
+  $("voter-input").value = currentVoter();
+  updateStartButton();
   $("intro").classList.remove("hidden");
-  $("intro-ok").focus();
+  (currentVoter() ? $("intro-ok") : $("voter-input")).focus();
 }
 
-function closeIntro() {
-  const firstTime = localStorage.getItem(STORE.intro) !== "1";
+function updateStartButton() {
+  $("intro-ok").disabled = !$("voter-input").value.trim();
+}
+
+function submitIntro(event) {
+  event.preventDefault();
+  const name = $("voter-input").value.trim().slice(0, MAX_NAME_LEN);
+  if (!name) {
+    $("name-hint").textContent = "Please enter your name to start.";
+    $("voter-input").focus();
+    return;
+  }
+  const changed = name !== currentVoter();
+  localStorage.setItem(STORE.voter, name);
   localStorage.setItem(STORE.intro, "1");
+  showVoter();
   $("intro").classList.add("hidden");
-  if (firstTime || !ballot) start();
+  if (changed) $("done").classList.add("hidden");
+  if (!ballot || changed || sessionFinished()) start();
 }
 
 function start() {
-  getVoter(false);
-  advance();
+  if (!currentVoter()) { showIntro(); return; }
+  if (sessionFinished()) showDone();
+  else if (!ballot || voted) loadBallot();
 }
 
 function setStatus(text, isError) {
@@ -136,10 +154,19 @@ function play() {
   playing = true;
   lastTick = performance.now();
   for (const v of Object.values(videos)) {
-    if (v.currentTime < durationOf(v) - 0.05) v.play().catch(() => {});
+    if (v.currentTime < durationOf(v) - 0.05) v.play().catch((err) => onPlayRejected(v, err));
   }
   $("play-btn").textContent = "Pause";
   requestAnimationFrame(tick);
+}
+
+function onPlayRejected(v, err) {
+  // Browsers may block unmuted autoplay until the user interacts; fall back to muted playback.
+  if (err && err.name === "NotAllowedError" && !v.muted) {
+    v.muted = true;
+    setStatus("The browser blocked sound; pick an Audio side again to hear it.");
+    if (playing) v.play().catch(() => {});
+  }
 }
 
 function pause() {
@@ -181,9 +208,50 @@ function onEnded(event) {
   }
 }
 
-// The clips are silent (decoders only produce video), so both players stay muted.
-function muteBoth() {
-  for (const v of Object.values(videos)) v.muted = true;
+// ---------- audio: Off / Left / Right, with the audible side highlighted ----------
+function applyAudio() {
+  const active = clipHasAudio ? audioChoice : "off";
+  for (const side of ["left", "right"]) {
+    videos[side].muted = active !== side;
+    viewports[side].classList.toggle("audible", active === side);
+    $(`speaker-${side}`).classList.toggle("hidden", active !== side);
+  }
+  document.querySelectorAll("#audio-ctl button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.audio === audioChoice));
+  });
+  $("audio-ctl").classList.toggle("hidden", !clipHasAudio);
+  $("no-audio-note").classList.toggle("hidden", clipHasAudio);
+}
+
+function setAudio(choice) {
+  if (!AUDIO_CHOICES.includes(choice)) return;
+  audioChoice = choice;
+  saveSetting(STORE.audio, choice);
+  applyAudio();
+}
+
+function cycleAudio() {
+  if (!clipHasAudio) return;
+  setAudio(AUDIO_CHOICES[(AUDIO_CHOICES.indexOf(audioChoice) + 1) % AUDIO_CHOICES.length]);
+}
+
+function setClipHasAudio(value) {
+  clipHasAudio = Boolean(value);
+  applyAudio();
+}
+
+// Fallback when the server does not say whether the clip has audio (e.g. the local Python server).
+function probeAudio(v) {
+  if (v.audioTracks && v.audioTracks.length > 0) return true;
+  if (v.mozHasAudio) return true;
+  if (typeof v.webkitAudioDecodedByteCount === "number" && v.webkitAudioDecodedByteCount > 0) return true;
+  return false;
+}
+
+function onLeftTimeUpdate() {
+  if (!audioProbePending || videos.left.currentTime < AUDIO_PROBE_S) return;
+  audioProbePending = false;
+  setClipHasAudio(probeAudio(videos.left) || probeAudio(videos.right));
 }
 
 // ---------- 1:1 crop ----------
@@ -213,7 +281,8 @@ function syncScroll(from, to) {
 // ---------- ballots & votes ----------
 async function loadBallot() {
   pause();
-  const voter = getVoter(false);
+  const voter = currentVoter();
+  if (!voter) { showIntro(); return; }
   setStatus("Loading next pair...");
   let data;
   try {
@@ -236,6 +305,8 @@ async function loadBallot() {
   $("prompt-text").textContent = data.prompt || "(no prompt text in bundle)";
   $("prompt-preview").textContent = (data.prompt || "").slice(0, 140) + ((data.prompt || "").length > 140 ? "..." : "");
   totalVotes = data.voter_votes;
+  audioProbePending = typeof data.has_audio !== "boolean";
+  setClipHasAudio(data.has_audio === true);
   let ready = 0;
   const onReady = () => {
     ready += 1;
@@ -252,11 +323,12 @@ async function loadBallot() {
     videos[side].src = data[`${side}_url`];
     videos[side].load();
   }
-  muteBoth();
+  applyAudio();
 }
 
 async function vote(choice) {
   if (!ballot || voted) return;
+  if (!currentVoter()) { showIntro(); return; }
   voted = true;
   document.querySelectorAll(".choice").forEach((b) => {
     b.disabled = true;
@@ -264,7 +336,7 @@ async function vote(choice) {
   });
   const payload = {
     ballot_id: ballot.ballot_id,
-    voter: getVoter(false),
+    voter: currentVoter(),
     choice,
     comment: $("comment").value.trim(),
     watch_seconds: shownAt ? (performance.now() - shownAt) / 1000 : 0,
@@ -317,6 +389,7 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     seekTo((master().currentTime || 0) + (e.key === "ArrowLeft" ? -1 : 1));
   }
+  else if (e.key === "m") cycleAudio();
   else if (e.key === "z") { $("zoom-chk").checked = !$("zoom-chk").checked; applyZoom(); }
   else if (e.key === "p") $("prompt-box").open = !$("prompt-box").open;
   else if ((e.key === "Enter" || e.key === "n") && voted) { e.preventDefault(); advance(); }
@@ -324,13 +397,14 @@ document.addEventListener("keydown", (e) => {
 
 $("play-btn").addEventListener("click", togglePlay);
 $("next-btn").addEventListener("click", advance);
-$("voter-btn").addEventListener("click", () => {
-  getVoter(true);
-  if (sessionFinished()) showDone();
-  else $("done").classList.add("hidden");
+$("voter-btn").addEventListener("click", showIntro);
+document.querySelectorAll("#audio-ctl button").forEach((b) => b.addEventListener("click", () => setAudio(b.dataset.audio)));
+$("voter-input").addEventListener("input", () => {
+  updateStartButton();
+  $("name-hint").textContent = "Your name is saved with each vote.";
 });
 $("help-btn").addEventListener("click", showIntro);
-$("intro-ok").addEventListener("click", closeIntro);
+$("intro-form").addEventListener("submit", submitIntro);
 $("more-btn").addEventListener("click", moreVotes);
 document.querySelectorAll(".choice").forEach((b) => b.addEventListener("click", () => vote(b.dataset.choice)));
 $("seek").addEventListener("input", (e) => {
@@ -341,6 +415,7 @@ $("seek").addEventListener("change", () => { seeking = false; });
 $("loop-chk").addEventListener("change", (e) => saveSetting(STORE.loop, e.target.checked ? "1" : "0"));
 $("reveal-chk").addEventListener("change", (e) => saveSetting(STORE.reveal, e.target.checked ? "1" : "0"));
 $("zoom-chk").addEventListener("change", applyZoom);
+videos.left.addEventListener("timeupdate", onLeftTimeUpdate);
 for (const side of ["left", "right"]) {
   videos[side].addEventListener("ended", onEnded);
   videos[side].addEventListener("click", togglePlay);
@@ -351,7 +426,9 @@ viewports.right.addEventListener("scroll", () => syncScroll(viewports.right, vie
 
 fetch("/api/info").then((r) => r.json()).then((info) => {
   $("bundle-name").textContent = `${info.clips} clips`;
+  $("intro-audio").classList.toggle("hidden", info.has_audio !== true);
 }).catch((err) => console.warn("could not load /api/info", err));
 loadSettings();
-if (localStorage.getItem(STORE.intro) === "1") start();
+showVoter();
+if (localStorage.getItem(STORE.intro) === "1" && currentVoter()) start();
 else showIntro();

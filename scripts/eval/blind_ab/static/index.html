@@ -13,7 +13,8 @@
   <span class="spacer"></span>
   <span id="progress" class="progress" title="Your votes this session"></span>
   <button id="help-btn" class="link" title="Show the instructions again">How to vote</button>
-  <span>Voter: <button id="voter-btn" class="link" title="Change voter name"></button></span>
+  <span>Voter: <strong id="voter-name-label"></strong>
+    <button id="voter-btn" class="link" title="Change the name saved with your votes">Not you? Change name</button></span>
   <a href="/results" target="_blank" rel="noopener">Results</a>
 </header>
 
@@ -23,9 +24,15 @@
     <p>Each pair shows the same AI-generated clip rendered by two different video decoders. Composition and
       motion are identical; only the image quality differs (sharpness, texture, fine detail, color, flicker).
       Pick the one that looks better.</p>
+    <p id="intro-audio" class="hidden">Use the Audio control (or <kbd>M</kbd>) to choose which side you hear.</p>
     <p>Tip: press <kbd>Z</kbd> for a 1:1 zoom on fine detail.</p>
     <p class="muted">A session is 12 comparisons. You can stop any time — every vote counts.</p>
-    <button id="intro-ok" class="primary">Start</button>
+    <form id="intro-form" class="name-form">
+      <label for="voter-input">Your name</label>
+      <input id="voter-input" type="text" maxlength="64" required autocomplete="name" placeholder="e.g. Alex">
+      <button id="intro-ok" type="submit" class="primary" disabled>Start</button>
+    </form>
+    <p id="name-hint" class="muted small">Your name is saved with each vote.</p>
   </div>
 </div>
 
@@ -46,11 +53,11 @@
 
   <section id="stage" class="stage">
     <figure class="pane">
-      <figcaption><span class="tag">Left</span> <span id="reveal-left" class="reveal"></span></figcaption>
+      <figcaption><span class="tag">Left</span> <span class="speaker hidden" id="speaker-left" title="You are hearing this side">&#9834; sound</span> <span id="reveal-left" class="reveal"></span></figcaption>
       <div class="viewport" id="vp-left"><video id="video-left" playsinline preload="auto" muted></video></div>
     </figure>
     <figure class="pane">
-      <figcaption><span class="tag">Right</span> <span id="reveal-right" class="reveal"></span></figcaption>
+      <figcaption><span class="tag">Right</span> <span class="speaker hidden" id="speaker-right" title="You are hearing this side">&#9834; sound</span> <span id="reveal-right" class="reveal"></span></figcaption>
       <div class="viewport" id="vp-right"><video id="video-right" playsinline preload="auto" muted></video></div>
     </figure>
   </section>
@@ -60,6 +67,13 @@
     <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
     <span id="time" class="mono">0.0 / 0.0 s</span>
     <label title="Loop both videos"><input type="checkbox" id="loop-chk" checked> Loop</label>
+    <span id="audio-ctl" class="segmented hidden" role="group" aria-label="Audio">
+      <span class="seg-label">Audio:</span>
+      <button type="button" data-audio="off" aria-pressed="true">Off</button>
+      <button type="button" data-audio="left" aria-pressed="false">Left</button>
+      <button type="button" data-audio="right" aria-pressed="false">Right</button>
+    </span>
+    <span id="no-audio-note" class="muted small hidden">These clips have no sound</span>
     <label title="Show pixels at 1:1 and pan both views together (z)"><input type="checkbox" id="zoom-chk"> 1:1 zoom</label>
     <label title="Show which decoder was which after each vote"><input type="checkbox" id="reveal-chk" checked> Show names after vote</label>
   </section>
@@ -80,7 +94,7 @@
   <p id="status" class="status" role="status"></p>
   <p class="muted small">You can stop any time — every vote counts.
     Keys: <kbd>1</kbd>-<kbd>4</kbd> vote, <kbd>space</kbd> play/pause, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> step 1 s,
-    <kbd>z</kbd> 1:1 zoom, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
+    <kbd>z</kbd> 1:1 zoom, <kbd>m</kbd> audio, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
 </main>
 <script src="/static/app.js"></script>
 </body>

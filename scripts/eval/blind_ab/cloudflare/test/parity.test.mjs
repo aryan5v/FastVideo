@@ -143,3 +143,21 @@ test("JSONL import keeps every field", () => {
   assert.match(sql, /'it''s'/);
   assert.match(sql, /'\{"session":7\}'\);$/);
 });
+
+test("build-time audio detection finds an MP4 'soun' handler", async () => {
+  const { hasAudioTrack } = await import("../tools/media.mjs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "blindab-media-"));
+  const box = (handler) => Buffer.concat([Buffer.from([0, 0, 0, 33]), Buffer.from("hdlr"), Buffer.alloc(8),
+    Buffer.from(handler), Buffer.alloc(13)]);
+  const write = (name, ...handlers) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, Buffer.concat([Buffer.from("....ftypisom"), ...handlers.map(box)]));
+    return file;
+  };
+  assert.equal(hasAudioTrack(write("av.mp4", "vide", "soun")), true);
+  assert.equal(hasAudioTrack(write("v.mp4", "vide")), false);
+  assert.equal(hasAudioTrack(write("x.webm", "soun")), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

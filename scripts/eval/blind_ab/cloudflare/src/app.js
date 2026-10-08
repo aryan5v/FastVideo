@@ -2,7 +2,9 @@
 //
 // `bundle` is the generated bundle description (see build.mjs):
 //   {name, layout, baseline, arms: [{slug, display_name, notes, speed}], clips: [{clip_id, prompt, videos}]}
-// where clips[].videos maps arm slug -> unguessable static asset path (e.g. "/v/<salted hash>.mp4").
+// where clips[].videos maps arm slug -> unguessable static asset path (e.g. "/v/<salted hash>.mp4") and
+// clips[].audio maps arm slug -> whether that video has an audio track (true/false/null = unknown), and
+// clips[].has_audio summarizes it per clip.
 
 import { allVotes, countVotes, getBallot, insertBallot, insertVote, matchupHistory } from "./db.js";
 import { parseRange, sendBytes, sendError, sendJson } from "./http.js";
@@ -54,6 +56,8 @@ async function newBallot(env, bundle, rawVoter) {
     ballot_id: ballotId,
     clip_id: clip.clip_id,
     prompt: clip.prompt,
+    // Whether the clip has an audio track; null means unknown (the page then probes the media).
+    has_audio: clip.has_audio ?? null,
     left_url: `/video/${ballotId}/left`,
     right_url: `/video/${ballotId}/right`,
     voter_votes: await countVotes(env.DB, voter),
@@ -107,6 +111,7 @@ async function routeApiGet(env, bundle, path, query) {
     case "/api/info":
       return sendJson(200, {
         bundle: bundle.name, layout: bundle.layout, arms: bundle.arms.length, clips: bundle.clips.length,
+        has_audio: bundle.clips.some((c) => c.has_audio === true),
         votes: await countVotes(env.DB),
       });
     case "/api/ballot":

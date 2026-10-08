@@ -31,12 +31,16 @@ been compared on least (avoiding repeats for the same voter), and balances
 which arm appears on the left. Video URLs are opaque ballot ids, so arm names
 are hidden until after the vote.
 
-- A short "How to vote" intro appears once (and from the header link), then
-  the voter name is asked once and kept in the browser's localStorage.
+- A short "How to vote" intro appears once (and from the header link) with a
+  required "Your name" field (blank or whitespace is rejected); the name is kept
+  in the browser's localStorage, and "Not you? Change name" reopens it.
 - Sessions are 12 comparisons with a progress counter ("4 / 12"), saved per
   voter in localStorage. After 12 a thank-you screen offers "Do 12 more".
 - Playback is synchronized: play/pause, seek, loop, step with the arrow keys.
-  Both players are muted.
+- Audio: Off / Left / Right (remembered; `m` cycles); the side you hear is
+  highlighted. Hidden, with a "These clips have no sound" note, when the clip
+  has no audio track (the Cloudflare build sets a per-clip `has_audio` flag
+  from the MP4 streams; the Python server detects it in the browser).
 - `1:1 zoom` (`z`) shows pixels at native size; panning one view pans both.
 - Vote with `1` "Left looks better", `2` "Right looks better", `3` "Can't
   tell" (stored as `tie`), `4` "Both look bad" (`both_bad`), and an optional

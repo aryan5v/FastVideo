@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { loadBundle } from "./tools/load_bundle.mjs";
+import { hasAudioTrack } from "./tools/media.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.resolve(HERE, "..", "static");
@@ -93,7 +94,9 @@ function writePublic(out, bundle, salt) {
   let bytes = 0;
   const clips = bundle.clips.map((clip) => {
     const videos = {};
+    const audio = {};
     for (const [slug, file] of Object.entries(clip.videos)) {
+      audio[slug] = hasAudioTrack(file);
       const size = fs.statSync(file).size;
       if (size > MAX_ASSET_BYTES) throw new Error(`${file} is ${size} bytes; Pages allows at most ${MAX_ASSET_BYTES}`);
       const asset = assetName(salt, slug, clip.clip_id, path.extname(file));
@@ -101,7 +104,10 @@ function writePublic(out, bundle, salt) {
       videos[slug] = asset;
       bytes += size;
     }
-    return { clip_id: clip.clip_id, prompt: clip.prompt, videos };
+    const flags = Object.values(audio);
+    // Per-clip flag: true if any variant has an audio track, false if none do, null if unknown (e.g. WebM).
+    const hasAudio = flags.some((f) => f === true) ? true : flags.every((f) => f === false) ? false : null;
+    return { clip_id: clip.clip_id, prompt: clip.prompt, videos, audio, has_audio: hasAudio };
   });
   return { clips, bytes };
 }
@@ -144,8 +150,9 @@ function main() {
   // Wrangler treats the nearest package.json as the project root; without this it would use ../.
   fs.writeFileSync(path.join(opts.out, "package.json"), '{"private": true, "type": "module"}\n');
   const videoCount = clips.reduce((n, c) => n + Object.keys(c.videos).length, 0);
+  const withAudio = clips.reduce((n, c) => n + Object.values(c.audio).filter(Boolean).length, 0);
   console.log(`built ${opts.out}: ${bundle.arms.length} arms, ${clips.length} clips, ${videoCount} videos `
-    + `(${(bytes / 1048576).toFixed(1)} MiB)`);
+    + `(${(bytes / 1048576).toFixed(1)} MiB), ${withAudio} with an audio track`);
 }
 
 try {
