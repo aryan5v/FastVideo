@@ -1,0 +1,5 @@
+# Build output (videos, generated bundle module, real wrangler config) and local deploy settings.
+dist/
+local.json
+node_modules/
+.wrangler/

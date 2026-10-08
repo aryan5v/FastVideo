@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+// Build a deployable Cloudflare Pages directory for one blind A/B bundle.
+//
+//   node build.mjs --bundle /path/to/bundle --database-id <D1 uuid> [--database-name blind-ab-vote]
+//                  [--project-name blind-ab-vote] [--baseline <slug>] [--name <shown bundle name>] [--out dist]
+//
+// Values not given as flags are read from the git-ignored ./local.json ({"databaseId", "databaseName",
+// "projectName", "bundle", "baseline", "name"}). Output (git-ignored) in --out:
+//   wrangler.toml          real config (project name, D1 binding)
+//   public/                UI from ../static plus videos under v/<salted hash>.<ext>
+//   functions/, src/       Pages Functions and their modules, with the generated src/bundle_data.js
+//   schema.sql, package.json
+// Deploy with:  cd dist && npx wrangler pages deploy
+
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+import { loadBundle } from "./tools/load_bundle.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STATIC_DIR = path.resolve(HERE, "..", "static");
+const MAX_ASSET_BYTES = 25 * 1024 * 1024; // Cloudflare Pages per-file limit
+const HASH_HEX_CHARS = 32;
+const SALT_FILE = ".video-salt";
+const DEFAULTS = { databaseName: "blind-ab-vote", projectName: "blind-ab-vote", out: "dist" };
+const NOT_FOUND_HTML = "<!doctype html><meta charset=\"utf-8\"><title>Not found</title><p>Not found.</p>\n";
+
+function readLocalConfig() {
+  const file = path.join(HERE, "local.json");
+  if (!fs.existsSync(file)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new Error(`cannot parse ${file}: ${err.message}`);
+  }
+}
+
+function options() {
+  const { values } = parseArgs({
+    options: {
+      bundle: { type: "string" }, out: { type: "string" }, "database-id": { type: "string" },
+      "database-name": { type: "string" }, "project-name": { type: "string" }, baseline: { type: "string" },
+      name: { type: "string" }, salt: { type: "string" },
+    },
+  });
+  const local = readLocalConfig();
+  const pick = (flag, key) => values[flag] ?? local[key] ?? DEFAULTS[key];
+  const opts = {
+    bundle: pick("bundle", "bundle"),
+    out: path.resolve(HERE, pick("out", "out")),
+    databaseId: pick("database-id", "databaseId"),
+    databaseName: pick("database-name", "databaseName"),
+    projectName: pick("project-name", "projectName"),
+    baseline: pick("baseline", "baseline") || null,
+    name: pick("name", "name"),
+    salt: values.salt,
+  };
+  if (!opts.bundle) throw new Error("--bundle is required");
+  if (!opts.databaseId || !/^[0-9a-f-]{36}$/i.test(opts.databaseId)) throw new Error("--database-id <D1 uuid> is required");
+  for (const key of ["databaseName", "projectName"]) {
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(opts[key])) throw new Error(`invalid ${key}: ${opts[key]}`);
+  }
+  return Object.freeze(opts);
+}
+
+function videoSalt(out, given) {
+  // Stable across rebuilds (so deploys only upload new files) but unknown to voters.
+  const file = path.join(out, SALT_FILE);
+  if (given) return given;
+  if (fs.existsSync(file)) return fs.readFileSync(file, "utf8").trim();
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function assetName(salt, slug, clipId, ext) {
+  const digest = crypto.createHash("sha256").update(`${salt}\u0000${slug}\u0000${clipId}`).digest("hex");
+  return `/v/${digest.slice(0, HASH_HEX_CHARS)}${ext.toLowerCase()}`;
+}
+
+function copyTree(src, dst) {
+  fs.cpSync(src, dst, { recursive: true, filter: (p) => !path.basename(p).startsWith(".") });
+}
+
+function writePublic(out, bundle, salt) {
+  const pub = path.join(out, "public");
+  fs.mkdirSync(path.join(pub, "static"), { recursive: true });
+  fs.mkdirSync(path.join(pub, "v"), { recursive: true });
+  for (const name of ["app.js", "results.js", "style.css"]) fs.copyFileSync(path.join(STATIC_DIR, name), path.join(pub, "static", name));
+  for (const name of ["index.html", "results.html"]) fs.copyFileSync(path.join(STATIC_DIR, name), path.join(pub, name));
+  fs.writeFileSync(path.join(pub, "404.html"), NOT_FOUND_HTML); // also disables the SPA fallback
+  let bytes = 0;
+  const clips = bundle.clips.map((clip) => {
+    const videos = {};
+    for (const [slug, file] of Object.entries(clip.videos)) {
+      const size = fs.statSync(file).size;
+      if (size > MAX_ASSET_BYTES) throw new Error(`${file} is ${size} bytes; Pages allows at most ${MAX_ASSET_BYTES}`);
+      const asset = assetName(salt, slug, clip.clip_id, path.extname(file));
+      fs.copyFileSync(file, path.join(pub, asset), fs.constants.COPYFILE_FICLONE);
+      videos[slug] = asset;
+      bytes += size;
+    }
+    return { clip_id: clip.clip_id, prompt: clip.prompt, videos };
+  });
+  return { clips, bytes };
+}
+
+function wranglerToml(opts) {
+  return [
+    "# Generated by build.mjs. Do not commit.",
+    `name = "${opts.projectName}"`,
+    'pages_build_output_dir = "public"',
+    'compatibility_date = "2025-09-01"',
+    "",
+    "[[d1_databases]]",
+    'binding = "DB"',
+    `database_name = "${opts.databaseName}"`,
+    `database_id = "${opts.databaseId}"`,
+    "",
+  ].join("\n");
+}
+
+function main() {
+  const opts = options();
+  const bundle = loadBundle(opts.bundle);
+  if (opts.baseline && !bundle.arms.some((a) => a.slug === opts.baseline)) {
+    throw new Error(`--baseline ${opts.baseline} is not one of ${bundle.arms.map((a) => a.slug)}`);
+  }
+  const salt = videoSalt(opts.out, opts.salt);
+  fs.rmSync(opts.out, { recursive: true, force: true });
+  fs.mkdirSync(opts.out, { recursive: true });
+  fs.writeFileSync(path.join(opts.out, SALT_FILE), `${salt}\n`, { mode: 0o600 });
+  const { clips, bytes } = writePublic(opts.out, bundle, salt);
+  copyTree(path.join(HERE, "functions"), path.join(opts.out, "functions"));
+  copyTree(path.join(HERE, "src"), path.join(opts.out, "src"));
+  const data = {
+    name: opts.name || path.basename(bundle.root), layout: bundle.layout, baseline: opts.baseline, arms: bundle.arms, clips,
+  };
+  fs.writeFileSync(path.join(opts.out, "src", "bundle_data.js"),
+    `// Generated by build.mjs. Maps arms to hidden asset paths; never served to browsers.\nexport default ${JSON.stringify(data, null, 1)};\n`);
+  fs.copyFileSync(path.join(HERE, "schema.sql"), path.join(opts.out, "schema.sql"));
+  fs.writeFileSync(path.join(opts.out, "wrangler.toml"), wranglerToml(opts));
+  // Wrangler treats the nearest package.json as the project root; without this it would use ../.
+  fs.writeFileSync(path.join(opts.out, "package.json"), '{"private": true, "type": "module"}\n');
+  const videoCount = clips.reduce((n, c) => n + Object.keys(c.videos).length, 0);
+  console.log(`built ${opts.out}: ${bundle.arms.length} arms, ${clips.length} clips, ${videoCount} videos `
+    + `(${(bytes / 1048576).toFixed(1)} MiB)`);
+}
+
+try {
+  main();
+} catch (err) {
+  console.error(`build failed: ${err.message}`);
+  process.exit(1);
+}

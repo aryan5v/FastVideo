@@ -150,10 +150,72 @@ ssh -N -L 8765:localhost:8765 user@remote-host
 Each teammate can open their own tunnel to the same server; votes from all of
 them land in the same file.
 
+## Serverless deployment (Cloudflare Pages + D1)
+
+`cloudflare/` is a port of the server to Cloudflare Pages Functions with votes
+in a D1 database, so a vote keeps running with no machine of yours online. It
+fits the free tier. The UI is the same `static/` files, and the API and
+exports are the same; the numbers match `stats.py` (see the parity test below).
+
+- Videos are uploaded as static assets under `v/<salted sha256>.mp4`. Browsers
+  only ever see `/video/<ballot_id>/<left|right>`. A Function looks the ballot
+  up in D1 and streams the hidden asset through `env.ASSETS`, so arm names stay
+  hidden until after the vote. Range requests (seeking) work. Pages allows at
+  most 25 MiB per file and 20,000 files per deployment.
+- Ballots and votes live in D1 (`schema.sql`). Votes are stored once per ballot.
+
+One-time setup (needs Node 18+ and `npx wrangler login`):
+
+```bash
+cd scripts/eval/blind_ab/cloudflare
+npx wrangler d1 create <db-name>                 # note the database_id it prints
+npx wrangler pages project create <project-name> --production-branch main
+```
+
+Deploy a bundle (either layout). Pass values as flags, or put them in the
+git-ignored `local.json`: `{"bundle", "databaseId", "databaseName",
+"projectName", "baseline"}`.
+
+```bash
+node build.mjs --bundle /path/to/bundle --database-id <uuid> \
+    --database-name <db-name> --project-name <project-name> [--baseline <slug>]
+cd dist                                           # git-ignored build output
+npx wrangler d1 execute <db-name> --remote --file schema.sql
+npx wrangler pages deploy --branch main
+```
+
+The site is at `https://<project-name>.pages.dev` (`/` to vote, `/results` for
+results). Rebuilding keeps the same video salt (`dist/.video-salt`), so
+redeploys only upload changed files. To start a fresh vote on a new bundle,
+use a new D1 database or clear the tables.
+
+Import votes from a local `votes.jsonl`. All fields are kept, and importing
+the same file twice adds nothing:
+
+```bash
+node tools/votes_to_sql.mjs votes.jsonl > /tmp/import.sql
+npx wrangler d1 execute <db-name> --remote --file /tmp/import.sql
+```
+
+To delete votes (for example a test vote), run `npx wrangler d1 execute <db-name>
+--remote --command "DELETE FROM votes WHERE voter = '<name>'"`. To use a custom
+domain, add it under the Pages project's *Custom domains*. If the domain's
+zone is in the same account, the hostname must be a proxied CNAME to
+`<project-name>.pages.dev`.
+
+Local preview: run `npx wrangler d1 execute <db-name> --local --file schema.sql`,
+then `npx wrangler pages dev`, both inside `dist/`.
+
 ## Tests
 
 ```bash
 pytest scripts/eval/blind_ab/tests -v
+node --test scripts/eval/blind_ab/cloudflare/test/parity.test.mjs
 ```
 
-CPU only, no GPU or real videos needed (placeholder files are used).
+CPU only, no GPU or real videos needed (placeholder files are used). The
+Node test checks that the Cloudflare port reproduces the Python Wilson
+intervals, Bradley-Terry fit, results summary and CSV, pairing decisions, and
+vote records. It compares against `cloudflare/test/fixtures.json`. After
+changing `stats.py`, `pairing.py` or `votes.py`, regenerate that file with
+`python scripts/eval/blind_ab/cloudflare/test/make_fixtures.py`.

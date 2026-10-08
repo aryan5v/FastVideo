@@ -1,0 +1,10 @@
+{
+  "name": "blind-ab-cloudflare",
+  "private": true,
+  "type": "module",
+  "description": "Serverless (Cloudflare Pages + D1) deployment of the blind A/B video voting app",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/parity.test.mjs"
+  }
+}

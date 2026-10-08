@@ -1,0 +1,10 @@
+# Template config. build.mjs writes dist/wrangler.toml with the real values (from CLI flags or the
+# git-ignored local.json); deploy from dist/. Do not commit real account or database ids here.
+name = "blind-ab-vote"
+pages_build_output_dir = "public"
+compatibility_date = "2025-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "blind-ab-vote"
+database_id = "00000000-0000-0000-0000-000000000000"

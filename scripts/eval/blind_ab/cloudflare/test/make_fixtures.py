@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Regenerate fixtures.json: reference values from the Python implementation for the JS parity tests.
+
+    python scripts/eval/blind_ab/cloudflare/test/make_fixtures.py
+"""
+from __future__ import annotations
+
+import json
+import random
+import sys
+from pathlib import Path
+from types import MappingProxyType
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2]))  # scripts/eval, so `blind_ab` imports as a package
+
+from blind_ab.bundle import Arm  # noqa: E402
+from blind_ab.pairing import PastMatchup, choose_matchup  # noqa: E402
+from blind_ab.stats import (bradley_terry, elo_scale, outcomes_from_votes, summarize, summary_to_csv,  # noqa: E402
+                            wilson_interval)
+from blind_ab.votes import CHOICES, Vote, clean_vote_fields  # noqa: E402
+
+SEED = 1234
+ARMS = (
+    {"slug": "base", "display_name": "Baseline", "notes": "ref", "speed": {"seconds_per_clip": 70.9, "hardware": "1x GPU",
+                                                                         "resolution": "832x480"}},
+    {"slug": "fp8", "display_name": "FP8, fast", "notes": "", "speed": {"seconds_per_clip": 52.3}},
+    {"slug": "nvfp4", "display_name": "NVFP4", "notes": "", "speed": {"seconds_per_clip": 13, "hardware": "GB200"}},
+    {"slug": "tiny", "display_name": "Tiny \"decoder\"", "notes": "", "speed": {}},
+    {"slug": "unvoted", "display_name": "Never voted", "notes": "", "speed": {"seconds_per_clip": 1.25}},
+)
+STRENGTH = {"base": 3.0, "fp8": 2.0, "nvfp4": 1.0, "tiny": 0.3}
+
+
+def make_arms() -> list[Arm]:
+    return [Arm(a["slug"], a["display_name"], a["notes"], MappingProxyType(a["speed"])) for a in ARMS]
+
+
+def make_votes(rng: random.Random, count: int) -> list[Vote]:
+    voters = ["ann", "bob", "Zoë", "carl"]
+    slugs = list(STRENGTH)
+    votes = []
+    for i in range(count):
+        left, right = rng.sample(slugs, 2)
+        p_left = STRENGTH[left] / (STRENGTH[left] + STRENGTH[right])
+        r = rng.random()
+        choice = "tie" if r < 0.15 else "both_bad" if r < 0.2 else "left" if rng.random() < p_left else "right"
+        votes.append(
+            Vote(voter=rng.choice(voters), timestamp=f"2026-01-01T12:{i // 60:02d}:{i % 60:02d}+00:00",
+                 clip_id=f"clip_{rng.randrange(6)}", left_arm=left, right_arm=right, choice=choice,
+                 comment=rng.choice(["", "sharper text", "a, b", "üñí \"q\""]),
+                 watch_seconds=round(rng.uniform(0, 60), 2), played_seconds=float(rng.randrange(3)),
+                 ballot_id=f"b{i:04d}"))
+    votes.append(Vote("ann", "2026-01-02T00:00:00+00:00", "clip_0", "base", "gone", "left"))  # unknown arm: ignored
+    return votes
+
+
+class RecordingRng:
+    """Deterministic stand-in for random.Random that records every decision point."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def choice(self, items):
+        items = list(items)
+        self.calls.append(["choice", [list(x) if isinstance(x, tuple) else x for x in items]])
+        return items[0]
+
+    def random(self) -> float:
+        self.calls.append(["random"])
+        return 0.75
+
+
+def pairing_cases(rng: random.Random) -> dict:
+    """Successive scheduling decisions; case i uses the first ``history_len`` entries of the shared history."""
+    availability = {f"clip_{i}": ["base", "fp8", "nvfp4", "tiny"] for i in range(5)}
+    availability["clip_5"] = ["base", "fp8"]
+    availability["clip_6"] = ["tiny"]
+    slugs = ["tiny", "base", "fp8", "nvfp4"]
+    cases, history = [], []
+    for step in range(40):
+        voter = ["ann", "bob", ""][step % 3]
+        rec = RecordingRng()
+        m = choose_matchup({k: frozenset(v) for k, v in availability.items()}, slugs, history, voter, rec)
+        cases.append({"voter": voter, "history_len": len(history),
+                      "expected": {"clip_id": m.clip_id, "left": m.left, "right": m.right}, "calls": rec.calls})
+        # Grow the history with a mix of the scheduled matchup and random extra comparisons.
+        history = [*history, PastMatchup(m.clip_id, m.left, m.right, voter or "ann")]
+        if step % 4 == 0:
+            a, b = rng.sample(["base", "fp8", "nvfp4", "tiny"], 2)
+            history = [*history, PastMatchup(f"clip_{rng.randrange(5)}", a, b, rng.choice(["ann", "bob"]))]
+    return {"availability": availability, "slugs": slugs, "cases": cases,
+            "history": [{"clip_id": h.clip_id, "arm_a": h.arm_a, "arm_b": h.arm_b, "voter": h.voter} for h in history]}
+
+
+def main() -> None:
+    rng = random.Random(SEED)
+    arms = make_arms()
+    votes = make_votes(rng, 160)
+    slugs = [a.slug for a in arms]
+    outcomes = outcomes_from_votes(votes, slugs)
+    numbers = [0.125, 0.375, 2.675, 1.0005, 1000.05, 999.95, 1e-05, 0.0001, 123456789012345678.0, 1e16, 70.9 / 13,
+               -0.5, -2.25, 1234.5, 0.1 + 0.2, 52.3 / 70.9, 3.0, 1e22, 2.5e-07]
+    fixtures = {
+        "_note": "Generated by make_fixtures.py from the Python implementation; do not edit by hand.",
+        "arms": list(ARMS),
+        "votes_jsonl": [v.to_json() for v in votes],
+        "wilson": [{"args": [s, n], "expected": list(wilson_interval(s, n))}
+                   for s, n in [(8, 10), (0, 10), (10, 10), (2.5, 5), (0, 0), (700, 1000), (33.5, 61), (1, 1)]],
+        "bradley_terry": {
+            "default_prior": bradley_terry(outcomes, slugs),
+            "elo": elo_scale(bradley_terry(outcomes, slugs)),
+            "half_prior": bradley_terry(outcomes, slugs, prior=0.5),
+            "undefeated": bradley_terry(
+                outcomes_from_votes([Vote("x", "t", "c", "a", "b", "left")] * 5 + [Vote("x", "t", "c", "b", "c", "tie")] * 4,
+                                    ["a", "b", "c"]), ["a", "b", "c"]),
+        },
+        "summary": {base or "": summarize(arms, votes, base) for base in (None, "fp8", "tiny", "missing")},
+        "csv": {base or "": summary_to_csv(summarize(arms, votes, base)) for base in (None, "nvfp4")},
+        "pairing": pairing_cases(rng),
+        "numbers": [{"x": x, "round1": round(x, 1), "round2": round(x, 2), "round3": round(x, 3), "repr": repr(x)}
+                    for x in numbers],
+        "clean_vote_fields": [
+            {"payload": p, "expected": clean_vote_fields(p)} for p in (
+                {"voter": "  ann ", "choice": "tie", "comment": " hi ", "watch_seconds": 12.345, "played_seconds": "3.005"},
+                {"voter": "bob", "choice": "both_bad", "watch_seconds": 1e9, "played_seconds": None},
+                {"voter": "Zoë", "choice": "left", "comment": 0, "watch_seconds": True, "played_seconds": 0.125},
+            )
+        ],
+        "choices": list(CHOICES),
+    }
+    path = HERE / "fixtures.json"
+    path.write_text(json.dumps(fixtures, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"wrote {path}")
+
+
+if __name__ == "__main__":
+    main()
