@@ -19,15 +19,17 @@
   <a href="/">Vote</a>
 </header>
 <main>
-  <h2>Arms <span class="muted small">(sorted by Bradley-Terry score; ties and "both bad" count as half a win)</span></h2>
+  <h2>Variants <span class="muted small">(best first, by ranking score; "can't tell" and "both look bad" count as half a win)</span></h2>
+  <p class="muted small">Win rate: share of comparisons won. 95% range: where the true win rate likely lies given the votes so far.
+    Ranking score: Bradley-Terry fit over all comparisons, Elo-like (1000 = average, +400 = 10x odds of being preferred).</p>
   <div class="scroll"><table id="arms-table"></table></div>
 
   <h2>Quality vs speed</h2>
-  <p class="muted small">Each dot is an arm: x = speedup vs the baseline (log scale, right is faster), y = Bradley-Terry score (up is preferred).
-    Arms without speed metadata are omitted.</p>
+  <p class="muted small">Each dot is a variant: x = speedup vs the baseline (log scale, right is faster), y = ranking score (up is preferred).
+    Variants without timing data are omitted.</p>
   <div id="scatter"></div>
 
-  <h2>Head-to-head <span class="muted small">(row vs column: wins-ties-losses; "both bad" counted with ties; cell shade = row win rate)</span></h2>
+  <h2>Head-to-head <span class="muted small">(row vs column: wins - can't tell - losses; "both look bad" counted with can't tell; cell shade = row win rate)</span></h2>
   <div class="scroll"><table id="matrix-table" class="matrix"></table></div>
   <p id="status" class="status" role="status"></p>
 </main>

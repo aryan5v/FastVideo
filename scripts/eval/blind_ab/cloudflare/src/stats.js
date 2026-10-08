@@ -132,6 +132,8 @@ function armRow(arm, cells, bt, baseline) {
     speedup_vs_baseline: spc && baseSpc ? pyRound(baseSpc / spc, 3) : null,
     hardware: speed.hardware ?? null,
     resolution: speed.resolution ?? null,
+    size: speed.size ?? null,
+    time_label: speed.label ?? null,
   };
 }
 
@@ -170,7 +172,7 @@ export function comparePyStr(a, b) {
 
 export const CSV_COLUMNS = ["slug", "display_name", "votes", "wins", "losses", "ties", "both_bad", "win_rate",
   "win_rate_ci_low", "win_rate_ci_high", "bt_score", "seconds_per_clip", "speedup_vs_baseline", "hardware",
-  "resolution"];
+  "resolution", "size"];
 const FLOAT_COLUMNS = new Set(["win_rate", "win_rate_ci_low", "win_rate_ci_high", "bt_score", "seconds_per_clip",
   "speedup_vs_baseline"]);
 

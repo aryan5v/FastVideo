@@ -25,7 +25,9 @@
    "slug": "nvfp4",
    "speed": {
     "hardware": "GB200",
-    "seconds_per_clip": 13
+    "label": "Decode time",
+    "seconds_per_clip": 13,
+    "size": "~1.4 GB"
    }
   },
   {
@@ -127,8 +129,8 @@
   }
  ],
  "csv": {
-  "": "slug,display_name,votes,wins,losses,ties,both_bad,win_rate,win_rate_ci_low,win_rate_ci_high,bt_score,seconds_per_clip,speedup_vs_baseline,hardware,resolution\nbase,Baseline,75,50,15,8,2,0.7333333333333333,0.6236920098227623,0.8202368636852615,1150.0,70.9,1.0,1x GPU,832x480\nfp8,\"FP8, fast\",86,48,26,10,2,0.627906976744186,0.5223383164148251,0.7225374935818455,1078.3,52.3,1.356,,\nunvoted,Never voted,0,0,0,0,0,,,,1000.0,1.25,56.72,,\nnvfp4,NVFP4,79,34,38,2,5,0.47468354430379744,0.36831931645956656,0.5833956815988599,984.6,13.0,5.454,GB200,\ntiny,\"Tiny \"\"decoder\"\"\",80,9,62,6,3,0.16875,0.1023342678943486,0.2655202429229381,787.1,,,,\n",
-  "nvfp4": "slug,display_name,votes,wins,losses,ties,both_bad,win_rate,win_rate_ci_low,win_rate_ci_high,bt_score,seconds_per_clip,speedup_vs_baseline,hardware,resolution\nbase,Baseline,75,50,15,8,2,0.7333333333333333,0.6236920098227623,0.8202368636852615,1150.0,70.9,0.183,1x GPU,832x480\nfp8,\"FP8, fast\",86,48,26,10,2,0.627906976744186,0.5223383164148251,0.7225374935818455,1078.3,52.3,0.249,,\nunvoted,Never voted,0,0,0,0,0,,,,1000.0,1.25,10.4,,\nnvfp4,NVFP4,79,34,38,2,5,0.47468354430379744,0.36831931645956656,0.5833956815988599,984.6,13.0,1.0,GB200,\ntiny,\"Tiny \"\"decoder\"\"\",80,9,62,6,3,0.16875,0.1023342678943486,0.2655202429229381,787.1,,,,\n"
+  "": "slug,display_name,votes,wins,losses,ties,both_bad,win_rate,win_rate_ci_low,win_rate_ci_high,bt_score,seconds_per_clip,speedup_vs_baseline,hardware,resolution,size\nbase,Baseline,75,50,15,8,2,0.7333333333333333,0.6236920098227623,0.8202368636852615,1150.0,70.9,1.0,1x GPU,832x480,\nfp8,\"FP8, fast\",86,48,26,10,2,0.627906976744186,0.5223383164148251,0.7225374935818455,1078.3,52.3,1.356,,,\nunvoted,Never voted,0,0,0,0,0,,,,1000.0,1.25,56.72,,,\nnvfp4,NVFP4,79,34,38,2,5,0.47468354430379744,0.36831931645956656,0.5833956815988599,984.6,13.0,5.454,GB200,,~1.4 GB\ntiny,\"Tiny \"\"decoder\"\"\",80,9,62,6,3,0.16875,0.1023342678943486,0.2655202429229381,787.1,,,,,\n",
+  "nvfp4": "slug,display_name,votes,wins,losses,ties,both_bad,win_rate,win_rate_ci_low,win_rate_ci_high,bt_score,seconds_per_clip,speedup_vs_baseline,hardware,resolution,size\nbase,Baseline,75,50,15,8,2,0.7333333333333333,0.6236920098227623,0.8202368636852615,1150.0,70.9,0.183,1x GPU,832x480,\nfp8,\"FP8, fast\",86,48,26,10,2,0.627906976744186,0.5223383164148251,0.7225374935818455,1078.3,52.3,0.249,,,\nunvoted,Never voted,0,0,0,0,0,,,,1000.0,1.25,10.4,,,\nnvfp4,NVFP4,79,34,38,2,5,0.47468354430379744,0.36831931645956656,0.5833956815988599,984.6,13.0,1.0,GB200,,~1.4 GB\ntiny,\"Tiny \"\"decoder\"\"\",80,9,62,6,3,0.16875,0.1023342678943486,0.2655202429229381,787.1,,,,,\n"
  },
  "numbers": [
   {
@@ -1528,10 +1530,6 @@
         "nvfp4"
        ],
        [
-        "base",
-        "tiny"
-       ],
-       [
         "fp8",
         "nvfp4"
        ],
@@ -1745,14 +1743,6 @@
        [
         "base",
         "fp8"
-       ],
-       [
-        "base",
-        "tiny"
-       ],
-       [
-        "fp8",
-        "nvfp4"
        ],
        [
         "fp8",
@@ -2090,6 +2080,1323 @@
    "nvfp4"
   ]
  },
+ "pairing_exhaust": {
+  "availability": {
+   "clip_0": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_1": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_5": [
+    "base",
+    "fp8"
+   ],
+   "clip_6": [
+    "tiny"
+   ]
+  },
+  "cases": [
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1",
+       "clip_5"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 0,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "base",
+     "right": "nvfp4"
+    },
+    "history_len": 2,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "base",
+     "right": "tiny"
+    },
+    "history_len": 3,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 4,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "nvfp4"
+    },
+    "history_len": 5,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_5"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_5",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 7,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 8,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "base",
+     "right": "tiny"
+    },
+    "history_len": 9,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 10,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "fp8",
+     "right": "tiny"
+    },
+    "history_len": 12,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 13,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 14,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "base",
+     "right": "tiny"
+    },
+    "history_len": 15,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 17,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 18,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_5"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_5",
+     "left": "base",
+     "right": "fp8"
+    },
+    "history_len": 19,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "nvfp4"
+    },
+    "history_len": 20,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "base",
+     "right": "tiny"
+    },
+    "history_len": 22,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "fp8",
+     "right": "nvfp4"
+    },
+    "history_len": 23,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 24,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "base",
+     "right": "nvfp4"
+    },
+    "history_len": 25,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 27,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 28,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "nvfp4"
+    },
+    "history_len": 29,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "base",
+     "right": "fp8"
+    },
+    "history_len": 30,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 32,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "base",
+     "right": "tiny"
+    },
+    "history_len": 33,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "fp8",
+     "right": "nvfp4"
+    },
+    "history_len": 34,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 35,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_5"
+      ]
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_5",
+     "left": "base",
+     "right": "fp8"
+    },
+    "history_len": 37,
+    "voter": "ann"
+   }
+  ],
+  "history": [
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_2",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "tiny",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_5",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "tiny",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "tiny",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "tiny",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "tiny",
+    "clip_id": "clip_4",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "fp8",
+    "clip_id": "clip_5",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_2",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "tiny",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "tiny",
+    "clip_id": "clip_3",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "tiny",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "tiny",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_0",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "fp8",
+    "clip_id": "clip_5",
+    "voter": "ann"
+   }
+  ],
+  "slugs": [
+   "tiny",
+   "base",
+   "fp8",
+   "nvfp4"
+  ]
+ },
  "summary": {
   "": {
    "arms": [
@@ -2102,9 +3409,11 @@
      "notes": "ref",
      "resolution": "832x480",
      "seconds_per_clip": 70.9,
+     "size": null,
      "slug": "base",
      "speedup_vs_baseline": 1.0,
      "ties": 8,
+     "time_label": null,
      "votes": 75,
      "win_rate": 0.7333333333333333,
      "win_rate_ci_high": 0.8202368636852615,
@@ -2120,9 +3429,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 52.3,
+     "size": null,
      "slug": "fp8",
      "speedup_vs_baseline": 1.356,
      "ties": 10,
+     "time_label": null,
      "votes": 86,
      "win_rate": 0.627906976744186,
      "win_rate_ci_high": 0.7225374935818455,
@@ -2138,9 +3449,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 1.25,
+     "size": null,
      "slug": "unvoted",
      "speedup_vs_baseline": 56.72,
      "ties": 0,
+     "time_label": null,
      "votes": 0,
      "win_rate": null,
      "win_rate_ci_high": null,
@@ -2156,9 +3469,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 13.0,
+     "size": "~1.4 GB",
      "slug": "nvfp4",
      "speedup_vs_baseline": 5.454,
      "ties": 2,
+     "time_label": "Decode time",
      "votes": 79,
      "win_rate": 0.47468354430379744,
      "win_rate_ci_high": 0.5833956815988599,
@@ -2174,9 +3489,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": null,
+     "size": null,
      "slug": "tiny",
      "speedup_vs_baseline": null,
      "ties": 6,
+     "time_label": null,
      "votes": 80,
      "win_rate": 0.16875,
      "win_rate_ci_high": 0.2655202429229381,
@@ -2337,9 +3654,11 @@
      "notes": "ref",
      "resolution": "832x480",
      "seconds_per_clip": 70.9,
+     "size": null,
      "slug": "base",
      "speedup_vs_baseline": 0.738,
      "ties": 8,
+     "time_label": null,
      "votes": 75,
      "win_rate": 0.7333333333333333,
      "win_rate_ci_high": 0.8202368636852615,
@@ -2355,9 +3674,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 52.3,
+     "size": null,
      "slug": "fp8",
      "speedup_vs_baseline": 1.0,
      "ties": 10,
+     "time_label": null,
      "votes": 86,
      "win_rate": 0.627906976744186,
      "win_rate_ci_high": 0.7225374935818455,
@@ -2373,9 +3694,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 1.25,
+     "size": null,
      "slug": "unvoted",
      "speedup_vs_baseline": 41.84,
      "ties": 0,
+     "time_label": null,
      "votes": 0,
      "win_rate": null,
      "win_rate_ci_high": null,
@@ -2391,9 +3714,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 13.0,
+     "size": "~1.4 GB",
      "slug": "nvfp4",
      "speedup_vs_baseline": 4.023,
      "ties": 2,
+     "time_label": "Decode time",
      "votes": 79,
      "win_rate": 0.47468354430379744,
      "win_rate_ci_high": 0.5833956815988599,
@@ -2409,9 +3734,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": null,
+     "size": null,
      "slug": "tiny",
      "speedup_vs_baseline": null,
      "ties": 6,
+     "time_label": null,
      "votes": 80,
      "win_rate": 0.16875,
      "win_rate_ci_high": 0.2655202429229381,
@@ -2572,9 +3899,11 @@
      "notes": "ref",
      "resolution": "832x480",
      "seconds_per_clip": 70.9,
+     "size": null,
      "slug": "base",
      "speedup_vs_baseline": 1.0,
      "ties": 8,
+     "time_label": null,
      "votes": 75,
      "win_rate": 0.7333333333333333,
      "win_rate_ci_high": 0.8202368636852615,
@@ -2590,9 +3919,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 52.3,
+     "size": null,
      "slug": "fp8",
      "speedup_vs_baseline": 1.356,
      "ties": 10,
+     "time_label": null,
      "votes": 86,
      "win_rate": 0.627906976744186,
      "win_rate_ci_high": 0.7225374935818455,
@@ -2608,9 +3939,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 1.25,
+     "size": null,
      "slug": "unvoted",
      "speedup_vs_baseline": 56.72,
      "ties": 0,
+     "time_label": null,
      "votes": 0,
      "win_rate": null,
      "win_rate_ci_high": null,
@@ -2626,9 +3959,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 13.0,
+     "size": "~1.4 GB",
      "slug": "nvfp4",
      "speedup_vs_baseline": 5.454,
      "ties": 2,
+     "time_label": "Decode time",
      "votes": 79,
      "win_rate": 0.47468354430379744,
      "win_rate_ci_high": 0.5833956815988599,
@@ -2644,9 +3979,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": null,
+     "size": null,
      "slug": "tiny",
      "speedup_vs_baseline": null,
      "ties": 6,
+     "time_label": null,
      "votes": 80,
      "win_rate": 0.16875,
      "win_rate_ci_high": 0.2655202429229381,
@@ -2807,9 +4144,11 @@
      "notes": "ref",
      "resolution": "832x480",
      "seconds_per_clip": 70.9,
+     "size": null,
      "slug": "base",
      "speedup_vs_baseline": null,
      "ties": 8,
+     "time_label": null,
      "votes": 75,
      "win_rate": 0.7333333333333333,
      "win_rate_ci_high": 0.8202368636852615,
@@ -2825,9 +4164,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 52.3,
+     "size": null,
      "slug": "fp8",
      "speedup_vs_baseline": null,
      "ties": 10,
+     "time_label": null,
      "votes": 86,
      "win_rate": 0.627906976744186,
      "win_rate_ci_high": 0.7225374935818455,
@@ -2843,9 +4184,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 1.25,
+     "size": null,
      "slug": "unvoted",
      "speedup_vs_baseline": null,
      "ties": 0,
+     "time_label": null,
      "votes": 0,
      "win_rate": null,
      "win_rate_ci_high": null,
@@ -2861,9 +4204,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": 13.0,
+     "size": "~1.4 GB",
      "slug": "nvfp4",
      "speedup_vs_baseline": null,
      "ties": 2,
+     "time_label": "Decode time",
      "votes": 79,
      "win_rate": 0.47468354430379744,
      "win_rate_ci_high": 0.5833956815988599,
@@ -2879,9 +4224,11 @@
      "notes": "",
      "resolution": null,
      "seconds_per_clip": null,
+     "size": null,
      "slug": "tiny",
      "speedup_vs_baseline": null,
      "ties": 6,
+     "time_label": null,
      "votes": 80,
      "win_rate": 0.16875,
      "win_rate_ci_high": 0.2655202429229381,

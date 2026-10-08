@@ -1,13 +1,15 @@
 "use strict";
-// Blind A/B ballot page: synchronized playback, voting, optional reveal.
+// Blind A/B ballot page: synchronized playback, voting, optional reveal, finite sessions.
 
 const $ = (id) => document.getElementById(id);
 const videos = { left: $("video-left"), right: $("video-right") };
 const viewports = { left: $("vp-left"), right: $("vp-right") };
 const STORE = {
-  voter: "blindab.voter", reveal: "blindab.reveal", loop: "blindab.loop", audio: "blindab.audio",
+  voter: "blindab.voter", reveal: "blindab.reveal", loop: "blindab.loop", intro: "blindab.introSeen",
+  sessionPrefix: "blindab.session.",
 };
 const DRIFT_TOLERANCE_S = 0.08;
+const SESSION_GOAL = 12;
 
 let ballot = null;          // current ballot from the server
 let voted = false;
@@ -16,13 +18,13 @@ let shownAt = 0;            // performance.now() when the ballot was shown
 let playedMs = 0;           // wall time spent playing for this ballot
 let lastTick = 0;
 let seeking = false;
+let totalVotes = null;      // this voter's votes across all sessions, from the server
 
 // ---------- settings ----------
 function loadSettings() {
   $("reveal-chk").checked = localStorage.getItem(STORE.reveal) !== "0";
   $("loop-chk").checked = localStorage.getItem(STORE.loop) !== "0";
-  $("audio-sel").value = localStorage.getItem(STORE.audio) || "off";
-  applyAudio();
+  muteBoth();
 }
 function saveSetting(key, value) { localStorage.setItem(key, value); }
 
@@ -36,7 +38,75 @@ function getVoter(forcePrompt) {
   }
   localStorage.setItem(STORE.voter, name);
   $("voter-btn").textContent = name;
+  updateProgress();
   return name;
+}
+
+// ---------- sessions (goal of SESSION_GOAL votes, persisted per voter) ----------
+function sessionKey() { return STORE.sessionPrefix + (localStorage.getItem(STORE.voter) || ""); }
+function getSession() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(sessionKey()) || "null");
+    if (saved && Number.isInteger(saved.done) && Number.isInteger(saved.goal)) return saved;
+  } catch (err) {
+    console.warn("resetting unreadable session progress", err);
+  }
+  return { done: 0, goal: SESSION_GOAL };
+}
+function saveSession(session) {
+  localStorage.setItem(sessionKey(), JSON.stringify(session));
+  updateProgress();
+}
+function updateProgress() {
+  const { done, goal } = getSession();
+  $("progress").textContent = `${Math.min(done, goal)} / ${goal}`;
+}
+function sessionFinished() {
+  const { done, goal } = getSession();
+  return done >= goal;
+}
+
+function overlayOpen() { return !$("intro").classList.contains("hidden") || !$("done").classList.contains("hidden"); }
+
+function showDone() {
+  pause();
+  const { done } = getSession();
+  const total = totalVotes !== null && totalVotes > done ? ` (${totalVotes} in total)` : "";
+  $("done-text").textContent = `You compared ${done} pair${done === 1 ? "" : "s"}${total}. `
+    + "Every vote helps; you can stop here or keep going.";
+  $("done").classList.remove("hidden");
+  $("more-btn").focus();
+}
+
+function moreVotes() {
+  const session = getSession();
+  saveSession({ done: session.done, goal: session.done + SESSION_GOAL });
+  $("done").classList.add("hidden");
+  loadBallot();
+}
+
+// Next ballot, or the thank-you screen once the session goal is reached.
+function advance() {
+  if (sessionFinished()) showDone();
+  else loadBallot();
+}
+
+function showIntro() {
+  pause();
+  $("intro").classList.remove("hidden");
+  $("intro-ok").focus();
+}
+
+function closeIntro() {
+  const firstTime = localStorage.getItem(STORE.intro) !== "1";
+  localStorage.setItem(STORE.intro, "1");
+  $("intro").classList.add("hidden");
+  if (firstTime || !ballot) start();
+}
+
+function start() {
+  getVoter(false);
+  advance();
 }
 
 function setStatus(text, isError) {
@@ -82,7 +152,7 @@ function togglePlay() { playing ? pause() : play(); }
 
 function tick(now) {
   if (!playing) return;
-  playedMs += now - lastTick;
+  playedMs += Math.max(0, now - lastTick); // rAF timestamps can predate the performance.now() taken in play()
   lastTick = now;
   const m = master();
   const s = m === videos.left ? videos.right : videos.left;
@@ -111,18 +181,9 @@ function onEnded(event) {
   }
 }
 
-function applyAudio() {
-  const sel = $("audio-sel").value;
-  videos.left.muted = sel !== "left";
-  videos.right.muted = sel !== "right";
-}
-
-function cycleAudio() {
-  const order = ["off", "left", "right"];
-  const sel = $("audio-sel");
-  sel.value = order[(order.indexOf(sel.value) + 1) % order.length];
-  saveSetting(STORE.audio, sel.value);
-  applyAudio();
+// The clips are silent (decoders only produce video), so both players stay muted.
+function muteBoth() {
+  for (const v of Object.values(videos)) v.muted = true;
 }
 
 // ---------- 1:1 crop ----------
@@ -174,7 +235,7 @@ async function loadBallot() {
   document.querySelectorAll(".choice").forEach((b) => { b.disabled = false; b.classList.remove("picked"); });
   $("prompt-text").textContent = data.prompt || "(no prompt text in bundle)";
   $("prompt-preview").textContent = (data.prompt || "").slice(0, 140) + ((data.prompt || "").length > 140 ? "..." : "");
-  $("vote-count").textContent = `${data.voter_votes} votes by you`;
+  totalVotes = data.voter_votes;
   let ready = 0;
   const onReady = () => {
     ready += 1;
@@ -191,7 +252,7 @@ async function loadBallot() {
     videos[side].src = data[`${side}_url`];
     videos[side].load();
   }
-  applyAudio();
+  muteBoth();
 }
 
 async function vote(choice) {
@@ -207,7 +268,7 @@ async function vote(choice) {
     choice,
     comment: $("comment").value.trim(),
     watch_seconds: shownAt ? (performance.now() - shownAt) / 1000 : 0,
-    played_seconds: playedMs / 1000,
+    played_seconds: Math.max(0, playedMs) / 1000,
   };
   let data;
   try {
@@ -223,11 +284,14 @@ async function vote(choice) {
     setStatus(`Vote not saved: ${err.message}`, true);
     return;
   }
-  $("vote-count").textContent = `${data.voter_votes} votes by you`;
-  if (!$("reveal-chk").checked) { loadBallot(); return; }
+  totalVotes = data.voter_votes;
+  const session = getSession();
+  saveSession({ done: session.done + 1, goal: session.goal });
+  if (!$("reveal-chk").checked) { advance(); return; }
   $("reveal-left").textContent = data.reveal.left.display_name;
   $("reveal-right").textContent = data.reveal.right.display_name;
-  $("after-text").textContent = `Saved. Left = ${data.reveal.left.display_name}, Right = ${data.reveal.right.display_name}.`;
+  $("after-text").textContent = `Saved. Left was ${data.reveal.left.display_name}; right was ${data.reveal.right.display_name}.`;
+  $("next-btn").lastChild.textContent = sessionFinished() ? " Finish" : " Next";
   $("vote-panel").classList.add("disabled");
   $("after-panel").classList.remove("hidden");
   $("next-btn").focus();
@@ -240,7 +304,7 @@ function isTyping(target) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.metaKey || e.ctrlKey || e.altKey || overlayOpen()) return;
   if (isTyping(e.target)) {
     if (e.key === "Escape") e.target.blur();
     if (e.key === "Enter" && e.target.id === "comment") e.target.blur();
@@ -254,14 +318,20 @@ document.addEventListener("keydown", (e) => {
     seekTo((master().currentTime || 0) + (e.key === "ArrowLeft" ? -1 : 1));
   }
   else if (e.key === "z") { $("zoom-chk").checked = !$("zoom-chk").checked; applyZoom(); }
-  else if (e.key === "m") cycleAudio();
   else if (e.key === "p") $("prompt-box").open = !$("prompt-box").open;
-  else if ((e.key === "Enter" || e.key === "n") && voted) { e.preventDefault(); loadBallot(); }
+  else if ((e.key === "Enter" || e.key === "n") && voted) { e.preventDefault(); advance(); }
 });
 
 $("play-btn").addEventListener("click", togglePlay);
-$("next-btn").addEventListener("click", loadBallot);
-$("voter-btn").addEventListener("click", () => getVoter(true));
+$("next-btn").addEventListener("click", advance);
+$("voter-btn").addEventListener("click", () => {
+  getVoter(true);
+  if (sessionFinished()) showDone();
+  else $("done").classList.add("hidden");
+});
+$("help-btn").addEventListener("click", showIntro);
+$("intro-ok").addEventListener("click", closeIntro);
+$("more-btn").addEventListener("click", moreVotes);
 document.querySelectorAll(".choice").forEach((b) => b.addEventListener("click", () => vote(b.dataset.choice)));
 $("seek").addEventListener("input", (e) => {
   seeking = true;
@@ -270,7 +340,6 @@ $("seek").addEventListener("input", (e) => {
 $("seek").addEventListener("change", () => { seeking = false; });
 $("loop-chk").addEventListener("change", (e) => saveSetting(STORE.loop, e.target.checked ? "1" : "0"));
 $("reveal-chk").addEventListener("change", (e) => saveSetting(STORE.reveal, e.target.checked ? "1" : "0"));
-$("audio-sel").addEventListener("change", (e) => { saveSetting(STORE.audio, e.target.value); applyAudio(); });
 $("zoom-chk").addEventListener("change", applyZoom);
 for (const side of ["left", "right"]) {
   videos[side].addEventListener("ended", onEnded);
@@ -281,7 +350,8 @@ viewports.left.addEventListener("scroll", () => syncScroll(viewports.left, viewp
 viewports.right.addEventListener("scroll", () => syncScroll(viewports.right, viewports.left));
 
 fetch("/api/info").then((r) => r.json()).then((info) => {
-  $("bundle-name").textContent = `${info.bundle}: ${info.arms} arms, ${info.clips} prompts`;
-}).catch(() => {});
+  $("bundle-name").textContent = `${info.clips} clips`;
+}).catch((err) => console.warn("could not load /api/info", err));
 loadSettings();
-loadBallot();
+if (localStorage.getItem(STORE.intro) === "1") start();
+else showIntro();

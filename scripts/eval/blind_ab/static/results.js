@@ -1,5 +1,5 @@
 "use strict";
-// Results page: arms table, quality-vs-speed scatter, head-to-head matrix.
+// Results page: variants table, quality-vs-speed scatter, head-to-head matrix.
 
 const $ = (id) => document.getElementById(id);
 const REFRESH_MS = 10000;
@@ -23,8 +23,10 @@ const num = (x, d) => (x === null || x === undefined ? "" : Number(x).toFixed(d)
 function renderArms(data) {
   const table = $("arms-table");
   table.replaceChildren();
-  const head = ["Arm", "Votes", "W / T / L / Bad", "Win rate [95% CI]", "", "BT score", "s / clip",
-    `Speedup vs ${data.baseline || "-"}`, "Hardware", "Resolution"];
+  const labels = [...new Set(data.arms.filter((r) => r.seconds_per_clip).map((r) => r.time_label || ""))];
+  const timeLabel = labels.length === 1 && labels[0] ? labels[0] : "Time per clip";
+  const head = ["Variant", "Votes", "Wins / Can't tell / Losses / Both bad", "Win rate [95% range]", "",
+    "Ranking score", timeLabel, `Speedup vs ${data.baseline || "-"}`, "Size"];
   const tr = el("tr");
   head.forEach((h) => tr.appendChild(el("th", {}, h)));
   table.appendChild(el("thead")).appendChild(tr);
@@ -41,10 +43,10 @@ function renderArms(data) {
       r.votes ? `${pct(r.win_rate)} [${pct(r.win_rate_ci_low)}, ${pct(r.win_rate_ci_high)}]` : "-"));
     row.appendChild(ciBar(r));
     row.appendChild(el("td", { class: "num strong" }, num(r.bt_score, 0)));
-    row.appendChild(el("td", { class: "num" }, num(r.seconds_per_clip, 1)));
+    row.appendChild(el("td", { class: "num", title: r.hardware || "" },
+      r.seconds_per_clip ? `${num(r.seconds_per_clip, 2)} s` : ""));
     row.appendChild(el("td", { class: "num strong" }, r.speedup_vs_baseline ? `${num(r.speedup_vs_baseline, 2)}x` : ""));
-    row.appendChild(el("td", {}, r.hardware || ""));
-    row.appendChild(el("td", {}, r.resolution || ""));
+    row.appendChild(el("td", { class: "num" }, r.size || ""));
     body.appendChild(row);
   }
 }
@@ -65,7 +67,7 @@ function renderScatter(data) {
   host.replaceChildren();
   const pts = data.arms.filter((r) => r.speedup_vs_baseline);
   if (!pts.length) {
-    host.appendChild(el("p", { class: "muted" }, "No arms have speed.seconds_per_clip in arms.json."));
+    host.appendChild(el("p", { class: "muted" }, "No variants have timing data (speed.seconds_per_clip in arms.json)."));
     return;
   }
   const W = 640, H = 320, M = { l: 56, r: 24, t: 16, b: 40 };
@@ -85,12 +87,12 @@ function renderScatter(data) {
   s.appendChild(svg("text", { x: (W + M.l) / 2, y: H - 6, class: "axis", "text-anchor": "middle" },
     `speedup vs ${data.baseline} (faster →)`));
   s.appendChild(svg("text", { x: 14, y: H / 2, class: "axis", "text-anchor": "middle",
-    transform: `rotate(-90 14 ${H / 2})` }, "BT score (better →)"));
+    transform: `rotate(-90 14 ${H / 2})` }, "ranking score (better →)"));
   [y0, (y0 + y1) / 2, y1].forEach((y) => s.appendChild(svg("text", { x: M.l - 6, y: sy(y) + 4, class: "tick",
     "text-anchor": "end" }, y.toFixed(0))));
   pts.forEach((r, i) => {
     const g = svg("g");
-    g.appendChild(svg("title", {}, `${r.display_name}: ${num(r.seconds_per_clip, 1)} s/clip, BT ${num(r.bt_score, 0)}`));
+    g.appendChild(svg("title", {}, `${r.display_name}: ${num(r.seconds_per_clip, 2)} s/clip, ranking score ${num(r.bt_score, 0)}`));
     g.appendChild(svg("circle", { cx: sx(xs[i]), cy: sy(ys[i]), r: 5, class: "pt" }));
     g.appendChild(svg("text", { x: sx(xs[i]) + 8, y: sy(ys[i]) + 4, class: "label" }, r.display_name));
     s.appendChild(g);
@@ -151,7 +153,7 @@ async function refresh() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     $("summary").textContent = `${data.bundle}: ${data.total_votes} votes from ${data.voters.length} voters `
-      + `on ${data.clips} prompts${data.ignored_votes ? ` (${data.ignored_votes} ignored: unknown arms)` : ""}`;
+      + `on ${data.clips} clips${data.ignored_votes ? ` (${data.ignored_votes} votes on retired variants not counted)` : ""}`;
     $("csv-link").href = `/api/results.csv${q}`;
     $("json-link").href = `/api/results.json${q}`;
     fillBaseline(data);

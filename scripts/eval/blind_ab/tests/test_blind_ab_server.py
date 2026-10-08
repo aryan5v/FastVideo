@@ -92,7 +92,7 @@ def test_ballot_vote_results_roundtrip(server):
 
 def test_static_and_errors(server):
     base, _ = server
-    assert b"Blind A/B" in _get(f"{base}/")[2]
+    assert b"Which video looks better?" in _get(f"{base}/")[2]
     assert b"results" in _get(f"{base}/results")[2]
     for path in ("/static/../serve.py", "/static/nope.js", "/video/abc/left", "/video/abc/middle", "/api/ballot"):
         with pytest.raises(urllib.error.HTTPError) as err:

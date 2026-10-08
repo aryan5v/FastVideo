@@ -25,19 +25,25 @@ page), `--verbose` (log every request).
 ## Ballot
 
 Each round shows one prompt and two arms side by side. The server picks the
-arm pair with the fewest votes so far (all pairs get covered evenly), then the
-clip that pair has been compared on least (avoiding repeats for the same
-voter), and balances which arm appears on the left. Video URLs are opaque
-ballot ids, so arm names are hidden until after the vote.
+arm pair with the fewest votes so far (all pairs get covered evenly), skipping
+pairs the voter has already seen on every clip, then the clip that pair has
+been compared on least (avoiding repeats for the same voter), and balances
+which arm appears on the left. Video URLs are opaque ballot ids, so arm names
+are hidden until after the vote.
 
+- A short "How to vote" intro appears once (and from the header link), then
+  the voter name is asked once and kept in the browser's localStorage.
+- Sessions are 12 comparisons with a progress counter ("4 / 12"), saved per
+  voter in localStorage. After 12 a thank-you screen offers "Do 12 more".
 - Playback is synchronized: play/pause, seek, loop, step with the arrow keys.
-- Audio: off / left / right (`m` cycles).
-- `1:1 crop` (`z`) shows pixels at native size; panning one view pans both.
-- Vote with `1` left better, `2` right better, `3` tie, `4` both bad, and an
-  optional comment. `space` plays/pauses, `p` toggles the prompt, `Enter` or
-  `n` loads the next pair.
-- "Reveal after vote" shows the arm names after each vote (stored per browser).
-- The voter name is asked once and kept in the browser's localStorage.
+  Both players are muted.
+- `1:1 zoom` (`z`) shows pixels at native size; panning one view pans both.
+- Vote with `1` "Left looks better", `2` "Right looks better", `3` "Can't
+  tell" (stored as `tie`), `4` "Both look bad" (`both_bad`), and an optional
+  comment. `space` plays/pauses, `p` toggles the prompt, `Enter` or `n` loads
+  the next pair.
+- "Show names after vote" reveals the arms' display names after each vote
+  (stored per browser).
 
 Each vote is appended to the votes JSONL file as one line:
 
@@ -56,8 +62,9 @@ lock. Restarting the server keeps all votes (the file is re-read on start).
 
 - Per arm: votes, wins / ties / losses / both bad, win rate with a Wilson 95%
   interval, Bradley-Terry score (Elo-like scale, 1000 = average, +400 = 10x
-  odds), seconds per clip, speedup vs the chosen baseline, hardware and
-  resolution from `arms.json`.
+  odds; labelled "Ranking score"), seconds per clip, speedup vs the chosen
+  baseline, and `size` from `arms.json`. Votes on arms no longer in
+  `arms.json` are kept but not counted ("votes on retired variants").
 - A quality-vs-speed scatter (speedup vs Bradley-Terry score).
 - A head-to-head win/tie/loss matrix.
 - Export: `/api/results.csv`, `/api/results.json` (both accept `?baseline=<slug>`),
@@ -102,6 +109,10 @@ bundle/
    "speed": {"seconds_per_clip": 52.3, "hardware": "1x GPU", "resolution": "832x480"}}
 ]}
 ```
+
+Optional `speed` keys shown on the results page: `size` (e.g. `"~1.4 GB"`) and
+`label`, the heading of the time column when all arms share it (default
+"Time per clip"; e.g. `"Decode time (GB200, 832x480, 5 s clip)"`).
 
 Speed metadata is also read from manifest-layout bundles if present. Clips
 with fewer than two arms are skipped.

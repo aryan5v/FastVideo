@@ -149,6 +149,8 @@ def _arm_row(arm: Arm, cells: Mapping[str, Mapping[str, int]], bt: float, baseli
         "speedup_vs_baseline": round(base_spc / spc, 3) if spc and base_spc else None,
         "hardware": arm.speed.get("hardware"),
         "resolution": arm.speed.get("resolution"),
+        "size": arm.speed.get("size"),
+        "time_label": arm.speed.get("label"),
     }
 
 
@@ -173,7 +175,7 @@ def summarize(arms: Sequence[Arm], votes: Sequence[Vote], baseline: str | None =
 
 
 CSV_COLUMNS = ("slug", "display_name", "votes", "wins", "losses", "ties", "both_bad", "win_rate", "win_rate_ci_low",
-               "win_rate_ci_high", "bt_score", "seconds_per_clip", "speedup_vs_baseline", "hardware", "resolution")
+               "win_rate_ci_high", "bt_score", "seconds_per_clip", "speedup_vs_baseline", "hardware", "resolution", "size")
 
 
 def summary_to_csv(summary: Mapping[str, Any]) -> str:

@@ -3,18 +3,40 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Blind A/B vote</title>
+  <title>Which video looks better?</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="bar">
-  <strong>Blind A/B</strong>
+  <strong>Which video looks better?</strong>
   <span id="bundle-name" class="muted"></span>
   <span class="spacer"></span>
+  <span id="progress" class="progress" title="Your votes this session"></span>
+  <button id="help-btn" class="link" title="Show the instructions again">How to vote</button>
   <span>Voter: <button id="voter-btn" class="link" title="Change voter name"></button></span>
-  <span class="muted" id="vote-count"></span>
   <a href="/results" target="_blank" rel="noopener">Results</a>
 </header>
+
+<div id="intro" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="intro-title">
+  <div class="card">
+    <h2 id="intro-title">How to vote</h2>
+    <p>Each pair shows the same AI-generated clip rendered by two different video decoders. Composition and
+      motion are identical; only the image quality differs (sharpness, texture, fine detail, color, flicker).
+      Pick the one that looks better.</p>
+    <p>Tip: press <kbd>Z</kbd> for a 1:1 zoom on fine detail.</p>
+    <p class="muted">A session is 12 comparisons. You can stop any time — every vote counts.</p>
+    <button id="intro-ok" class="primary">Start</button>
+  </div>
+</div>
+
+<div id="done" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="done-title">
+  <div class="card">
+    <h2 id="done-title">Thank you!</h2>
+    <p id="done-text"></p>
+    <p><a href="/results" target="_blank" rel="noopener">See the results so far</a></p>
+    <button id="more-btn" class="primary">Do 12 more</button>
+  </div>
+</div>
 
 <main>
   <details id="prompt-box" class="prompt">
@@ -38,18 +60,15 @@
     <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
     <span id="time" class="mono">0.0 / 0.0 s</span>
     <label title="Loop both videos"><input type="checkbox" id="loop-chk" checked> Loop</label>
-    <label title="Which side's audio to hear (m cycles)">Audio
-      <select id="audio-sel"><option value="off">Off</option><option value="left">Left</option><option value="right">Right</option></select>
-    </label>
-    <label title="Show pixels at 1:1 and pan both views together (z)"><input type="checkbox" id="zoom-chk"> 1:1 crop</label>
-    <label title="Show arm names after each vote"><input type="checkbox" id="reveal-chk" checked> Reveal after vote</label>
+    <label title="Show pixels at 1:1 and pan both views together (z)"><input type="checkbox" id="zoom-chk"> 1:1 zoom</label>
+    <label title="Show which decoder was which after each vote"><input type="checkbox" id="reveal-chk" checked> Show names after vote</label>
   </section>
 
   <section class="vote" id="vote-panel">
-    <button class="choice" data-choice="left"><kbd>1</kbd> Left better</button>
-    <button class="choice" data-choice="right"><kbd>2</kbd> Right better</button>
-    <button class="choice" data-choice="tie"><kbd>3</kbd> Tie</button>
-    <button class="choice" data-choice="both_bad"><kbd>4</kbd> Both bad</button>
+    <button class="choice" data-choice="left"><kbd>1</kbd> Left looks better</button>
+    <button class="choice" data-choice="right"><kbd>2</kbd> Right looks better</button>
+    <button class="choice" data-choice="tie"><kbd>3</kbd> Can't tell</button>
+    <button class="choice" data-choice="both_bad"><kbd>4</kbd> Both look bad</button>
     <input id="comment" type="text" maxlength="1000" placeholder="Optional comment (Esc to leave the field)">
   </section>
 
@@ -59,8 +78,9 @@
   </section>
 
   <p id="status" class="status" role="status"></p>
-  <p class="muted small">Keys: <kbd>1</kbd>-<kbd>4</kbd> vote, <kbd>space</kbd> play/pause, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> step 1 s,
-    <kbd>z</kbd> 1:1 crop, <kbd>m</kbd> audio, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
+  <p class="muted small">You can stop any time — every vote counts.
+    Keys: <kbd>1</kbd>-<kbd>4</kbd> vote, <kbd>space</kbd> play/pause, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> step 1 s,
+    <kbd>z</kbd> 1:1 zoom, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
 </main>
 <script src="/static/app.js"></script>
 </body>

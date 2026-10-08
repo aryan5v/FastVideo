@@ -75,8 +75,8 @@ test("CSV export is byte-identical to stats.summary_to_csv", () => {
   }
 });
 
-test("pairing reproduces pairing.choose_matchup decision by decision", () => {
-  const { availability, slugs: armSlugs, history, cases } = fx.pairing;
+function checkPairing(sequence) {
+  const { availability, slugs: armSlugs, history, cases } = sequence;
   const avail = new Map(Object.entries(availability).map(([cid, a]) => [cid, new Set(a)]));
   for (const [i, c] of cases.entries()) {
     const calls = [];
@@ -88,7 +88,11 @@ test("pairing reproduces pairing.choose_matchup decision by decision", () => {
     assert.deepEqual(got, c.expected, `case ${i}`);
     assert.deepEqual(calls, c.calls, `case ${i} candidate sets`);
   }
-});
+}
+
+test("pairing reproduces pairing.choose_matchup decision by decision", () => checkPairing(fx.pairing));
+
+test("pairing skips pairs a voter has exhausted, like pairing.choose_matchup", () => checkPairing(fx.pairing_exhaust));
 
 test("pairing with the default RNG keeps every pair covered evenly", () => {
   const avail = new Map(["c1", "c2", "c3"].map((c) => [c, new Set(["a", "b", "c"])]));

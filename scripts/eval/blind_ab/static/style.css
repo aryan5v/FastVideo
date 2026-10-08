@@ -70,3 +70,11 @@ svg .label { fill: var(--fg); font-size: 12px; }
 .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; max-width: 100%; height: auto; }
 @media (max-width: 900px) { .stage { grid-template-columns: 1fr; } .viewport { height: 45vh; } }
 .vote .choice.picked kbd { background: transparent; color: inherit; border-color: currentColor; }
+.progress { font-weight: 600; font-variant-numeric: tabular-nums; }
+.overlay { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.55); display: flex;
+           align-items: center; justify-content: center; padding: 16px; }
+.card { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 10px;
+        max-width: 560px; padding: 20px 24px; font-size: 15px; line-height: 1.5; }
+.card h2 { margin-top: 0; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); padding: 8px 20px;
+                 font-weight: 600; }

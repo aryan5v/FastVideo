@@ -1,8 +1,9 @@
 // Port of ../../pairing.py: balanced matchup scheduling for blind pairwise voting.
 //
-// Each round picks the arm pair with the fewest comparisons so far, then the clip that pair has been
-// compared on least (preferring clips this voter has not seen for that pair). The arm shown on the left
-// less often goes on the left (random on ties). Keep in sync with pairing.py.
+// Each round picks the arm pair with the fewest comparisons so far (skipping pairs this voter has seen on
+// every clip while others remain), then the clip that pair has been compared on least (preferring clips
+// this voter has not seen for that pair). The arm shown on the left less often goes on the left (random on
+// ties). Keep in sync with pairing.py.
 
 import { comparePyStr } from "./stats.js";
 
@@ -76,12 +77,15 @@ export function chooseMatchup(availability, armSlugs, history, voter = "", rng =
   const { counts, seen } = tally(history, voter);
   const get = (map, key) => map.get(key) || 0;
 
-  const pair = argminChoice(pairs, (p) => [get(counts.pair, keyOf(p))], rng);
-  const pk = keyOf(pair);
-  const clips = [...availability.entries()]
-    .filter(([, arms]) => arms.has(pair[0]) && arms.has(pair[1]))
+  const clipsFor = (p) => [...availability.entries()]
+    .filter(([, arms]) => arms.has(p[0]) && arms.has(p[1]))
     .map(([cid]) => cid)
     .sort(comparePyStr);
+  // A pair is exhausted when this voter has already seen it on every clip it shares.
+  const exhausted = (p) => clipsFor(p).every((cid) => seen.has(`${cid}\u0001${keyOf(p)}`));
+  const pair = argminChoice(pairs, (p) => [exhausted(p), get(counts.pair, keyOf(p))], rng);
+  const pk = keyOf(pair);
+  const clips = clipsFor(pair);
   const clipId = argminChoice(clips, (cid) => {
     const ck = `${cid}\u0001${pk}`;
     return [seen.has(ck), get(counts.clipPair, ck), get(counts.clip, cid)];

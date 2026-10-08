@@ -1,8 +1,10 @@
 """Balanced matchup scheduling for blind pairwise voting.
 
 Each round picks the arm pair with the fewest comparisons so far (all pairs
-get covered evenly over time), then the clip that pair has been compared on
-least, preferring clips the current voter has not yet seen for that pair.
+get covered evenly over time), skipping pairs the current voter has already
+seen on every clip while other pairs remain, then the clip that pair has been
+compared on least, preferring clips the current voter has not yet seen for
+that pair.
 Left/right placement goes to whichever arm has been shown on the left less
 often (random on ties), so no arm is systematically favored by screen side.
 """
@@ -80,8 +82,17 @@ def choose_matchup(availability: Mapping[str, frozenset[str]],
         if voter and past.voter == voter:
             seen_by_voter.add((past.clip_id, key))
 
-    pair = _argmin_choice(list(pairs), lambda p: pair_counts[p], rng)
-    clips = sorted(cid for cid, arms in availability.items() if pair[0] in arms and pair[1] in arms)
+    clips_by_pair = {
+        p: sorted(cid for cid, arms in availability.items() if p[0] in arms and p[1] in arms)
+        for p in pairs
+    }
+
+    def exhausted(p: tuple[str, str]) -> bool:
+        # The voter has already seen this pair on every clip it shares.
+        return all((cid, p) in seen_by_voter for cid in clips_by_pair[p])
+
+    pair = _argmin_choice(list(pairs), lambda p: (exhausted(p), pair_counts[p]), rng)
+    clips = clips_by_pair[pair]
     clip_id = _argmin_choice(
         clips,
         lambda cid: ((cid, pair) in seen_by_voter, clip_pair_counts[(cid, pair)], clip_counts[cid]),

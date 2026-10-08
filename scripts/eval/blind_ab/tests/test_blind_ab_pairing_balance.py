@@ -75,3 +75,18 @@ def test_no_shared_clip_raises():
 def test_returns_matchup_with_distinct_arms():
     m = choose_matchup(CLIPS, ARMS, [], "v", random.Random(3))
     assert isinstance(m, Matchup) and m.left != m.right and m.clip_id in CLIPS
+
+
+def test_voter_never_repeats_pair_and_clip_while_unseen_combos_remain():
+    # One voter, 6 pairs x 2 clips = 12 combos; another voter's votes skew the global pair counts.
+    clips = {f"clip{i}": frozenset(ARMS) for i in range(2)}
+    rng = random.Random(5)
+    history = [PastMatchup("clip0", "a", "b", "other")] * 3
+    seen = set()
+    for _ in range(12):
+        m = choose_matchup(clips, ARMS, history, "me", rng)
+        combo = (m.clip_id, pair_key(m.left, m.right))
+        assert combo not in seen
+        seen.add(combo)
+        history.append(PastMatchup(m.clip_id, m.left, m.right, "me"))
+    assert len(seen) == 12
