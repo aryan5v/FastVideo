@@ -397,10 +397,12 @@ def run_eval(args: argparse.Namespace, plan: list[dict[str, Any]]) -> None:
     manifest_path = eval_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else []
     done = {item["id"] for item in manifest}
+    # The model's own vae/config.json: the pipeline config's VAE arch in this process keeps its dataclass
+    # defaults (zeros/ones) until the VAE itself loads.
+    vae_config = json.loads((Path(args.model_path) / "vae" / "config.json").read_text())
+    mean = torch.tensor(vae_config["latents_mean"], dtype=torch.float32).view(1, -1, 1, 1, 1)
+    std = torch.tensor(vae_config["latents_std"], dtype=torch.float32).view(1, -1, 1, 1, 1)
     driver = OmniRefLatentGenerator(args)
-    arch = driver.fastvideo_args.pipeline_config.vae_config.arch_config
-    mean = torch.tensor(arch.latents_mean, dtype=torch.float32).view(1, -1, 1, 1, 1)
-    std = torch.tensor(arch.latents_std, dtype=torch.float32).view(1, -1, 1, 1, 1)
     for clip in plan:
         if clip["id"] in done:
             continue
