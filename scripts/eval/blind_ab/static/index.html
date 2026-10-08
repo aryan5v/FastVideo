@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blind A/B vote</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <strong>Blind A/B</strong>
+  <span id="bundle-name" class="muted"></span>
+  <span class="spacer"></span>
+  <span>Voter: <button id="voter-btn" class="link" title="Change voter name"></button></span>
+  <span class="muted" id="vote-count"></span>
+  <a href="/results" target="_blank" rel="noopener">Results</a>
+</header>
+
+<main>
+  <details id="prompt-box" class="prompt">
+    <summary><span class="muted">Prompt</span> <span id="prompt-preview"></span></summary>
+    <pre id="prompt-text"></pre>
+  </details>
+
+  <section id="stage" class="stage">
+    <figure class="pane">
+      <figcaption><span class="tag">Left</span> <span id="reveal-left" class="reveal"></span></figcaption>
+      <div class="viewport" id="vp-left"><video id="video-left" playsinline preload="auto" muted></video></div>
+    </figure>
+    <figure class="pane">
+      <figcaption><span class="tag">Right</span> <span id="reveal-right" class="reveal"></span></figcaption>
+      <div class="viewport" id="vp-right"><video id="video-right" playsinline preload="auto" muted></video></div>
+    </figure>
+  </section>
+
+  <section class="transport">
+    <button id="play-btn" title="Play / pause (space)">Play</button>
+    <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
+    <span id="time" class="mono">0.0 / 0.0 s</span>
+    <label title="Loop both videos"><input type="checkbox" id="loop-chk" checked> Loop</label>
+    <label title="Which side's audio to hear (m cycles)">Audio
+      <select id="audio-sel"><option value="off">Off</option><option value="left">Left</option><option value="right">Right</option></select>
+    </label>
+    <label title="Show pixels at 1:1 and pan both views together (z)"><input type="checkbox" id="zoom-chk"> 1:1 crop</label>
+    <label title="Show arm names after each vote"><input type="checkbox" id="reveal-chk" checked> Reveal after vote</label>
+  </section>
+
+  <section class="vote" id="vote-panel">
+    <button class="choice" data-choice="left"><kbd>1</kbd> Left better</button>
+    <button class="choice" data-choice="right"><kbd>2</kbd> Right better</button>
+    <button class="choice" data-choice="tie"><kbd>3</kbd> Tie</button>
+    <button class="choice" data-choice="both_bad"><kbd>4</kbd> Both bad</button>
+    <input id="comment" type="text" maxlength="1000" placeholder="Optional comment (Esc to leave the field)">
+  </section>
+
+  <section class="after hidden" id="after-panel">
+    <span id="after-text"></span>
+    <button id="next-btn"><kbd>Enter</kbd> Next</button>
+  </section>
+
+  <p id="status" class="status" role="status"></p>
+  <p class="muted small">Keys: <kbd>1</kbd>-<kbd>4</kbd> vote, <kbd>space</kbd> play/pause, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> step 1 s,
+    <kbd>z</kbd> 1:1 crop, <kbd>m</kbd> audio, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

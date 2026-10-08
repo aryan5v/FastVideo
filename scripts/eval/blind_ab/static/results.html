@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blind A/B results</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <strong>Blind A/B results</strong>
+  <span id="summary" class="muted"></span>
+  <span class="spacer"></span>
+  <label>Speed baseline <select id="baseline"></select></label>
+  <label><input type="checkbox" id="auto-chk" checked> Auto-refresh</label>
+  <a id="csv-link" href="/api/results.csv">CSV</a>
+  <a id="json-link" href="/api/results.json">JSON</a>
+  <a href="/api/votes.jsonl">votes.jsonl</a>
+  <a href="/">Vote</a>
+</header>
+<main>
+  <h2>Arms <span class="muted small">(sorted by Bradley-Terry score; ties and "both bad" count as half a win)</span></h2>
+  <div class="scroll"><table id="arms-table"></table></div>
+
+  <h2>Quality vs speed</h2>
+  <p class="muted small">Each dot is an arm: x = speedup vs the baseline (log scale, right is faster), y = Bradley-Terry score (up is preferred).
+    Arms without speed metadata are omitted.</p>
+  <div id="scatter"></div>
+
+  <h2>Head-to-head <span class="muted small">(row vs column: wins-ties-losses; "both bad" counted with ties; cell shade = row win rate)</span></h2>
+  <div class="scroll"><table id="matrix-table" class="matrix"></table></div>
+  <p id="status" class="status" role="status"></p>
+</main>
+<script src="/static/results.js"></script>
+</body>
+</html>
