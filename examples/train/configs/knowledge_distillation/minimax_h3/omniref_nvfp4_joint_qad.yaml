@@ -1,0 +1,114 @@
+# Joint QAD of FastH3 OmniRef step 3500: NVFP4 block linears + sparse-FP4 VSA-128 attention.
+#
+# Student = the teacher's own bf16 weights (fp32 masters) + Stage A's calibrated
+# static FFN scales + unit attention/gate scales + the deployed sparse-FP4
+# attention numerics (Triton emulator of attn_qat_infer at tile 128).
+# Loss = per-forward x0 regression to the frozen bf16 teacher on the 8-forward
+# PDD ladder (teacher forcing, plus a student-rollout fraction after warmup).
+# Guardrails: step-0 bit-identity and PTQ checks, eval every 25 steps on 10
+# held-out rows (5 cases x 2, 480p), best-checkpoint saving, stop after 3
+# consecutive evals worse than the PTQ start.
+#
+# Cost (measured on GB200, emulator at 8 warps, 4 of 8 forwards trained per row):
+# 300 steps x 8 rows ~ 245 GPU-h train + ~25 GPU-h eval; ~17 h on 4 trays, ~9 h on 8.
+#
+# Launch (needs approval): sbatch --hold --nodes=4 jobs/qad_multi.sbatch <this.yaml> <tag>, then the
+# multi-tray warmup trick. 4 trays = SP 4 x DP 4. Paths are the GB200 (NVL) cluster's.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    qad:
+      enabled: true
+      linears:
+        enabled: true
+        # Stage A output (FASTVIDEO_NVFP4_ACT_AMAX format). Required for real runs.
+        amax_json: /mnt/nfs/vlm-aryan/h3-omniref-nvfp4/out/calib/amax.json
+        attention: true
+        gate: true
+        ffn: true
+        skip_blocks: []
+      fp4_attention:
+        enabled: true
+        # Must match the deployed sm_120/121 kernel flags (today: single-level P, no K smoothing).
+        two_level_p: false
+        smooth_k: false
+        first_block_max_floor: null
+    data:
+      manifests:
+        - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/omniref-v4-processed/20260919T001000Z/encoded/full/MANIFEST.jsonl
+        # Add the v5 r3 manifest once full_scene_audio_image_reference rows exist on NVL (B300-only today).
+      cases: [first_frame, first_last_frame, storyboard, continue_scene, continue_shot,
+              full_scene_audio_image_reference]
+      per_group: {"480p": 400, "768p": 50}
+      seed: 20261007
+      max_frames: 243
+      eval_manifest: /mnt/nfs/vlm-aryan/h3-nvfp4-decoder/gen-latents/omniref-eval/manifest.json
+      eval_resolutions: ["480p"]
+      eval_per_group: 2
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: false
+
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.pdd_qad.OmniRefPDDQADMethod
+  video_weight: 1.0
+  audio_weight: 1.0
+  rollout_fraction: 0.25
+  rollout_start_step: 50
+  rungs_per_row: 4
+  eval_every: 25
+  patience: 3
+  fidelity_tolerance: 0.05  # keyframe (student vs teacher) may exceed its PTQ value by 5%
+  require_bitwise_init: true
+  save_best: true
+  # Stage A's weights-only teacher-forced x0 rel-L2 per rung: {"video": [8 values], "audio": [8 values]}.
+  ptq_reference_json: null
+  ptq_tolerance: 0.05
+
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+    pin_cpu_memory: false
+  data:
+    train_batch_size: 1
+    seed: 1234
+  optimizer:
+    learning_rate: 1.0e-6
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+    lr_scheduler: cosine_with_min_lr
+    lr_warmup_steps: 25
+    min_lr_ratio: 0.3
+  loop:
+    max_train_steps: 300
+    gradient_accumulation_steps: 2
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/h3-omniref-qad/runs/joint-qad-v1
+    training_state_checkpointing_steps: 50
+    checkpoints_total_limit: 2
+    resume_from_checkpoint: ""
+  tracker:
+    trackers: [wandb]
+    project_name: fasth3-omniref-nvfp4
+    run_name: joint-qad-v1
+  model:
+    enable_gradient_checkpointing_type: full
+  dit_precision: fp32
+  vsa_sparsity: 0.0  # the model reads the trained VSA settings from fastvideo_inference.json
+
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+
+pipeline: {}

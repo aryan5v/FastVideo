@@ -273,6 +273,27 @@ class CheckpointManager:
 
         self._cleanup_old_checkpoints()
 
+    def save_tagged(self, tag: str, step: int) -> None:
+        """Save the trainable roles' model weights only to ``<output_dir>/<tag>`` (overwritten).
+
+        Tagged directories are not ``checkpoint-<step>`` and are never pruned;
+        they hold no optimizer state (resume from regular checkpoints).
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag) or _CHECKPOINT_DIR_RE.match(tag):
+            raise ValueError(f"invalid checkpoint tag {tag!r}")
+        tagged_dir = Path(self.output_dir) / tag
+        dcp_dir = tagged_dir / "dcp"
+        if _rank() == 0:
+            if tagged_dir.exists():
+                shutil.rmtree(tagged_dir)
+            os.makedirs(dcp_dir, exist_ok=True)
+            self._write_metadata(tagged_dir, step)
+            logger.info("Saving %s weights (step %d) to %s", tag, step, tagged_dir)
+        _barrier()
+        states = {key: value for key, value in self.method.checkpoint_state().items() if key.startswith("roles.")}
+        dcp.save(states, checkpoint_id=str(dcp_dir))
+        _barrier()
+
     def _write_metadata(
         self,
         checkpoint_dir: Path,

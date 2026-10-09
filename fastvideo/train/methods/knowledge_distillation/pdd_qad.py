@@ -1,0 +1,385 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Per-forward quantization-aware distillation (QAD) of a FastH3 OmniRef PDD student.
+
+Student = the teacher's own weights + NVFP4 fake-quantized block linears
+(Stage A calibrated static FFN scales, unit attention/gate scales) + the
+deployed sparse-FP4 attention numerics. Loss = per-forward regression of the
+denoiser output (x0) to the frozen bf16 teacher, at identical inputs on the
+eight-forward PDD ladder; no DMD, no adversarial term.
+
+Each optimizer micro-step takes one OmniRef row: the teacher walks its PDD
+trajectory (teacher forcing), or with probability ``rollout_fraction`` the
+student walks its own (DAgger-style exposure-bias correction); at every
+forward both models see the same state and the student's x0 error is
+backpropagated at once, inside that forward's scope.
+
+Guardrails: step-0 checks (quantization disabled -> bit-identical to the
+teacher; quantized error vs the Stage A PTQ number), per-(rung, modality)
+loss normalization by the step-0 PTQ error, held-out evaluation every
+``eval_every`` steps (teacher-forced x0 rel-L2 per forward, student-rollout
+endpoint, latent keyframe fidelity), best-checkpoint requests, and a stop
+request after ``patience`` consecutive evaluations worse than step 0.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from fastvideo.distributed import get_world_group
+from fastvideo.logger import init_logger
+from fastvideo.train.methods.base import LogScalar, TrainingMethod
+from fastvideo.train.methods.knowledge_distillation.pdd_qad_metrics import (MODALITIES, RungStats, keyframe_latents,
+                                                                            rel_l2, step_packed, summarize,
+                                                                            target_slices, x0_pair)
+from fastvideo.train.utils.optimizer import build_optimizer_and_scheduler
+
+logger = init_logger(__name__)
+
+
+def _unit_hash(*parts: Any) -> float:
+    digest = hashlib.sha256(":".join(str(p) for p in parts).encode()).digest()
+    return int.from_bytes(digest[:8], "little") / 2.0**64
+
+
+class OmniRefPDDQADMethod(TrainingMethod):
+    """Teacher-forced (+ optional student-rollout) per-forward x0 regression; see module docstring."""
+
+    def __init__(self, *, cfg: Any, role_models: dict[str, Any]) -> None:
+        super().__init__(cfg=cfg, role_models=role_models)
+        if "teacher" not in role_models:
+            raise ValueError("OmniRefPDDQADMethod needs a frozen 'teacher' role")
+        self.teacher = role_models["teacher"]
+        if getattr(self.teacher, "_trainable", False) or self.teacher.qad_linears:
+            raise ValueError("the teacher must be frozen and unquantized")
+        mc = self.method_config
+        self.weights = {"video": float(mc.get("video_weight", 1.0)), "audio": float(mc.get("audio_weight", 1.0))}
+        self.rollout_fraction = float(mc.get("rollout_fraction", 0.0))
+        self.rollout_start_step = int(mc.get("rollout_start_step", 0))
+        # Student forward+backward on this many of the 8 forwards per row (the teacher walks all of them).
+        self.rungs_per_row = int(mc.get("rungs_per_row", 0))
+        self.eval_every = int(mc.get("eval_every", 50))
+        self.patience = int(mc.get("patience", 3))
+        self.fidelity_tolerance = float(mc.get("fidelity_tolerance", 0.05))
+        self.ptq_reference_json = mc.get("ptq_reference_json")
+        self.ptq_tolerance = float(mc.get("ptq_tolerance", 0.05))
+        self.require_bitwise_init = bool(mc.get("require_bitwise_init", True))
+        self.max_eval_rows = int(mc.get("max_eval_rows", 0))
+        self.save_best = bool(mc.get("save_best", True))
+        self.student.init_preprocessors(cfg.training)
+        tc = self.training_config
+        params = [p for p in self.student.transformer.parameters() if p.requires_grad]
+        self.optimizer, self.lr_scheduler = build_optimizer_and_scheduler(params=params,
+                                                                          optimizer_config=tc.optimizer,
+                                                                          loop_config=tc.loop,
+                                                                          learning_rate=float(
+                                                                              tc.optimizer.learning_rate),
+                                                                          betas=tuple(tc.optimizer.betas),
+                                                                          scheduler_name=str(tc.optimizer.lr_scheduler))
+        self.normalizers: dict[str, list[float]] | None = None
+        self.step0: dict[str, float] = {}
+        self.best_score = math.inf
+        self.bad_evals = 0
+        self.stop_requested = False
+        self._checkpoint_request: str | None = None
+        world = get_world_group()
+        self.sp_size = int(tc.distributed.sp_size or 1)
+        self.dp_rank, self.dp_size = world.rank // self.sp_size, world.world_size // self.sp_size
+        self.is_sp_leader = world.rank % self.sp_size == 0
+
+    # ------------------------------------------------------------------ optimizer plumbing
+    def get_optimizers(self, iteration: int) -> list[torch.optim.Optimizer]:
+        return [self.optimizer]
+
+    def get_lr_schedulers(self, iteration: int) -> list[Any]:
+        return [self.lr_scheduler]
+
+    @property
+    def _optimizer_dict(self) -> dict[str, Any]:
+        return {"student": self.optimizer}
+
+    @property
+    def _lr_scheduler_dict(self) -> dict[str, Any]:
+        return {"student": self.lr_scheduler}
+
+    def backward(self,
+                 loss_map: dict[str, torch.Tensor],
+                 outputs: dict[str, Any],
+                 *,
+                 grad_accum_rounds: int = 1) -> None:
+        """No-op: each forward's loss was backpropagated inside its own rung scope."""
+
+    def consume_checkpoint_request(self) -> str | None:
+        request, self._checkpoint_request = self._checkpoint_request, None
+        return request
+
+    # ------------------------------------------------------------------ one training row
+    def _row(self, spec: Any) -> Any:
+        from fastvideo.train.models.minimax_h3.omniref_data import read_row
+        return self.student.prepare(spec, read_row(spec.parquet))
+
+    def single_train_step(self, batch: dict[str, Any], iteration: int) -> tuple[dict, dict, dict[str, LogScalar]]:
+        if self.normalizers is None:
+            raise RuntimeError("step-0 evaluation must run before training (it sets the loss normalizers)")
+        spec = batch["row"]
+        prepared = self._row(spec)
+        rollout = iteration >= self.rollout_start_step and _unit_hash(spec.id, iteration) < self.rollout_fraction
+        schedulers = self.student.schedulers()
+        timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
+        accum = max(1, int(self.training_config.loop.gradient_accumulation_steps or 1))
+        num_rungs = self.student.num_rungs
+        trained = self._trained_rungs(spec.id, iteration, num_rungs)
+        video, audio = prepared.video, prepared.audio
+        total = torch.zeros((), device=self.student.device)
+        metrics: dict[str, LogScalar] = {
+            "train/rollout": float(rollout),
+            "train/tokens": float(prepared.layout.sequence_length)
+        }
+        started = time.perf_counter()
+        for rung in range(num_rungs):
+            with torch.no_grad(), self.teacher.rung_scope(prepared, rung, timesteps) as rt:
+                teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
+            if rung not in trained:
+                if rollout:  # the student's own trajectory still needs its (no-grad) forward here
+                    with torch.no_grad(), self.student.rung_scope(prepared, rung, timesteps) as rt:
+                        student_out = self.student.forward_rung(prepared, video, audio, rt)
+                video, audio = step_packed(schedulers, prepared, rung, video, audio,
+                                           *(student_out if rollout else teacher_out))
+                continue
+            with self.student.rung_scope(prepared, rung, timesteps) as rt:
+                student_out = self.student.forward_rung(prepared, video, audio, rt)
+                pair = x0_pair(prepared, schedulers, rung, video, audio, {
+                    "student": student_out,
+                    "teacher": teacher_out
+                })
+                loss = self._rung_loss(pair, rung, metrics)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f"non-finite QAD loss at step {iteration}, row {spec.id}, rung {rung}")
+                (loss / (len(trained) * accum)).backward()
+            total += loss.detach() / len(trained)
+            step_out = tuple(v.detach() for v in student_out) if rollout else teacher_out
+            video, audio = step_packed(schedulers, prepared, rung, video, audio, *step_out)
+        metrics["train/row_seconds"] = time.perf_counter() - started
+        if get_world_group().rank == 0:
+            logger.info("QAD step %d row %s (%s, %d tokens, rollout=%s): loss %.5f in %.1fs", iteration, spec.id,
+                        spec.case, prepared.layout.sequence_length, rollout, float(total), metrics["train/row_seconds"])
+        return {"total_loss": total}, {}, metrics
+
+    def _trained_rungs(self, row_id: str, iteration: int, num_rungs: int) -> set[int]:
+        """All forwards, or a deterministic random subset (identical on every rank of an SP group)."""
+        if self.rungs_per_row <= 0 or self.rungs_per_row >= num_rungs:
+            return set(range(num_rungs))
+        order = sorted(range(num_rungs), key=lambda rung: _unit_hash(row_id, iteration, "rung", rung))
+        return set(order[:self.rungs_per_row])
+
+    def _rung_loss(self, pair: dict[str, dict[str, torch.Tensor]], rung: int, metrics: dict[str,
+                                                                                            LogScalar]) -> torch.Tensor:
+        assert self.normalizers is not None
+        loss = torch.zeros((), device=self.student.device)
+        for modality in MODALITIES:
+            student, teacher = pair[modality]["student"], pair[modality]["teacher"]
+            mse = (student - teacher).pow(2).mean()
+            normalized = mse / self.normalizers[modality][rung]
+            loss = loss + self.weights[modality] * normalized
+            metrics[f"train/rel_mse_vs_ptq/{modality}/rung{rung}"] = normalized.detach()
+        return loss / sum(self.weights.values())
+
+    # ------------------------------------------------------------------ evaluation and guardrails
+    def on_validation_begin(self, iteration: int = 0) -> dict[str, LogScalar]:
+        first = self.normalizers is None
+        if not first and (self.eval_every <= 0 or iteration % self.eval_every):
+            return {}
+        rows = self._rank_rows()
+        metrics: dict[str, LogScalar] = {}
+        started = time.perf_counter()
+        if first:
+            metrics.update(self._initial_checks(rows))
+        summary = self._evaluate(rows, rollout=True)
+        metrics.update({f"eval/{k}": v for k, v in summary.items()})
+        if first:
+            self.normalizers = {
+                m: [max(summary[f"x0_mse/{m}/rung{r}"], 1e-20) for r in range(self.student.num_rungs)]
+                for m in MODALITIES
+            }
+            self.step0 = dict(summary)
+            self.best_score = summary["score"]
+        else:
+            metrics.update(self._guardrails(iteration, summary))
+        metrics["eval/seconds"] = time.perf_counter() - started
+        metrics["eval/score_vs_ptq"] = summary["score"] / max(self.step0.get("score", summary["score"]), 1e-30)
+        if get_world_group().rank == 0:
+            logger.info("QAD eval @%d: score %.5f (PTQ %.5f) %s", iteration, summary["score"],
+                        self.step0.get("score", float("nan")),
+                        json.dumps({
+                            k: round(float(v), 5)
+                            for k, v in metrics.items()
+                        }))
+        return metrics
+
+    def _rank_rows(self) -> list[tuple[Any, bool]]:
+        """This data-parallel group's eval rows, padded so every group runs the same number of forwards.
+
+        FSDP all-gathers span every rank, so groups must stay in lockstep; padded
+        repeats run but are not counted (``(row, counted)`` pairs).
+        """
+        rows = self.student.eval_rows[:self.max_eval_rows] if self.max_eval_rows else self.student.eval_rows
+        if not rows:
+            return []
+        per_rank = -(-len(rows) // self.dp_size)
+        return [(rows[(i * self.dp_size + self.dp_rank) % len(rows)], i * self.dp_size + self.dp_rank < len(rows))
+                for i in range(per_rank)]
+
+    def _guardrails(self, iteration: int, summary: dict[str, float]) -> dict[str, LogScalar]:
+        worse = summary["score"] > self.step0["score"]
+        for name in ("first", "last"):
+            key = f"keyframe/vs_teacher/{name}"
+            if key in summary and key in self.step0:
+                worse |= summary[key] > self.step0[key] * (1.0 + self.fidelity_tolerance)
+        self.bad_evals = self.bad_evals + 1 if worse else 0
+        if summary["score"] < self.best_score:
+            self.best_score = summary["score"]
+            self._checkpoint_request = "best" if self.save_best else None
+        if self.bad_evals >= self.patience:
+            self.stop_requested = True
+            logger.warning("QAD stop: %d consecutive evaluations worse than the PTQ start (step %d)", self.bad_evals,
+                           iteration)
+        return {
+            "eval/bad_evals": float(self.bad_evals),
+            "eval/best_score": self.best_score,
+            "eval/stop_requested": float(self.stop_requested)
+        }
+
+    @torch.no_grad()
+    def _evaluate(self, rows: list[tuple[Any, bool]], *, rollout: bool, attention: bool = True) -> dict[str, float]:
+        num_rungs = self.student.num_rungs
+        stats = RungStats(num_rungs)
+        counted_stats = stats
+        with self.student.quantization(linears=True, attention=attention):
+            for spec, counted in rows:
+                stats = counted_stats if counted else RungStats(num_rungs)
+                prepared = self._row(spec)
+                schedulers = self.student.schedulers()
+                timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
+                video, audio = prepared.video, prepared.audio
+                for rung in range(num_rungs):
+                    with self.teacher.rung_scope(prepared, rung, timesteps) as rt:
+                        teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
+                    with self.student.rung_scope(prepared, rung, timesteps) as rt:
+                        student_out = self.student.forward_rung(prepared, video, audio, rt)
+                    stats.add_rung(
+                        rung,
+                        x0_pair(prepared, schedulers, rung, video, audio, {
+                            "student": student_out,
+                            "teacher": teacher_out
+                        }))
+                    video, audio = step_packed(schedulers, prepared, rung, video, audio, *teacher_out)
+                if rollout:
+                    self._rollout_metrics(stats, prepared, schedulers, timesteps, video, audio)
+        means = counted_stats.reduce(contribute=self.is_sp_leader)
+        summary = summarize(means, num_rungs, self.weights)
+        for name in ("first", "last"):
+            student, teacher = summary.get(f"keyframe/student/{name}"), summary.get(f"keyframe/teacher/{name}")
+            if student is not None and teacher is not None:
+                summary[f"keyframe/drop/{name}"] = student / max(teacher, 1e-12) - 1.0
+        return summary
+
+    def _rollout_metrics(self, stats: RungStats, prepared: Any, schedulers: tuple[Any, Any], timesteps: Any,
+                         teacher_video: torch.Tensor, teacher_audio: torch.Tensor) -> None:
+        """Student's own 8-forward sample vs the teacher's: endpoint rel-L2 and latent keyframe fidelity."""
+        video, audio = prepared.video, prepared.audio
+        for rung in range(self.student.num_rungs):
+            with self.student.rung_scope(prepared, rung, timesteps) as rt:
+                out = self.student.forward_rung(prepared, video, audio, rt)
+            video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
+        cut = target_slices(prepared)
+        for modality, student, teacher in (("video", video, teacher_video), ("audio", audio, teacher_audio)):
+            s, t = student[cut[modality]].float(), teacher[cut[modality]].float()
+            stats.add_scalar(f"endpoint.{modality}", (s - t).norm() / t.norm().clamp_min(1e-12))
+        teacher_frames = keyframe_latents(prepared, teacher_video)
+        for name, (frame, reference) in keyframe_latents(prepared, video).items():
+            stats.add_scalar(f"keyframe.vs_teacher.{name}", rel_l2(frame, teacher_frames[name][0]))
+            if reference is not None:
+                stats.add_scalar(f"keyframe.student.{name}", rel_l2(frame, reference))
+                stats.add_scalar(f"keyframe.teacher.{name}", rel_l2(teacher_frames[name][0], reference))
+
+    def _initial_checks(self, rows: list[tuple[Any, bool]]) -> dict[str, LogScalar]:
+        """Bit-identity with quantization off, and the PTQ error with bf16 attention (Stage A's protocol)."""
+        out: dict[str, LogScalar] = self._provisional_calibration()
+        diff = torch.zeros((), device=self.student.device, dtype=torch.float64)
+        if rows:
+            prepared = self._row(rows[0][0])
+            schedulers = self.student.schedulers()
+            timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
+            with torch.no_grad(), self.student.quantization(linears=False, attention=False):
+                for rung in (0, self.student.num_rungs - 1):
+                    outs = []
+                    for model in (self.teacher, self.student):
+                        with model.rung_scope(prepared, rung, timesteps) as rt:
+                            outs.append(model.forward_rung(prepared, prepared.video, prepared.audio, rt))
+                    for teacher_t, student_t in zip(*outs, strict=True):
+                        diff = torch.maximum(diff, (teacher_t.double() - student_t.double()).abs().max())
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(diff, op=torch.distributed.ReduceOp.MAX)
+        out["init/noquant_vs_teacher_max_abs"] = float(diff)
+        if self.require_bitwise_init and float(diff) != 0.0:
+            raise RuntimeError(f"student with quantization disabled differs from the teacher (max |diff| "
+                               f"{float(diff):.3e}); refusing to train from a student that is not the teacher")
+        weights_only = self._evaluate(rows, rollout=False, attention=False)
+        out.update({f"init/ptq_bf16_attn/{k}": v for k, v in weights_only.items() if k.startswith(("x0_rel", "score"))})
+        out.update(self._compare_ptq_reference(weights_only))
+        return out
+
+    @torch.no_grad()
+    def _provisional_calibration(self) -> dict[str, LogScalar]:
+        """Smoke runs without Stage A's table: max-calibrate the FFN inputs on dense teacher trajectories."""
+        from fastvideo.layers.quantization.nvfp4_qad import calibrating, nvfp4_qad_export_scales
+        pending = [m for m in self.student.qad_linears.values() if m.act_scale == "static" and m.input_amax is None]
+        if not pending:
+            return {}
+        count = int(getattr(self.student, "provisional_rows", 0))
+        rows = self.student.train_rows[:count]
+        per_rank = -(-len(rows) // self.dp_size)
+        mine = [rows[(i * self.dp_size + self.dp_rank) % len(rows)] for i in range(per_rank)]
+        with self.student.quantization(linears=False, attention=False), calibrating(self.student.qad_linears):
+            for spec in mine:
+                prepared = self._row(spec)
+                schedulers = self.student.schedulers()
+                timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
+                video, audio = prepared.video, prepared.audio
+                for rung in range(self.student.num_rungs):
+                    with self.student.rung_scope(prepared, rung, timesteps) as rt:
+                        out = self.student.forward_rung(prepared, video, audio, rt)
+                    video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
+        table = nvfp4_qad_export_scales(self.student.qad_linears)
+        if get_world_group().rank == 0:
+            path = Path(self.training_config.checkpoint.output_dir) / "provisional_amax.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(table, indent=1, sort_keys=True))
+            logger.warning("PROVISIONAL FFN scales from %d rows written to %s; use Stage A's table for real runs",
+                           len(rows), path)
+        return {"init/provisional_calibration_rows": float(len(rows))}
+
+    def _compare_ptq_reference(self, weights_only: dict[str, float]) -> dict[str, LogScalar]:
+        """Compare step-0 weights-only x0 rel-L2 per rung to Stage A's (``{"video": [...], "audio": [...]}``)."""
+        if not self.ptq_reference_json:
+            return {}
+        reference = json.loads(Path(self.ptq_reference_json).read_text())
+        deviations = []
+        for modality in MODALITIES:
+            for rung, value in enumerate(reference.get(modality, [])):
+                ours = weights_only.get(f"x0_rel_l2/{modality}/rung{rung}")
+                if ours is not None and value:
+                    deviations.append(abs(ours / float(value) - 1.0))
+        worst = max(deviations, default=float("nan"))
+        if deviations and worst > self.ptq_tolerance:
+            raise RuntimeError(f"step-0 PTQ error deviates {worst:.1%} from Stage A's ({self.ptq_reference_json}); "
+                               "the QAD student does not start at the calibrated PTQ point")
+        return {"init/ptq_vs_stage_a_max_rel_dev": worst}
+
+
+__all__ = ["OmniRefPDDQADMethod"]
