@@ -12,13 +12,39 @@ replay one forward under both numerics with identical inputs and forward context
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import json
 from collections.abc import Iterator
+from pathlib import Path
 
 import torch
 
 SEP = "::"
 BUFFERS = ("_nvfp4_weight", "_nvfp4_weight_scale", "_nvfp4_alpha", "_weight_global_sf")
 INPUT_SF = "_nvfp4_input_global_sf"
+FP4_AMAX_SCALE = 448.0 * 6.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Variant:
+    """A PTQ variant on top of an export: per-layer static amax overrides, per-call (dynamic) activation
+    scales, and linears kept bf16. Keys are module names (``transformer_blocks.3.ff.fc_out``)."""
+
+    amax: dict[str, float] = dataclasses.field(default_factory=dict)
+    dynamic: frozenset[str] = frozenset()
+    bf16: frozenset[str] = frozenset()
+
+    def to_json(self) -> dict:
+        return {"amax": self.amax, "dynamic": sorted(self.dynamic), "bf16": sorted(self.bf16)}
+
+    @classmethod
+    def from_json(cls, raw: dict) -> Variant:
+        return cls(amax={k: float(v) for k, v in raw.get("amax", {}).items()}, dynamic=frozenset(raw.get("dynamic", ())),
+                   bf16=frozenset(raw.get("bf16", ())))
+
+    @classmethod
+    def load(cls, path: str | None) -> Variant:
+        return cls() if not path else cls.from_json(json.loads(Path(path).read_text()))
 
 
 def _resolve(modules: dict[str, torch.nn.Module], prefix: str) -> tuple[str, torch.nn.Module]:
@@ -67,9 +93,34 @@ class NVFP4Swap:
             module.quant_method = nvfp4_method if use else bf16_method
 
     @contextlib.contextmanager
-    def enabled(self, only: set[str] | None = None) -> Iterator[None]:
-        self.set(True, only)
+    def enabled(self, only: set[str] | None = None, variant: Variant | None = None) -> Iterator[None]:
+        """NVFP4 on (``only``: just these linears), with ``variant``'s scale overrides and bf16 linears."""
+        variant = variant or Variant()
+        names = {name for name, *_ in self.layers}
+        unknown = (set(variant.amax) | set(variant.dynamic) | set(variant.bf16)) - names
+        if unknown:
+            raise ValueError(f"variant names {sorted(unknown)[:4]} are not exported linears")
+        active = (names if only is None else set(only)) - set(variant.bf16)
+        saved: list[tuple[torch.nn.Module, object, torch.Tensor | None]] = []
+        for name, module, _, method in self.layers:
+            if name not in active or (name not in variant.amax and name not in variant.dynamic):
+                continue
+            saved.append((module, method, module._buffers.get(INPUT_SF)))
+            if name in variant.dynamic:
+                module._buffers.pop(INPUT_SF, None)
+                method._dynamic_act_cached = True
+            else:
+                device = module._nvfp4_weight.device
+                module._buffers[INPUT_SF] = torch.tensor(FP4_AMAX_SCALE / max(variant.amax[name], 1e-12),
+                                                         dtype=torch.float32, device=device)
+        self.set(True, active)
         try:
             yield
         finally:
             self.set(False)
+            for module, method, buffer in saved:
+                method._dynamic_act_cached = False
+                if buffer is None:
+                    module._buffers.pop(INPUT_SF, None)
+                else:
+                    module._buffers[INPUT_SF] = buffer

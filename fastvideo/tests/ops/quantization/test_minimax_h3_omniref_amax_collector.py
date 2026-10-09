@@ -220,3 +220,35 @@ def test_t4_gate_fails_closed_without_rows(tmp_path) -> None:
     t4.report(argparse.Namespace(output_dir=str(tmp_path), gate_resolutions=["480p"]))
     result = json.loads((tmp_path / "gate_a_report.json").read_text())
     assert result["rows"] == 0 and result["gate_t4_passed"] is False
+
+
+def test_variant_overrides_scales_and_restores() -> None:
+    swap_mod = _load("h3_nvfp4_swap", SCRIPTS / "h3_nvfp4_swap.py")
+
+    class _Method:
+        _dynamic_act_cached = False
+
+    layers = []
+    for name in ("transformer_blocks.0.ff.fc_in", "transformer_blocks.0.ff.fc_out", "transformer_blocks.0.attn.to_q"):
+        module = nn.Linear(4, 4)
+        module.register_buffer("_nvfp4_weight", torch.zeros(4, 2, dtype=torch.uint8))
+        module.register_buffer("_nvfp4_input_global_sf", torch.tensor(1.0))
+        bf16, nvfp4 = _Method(), _Method()
+        module.quant_method = bf16
+        layers.append((name, module, bf16, nvfp4))
+    swap = object.__new__(swap_mod.NVFP4Swap)
+    swap.layers = layers
+    variant = swap_mod.Variant(amax={"transformer_blocks.0.ff.fc_in": 2688.0},
+                               dynamic=frozenset({"transformer_blocks.0.ff.fc_out"}),
+                               bf16=frozenset({"transformer_blocks.0.attn.to_q"}))
+    assert swap_mod.Variant.from_json(json.loads(json.dumps(variant.to_json()))) == variant
+    (_, fc_in, _, m_in), (_, fc_out, _, m_out), (_, to_q, q_bf16, _) = layers
+    with swap.enabled(variant=variant):
+        assert fc_in.quant_method is m_in and fc_out.quant_method is m_out and to_q.quant_method is q_bf16
+        assert fc_in._nvfp4_input_global_sf.item() == pytest.approx(1.0)  # 2688 / 2688
+        assert "_nvfp4_input_global_sf" not in fc_out._buffers and m_out._dynamic_act_cached
+    assert fc_out._nvfp4_input_global_sf.item() == 1.0 and not m_out._dynamic_act_cached
+    assert all(module.quant_method is bf16 for _, module, bf16, _ in layers)
+    with pytest.raises(ValueError, match="not exported"):
+        with swap.enabled(variant=swap_mod.Variant(bf16=frozenset({"nope"}))):
+            pass

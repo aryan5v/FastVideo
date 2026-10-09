@@ -33,7 +33,7 @@ sys.path.insert(0, str(HERE.parents[1] / "distill" / "minimax_h3_nvfp4_decoder")
 
 from calibrate_omniref_nvfp4 import (add_plan_args, current_layout, generate_rows, heldout_name,  # noqa: E402
                                      heldout_plan, real_transformer, save_atomic)
-from h3_nvfp4_swap import NVFP4Swap  # noqa: E402
+from h3_nvfp4_swap import NVFP4Swap, Variant  # noqa: E402
 
 GATE_T1_RATIO = 1.2
 
@@ -79,7 +79,8 @@ class TeacherForcing:
     def __init__(self, transformer: torch.nn.Module, swap: NVFP4Swap, stage: Any) -> None:
         self.transformer, self.swap, self.stage = transformer, swap, stage
         self.original = transformer.forward
-        self.arms: dict[str, set[str] | None] = {"nvfp4": None}
+        # arm name -> (linears to quantize or None for all, variant applied on top)
+        self.arms: dict[str, tuple[set[str] | None, Variant | None]] = {"nvfp4": (None, None)}
         self.records: list[dict[str, Any]] | None = None
         transformer.forward = self._forward
 
@@ -102,8 +103,8 @@ class TeacherForcing:
         x_a = kwargs["audio_hidden_states"][0, nca:].float()
         ref_v, ref_a = reference[0][0, ncv:].float(), reference[1][0, nca:].float()
         record: dict[str, Any] = {"forward": index, "sigma_video": sigma_v, "sigma_audio": sigma_a}
-        for arm, only in self.arms.items():
-            with self.swap.enabled(only):
+        for arm, (only, variant) in self.arms.items():
+            with self.swap.enabled(only, variant):
                 out = self.original(*args, **kwargs)
             record[arm] = {"video": compare(x_v, ref_v, out[0][0, ncv:].float(), sigma_v),
                            "audio": compare(x_a, ref_a, out[1][0, nca:].float(), sigma_a)}
@@ -134,14 +135,15 @@ def run_omniref(args: argparse.Namespace) -> None:
     transformer = real_transformer(driver)
     swap = NVFP4Swap(transformer, args.export, device=torch.device("cuda"))
     print(json.dumps({"nvfp4_linears": len(swap), "static_scales": swap.static_scales}), flush=True)
+    variant = Variant.load(args.variant)
     forcing = TeacherForcing(transformer, swap, driver.denoise)
-    arms = attribution_arms(swap)
+    arms = {name: (only, variant) for name, only in attribution_arms(swap).items()}
     bf16_dir = Path(args.bf16_dir)
     for position, clip in enumerate(todo):
         start = time.perf_counter()
         row = read_row(clip["parquet"])
         attribution = position < args.attribution_rows and clip["resolution"] == "480p"
-        forcing.arms = {"nvfp4": None, **(arms if attribution else {})}
+        forcing.arms = {"nvfp4": (None, variant), **(arms if attribution else {})}
         forcing.records = []
         try:
             bf16 = generate_rows(driver, row, clip["seed"])
@@ -152,7 +154,7 @@ def run_omniref(args: argparse.Namespace) -> None:
         if saved_path.exists():
             saved = torch.load(saved_path, weights_only=False)
             rerun = {"video_rel": _rel(bf16["video"], saved["video"]), "audio_rel": _rel(bf16["audio"], saved["audio"])}
-        with swap.enabled():
+        with swap.enabled(variant=variant):
             nvfp4 = generate_rows(driver, row, clip["seed"], decode_audio=True)
         meta = {k: clip[k] for k in ("id", "source", "case", "resolution", "parquet", "plan_index")}
         save_atomic({**nvfp4, **meta, "seed": clip["seed"], "tag": "nvfp4_s0"},
@@ -246,13 +248,20 @@ def report(args: argparse.Namespace) -> None:
                                               result["v2"]["audio_x0_rel"], strict=True)]
         result["gate_t1"] = {"threshold": GATE_T1_RATIO, "video_ratio_per_rung": [round(r, 3) for r in ratios],
                              "audio_ratio_per_rung": [round(r, 3) for r in audio_ratios],
-                             "passed": all(r <= GATE_T1_RATIO for r in ratios)}
+                             "video_passed": all(r <= GATE_T1_RATIO for r in ratios),
+                             "audio_passed": all(r <= GATE_T1_RATIO for r in audio_ratios),
+                             "passed": all(r <= GATE_T1_RATIO for r in ratios + audio_ratios)}
+        result["omniref_by_case_480p_audio_ratio"] = {
+            case: [round(a / b, 3) for a, b in zip(_per_rung([r for r in subsets["480p"] if r["case"] == case], "nvfp4",
+                                                             "audio", "x0_rel"), result["v2"]["audio_x0_rel"], strict=True)]
+            for case in sorted({r["case"] for r in subsets["480p"]})}
     attributed = [r for r in omniref if r.get("attribution")]
     if attributed:
         arms = sorted({arm for r in attributed for rec in r["forwards"] for arm in rec
                        if isinstance(rec[arm], dict) and "video" in rec[arm]})
-        result["attribution_x0_rel_video"] = {
-            arm: [round(v, 5) for v in _per_rung(attributed, arm, "video", "x0_rel")] for arm in arms}
+        for mod in ("video", "audio"):
+            result[f"attribution_x0_rel_{mod}"] = {
+                arm: [round(v, 5) for v in _per_rung(attributed, arm, mod, "x0_rel")] for arm in arms}
         result["attribution_rows"] = len(attributed)
     reruns = [r["bf16_rerun"]["video_rel"] for r in omniref if r.get("bf16_rerun")]
     if reruns:
@@ -272,6 +281,7 @@ def main() -> None:
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--master-port", type=int, default=int(os.environ.get("MASTER_PORT", 29500)))
+    parser.add_argument("--variant", help="Variant JSON (amax overrides, dynamic, bf16 linears) on top of --export")
     parser.add_argument("--attribution-rows", type=int, default=1, help="rows per shard with layer-group arms")
     parser.add_argument("--v2-config", default="examples/inference/basic/basic_fasth3_spark_v2_nvfp4.yaml")
     parser.add_argument("--v2-seed", type=int, default=1234)
