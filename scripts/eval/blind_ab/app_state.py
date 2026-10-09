@@ -44,6 +44,7 @@ class AppState:
         self._lock = threading.Lock()
         self._ballots: OrderedDict[str, Ballot] = OrderedDict()
         self._availability = {clip.clip_id: frozenset(clip.videos) for clip in bundle.clips}
+        self._groups = {clip.clip_id: clip.group for clip in bundle.clips if clip.group}
 
     def _history(self, now: float) -> list[PastMatchup]:
         history = [PastMatchup(v.clip_id, v.left_arm, v.right_arm, v.voter) for v in self.votes.all()]
@@ -58,7 +59,7 @@ class AppState:
         now = time.time()
         with self._lock:
             matchup = choose_matchup(self._availability, self.bundle.arm_slugs, self._history(now), voter_name,
-                                     self._rng)
+                                     self._rng, self._groups, self.bundle.side_policy)
             ballot = Ballot(secrets.token_urlsafe(12), matchup, voter_name, now)
             self._ballots[ballot.ballot_id] = ballot
             while len(self._ballots) > MAX_BALLOTS:
@@ -68,6 +69,7 @@ class AppState:
             "ballot_id": ballot.ballot_id,
             "clip_id": clip.clip_id,
             "prompt": clip.prompt,
+            "guidance": clip.guidance,
             "left_url": f"/video/{ballot.ballot_id}/left",
             "right_url": f"/video/{ballot.ballot_id}/right",
             "voter_votes": sum(1 for v in self.votes.all() if v.voter == voter_name),
@@ -97,7 +99,7 @@ class AppState:
         vote = Vote(timestamp=utc_now(), clip_id=m.clip_id, left_arm=m.left, right_arm=m.right, ballot_id=ballot_id,
                     **fields)
         try:
-            self.votes.append(vote)
+            self.votes.append(vote, self.bundle.clip(m.clip_id).meta)
         except OSError:
             with self._lock:
                 self._ballots[ballot_id] = ballot
@@ -125,6 +127,7 @@ class AppState:
             "arms": len(self.bundle.arms),
             "clips": len(self.bundle.clips),
             "votes": len(self.votes.all()),
+            "site": dict(self.bundle.site),
         }
 
 

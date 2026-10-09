@@ -4,6 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 const VIDEO_SUFFIXES = [".mp4", ".webm", ".mov", ".m4v"];
+const SIDE_POLICIES = ["balanced", "random"];
+const SITE_TEXT_KEYS = ["title", "heading", "reveal_label", "guidance_label"];
+const CHOICE_KEYS = ["left", "right", "tie", "both_bad"];
 
 export class BundleError extends Error {}
 
@@ -81,9 +84,57 @@ function loadManifestClips(root, arms) {
       if (video) videos[slug] = video;
       else console.warn(`missing video for arm ${slug} clip ${clipId}`);
     }
-    clips.push({ clip_id: clipId, prompt: String(row.prompt || ""), videos });
+    clips.push({ clip_id: clipId, prompt: String(row.prompt || ""), guidance: "", group: "", meta: {}, videos });
   });
   return clips;
+}
+
+const isPlainObject = (x) => Boolean(x) && typeof x === "object" && !Array.isArray(x);
+
+/** Port of bundle.parse_prompt_entry: a prompts.json value (string or object) -> clip fields. */
+export function parsePromptEntry(raw, clipId, source) {
+  if (raw === null || raw === undefined) return { prompt: "", guidance: "", group: "", meta: {} };
+  if (typeof raw === "string") return { prompt: raw, guidance: "", group: "", meta: {} };
+  if (!isPlainObject(raw)) throw new BundleError(`${source}: entry for '${clipId}' must be a string or an object`);
+  const meta = raw.meta || {};
+  if (!isPlainObject(meta) || Object.values(meta).some((v) => v !== null && typeof v === "object")) {
+    throw new BundleError(`${source}: 'meta' for '${clipId}' must be a flat object`);
+  }
+  return {
+    prompt: String(raw.prompt || ""), guidance: String(raw.guidance || ""), group: String(raw.group || ""),
+    meta: { ...meta },
+  };
+}
+
+/** Port of bundle.load_site: the optional site.json (page text and side policy). */
+export function loadSite(root) {
+  const file = path.join(root, "site.json");
+  if (!isFile(file)) return {};
+  const data = readJson(file);
+  if (!isPlainObject(data)) throw new BundleError(`${file}: expected an object`);
+  if (!SIDE_POLICIES.includes(data.sides ?? "balanced")) throw new BundleError(`${file}: 'sides' must be one of ${SIDE_POLICIES}`);
+  const intro = data.intro ?? [];
+  if (!Array.isArray(intro) || !intro.every((x) => typeof x === "string")) {
+    throw new BundleError(`${file}: 'intro' must be a list of paragraph strings`);
+  }
+  const choices = data.choices ?? {};
+  if (!isPlainObject(choices) || !Object.keys(choices).every((k) => CHOICE_KEYS.includes(k))) {
+    throw new BundleError(`${file}: 'choices' may only relabel ${CHOICE_KEYS}`);
+  }
+  for (const key of SITE_TEXT_KEYS) {
+    if (key in data && typeof data[key] !== "string") throw new BundleError(`${file}: '${key}' must be a string`);
+  }
+  return { ...data };
+}
+
+/** Port of bundle.select_arms: keep only the named arms (arms.json order); empty keeps all. */
+export function selectArms(arms, only) {
+  if (!only || !only.length) return arms;
+  const unknown = only.filter((slug) => !arms.some((a) => a.slug === slug)).sort();
+  if (unknown.length) throw new BundleError(`unknown arm(s) ${unknown}; arms.json has ${arms.map((a) => a.slug)}`);
+  const kept = arms.filter((a) => only.includes(a.slug));
+  if (kept.length < 2) throw new BundleError(`need at least two arms, got ${kept.map((a) => a.slug)}`);
+  return kept;
 }
 
 function loadSimpleClips(root, arms) {
@@ -109,19 +160,22 @@ function loadSimpleClips(root, arms) {
     }
   }
   return [...byClip.keys()].sort().map((clipId) => ({
-    clip_id: clipId, prompt: String(prompts[clipId] ?? ""), videos: byClip.get(clipId),
+    clip_id: clipId, ...parsePromptEntry(prompts[clipId], clipId, promptsFile), videos: byClip.get(clipId),
   }));
 }
 
-/** Parse a bundle directory; returns {root, layout, arms, clips} with clips[].videos = slug -> absolute path. */
-export function loadBundle(dir) {
+/**
+ * Parse a bundle directory, optionally restricted to the arms in `onlyArms`. Returns {root, layout, arms, clips,
+ * site} with clips[].videos = slug -> absolute path.
+ */
+export function loadBundle(dir, onlyArms = null) {
   const root = fs.realpathSync(path.resolve(dir));
   if (!isDir(root)) throw new BundleError(`bundle directory not found: ${root}`);
-  const arms = loadArms(root);
+  const arms = selectArms(loadArms(root), onlyArms);
   const manifest = isFile(path.join(root, "manifest.jsonl"));
   const clips = manifest ? loadManifestClips(root, arms) : loadSimpleClips(root, arms);
   const usable = clips.filter((c) => Object.keys(c.videos).length >= 2);
   if (!usable.length) throw new BundleError(`${root}: no clip has videos for at least two arms`);
   if (usable.length < clips.length) console.warn(`skipping ${clips.length - usable.length} clips with fewer than two arms`);
-  return { root, layout: manifest ? "manifest" : "simple", arms, clips: usable };
+  return { root, layout: manifest ? "manifest" : "simple", arms, clips: usable, site: loadSite(root) };
 }

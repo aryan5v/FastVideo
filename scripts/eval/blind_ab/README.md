@@ -99,9 +99,30 @@ Extra fields are ignored. If an arm's `path` is missing, the app looks for
 ```text
 bundle/
   arms.json
-  prompts.json             # optional: {"<clip_id>": "prompt text"}
+  prompts.json             # optional: {"<clip_id>": "prompt text" | {...}}, see below
+  site.json                # optional page text and side policy, see below
   arms/<arm>/<clip_id>.mp4 # same clip_id across arms = same prompt + seed
 ```
+
+A `prompts.json` value can also be an object:
+
+```json
+{"P1_seed42": {"prompt": "...", "guidance": "The ball should bounce at least four times, each lower.",
+               "group": "P1", "meta": {"problem": "P1", "seed": 42}}}
+```
+
+`guidance` is shown above the videos as "What to look for". `group` ties clips
+that share a source (one problem, several seeds): the scheduler prefers the
+groups this voter, then everyone, has seen least, so votes cover every group
+before any group repeats. `meta` (a flat object) is stored with every vote on
+that clip (D1 `extra` column, extra keys in `votes.jsonl`).
+
+`site.json` overrides the page text: `{"title", "heading", "intro": [paragraphs],
+"choices": {"left", "right", "tie", "both_bad"}, "guidance_label",
+"reveal_label", "sides"}`. Choices keep the same four values; only their labels
+change. `"sides": "random"` flips a fair coin for left/right on every ballot
+(default `"balanced"`). To compare a subset of arms, pass `--arms a,b` to
+`serve.py` / `build.mjs` (or `"arms": [...]` in the build config).
 
 `arms.json` uses the same schema plus optional per-arm speed metadata:
 
@@ -189,7 +210,10 @@ npx wrangler pages project create <project-name> --production-branch main
 
 Deploy a bundle (either layout). Pass values as flags, or put them in the
 git-ignored `local.json`: `{"bundle", "databaseId", "databaseName",
-"projectName", "baseline"}`.
+"projectName", "baseline", "name", "out", "arms"}`. For a second site, use
+another config file with its own `out`, e.g. `node build.mjs --config
+local.physics.json` with `"out": "dist-physics"`, so the sites never share a
+build directory or video salt.
 
 ```bash
 node build.mjs --bundle /path/to/bundle --database-id <uuid> \

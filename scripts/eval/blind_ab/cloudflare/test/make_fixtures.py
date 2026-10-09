@@ -72,7 +72,8 @@ class RecordingRng:
         return 0.75
 
 
-def pairing_cases(rng: random.Random, n_clips: int = 5, steps: int = 40, voters=("ann", "bob", "")) -> dict:
+def pairing_cases(rng: random.Random, n_clips: int = 5, steps: int = 40, voters=("ann", "bob", ""),
+                  groups: dict | None = None, sides: str = "balanced") -> dict:
     """Successive scheduling decisions; case i uses the first ``history_len`` entries of the shared history."""
     availability = {f"clip_{i}": ["base", "fp8", "nvfp4", "tiny"] for i in range(n_clips)}
     availability["clip_5"] = ["base", "fp8"]
@@ -82,7 +83,7 @@ def pairing_cases(rng: random.Random, n_clips: int = 5, steps: int = 40, voters=
     for step in range(steps):
         voter = voters[step % len(voters)]
         rec = RecordingRng()
-        m = choose_matchup({k: frozenset(v) for k, v in availability.items()}, slugs, history, voter, rec)
+        m = choose_matchup({k: frozenset(v) for k, v in availability.items()}, slugs, history, voter, rec, groups, sides)
         cases.append({"voter": voter, "history_len": len(history),
                       "expected": {"clip_id": m.clip_id, "left": m.left, "right": m.right}, "calls": rec.calls})
         # Grow the history with a mix of the scheduled matchup and random extra comparisons.
@@ -90,7 +91,7 @@ def pairing_cases(rng: random.Random, n_clips: int = 5, steps: int = 40, voters=
         if step % 4 == 0:
             a, b = rng.sample(["base", "fp8", "nvfp4", "tiny"], 2)
             history = [*history, PastMatchup(f"clip_{rng.randrange(5)}", a, b, rng.choice(["ann", "bob"]))]
-    return {"availability": availability, "slugs": slugs, "cases": cases,
+    return {"availability": availability, "slugs": slugs, "cases": cases, "groups": groups or {}, "sides": sides,
             "history": [{"clip_id": h.clip_id, "arm_a": h.arm_a, "arm_b": h.arm_b, "voter": h.voter} for h in history]}
 
 
@@ -121,6 +122,9 @@ def main() -> None:
         "pairing": pairing_cases(rng),
         # Two clips and one main voter: pairs get exhausted for "ann", exercising the skip-exhausted rule.
         "pairing_exhaust": pairing_cases(rng, n_clips=2, steps=30, voters=("ann", "ann", "ann", "bob")),
+        # Clips grouped like problems x seeds, with coin-flip sides (the physics site's settings).
+        "pairing_groups": pairing_cases(rng, n_clips=6, steps=30, groups={f"clip_{i}": f"g{i // 2}" for i in range(6)},
+                                        sides="random"),
         "numbers": [{"x": x, "round1": round(x, 1), "round2": round(x, 2), "round3": round(x, 3), "repr": repr(x)}
                     for x in numbers],
         "clean_vote_fields": [

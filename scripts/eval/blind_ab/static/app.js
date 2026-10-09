@@ -302,6 +302,8 @@ async function loadBallot() {
   $("after-panel").classList.add("hidden");
   $("vote-panel").classList.remove("disabled");
   document.querySelectorAll(".choice").forEach((b) => { b.disabled = false; b.classList.remove("picked"); });
+  $("guidance-text").textContent = data.guidance || "";
+  $("guidance").classList.toggle("hidden", !data.guidance);
   $("prompt-text").textContent = data.prompt || "(no prompt text in bundle)";
   $("prompt-preview").textContent = (data.prompt || "").slice(0, 140) + ((data.prompt || "").length > 140 ? "..." : "");
   totalVotes = data.voter_votes;
@@ -424,7 +426,27 @@ for (const side of ["left", "right"]) {
 viewports.left.addEventListener("scroll", () => syncScroll(viewports.left, viewports.right));
 viewports.right.addEventListener("scroll", () => syncScroll(viewports.right, viewports.left));
 
+// Optional per-site text from the bundle's site.json (title, intro paragraphs, choice labels).
+function applySite(site) {
+  if (!site) return;
+  if (site.title) document.title = site.title;
+  if (site.heading) $("site-heading").textContent = site.heading;
+  if (Array.isArray(site.intro) && site.intro.length) {
+    const box = $("intro-site");
+    box.replaceChildren(...site.intro.map((text) => Object.assign(document.createElement("p"), { textContent: text })));
+    box.classList.remove("hidden");
+    $("intro-default").classList.add("hidden");
+  }
+  for (const [choice, label] of Object.entries(site.choices || {})) {
+    const span = document.querySelector(`.choice[data-choice="${choice}"] .label`);
+    if (span && typeof label === "string") span.textContent = label;
+  }
+  if (site.guidance_label) $("guidance-label").textContent = site.guidance_label;
+  if (site.reveal_label) $("reveal-chk").parentElement.title = site.reveal_label;
+}
+
 fetch("/api/info").then((r) => r.json()).then((info) => {
+  applySite(info.site);
   $("bundle-name").textContent = `${info.clips} clips`;
   $("intro-audio").classList.toggle("hidden", info.has_audio !== true);
 }).catch((err) => console.warn("could not load /api/info", err));

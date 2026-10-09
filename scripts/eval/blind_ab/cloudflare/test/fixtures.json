@@ -1771,6 +1771,7 @@
     "voter": "ann"
    }
   ],
+  "groups": {},
   "history": [
    {
     "arm_a": "fp8",
@@ -2073,6 +2074,7 @@
     "voter": "ann"
    }
   ],
+  "sides": "balanced",
   "slugs": [
    "tiny",
    "base",
@@ -3160,6 +3162,7 @@
     "voter": "ann"
    }
   ],
+  "groups": {},
   "history": [
    {
     "arm_a": "fp8",
@@ -3390,6 +3393,1490 @@
     "voter": "ann"
    }
   ],
+  "sides": "balanced",
+  "slugs": [
+   "tiny",
+   "base",
+   "fp8",
+   "nvfp4"
+  ]
+ },
+ "pairing_groups": {
+  "availability": {
+   "clip_0": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_1": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_2": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_3": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_4": [
+    "base",
+    "fp8",
+    "nvfp4",
+    "tiny"
+   ],
+   "clip_5": [
+    "base",
+    "fp8"
+   ],
+   "clip_6": [
+    "tiny"
+   ]
+  },
+  "cases": [
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1",
+       "clip_2",
+       "clip_3",
+       "clip_4",
+       "clip_5"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 0,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_2",
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_2",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 2,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1",
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 3,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 4,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 5,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 7,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 8,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 9,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 10,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_5"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_5",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 12,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 13,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0",
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 14,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 15,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_2"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_2",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 17,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 18,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 19,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 20,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 22,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 23,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 24,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 25,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_2"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_2",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 27,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_0"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_0",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 28,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "nvfp4"
+    },
+    "history_len": 29,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "fp8"
+       ],
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_2"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_2",
+     "left": "fp8",
+     "right": "base"
+    },
+    "history_len": 30,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "nvfp4"
+       ],
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "nvfp4",
+     "right": "base"
+    },
+    "history_len": 32,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "base",
+        "tiny"
+       ],
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_4"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_4",
+     "left": "tiny",
+     "right": "base"
+    },
+    "history_len": 33,
+    "voter": ""
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "nvfp4"
+       ],
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_2"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_2",
+     "left": "nvfp4",
+     "right": "fp8"
+    },
+    "history_len": 34,
+    "voter": "ann"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "fp8",
+        "tiny"
+       ],
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_1"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_1",
+     "left": "tiny",
+     "right": "fp8"
+    },
+    "history_len": 35,
+    "voter": "bob"
+   },
+   {
+    "calls": [
+     [
+      "choice",
+      [
+       [
+        "nvfp4",
+        "tiny"
+       ]
+      ]
+     ],
+     [
+      "choice",
+      [
+       "clip_3"
+      ]
+     ],
+     [
+      "random"
+     ]
+    ],
+    "expected": {
+     "clip_id": "clip_3",
+     "left": "tiny",
+     "right": "nvfp4"
+    },
+    "history_len": 37,
+    "voter": ""
+   }
+  ],
+  "groups": {
+   "clip_0": "g0",
+   "clip_1": "g0",
+   "clip_2": "g1",
+   "clip_3": "g1",
+   "clip_4": "g2",
+   "clip_5": "g2"
+  },
+  "history": [
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "fp8",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_2",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_3",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_4",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_2",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_3",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_5",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_0",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_2",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_3",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_3",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "tiny",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_3",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_3",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_0",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_1",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "fp8",
+    "arm_b": "base",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "base",
+    "clip_id": "clip_4",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "base",
+    "clip_id": "clip_4",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "nvfp4",
+    "arm_b": "fp8",
+    "clip_id": "clip_2",
+    "voter": "ann"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "fp8",
+    "clip_id": "clip_1",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "base",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_4",
+    "voter": "bob"
+   },
+   {
+    "arm_a": "tiny",
+    "arm_b": "nvfp4",
+    "clip_id": "clip_3",
+    "voter": "ann"
+   }
+  ],
+  "sides": "random",
   "slugs": [
    "tiny",
    "base",

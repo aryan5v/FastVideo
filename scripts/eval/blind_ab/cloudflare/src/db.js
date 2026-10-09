@@ -56,12 +56,16 @@ export async function getBallot(db, ballotId) {
     .bind(ballotId).first();
 }
 
-/** Store a vote for a ballot exactly once. Returns false if the ballot already has a vote. */
-export async function insertVote(db, vote) {
+/**
+ * Store a vote for a ballot exactly once; `extra` (e.g. the clip's problem and seed) goes into the extra JSON
+ * column. Returns false if the ballot already has a vote.
+ */
+export async function insertVote(db, vote, extra = {}) {
+  const extraJson = Object.keys(extra).length ? JSON.stringify(extra) : null;
   const [inserted] = await db.batch([
-    db.prepare(`INSERT OR IGNORE INTO votes (${VOTE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    db.prepare(`INSERT OR IGNORE INTO votes (${VOTE_COLUMNS}, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       vote.voter, vote.timestamp, vote.clip_id, vote.left_arm, vote.right_arm, vote.choice, vote.comment,
-      vote.watch_seconds, vote.played_seconds, vote.ballot_id),
+      vote.watch_seconds, vote.played_seconds, vote.ballot_id, extraJson),
     db.prepare("UPDATE ballots SET voted = 1 WHERE ballot_id = ?").bind(vote.ballot_id),
   ]);
   return inserted.meta.changes === 1;

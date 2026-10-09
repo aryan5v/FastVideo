@@ -243,6 +243,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="bind address; use 0.0.0.0 to share on a LAN")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--baseline", help="arm slug used for speedup columns (default: first arm with speed)")
+    parser.add_argument("--arms", help="comma-separated arm slugs to compare (default: every arm in arms.json)")
     parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
     return parser.parse_args(argv)
 
@@ -251,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     try:
-        bundle = load_bundle(args.bundle)
+        only = [slug.strip() for slug in args.arms.split(",") if slug.strip()] if args.arms else None
+        bundle = load_bundle(args.bundle, only)
     except BundleError as exc:
         logger.error("%s", exc)
         return 2

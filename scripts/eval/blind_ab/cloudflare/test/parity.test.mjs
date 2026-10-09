@@ -77,6 +77,7 @@ test("CSV export is byte-identical to stats.summary_to_csv", () => {
 
 function checkPairing(sequence) {
   const { availability, slugs: armSlugs, history, cases } = sequence;
+  const options = { groups: new Map(Object.entries(sequence.groups || {})), sides: sequence.sides || "balanced" };
   const avail = new Map(Object.entries(availability).map(([cid, a]) => [cid, new Set(a)]));
   for (const [i, c] of cases.entries()) {
     const calls = [];
@@ -84,7 +85,7 @@ function checkPairing(sequence) {
       choice: (items) => { calls.push(["choice", items]); return items[0]; },
       random: () => { calls.push(["random"]); return 0.75; },
     };
-    const got = chooseMatchup(avail, armSlugs, history.slice(0, c.history_len), c.voter, rng);
+    const got = chooseMatchup(avail, armSlugs, history.slice(0, c.history_len), c.voter, rng, options);
     assert.deepEqual(got, c.expected, `case ${i}`);
     assert.deepEqual(calls, c.calls, `case ${i} candidate sets`);
   }
@@ -93,6 +94,50 @@ function checkPairing(sequence) {
 test("pairing reproduces pairing.choose_matchup decision by decision", () => checkPairing(fx.pairing));
 
 test("pairing skips pairs a voter has exhausted, like pairing.choose_matchup", () => checkPairing(fx.pairing_exhaust));
+
+test("grouped clips and random sides match pairing.choose_matchup", () => checkPairing(fx.pairing_groups));
+
+test("grouped pairing covers every group, then every clip, with both arms on the same clip", () => {
+  const avail = new Map();
+  const groups = new Map();
+  for (let p = 1; p <= 40; p += 1) {
+    for (const seed of [42, 43, 44, 45]) {
+      avail.set(`P${p}_seed${seed}`, new Set(["v2", "trim"]));
+      groups.set(`P${p}_seed${seed}`, `P${p}`);
+    }
+  }
+  const history = [];
+  const lefts = { v2: 0, trim: 0 };
+  for (let i = 0; i < 160; i += 1) {
+    const m = chooseMatchup(avail, ["v2", "trim"], history, i % 2 ? "ann" : "bob", undefined, { groups, sides: "random" });
+    assert.notEqual(m.left, m.right);
+    lefts[m.left] += 1;
+    history.push({ clip_id: m.clip_id, arm_a: m.left, arm_b: m.right, voter: i % 2 ? "ann" : "bob" });
+    if (i === 39) assert.equal(new Set(history.map((h) => groups.get(h.clip_id))).size, 40, "first 40 hit 40 problems");
+  }
+  assert.equal(new Set(history.map((h) => h.clip_id)).size, 160, "160 ballots cover all 160 problem-seed clips");
+  assert.ok(lefts.v2 > 50 && lefts.trim > 50, `sides look random: ${JSON.stringify(lefts)}`);
+});
+
+test("prompt entries, site.json and arm selection parse like bundle.py", async () => {
+  const { parsePromptEntry, selectArms } = await import("../tools/load_bundle.mjs");
+  assert.deepEqual(parsePromptEntry("a cat", "c", "p"), { prompt: "a cat", guidance: "", group: "", meta: {} });
+  assert.deepEqual(parsePromptEntry({ prompt: "x", guidance: "g", group: "P1", meta: { seed: 42 } }, "c", "p"),
+    { prompt: "x", guidance: "g", group: "P1", meta: { seed: 42 } });
+  assert.throws(() => parsePromptEntry({ meta: { a: [1] } }, "c", "p"), /flat object/);
+  const arms = [{ slug: "v2" }, { slug: "trim" }, { slug: "omni" }];
+  assert.deepEqual(selectArms(arms, ["trim", "v2"]).map((a) => a.slug), ["v2", "trim"]);
+  assert.throws(() => selectArms(arms, ["v2", "nope"]), /unknown arm/);
+  assert.throws(() => selectArms(arms, ["v2"]), /at least two/);
+});
+
+test("vote export keeps flat extra fields such as problem and seed", () => {
+  const line = voteToJson({ ...voteFromRecord(JSON.parse(fx.votes_jsonl[0])), problem: "P1", seed: 42 });
+  const parsed = JSON.parse(line);
+  assert.equal(parsed.problem, "P1");
+  assert.equal(parsed.seed, 42);
+  assert.equal(Object.keys(parsed).join(), Object.keys(parsed).sort().join());
+});
 
 test("pairing with the default RNG keeps every pair covered evenly", () => {
   const avail = new Map(["c1", "c2", "c3"].map((c) => [c, new Set(["a", "b", "c"])]));

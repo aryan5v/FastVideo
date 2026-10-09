@@ -29,7 +29,9 @@ function bundleIndex(bundle) {
   const clips = new Map(bundle.clips.map((c) => [c.clip_id, c]));
   const availability = new Map(bundle.clips.map((c) => [c.clip_id, new Set(Object.keys(c.videos))]));
   const arms = new Map(bundle.arms.map((a) => [a.slug, a]));
-  return { clips, availability, arms, slugs: bundle.arms.map((a) => a.slug) };
+  const groups = new Map(bundle.clips.filter((c) => c.group).map((c) => [c.clip_id, c.group]));
+  const sides = (bundle.site && bundle.site.sides) || "balanced";
+  return { clips, availability, arms, groups, sides, slugs: bundle.arms.map((a) => a.slug) };
 }
 
 const indexCache = new WeakMap();
@@ -48,7 +50,8 @@ async function newBallot(env, bundle, rawVoter) {
   const idx = indexOf(bundle);
   const now = Date.now() / 1000;
   const history = await matchupHistory(env.DB, now);
-  const matchup = chooseMatchup(idx.availability, idx.slugs, history, voter);
+  const matchup = chooseMatchup(idx.availability, idx.slugs, history, voter, undefined,
+    { groups: idx.groups, sides: idx.sides });
   const ballotId = newBallotId();
   await insertBallot(env.DB, { ballot_id: ballotId, ...matchup, voter }, now);
   const clip = idx.clips.get(matchup.clip_id);
@@ -56,6 +59,7 @@ async function newBallot(env, bundle, rawVoter) {
     ballot_id: ballotId,
     clip_id: clip.clip_id,
     prompt: clip.prompt,
+    guidance: clip.guidance || "",
     // Whether the clip has an audio track; null means unknown (the page then probes the media).
     has_audio: clip.has_audio ?? null,
     left_url: `/video/${ballotId}/left`,
@@ -78,7 +82,8 @@ async function recordVote(env, bundle, payload) {
     right_arm: ballot.right_arm,
     ballot_id: ballotId,
   };
-  if (!(await insertVote(env.DB, vote))) throw new BallotError("this ballot was already voted on");
+  const meta = indexOf(bundle).clips.get(ballot.clip_id)?.meta || {};
+  if (!(await insertVote(env.DB, vote, meta))) throw new BallotError("this ballot was already voted on");
   const arms = indexOf(bundle).arms;
   const reveal = (slug) => ({ slug, display_name: arms.has(slug) ? arms.get(slug).display_name : slug });
   return {
@@ -113,6 +118,7 @@ async function routeApiGet(env, bundle, path, query) {
         bundle: bundle.name, layout: bundle.layout, arms: bundle.arms.length, clips: bundle.clips.length,
         has_audio: bundle.clips.some((c) => c.has_audio === true),
         votes: await countVotes(env.DB),
+        site: bundle.site || {},
       });
     case "/api/ballot":
       return sendJson(200, await newBallot(env, bundle, query.get("voter")));

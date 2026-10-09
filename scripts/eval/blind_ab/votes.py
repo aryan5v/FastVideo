@@ -43,8 +43,9 @@ class Vote:
             return self.right_arm
         return None
 
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True)
+    def to_json(self, extra: Mapping[str, Any] | None = None) -> str:
+        """One JSONL line; ``extra`` (e.g. the clip's problem and seed) is added without overriding vote fields."""
+        return json.dumps({**(extra or {}), **asdict(self)}, ensure_ascii=False, sort_keys=True)
 
 
 def utc_now() -> str:
@@ -133,8 +134,8 @@ class VoteStore:
             logger.warning("skipped %d malformed lines in %s", bad, self.path)
         return votes
 
-    def append(self, vote: Vote) -> None:
-        line = vote.to_json() + "\n"
+    def append(self, vote: Vote, extra: Mapping[str, Any] | None = None) -> None:
+        line = vote.to_json(extra) + "\n"
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as handle:

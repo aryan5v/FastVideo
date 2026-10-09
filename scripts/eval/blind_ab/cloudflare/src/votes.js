@@ -89,7 +89,9 @@ export function voteFromRecord(record) {
   return Object.freeze(vote);
 }
 
-/** One JSONL line, identical to Vote.to_json() in votes.py. */
+/** One JSONL line, identical to Vote.to_json(extra) in votes.py; flat extra keys on `vote` are kept. */
 export function voteToJson(vote) {
-  return pyJsonFlat(Object.fromEntries(VOTE_FIELDS.map((k) => [k, vote[k]])), FLOAT_FIELDS);
+  const extra = Object.fromEntries(Object.entries(vote).filter(([k, v]) => !VOTE_FIELDS.includes(k)
+    && (v === null || typeof v !== "object")));
+  return pyJsonFlat({ ...extra, ...Object.fromEntries(VOTE_FIELDS.map((k) => [k, vote[k]])) }, FLOAT_FIELDS);
 }
