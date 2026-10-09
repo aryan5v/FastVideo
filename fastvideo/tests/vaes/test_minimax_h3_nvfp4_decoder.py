@@ -237,7 +237,7 @@ def test_fused_qkv_epilogue_matches_eager_attention_prologue():
         assert torch.equal(got.view(batch, seq, heads, head_dim), want)
 
 
-def _fused_test_decoder(act_scale: str, num_layers: int = 2) -> MiniMaxH3VideoViTDecoder3d:
+def _fused_test_decoder(act_scale: str, num_layers: int = 2, convert: bool = True) -> MiniMaxH3VideoViTDecoder3d:
     torch.manual_seed(0)
     decoder = MiniMaxH3VideoViTDecoder3d(in_channels=24,
                                          out_channels=3,
@@ -256,7 +256,8 @@ def _fused_test_decoder(act_scale: str, num_layers: int = 2) -> MiniMaxH3VideoVi
             block.scale1.normal_(0, 0.5)
             block.scale2.normal_(0, 0.5)
         decoder.register_tokens.normal_()
-    convert_decoder_to_nvfp4(decoder, compute_dtype=torch.bfloat16, act_scale=act_scale)
+    if convert:
+        convert_decoder_to_nvfp4(decoder, compute_dtype=torch.bfloat16, act_scale=act_scale)
     return decoder.requires_grad_(False).eval()
 
 
@@ -486,7 +487,7 @@ def _write_deploy_checkpoint(path, student_layers: int, base_layers: int, heads:
     return decoder
 
 
-def _load_h3_vae(vae_dir):
+def _load_h3_vae(vae_dir, cpu: bool = True):
     from fastvideo.configs.models.vaes.minimax_h3_video import MiniMaxH3VideoVAEConfig
     from fastvideo.configs.pipelines import PipelineConfig
     from fastvideo.fastvideo_args import FastVideoArgs
@@ -494,7 +495,7 @@ def _load_h3_vae(vae_dir):
 
     args = FastVideoArgs(model_path=str(vae_dir),
                          pipeline_config=PipelineConfig(vae_config=MiniMaxH3VideoVAEConfig(), vae_precision="fp32"))
-    args.vae_cpu_offload = True  # load on CPU
+    args.vae_cpu_offload = cpu  # load on CPU
     return VAELoader().load(str(vae_dir), args)
 
 
@@ -575,3 +576,160 @@ def test_decoder_gemm_backend_matches_cutlass(rows, out_features, in_features):
                           block_size=16, use_8x4_sf_layout=False, backend=name)
         outs.append(out)
     assert torch.equal(outs[0], outs[1])
+
+
+# Safetensors exports: bf16 masters read directly, and pre-packed NVFP4 weights.
+def _deploy_to_safetensors(pt_path, out_path):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import write_nvfp4_decoder_safetensors
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import load_nvfp4_decoder_checkpoint
+
+    write_nvfp4_decoder_safetensors(str(out_path), load_nvfp4_decoder_checkpoint(str(pt_path)))
+
+
+def test_loader_reads_bf16_safetensors_like_the_pt(tmp_path):
+    import fastvideo.envs as envs
+
+    _write_vae_dir(tmp_path / "vae", decoder_layers=5)
+    _write_deploy_checkpoint(tmp_path / "d3.pt", student_layers=3, base_layers=5)
+    _deploy_to_safetensors(tmp_path / "d3.pt", tmp_path / "d3.safetensors")
+    states = []
+    for name in ("d3.pt", "d3.safetensors"):
+        with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / name)):
+            vae = _load_h3_vae(tmp_path / "vae")
+        assert len(vae.decoder.transformer_blocks) == 3 and vae.decode_autocast_dtype == torch.bfloat16
+        states.append({**vae.decoder.state_dict(), **vae.post_quant_conv.state_dict()})
+    assert states[0].keys() == states[1].keys()
+    assert all(torch.equal(states[0][key], states[1][key]) for key in states[0])
+
+
+def test_safetensors_reader_rejects_foreign_files(tmp_path):
+    from safetensors.torch import save_file
+
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import load_nvfp4_decoder_checkpoint
+
+    save_file({"decoder.x": torch.zeros(2)}, str(tmp_path / "plain.safetensors"))
+    with pytest.raises(ValueError, match="format"):
+        load_nvfp4_decoder_checkpoint(str(tmp_path / "plain.safetensors"))
+    save_file({"decoder.x": torch.zeros(2)}, str(tmp_path / "nometa.safetensors"),
+              metadata={"format": "fastvideo_h3_decoder_nvfp4_packed_v1"})
+    with pytest.raises(ValueError, match="nvfp4_metadata"):
+        load_nvfp4_decoder_checkpoint(str(tmp_path / "nometa.safetensors"))
+
+
+def _fake_packed_checkpoint(vae, act_scale="unit"):
+    """A packed-format checkpoint with arbitrary (not GEMM-meaningful) codes, for CPU-side contract tests."""
+    from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import NVFP4_DECODER_PACKED_FORMAT
+
+    names = nvfp4_decoder_linear_names(vae.decoder)
+    state = {}
+    generator = torch.Generator().manual_seed(3)
+    for key, value in vae.decoder.state_dict().items():
+        module, _, param = key.rpartition(".")
+        if module in names and param == "weight":
+            out_features, in_features = value.shape
+            state[f"{module}.packed_weight"] = torch.randint(0, 256, (out_features, in_features // 2),
+                                                             dtype=torch.uint8, generator=generator)
+            state[f"{module}.weight_inv_scale"] = torch.randint(0, 256, (out_features * in_features // 16, ),
+                                                                dtype=torch.uint8, generator=generator)
+            state[f"{module}.weight_global_sf"] = torch.rand((), generator=generator)
+            state[f"{module}.input_amax"] = torch.zeros(())
+        elif module in names:
+            state[key] = value.bfloat16()
+        else:
+            state[key] = torch.randn(value.shape, generator=generator).to(value.dtype)
+    return {
+        "format": NVFP4_DECODER_PACKED_FORMAT,
+        "metadata": {
+            "act_scale": act_scale,
+            "rotation_group": None,
+            "skip_blocks": [],
+            "num_linears": len(names),
+            "student_layers": len(vae.decoder.transformer_blocks),
+        },
+        "decoder": state,
+        "post_quant_conv": vae.post_quant_conv.state_dict(),
+    }
+
+
+def test_loader_applies_packed_safetensors_without_master_weights(tmp_path):
+    import fastvideo.envs as envs
+    from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import write_nvfp4_decoder_safetensors
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import keep_evenly_spaced_blocks, nvfp4_linears
+
+    _write_vae_dir(tmp_path / "vae", decoder_layers=5)
+    student = _tiny_h3_vae(_tiny_vae_arch(5))
+    keep_evenly_spaced_blocks(student.decoder, 3)
+    checkpoint = _fake_packed_checkpoint(student)
+    write_nvfp4_decoder_safetensors(str(tmp_path / "p3.safetensors"), checkpoint)
+    with envs.FASTVIDEO_H3_VAE_NVFP4_DECODER.override(str(tmp_path / "p3.safetensors")):
+        vae = _load_h3_vae(tmp_path / "vae")
+    layers = nvfp4_linears(vae.decoder)
+    assert len(vae.decoder.transformer_blocks) == 3 and len(layers) == checkpoint["metadata"]["num_linears"]
+    assert all(layer.frozen and layer.weight is None and layer.act_scale == "unit" for layer in layers)
+    assert vae.decode_autocast_dtype == torch.bfloat16
+    named = dict(vae.decoder.named_modules())
+    for key, value in checkpoint["decoder"].items():
+        module, _, param = key.rpartition(".")
+        actual = getattr(named[module], param)
+        assert actual.dtype == value.dtype and torch.equal(actual, value), key
+    assert not any(parameter.requires_grad for parameter in vae.parameters())
+
+
+def test_packed_loader_refuses_mismatched_architecture(tmp_path):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import apply_nvfp4_decoder_checkpoint
+
+    checkpoint = _fake_packed_checkpoint(_tiny_h3_vae(_tiny_vae_arch(2, heads=4)))
+    with pytest.raises(ValueError, match="does not fit"):
+        apply_nvfp4_decoder_checkpoint(_tiny_h3_vae(_tiny_vae_arch(2, heads=2)), checkpoint, freeze=True)
+    checkpoint = _fake_packed_checkpoint(_tiny_h3_vae(_tiny_vae_arch(2)))
+    del checkpoint["decoder"]["transformer_blocks.0.ff.net.2.packed_weight"]
+    with pytest.raises(ValueError, match="missing"):
+        apply_nvfp4_decoder_checkpoint(_tiny_h3_vae(_tiny_vae_arch(2)), checkpoint, freeze=True)
+
+
+class _DecoderHost(nn.Module):
+    """The two VAE submodules an NVFP4 decoder export covers."""
+
+    def __init__(self, decoder: nn.Module) -> None:
+        super().__init__()
+        self.decoder = decoder
+        self.post_quant_conv = nn.Conv3d(24, 24, 1)
+
+
+@_needs_fp4
+@pytest.mark.parametrize("fused", [True, False])
+@pytest.mark.parametrize("act_scale", ["unit", "static"])
+def test_packed_export_round_trip_is_bit_identical(tmp_path, fused, act_scale):
+    from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import (packed_nvfp4_decoder_checkpoint,
+                                                                   read_nvfp4_decoder_safetensors,
+                                                                   write_nvfp4_decoder_safetensors)
+    from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import (apply_nvfp4_decoder_checkpoint,
+                                                                freeze_nvfp4_linears, nvfp4_linears)
+
+    reference = _fused_test_decoder(act_scale)
+    with torch.no_grad():
+        for layer in nvfp4_linears(reference):
+            layer.input_amax.fill_(4.0)
+    freeze_nvfp4_linears(reference)
+    host = _DecoderHost(reference).cuda()
+    metadata = {"act_scale": act_scale, "rotation_group": None, "skip_blocks": [], "student_layers": 2}
+    write_nvfp4_decoder_safetensors(str(tmp_path / "p.safetensors"), packed_nvfp4_decoder_checkpoint(host, metadata))
+
+    loaded = _DecoderHost(_fused_test_decoder(act_scale, convert=False)).cuda()
+    with torch.no_grad():
+        for parameter in loaded.parameters():
+            parameter.zero_()  # every value must come from the file
+    checkpoint = read_nvfp4_decoder_safetensors(str(tmp_path / "p.safetensors"), "cuda")
+    torch.cuda.reset_peak_memory_stats()
+    before = torch.cuda.memory_allocated()
+    apply_nvfp4_decoder_checkpoint(loaded, checkpoint, freeze=True)
+    # No master weight: the dense linears are only released; at most a few scalars are allocated,
+    # far below one bf16 copy of the smallest quantized weight (512 x 512).
+    assert torch.cuda.max_memory_allocated() - before < 512 * 512 * 2 // 16
+    assert all(layer.frozen for layer in nvfp4_linears(loaded.decoder))
+    if not fused:
+        reference.fused_blocks_forward = None
+        loaded.decoder.fused_blocks_forward = None
+    latents = torch.randn(2, 24, 3, 8, 8, device="cuda")
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        assert torch.equal(loaded.decoder(latents), reference(latents))

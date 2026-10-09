@@ -182,6 +182,30 @@ class NVFP4DecoderLinear(nn.Module):
         bias = linear.bias.detach().float() if linear.bias is not None else None
         return cls(weight, bias, rotation_group, compute_dtype, act_scale)
 
+    @classmethod
+    def from_packed(cls, packed: torch.Tensor, inv_scale: torch.Tensor, global_sf_w: torch.Tensor,
+                    bias: torch.Tensor | None, input_amax: torch.Tensor, *, in_features: int,
+                    rotation_group: int | None, compute_dtype: torch.dtype, act_scale: str) -> NVFP4DecoderLinear:
+        """A frozen layer built from already packed tensors (``freeze()``'s buffers), with no master weight.
+
+        ``packed`` holds two FP4 codes per byte, so its shape is ``[out_features, in_features // 2]``.
+        Nothing full-precision is allocated: the constructor's placeholder weight lives on ``meta``.
+        """
+        out_features = packed.shape[0]
+        if packed.dtype != torch.uint8 or packed.shape[1] * 2 != in_features:
+            raise ValueError(f"packed NVFP4 weight must be uint8 [{out_features}, {in_features // 2}], "
+                             f"got {packed.dtype} {list(packed.shape)}")
+        layer = cls(torch.empty(out_features, in_features, device="meta"), None, rotation_group, compute_dtype,
+                    act_scale)
+        del layer.weight
+        layer.register_parameter("weight", None)
+        layer.bias = nn.Parameter(bias, requires_grad=False) if bias is not None else None
+        layer.register_buffer("input_amax", input_amax.to(torch.float32))
+        layer.register_buffer("packed_weight", packed, persistent=False)
+        layer.register_buffer("weight_inv_scale", inv_scale, persistent=False)
+        layer.register_buffer("weight_global_sf", global_sf_w, persistent=False)
+        return layer
+
     @property
     def frozen(self) -> bool:
         return self.weight is None
@@ -302,14 +326,18 @@ def convert_decoder_to_nvfp4(decoder: nn.Module,
             parent[int(child)] = replacement
         else:
             setattr(parent, child, replacement)
+    enable_fused_blocks(decoder)
+    return names
+
+
+def enable_fused_blocks(decoder: nn.Module) -> None:
+    """Run eligible NVFP4 block stacks through the bit-exact fused kernels (see that module)."""
     try:
         from fastvideo.models.vaes.minimax_h3_nvfp4_fused import fused_nvfp4_blocks_forward
     except ImportError:
         # Triton-less hosts (CPU, macOS) keep the eager NVFP4 path; the fused kernels are an exact speedup only.
-        return names
-    # Inference runs eligible block stacks through the bit-exact fused kernels (see that module).
+        return
     decoder.fused_blocks_forward = fused_nvfp4_blocks_forward
-    return names
 
 
 def nvfp4_linears(module: nn.Module) -> list[NVFP4DecoderLinear]:
@@ -372,8 +400,16 @@ def keep_evenly_spaced_blocks(decoder: nn.Module, count: int) -> list[int]:
 NVFP4_DECODER_DEPLOY_FORMAT = "fastvideo_h3_decoder_nvfp4_deploy_v1"
 
 
-def load_nvfp4_decoder_checkpoint(path: str) -> dict[str, Any]:
-    """Read an exported NVFP4 decoder (tensors, plain metadata) and check its format."""
+def load_nvfp4_decoder_checkpoint(path: str, device: torch.device | str = "cpu") -> dict[str, Any]:
+    """Read an exported NVFP4 decoder (tensors, plain metadata) and check its format.
+
+    ``.safetensors`` files may hold bf16 masters (deploy format) or pre-packed NVFP4 weights;
+    packed tensors are read straight onto ``device``. ``.pt`` files are deploy format only.
+    """
+    if str(path).endswith(".safetensors"):
+        from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import read_nvfp4_decoder_safetensors
+
+        return read_nvfp4_decoder_safetensors(path, device)
     checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
     if not isinstance(checkpoint, dict) or checkpoint.get("format") != NVFP4_DECODER_DEPLOY_FORMAT:
         found = checkpoint.get("format") if isinstance(checkpoint, dict) else type(checkpoint).__name__
@@ -390,28 +426,27 @@ def apply_nvfp4_decoder_checkpoint(vae: nn.Module, checkpoint: dict[str, Any], *
     The VAE is depth-cut to the checkpoint's ``student_layers`` blocks when it has more (a light
     or full VAE can host a shallower student), converted with the checkpoint's NVFP4 settings,
     and loaded strictly, so an architecture mismatch fails here instead of decoding garbage.
-    ``freeze`` packs the weights and drops the masters (needs the VAE on a CUDA device).
+    ``freeze`` packs the weights and drops the masters (needs the VAE on a CUDA device). A
+    pre-packed checkpoint is always loaded frozen, without materializing any master weight.
     Sets ``vae.decode_autocast_dtype`` to bf16, the dtype these decoders are trained and
     validated under. Returns the checkpoint metadata.
     """
     metadata = checkpoint["metadata"]
     decoder = vae.decoder
-    available = len(decoder.transformer_blocks)
-    student_layers = int(metadata.get("student_layers", available))
-    if student_layers > available:
-        raise ValueError(f"the NVFP4 decoder needs {student_layers} decoder blocks but the loaded VAE has "
-                         f"{available}; load a VAE with at least that many (e.g. the full MiniMax-H3 vae/)")
-    if student_layers < available:
-        keep_evenly_spaced_blocks(decoder, student_layers)
+    _depth_cut_for(decoder, metadata)
+    if checkpoint["format"] != NVFP4_DECODER_DEPLOY_FORMAT:
+        from fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint import apply_packed_nvfp4_decoder
+
+        apply_packed_nvfp4_decoder(vae, checkpoint)
+        vae.decode_autocast_dtype = torch.bfloat16
+        return metadata
     act_scale = metadata.get("act_scale", "dynamic")
     names = convert_decoder_to_nvfp4(decoder,
                                      rotation_group=metadata.get("rotation_group"),
                                      skip_blocks=tuple(metadata.get("skip_blocks") or ()),
                                      compute_dtype=torch.bfloat16,
                                      act_scale=act_scale)
-    expected = metadata.get("num_linears")
-    if expected is not None and int(expected) != len(names):
-        raise ValueError(f"the NVFP4 decoder has {expected} NVFP4 linears, the converted VAE {len(names)}")
+    check_num_linears(metadata, len(names))
     try:
         decoder.load_state_dict(checkpoint["decoder"], strict=True)
         vae.post_quant_conv.load_state_dict(checkpoint["post_quant_conv"], strict=True)
@@ -422,3 +457,19 @@ def apply_nvfp4_decoder_checkpoint(vae: nn.Module, checkpoint: dict[str, Any], *
         freeze_nvfp4_linears(decoder)
     vae.decode_autocast_dtype = torch.bfloat16
     return metadata
+
+
+def check_num_linears(metadata: dict[str, Any], found: int) -> None:
+    expected = metadata.get("num_linears")
+    if expected is not None and int(expected) != found:
+        raise ValueError(f"the NVFP4 decoder has {expected} NVFP4 linears, the converted VAE {found}")
+
+
+def _depth_cut_for(decoder: nn.Module, metadata: dict[str, Any]) -> None:
+    available = len(decoder.transformer_blocks)
+    student_layers = int(metadata.get("student_layers", available))
+    if student_layers > available:
+        raise ValueError(f"the NVFP4 decoder needs {student_layers} decoder blocks but the loaded VAE has "
+                         f"{available}; load a VAE with at least that many (e.g. the full MiniMax-H3 vae/)")
+    if student_layers < available:
+        keep_evenly_spaced_blocks(decoder, student_layers)

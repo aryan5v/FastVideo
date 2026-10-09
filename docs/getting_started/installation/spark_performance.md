@@ -369,6 +369,14 @@ only the packed FP4 weights stay resident (0.31 GiB for 8 blocks instead of
 precision they were trained in. The decoder GEMMs use the cuDNN backend on
 GB10; outputs match CUTLASS bit for bit.
 
+The variable also accepts `.safetensors` files written by
+`fastvideo.models.vaes.minimax_h3_nvfp4_checkpoint`: either the same bf16
+master weights, or pre-packed NVFP4 weights from
+`scripts/distill/minimax_h3_nvfp4_decoder/export_packed.py`. A packed file is
+read straight onto the GPU and never materializes the full-precision weights
+of the quantized linears; it decodes bit-identically to packing the bf16 file
+at load.
+
 V2 at 832x480, 124 frames, seed 1234, one Spark, warm calls:
 
 | Video decoder | End to end | Denoise | Video decode | Peak allocated |
