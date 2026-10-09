@@ -83,6 +83,10 @@ class OmniRefPDDQADMethod(TrainingMethod):
         self.select_metric = str(mc.get("select_metric", "score"))
         # Save each eval's final latents (student's own sample, teacher's) for side-by-side decoding.
         self.eval_save_dir = mc.get("eval_save_dir")
+        # Full evaluation (with the student's own 8-step sample) every this many steps; teacher-forced only otherwise.
+        self.full_eval_every = int(mc.get("full_eval_every", 0)) or self.eval_every
+        # Start the student from another run's tagged weights (e.g. Stage 1 best) instead of the teacher's.
+        self.init_student_dcp = mc.get("init_student_dcp")
         self._eval_iteration = 0
         self.eval_every = int(mc.get("eval_every", 50))
         self.patience = int(mc.get("patience", 3))
@@ -108,6 +112,13 @@ class OmniRefPDDQADMethod(TrainingMethod):
         self.bad_evals = 0
         self.stop_requested = False
         self._checkpoint_request: str | None = None
+        if self.init_student_dcp:
+            import torch.distributed.checkpoint as dcp
+
+            from fastvideo.training.checkpointing_utils import ModelWrapper
+            dcp.load({"roles.student.transformer": ModelWrapper(self.student.transformer)},
+                     checkpoint_id=str(Path(self.init_student_dcp) / "dcp"))
+            logger.info("QAD student initialized from %s", self.init_student_dcp)
         world = get_world_group()
         self.sp_size = int(tc.distributed.sp_size or 1)
         self.dp_rank, self.dp_size = world.rank // self.sp_size, world.world_size // self.sp_size
@@ -234,10 +245,11 @@ class OmniRefPDDQADMethod(TrainingMethod):
         metrics: dict[str, LogScalar] = {}
         started = time.perf_counter()
         self._eval_iteration = iteration
-        if first and iteration == 0:
+        if first and iteration == 0 and not self.init_student_dcp:
             # Fresh start only: a resumed run (e.g. Stage 2 from a Stage-1 checkpoint) is no longer the teacher.
             metrics.update(self._initial_checks(rows))
-        summary = self._evaluate(rows, rollout=True)
+        full = first or (iteration % self.full_eval_every == 0)
+        summary = self._evaluate(rows, rollout=full)
         metrics.update({f"eval/{k}": v for k, v in summary.items()})
         if first:
             self.normalizers = {
@@ -279,8 +291,8 @@ class OmniRefPDDQADMethod(TrainingMethod):
             if key in summary and key in self.step0:
                 worse |= summary[key] > self.step0[key] * (1.0 + self.fidelity_tolerance)
         self.bad_evals = self.bad_evals + 1 if worse else 0
-        selected = summary.get(self.select_metric, summary["score"])
-        if selected < self.best_score:
+        selected = summary.get(self.select_metric)
+        if selected is not None and selected < self.best_score:
             self.best_score = selected
             self._checkpoint_request = "best" if self.save_best else None
         if self.bad_evals >= self.patience:

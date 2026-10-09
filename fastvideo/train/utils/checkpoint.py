@@ -39,6 +39,17 @@ def _rank() -> int:
     return 0
 
 
+_CPU_GROUP: Any = None
+
+
+def _cpu_group() -> Any:
+    """A gloo group over all ranks (created once, collectively) for checkpoint coordination."""
+    global _CPU_GROUP
+    if _CPU_GROUP is None and dist.is_available() and dist.is_initialized():
+        _CPU_GROUP = dist.new_group(backend="gloo")
+    return _CPU_GROUP
+
+
 def _barrier() -> None:
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
@@ -291,7 +302,10 @@ class CheckpointManager:
             logger.info("Saving %s weights (step %d) to %s", tag, step, tagged_dir)
         _barrier()
         states = {key: value for key, value in self.method.checkpoint_state().items() if key.startswith("roles.")}
-        dcp.save(states, checkpoint_id=str(dcp_dir))
+        # Coordinate over a CPU group: DCP's metadata gather over NCCL needs device memory, and right after an
+        # evaluation the GPUs can be nearly full (seen as "NCCL Error 1: unhandled cuda error" in gather).
+        torch.cuda.empty_cache()
+        dcp.save(states, checkpoint_id=str(dcp_dir), process_group=_cpu_group())
         _barrier()
 
     def _write_metadata(

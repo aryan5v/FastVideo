@@ -111,11 +111,14 @@ class BlockReconstruction:
         try:
             with torch.enable_grad():
                 # The block's own hidden input only feeds norm1 and the residual, whose results are unused; the
-                # teacher attention input has the right shape. FSDP needs the call to go through the block.
-                block(attn.input, *block_args[1:])
+                # teacher attention input has the right shape. The call goes through the block, and the block
+                # input and output join the graph (zero weight), so FSDP's pre-/post-backward hooks re-gather the
+                # block's weights for backward and reduce-scatter its gradients.
+                hidden = attn.input.detach().requires_grad_(True)
+                block_out = block(hidden, *block_args[1:])
                 attn_rel = _rel_sq(replace_attn.output, attn.output)
                 ff_rel = _rel_sq(replace_ff.output, ff.output)
-                ((attn_rel + ff_rel) * self.scale).backward()
+                ((attn_rel + ff_rel) * self.scale + 0.0 * block_out.float().sum()).backward()
         finally:
             for handle in handles:
                 handle.remove()
