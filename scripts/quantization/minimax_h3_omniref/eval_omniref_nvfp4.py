@@ -68,8 +68,13 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def compare(x_t: torch.Tensor, ref_v: torch.Tensor, q_v: torch.Tensor, sigma: float) -> dict[str, float]:
-    """Velocity and flow-matching x0 (= x_t - sigma * v) error of ``q_v`` against ``ref_v``."""
-    x0_ref, x0_q = x_t - sigma * ref_v, x_t - sigma * q_v
+    """Velocity and x0 error of ``q_v`` against ``ref_v``.
+
+    H3's transformer output is the velocity toward the clean sample: ``MiniMaxH3Scheduler.step`` forms
+    ``x0 = x_t + (1 - t) * v`` with ``1 - t`` the node sigma, so x0 is ``x_t + sigma * v`` (an earlier
+    ``x_t - sigma * v`` inflated the x0 denominator at high noise; v_rel was unaffected).
+    """
+    x0_ref, x0_q = x_t + sigma * ref_v, x_t + sigma * q_v
     return {"v_rel": _rel(q_v, ref_v), "x0_rel": _rel(x0_q, x0_ref), "x0_cos": _cos(x0_q, x0_ref)}
 
 
