@@ -136,7 +136,9 @@ def calibrate(args: argparse.Namespace) -> None:
     heldout = heldout_plan(args)[args.shard::args.num_shards]
     shard_path = out / "shards" / f"amax-shard{args.shard:02d}.pt"
     previous = torch.load(shard_path, weights_only=False) if shard_path.exists() else None
-    done = {row["id"] for row in previous["rows"]} if previous else set()
+    # Rows already calibrated in any shard file (a larger rerun reshards the plan).
+    done = {row["id"] for path in (out / "shards").glob("amax-shard*.pt")
+            for row in (previous if path == shard_path else torch.load(path, weights_only=False))["rows"]}
     todo = [clip for clip in plan if clip["id"] not in done]
     heldout_todo = [(clip, tag, seed) for clip in heldout for tag, seed in (("bf16_s0", clip["seed"]),
                                                                             ("bf16_s1", clip["seed"] + 1))
@@ -191,8 +193,12 @@ def merge(args: argparse.Namespace) -> None:
     states = [torch.load(p, weights_only=False) for p in sorted((out / "shards").glob("amax-shard*.pt"))]
     if not states:
         raise SystemExit(f"no shard files under {out / 'shards'}")
+    plan = calibration_plan(args)
+    order = {clip["id"]: clip["plan_index"] for clip in plan}
+    for state in states:  # rows from an earlier, smaller plan take their index in the current plan
+        state["rows"] = [{**row, "plan_index": order[row["id"]]} for row in state["rows"] if row["id"] in order]
     merged = merge_states(states)
-    expected = len(calibration_plan(args))
+    expected = len(plan)
     table = runtime_amax_table(merged["rows"], margin=args.margin)
     check = convergence(merged["rows"], tolerance=args.tolerance)
     report = layer_report(merged)

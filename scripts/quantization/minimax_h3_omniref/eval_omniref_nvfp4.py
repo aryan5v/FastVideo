@@ -189,7 +189,7 @@ def run_v2(args: argparse.Namespace) -> None:
             **sampling, "seed": args.v2_seed, "width": 832, "height": 480, "num_frames": frames},
                                     "output": {"save_video": False, "return_frames": True}})
 
-    run(prompts[0], 39)  # post_init applies the checkpoint's DMD rungs; also warms kernels
+    run(prompts[0], args.v2_frames)  # post_init applies the DMD rungs; H3 accepts 124-362 frames
     stage = pipeline._stage_name_mapping["denoising_stage"]
     transformer = pipeline.get_module("transformer")
     transformer = transformer.materialize() if hasattr(transformer, "materialize") else transformer

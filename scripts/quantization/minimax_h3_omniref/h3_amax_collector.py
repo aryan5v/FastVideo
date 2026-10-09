@@ -239,6 +239,30 @@ def convergence(rows: Sequence[dict[str, Any]], tolerance: float = 0.05) -> dict
                                               for k, g in worst]}
 
 
+def row_statistics(rows: Sequence[dict[str, Any]], key: str, groups: Sequence[str]) -> dict[str, Any]:
+    """Distribution of the per-row amax of one layer: are a few rows driving the max, or does it drift up?
+
+    ``prefix_max`` is the running max after 1/8, 1/4, 1/2 and all rows (plan order); ``max_over_p99`` well
+    above 1 means the max is set by rare outlier rows (an extreme-value statistic that keeps growing with
+    the sample), which argues for a percentile / MSE clip over plain max for that layer.
+    """
+    values = [max(row["amax"][key]) for row in rows]
+    ordered = sorted(values)
+
+    def quantile(q: float) -> float:
+        return ordered[min(len(ordered) - 1, int(q * (len(ordered) - 1) + 0.5))]
+
+    top = sorted(range(len(rows)), key=lambda i: -values[i])[:3]
+    return {
+        "p50": quantile(0.5), "p90": quantile(0.9), "p99": quantile(0.99), "max": ordered[-1],
+        "max_over_p99": ordered[-1] / max(quantile(0.99), 1e-12),
+        "rows_within_5pct_of_max": sum(v >= 0.95 * ordered[-1] for v in values),
+        "prefix_max": [max(values[:max(1, len(values) * n // 8)]) for n in (1, 2, 4, 8)],
+        "top_rows": [{"id": rows[i].get("id"), "case": rows[i].get("case"), "value": values[i],
+                      "group": groups[max(range(len(groups)), key=rows[i]["amax"][key].__getitem__)]} for i in top],
+    }
+
+
 def layer_report(merged: dict[str, Any]) -> dict[str, Any]:
     """Per layer: overall amax, per-group amax, per-case amax, and for tail layers top-k / percentiles."""
     rows = merged["rows"]
@@ -254,6 +278,8 @@ def layer_report(merged: dict[str, Any]) -> dict[str, Any]:
             "argmax_group": groups[max(range(len(groups)), key=per_group.__getitem__)],
             "cases": {case: max(max(r["amax"][key]) for r in rows if r.get("case", "?") == case) for case in cases},
         }
+        if is_ffn_key(key):
+            entry["rows"] = row_statistics(rows, key, groups)
         if key in merged["hist"]:
             counts = merged["hist"][key]
             top = merged["topk"][key]

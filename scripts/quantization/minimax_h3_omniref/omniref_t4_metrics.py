@@ -45,6 +45,11 @@ GATE_REF_DROP = 0.02
 SAMPLED_FRAMES = 8
 
 
+def _embeds(output: Any) -> torch.Tensor:
+    """Projected CLIP features: a tensor in transformers 4.x, ``pooler_output`` of a model output in 5.x."""
+    return (output if isinstance(output, torch.Tensor) else output.pooler_output).float()
+
+
 class Scorers:
 
     def __init__(self, models_dir: Path, device: torch.device) -> None:
@@ -78,12 +83,12 @@ class Scorers:
     @torch.no_grad()
     def clip_embed(self, frames: torch.Tensor) -> torch.Tensor:
         x = self._resize_norm(frames, 224, (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
-        return self.clip.get_image_features(pixel_values=x).float()
+        return _embeds(self.clip.get_image_features(pixel_values=x))
 
     @torch.no_grad()
     def clip_text(self, text: str) -> torch.Tensor:
         tokens = self.tokenizer([text], truncation=True, max_length=77, padding=True, return_tensors="pt").to(self.device)
-        return F.normalize(self.clip.get_text_features(**tokens).float(), dim=-1)
+        return F.normalize(_embeds(self.clip.get_text_features(**tokens)), dim=-1)
 
     @torch.no_grad()
     def lpips_mean(self, a: torch.Tensor, b: torch.Tensor) -> float:
@@ -258,7 +263,7 @@ def report(args: argparse.Namespace) -> None:
     rows = [r for r in rows if r["resolution"] in args.gate_resolutions]
     metrics = sorted({k for r in rows for k in r["metrics"]["bf16_s0"]})
     table: dict[str, Any] = {}
-    passed = True
+    passed = bool(rows)  # fail closed: no scored rows, no pass
     for metric in metrics:
         paired = [r for r in rows if all(metric in r["metrics"][t] for t in VARIANTS)]
         if len(paired) < 3:
@@ -285,6 +290,9 @@ def report(args: argparse.Namespace) -> None:
             entry["passed"] = bool(abs(dq.mean()) <= floor)
         passed &= entry["passed"]
         table[metric] = entry
+    required = {"dino_ref", "clip_ref", "first_psnr", "first_lpips"}
+    missing = sorted(required - set(table))
+    passed = passed and not missing
     pairwise = {}
     for metric in ("lpips_vs_bf16", "psnr_vs_bf16", "mel_l1_vs_bf16", "mel_cos_vs_bf16"):
         values = {t: [r["metrics"][t][metric] for r in rows if metric in r["metrics"][t]] for t in ("nvfp4_s0",
@@ -294,7 +302,7 @@ def report(args: argparse.Namespace) -> None:
     by_case = {case: {m: float(np.mean([r["metrics"]["nvfp4_s0"].get(m, np.nan) - r["metrics"]["bf16_s0"].get(m, np.nan)
                                         for r in rows if r["case"] == case])) for m in REF_FIDELITY}
                for case in sorted({r["case"] for r in rows})}
-    result = {"rows": len(rows), "resolutions": args.gate_resolutions, "gate_t4_passed": passed, "metrics": table,
+    result = {"rows": len(rows), "missing_required_metrics": missing, "resolutions": args.gate_resolutions, "gate_t4_passed": passed, "metrics": table,
               "t3_pairwise_vs_bf16_s0": pairwise, "ref_fidelity_delta_by_case": by_case,
               "not_measured": ["ArcFace", "VisionReward", "MUSIQ", "motion smoothness", "AV sync",
                                "<Audio 1> log-mel (no full_scene_audio_image_reference rows on NVL)"]}

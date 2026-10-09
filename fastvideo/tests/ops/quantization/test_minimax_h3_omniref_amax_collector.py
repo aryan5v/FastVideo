@@ -203,3 +203,20 @@ def test_calibration_plan_counts_balance_and_heldout_disjoint() -> None:
     assert {(p["case"], p["resolution"]) for p in half} == set(groups)  # every group in the first half
     held = calib._group_plan(groups, 8, {"480p": 4, "768p": 1}, frozenset(p["source"] for p in plan))
     assert not {p["source"] for p in held} & {p["source"] for p in plan}
+
+
+def test_row_statistics_flags_single_outlier_row() -> None:
+    rows = _rows([10.0] * 99 + [30.0])
+    stats = col.row_statistics(rows, "b0.ff.fc_in", ["all"])
+    assert stats["max"] == 30.0 and stats["p99"] == 10.0 and stats["max_over_p99"] == pytest.approx(3.0)
+    assert stats["rows_within_5pct_of_max"] == 1 and stats["top_rows"][0]["id"] == "99"
+    assert stats["prefix_max"] == [10.0, 10.0, 10.0, 30.0]
+
+
+def test_t4_gate_fails_closed_without_rows(tmp_path) -> None:
+    import argparse
+
+    t4 = _load("omniref_t4_metrics", SCRIPTS / "omniref_t4_metrics.py")
+    t4.report(argparse.Namespace(output_dir=str(tmp_path), gate_resolutions=["480p"]))
+    result = json.loads((tmp_path / "gate_a_report.json").read_text())
+    assert result["rows"] == 0 and result["gate_t4_passed"] is False
