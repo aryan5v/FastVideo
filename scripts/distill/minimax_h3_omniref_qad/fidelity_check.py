@@ -150,14 +150,17 @@ def compare(args: argparse.Namespace) -> None:
                     q, k_in, v, *theirs[:3], theirs[3], single_level_p_quant=not two_level, validate=True)
             kernel = kernels[(two_level, smooth)]
             row[f"{mode}/kernel_vs_bf16"] = _rel(kernel.cpu(), data["bf16_out"])
-            row[f"{mode}/gb200_emulator_vs_kernel"] = _rel(data["emulator"][mode], kernel.cpu())
+            gb200 = (data.get("emulator") or data.get("gb200_emulator") or {}).get(mode)
+            if gb200 is not None:  # reduced captures keep only some GB200 emulator outputs
+                row[f"{mode}/gb200_emulator_vs_kernel"] = _rel(gb200, kernel.cpu())
             local = train.fp4_vsa_attn_qat(*(data[n].cuda() for n in "qkv"), *mine, **kwargs)
             row[f"{mode}/local_emulator_vs_kernel"] = _rel(local, kernel)
         results.append(row)
         print(json.dumps({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()}), flush=True)
-    summary = {key: max(r[key] for r in results) for key in results[0] if key.endswith("_vs_kernel")} if results else {}
-    summary.update({f"mean/{key}": sum(r[key] for r in results) / len(results) for key in results[0]
-                    if key.endswith("_vs_bf16")} if results else {})
+    keys = sorted({key for r in results for key in r})
+    summary = {key: max(r[key] for r in results if key in r) for key in keys if key.endswith("_vs_kernel")}
+    summary.update({f"mean/{key}": sum(r[key] for r in results) / len(results) for key in keys
+                    if key.endswith("_vs_bf16")})
     report = {"gate": GATE, "worst": summary, "passes": {k: v <= GATE for k, v in summary.items()},
               "lists_equal": all(r["lists_equal"] for r in results), "captures": results}
     Path(args.report).write_text(json.dumps(report, indent=1))
