@@ -182,7 +182,7 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         cfg = self.data_config
         cases = tuple(cfg.get("cases", OMNIREF_CASES))
         eval_rows = load_eval_rows(cfg["eval_manifest"], cases, tuple(cfg.get("eval_resolutions", ("480p", ))),
-                                   int(cfg.get("eval_per_group", 2)), int(cfg.get("eval_max_frames", 0)))
+                                   cfg.get("eval_per_group", 2), int(cfg.get("eval_max_frames", 0)))
         groups = load_manifest_groups(list(cfg["manifests"]), cases, int(cfg.get("max_frames", 243)))
         missing = sorted(set(cases) - {case for case, _ in groups})
         if missing:

@@ -1,0 +1,114 @@
+# Staged OmniRef QAD v1 (approved launch 2026-10-09): Stage 2, x0 + 1.0*reconstruction from Stage 1 best, 90 updates, lr 5e-6
+# Stage A 1000-row amax (08:43 UTC), two-level P + K smoothing, 16 states/update (4 trays x 1 row x 4 forwards), 480p + 768p, 15-row held-out eval
+# (2x480p + 1x768p per case), best by teacher alignment (endpoint/video). Launched by jobs/staged_qad.sbatch.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    qad:
+      enabled: true
+      linears:
+        enabled: true
+        amax_json: /mnt/nfs/vlm-aryan/h3-omniref-nvfp4/out/calib/amax.json
+        attention: true
+        gate: true
+        ffn: true
+        skip_blocks: []
+      fp4_attention:
+        enabled: true
+        two_level_p: true
+        smooth_k: true
+        first_block_max_floor: null
+    data:
+      manifests:
+      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/omniref-v4-processed/20260919T001000Z/encoded/full/MANIFEST.jsonl
+      cases:
+      - first_frame
+      - first_last_frame
+      - storyboard
+      - continue_scene
+      - continue_shot
+      - full_scene_audio_image_reference
+      per_group:
+        480p: 400
+        768p: 50
+      seed: 20261007
+      max_frames: 243
+      eval_manifest: /mnt/nfs/vlm-aryan/h3-nvfp4-decoder/gen-latents/omniref-eval/manifest.json
+      eval_resolutions:
+      - 480p
+      - 768p
+      eval_per_group:
+        480p: 2
+        768p: 1
+      eval_max_frames: 0
+    trainable_patterns: transformer_blocks\.\d+\.(attn\.(to_q|to_k|to_v|to_out|to_gate_compress|norm_q|norm_k)|ff\.(fc_in|fc_out))\.
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: false
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.pdd_qad.OmniRefPDDQADMethod
+  video_weight: 1.0
+  audio_weight: 1.0
+  rollout_fraction: 0.0
+  rollout_start_step: 0
+  rungs_per_row: 4
+  eval_every: 45
+  patience: 2
+  fidelity_tolerance: 0.05
+  require_bitwise_init: true
+  save_best: true
+  ptq_reference_json: null
+  ptq_tolerance: 0.05
+  select_metric: endpoint/video
+  eval_save_dir: /mnt/nfs/vlm-aryan/h3-omniref-qad/runs/staged-qad-v1/stage2/samples
+  objective: output+recon
+  recon_lambda: 1.0
+  full_eval_every: 45
+  init_student_dcp: /mnt/nfs/vlm-aryan/h3-omniref-qad/runs/staged-qad-v1/stage1/best
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+    pin_cpu_memory: false
+  data:
+    train_batch_size: 1
+    seed: 1234
+  optimizer:
+    learning_rate: 5.0e-06
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    weight_decay: 0.0
+    lr_scheduler: cosine_with_min_lr
+    lr_warmup_steps: 10
+    min_lr_ratio: 0.3
+  loop:
+    max_train_steps: 90
+    gradient_accumulation_steps: 1
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/h3-omniref-qad/runs/staged-qad-v1/stage2
+    training_state_checkpointing_steps: 0
+    checkpoints_total_limit: 1
+    resume_from_checkpoint: ''
+  tracker:
+    trackers:
+    - wandb
+    project_name: fasth3-omniref-nvfp4
+    run_name: staged-qad-v1-stage2
+  model:
+    enable_gradient_checkpointing_type: full
+  dit_precision: fp32
+  vsa_sparsity: 0.0
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+pipeline: {}

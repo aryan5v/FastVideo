@@ -102,7 +102,7 @@ def select_rows(groups: dict[tuple[str, str], list[dict[str, Any]]],
 def load_eval_rows(manifest_json: str,
                    cases: tuple[str, ...],
                    resolutions: tuple[str, ...],
-                   per_group: int,
+                   per_group: int | dict[str, int],
                    max_frames: int = 0) -> list[RowSpec]:
     """Held-out rows from a ``generate_omniref_latents.py --eval-dir`` manifest (ids, parquets and seeds)."""
     items = json.loads(Path(manifest_json).read_text())
@@ -110,7 +110,8 @@ def load_eval_rows(manifest_json: str,
     rows = []
     for item in sorted(items, key=lambda item: item["id"]):
         key = (item["case"], item["resolution"])
-        if item["case"] not in cases or item["resolution"] not in resolutions or counts[key] >= per_group:
+        limit = int(per_group.get(item["resolution"], 0)) if isinstance(per_group, dict) else int(per_group)
+        if item["case"] not in cases or item["resolution"] not in resolutions or counts[key] >= limit:
             continue
         if max_frames and int(item.get("num_frames", 0)) > max_frames:
             continue
