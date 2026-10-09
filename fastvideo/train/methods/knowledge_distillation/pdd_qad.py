@@ -84,7 +84,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
         # Save each eval's final latents (student's own sample, teacher's) for side-by-side decoding.
         self.eval_save_dir = mc.get("eval_save_dir")
         # Full evaluation (with the student's own 8-step sample) every this many steps; teacher-forced only otherwise.
-        self.full_eval_every = int(mc.get("full_eval_every", 0)) or self.eval_every
+        self.full_eval_every = int(mc.get("full_eval_every", 0)) or int(mc.get("eval_every", 50))
         # Start the student from another run's tagged weights (e.g. Stage 1 best) instead of the teacher's.
         self.init_student_dcp = mc.get("init_student_dcp")
         self._eval_iteration = 0
