@@ -96,6 +96,35 @@ class OmniRefPDDQADMethod(TrainingMethod):
         self.require_bitwise_init = bool(mc.get("require_bitwise_init", True))
         self.max_eval_rows = int(mc.get("max_eval_rows", 0))
         self.save_best = bool(mc.get("save_best", True))
+        # Reconstruction per row group (target video, target audio, conditioning): over the whole packed sequence
+        # audio is ~1.4% of rows and text tokens dominate the norm, so an ungrouped ratio barely trains audio.
+        self.recon_group_weights = dict(
+            mc.get("recon_group_weights") or {
+                "video": 1.0,
+                "audio": 1.0,
+                "condition": 0.25
+            })
+        # "step0": divide each forward's reconstruction loss by its step-0 value (as the x0 terms are), so
+        # recon_lambda means what it says; raw reconstruction gradients are ~1e3-1e4x smaller than x0's.
+        self.recon_normalize = str(mc.get("recon_normalize", "none"))
+        if self.recon_normalize not in ("none", "step0"):
+            raise ValueError(f"recon_normalize must be none or step0, got {self.recon_normalize!r}")
+        self.recon_norm_rows = int(mc.get("recon_norm_rows", 4))
+        self.recon_norm: list[float] | None = None
+        # Full evaluations roll out (8 more student forwards) on at most this many rows; others are teacher-forced.
+        self.max_rollout_rows = int(mc.get("max_rollout_rows", 0))
+        # A checkpoint is "best" only if these full-eval metrics stay <= step0 * (1 + tolerance). With
+        # noise_floor_eval the tolerance is 2 sigma of a seed+1 re-evaluation at step 0 (>= min_eligibility_tolerance);
+        # otherwise fidelity_tolerance.
+        self.eligibility_keys = tuple(
+            mc.get("eligibility_keys")
+            or ("endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last", "x0_rel_l2/audio/mean"))
+        self.noise_floor_eval = bool(mc.get("noise_floor_eval", False))
+        self.min_eligibility_tolerance = float(mc.get("min_eligibility_tolerance", 0.02))
+        self.tolerances: dict[str, float] = {}
+        # Stage A's per-rung reference metric for the step-0 PTQ match (v_rel is sign-independent).
+        self.ptq_reference_metric = str(mc.get("ptq_reference_metric", "v_rel_l2"))
+        self._recon_criteria: dict[str, Any] = {}
         self.student.init_preprocessors(cfg.training)
         tc = self.training_config
         params = [p for p in self.student.transformer.parameters() if p.requires_grad]
@@ -178,9 +207,11 @@ class OmniRefPDDQADMethod(TrainingMethod):
             with torch.no_grad(), self.teacher.rung_scope(prepared, rung, timesteps) as rt:
                 if rung in trained and self.recon_weight > 0:
                     # Student blocks train inside the teacher forward, on the teacher's sub-layer inputs.
-                    scale = self.recon_weight / (2 * len(self.student.transformer.transformer_blocks) * len(trained) *
-                                                 accum)
-                    with BlockReconstruction(self.teacher.transformer, self.student.transformer, scale) as recon:
+                    norm = self.recon_norm[rung] if self.recon_norm else 1.0
+                    scale = self.recon_weight / (norm * 2 * len(self.student.transformer.transformer_blocks) *
+                                                 len(trained) * accum)
+                    with BlockReconstruction(self.teacher.transformer, self.student.transformer, scale,
+                                             self._recon_criterion(prepared)) as recon:
                         teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
                 else:
                     teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
@@ -188,7 +219,9 @@ class OmniRefPDDQADMethod(TrainingMethod):
                 recon_loss = recon.loss()
                 if not torch.isfinite(recon_loss):
                     raise FloatingPointError(f"non-finite reconstruction loss at step {iteration}, rung {rung}")
-                total += self.recon_weight * recon_loss / len(trained)
+                norm = self.recon_norm[rung] if self.recon_norm else 1.0
+                total += self.recon_weight * recon_loss / (norm * len(trained))
+                metrics[f"train/recon_vs_step0/rung{rung}"] = recon_loss / norm
                 for key, value in recon.metrics("train/recon").items():
                     metrics[f"{key}/rung{rung}"] = value
             if rung not in trained or self.output_weight == 0:
@@ -216,6 +249,68 @@ class OmniRefPDDQADMethod(TrainingMethod):
             logger.info("QAD step %d row %s (%s, %d tokens, rollout=%s): loss %.5f in %.1fs", iteration, spec.id,
                         spec.case, prepared.layout.sequence_length, rollout, float(total), metrics["train/row_seconds"])
         return {"total_loss": total}, {}, metrics
+
+    def _recon_criterion(self, prepared: Any) -> Any:
+        from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import (GroupedRelError, local_row_groups,
+                                                                                  packed_row_groups)
+        key = prepared.spec.id
+        if key not in self._recon_criteria:
+            self._recon_criteria = {}  # one row at a time
+            groups = packed_row_groups(prepared.layout, int(prepared.layout.sequence_length))
+            self._recon_criteria[key] = GroupedRelError(local_row_groups(groups, self.student.device),
+                                                        self.recon_group_weights)
+        return self._recon_criteria[key]
+
+    @torch.no_grad()
+    def _calibrate_recon(self, rows: list[tuple[Any, bool]]) -> dict[str, LogScalar]:
+        """Step-0 reconstruction error per forward (measure-only), the Stage-2 normalizer."""
+        num_rungs = self.student.num_rungs
+        sums = torch.zeros(num_rungs, dtype=torch.float64, device=self.student.device)
+        count = torch.zeros((), dtype=torch.float64, device=self.student.device)
+        per_rank = -(-self.recon_norm_rows // self.dp_size)
+        for spec, counted in rows[:per_rank]:
+            prepared = self._row(spec)
+            schedulers = self.student.schedulers()
+            timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
+            video, audio = prepared.video, prepared.audio
+            for rung in range(num_rungs):
+                with self.teacher.rung_scope(prepared, rung,
+                                             timesteps) as rt, BlockReconstruction(self.teacher.transformer,
+                                                                                   self.student.transformer,
+                                                                                   0.0,
+                                                                                   self._recon_criterion(prepared),
+                                                                                   measure_only=True) as recon:
+                    out = self.teacher.forward_rung(prepared, video, audio, rt)
+                if counted:
+                    sums[rung] += recon.loss().double()
+                video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
+            count += float(counted)
+        if not self.is_sp_leader:
+            sums.zero_()
+            count.zero_()
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(sums)
+            torch.distributed.all_reduce(count)
+        self.recon_norm = [max(float(v), 1e-12) for v in (sums / count.clamp_min(1.0))]
+        return {f"init/recon_step0/rung{rung}": value for rung, value in enumerate(self.recon_norm)}
+
+    def _noise_floor(self, rows: list[tuple[Any, bool]], step0: dict[str, float]) -> dict[str, LogScalar]:
+        """Re-evaluate step 0 at seed+1; per-metric tolerance = max(2 sigma, minimum) with sigma relative."""
+        import dataclasses
+        shifted = [(dataclasses.replace(spec, seed=spec.seed + 1), counted) for spec, counted in rows]
+        other = self._evaluate(shifted, rollout=True, save_tag="seed1")
+        out: dict[str, LogScalar] = {}
+        for key in set(self.eligibility_keys) | {"endpoint/video", "score"}:
+            if key in step0 and key in other:
+                mean = 0.5 * (step0[key] + other[key])
+                sigma = abs(step0[key] - other[key]) / (math.sqrt(2.0) * max(mean, 1e-12))
+                self.tolerances[key] = max(2.0 * sigma, self.min_eligibility_tolerance)
+                out[f"init/noise_sigma/{key}"] = sigma
+                out[f"init/seed1/{key}"] = other[key]
+        return out
+
+    def _tolerance(self, key: str) -> float:
+        return self.tolerances.get(key, self.fidelity_tolerance)
 
     def _trained_rungs(self, row_id: str, iteration: int, num_rungs: int) -> set[int]:
         """All forwards, or a deterministic random subset (identical on every rank of an SP group)."""
@@ -248,9 +343,13 @@ class OmniRefPDDQADMethod(TrainingMethod):
         if first and iteration == 0 and not self.init_student_dcp:
             # Fresh start only: a resumed run (e.g. Stage 2 from a Stage-1 checkpoint) is no longer the teacher.
             metrics.update(self._initial_checks(rows))
+        if first and self.recon_normalize == "step0" and self.recon_weight > 0:
+            metrics.update(self._calibrate_recon(rows))
         full = first or (iteration % self.full_eval_every == 0)
         summary = self._evaluate(rows, rollout=full)
         metrics.update({f"eval/{k}": v for k, v in summary.items()})
+        if first and self.noise_floor_eval:
+            metrics.update(self._noise_floor(rows, summary))
         if first:
             self.normalizers = {
                 m: [max(summary[f"x0_mse/{m}/rung{r}"], 1e-20) for r in range(self.student.num_rungs)]
@@ -284,15 +383,23 @@ class OmniRefPDDQADMethod(TrainingMethod):
         return [(rows[(i * self.dp_size + self.dp_rank) % len(rows)], i * self.dp_size + self.dp_rank < len(rows))
                 for i in range(per_rank)]
 
+    def _eligible(self, summary: dict[str, float]) -> bool:
+        """Full-eval audio/keyframe metrics within step0 * (1 + tolerance); a teacher-forced-only eval cannot tell."""
+        if "endpoint/video" not in summary:
+            return False
+        return all(summary[key] <= self.step0[key] * (1.0 + self._tolerance(key)) for key in self.eligibility_keys
+                   if key in self.step0 and key in summary)
+
     def _guardrails(self, iteration: int, summary: dict[str, float]) -> dict[str, LogScalar]:
         worse = summary["score"] > self.step0["score"]
         # Teacher alignment: the student's own sample (same seed) and its keyframes vs the teacher's.
         for key in ("endpoint/video", "endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last"):
             if key in summary and key in self.step0:
-                worse |= summary[key] > self.step0[key] * (1.0 + self.fidelity_tolerance)
+                worse |= summary[key] > self.step0[key] * (1.0 + self._tolerance(key))
         self.bad_evals = self.bad_evals + 1 if worse else 0
         selected = summary.get(self.select_metric)
-        if selected is not None and selected < self.best_score:
+        eligible = self._eligible(summary)
+        if selected is not None and selected < self.best_score and eligible:
             self.best_score = selected
             self._checkpoint_request = "best" if self.save_best else None
         if self.bad_evals >= self.patience:
@@ -300,6 +407,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
             logger.warning("QAD stop: %d consecutive evaluations worse than the PTQ start (step %d)", self.bad_evals,
                            iteration)
         return {
+            "eval/eligible": float(eligible),
             "eval/bad_evals": float(self.bad_evals),
             "eval/best_score": self.best_score,
             "eval/stop_requested": float(self.stop_requested)
@@ -311,12 +419,15 @@ class OmniRefPDDQADMethod(TrainingMethod):
                   *,
                   rollout: bool,
                   attention: bool = True,
-                  linears: bool = True) -> dict[str, float]:
+                  linears: bool = True,
+                  save_tag: str = "") -> dict[str, float]:
         num_rungs = self.student.num_rungs
         stats = RungStats(num_rungs)
         counted_stats = stats
+        # Same rollout count on every data-parallel group (lockstep), covering the first max_rollout_rows rows.
+        rollout_rows = -(-self.max_rollout_rows // self.dp_size) if self.max_rollout_rows else len(rows)
         with self.student.quantization(linears=linears, attention=attention):
-            for spec, counted in rows:
+            for position, (spec, counted) in enumerate(rows):
                 stats = counted_stats if counted else RungStats(num_rungs)
                 prepared = self._row(spec)
                 schedulers = self.student.schedulers()
@@ -334,8 +445,15 @@ class OmniRefPDDQADMethod(TrainingMethod):
                             "teacher": teacher_out
                         }))
                     video, audio = step_packed(schedulers, prepared, rung, video, audio, *teacher_out)
-                if rollout:
-                    self._rollout_metrics(stats, prepared, schedulers, timesteps, video, audio, save=counted)
+                if rollout and position < rollout_rows:
+                    self._rollout_metrics(stats,
+                                          prepared,
+                                          schedulers,
+                                          timesteps,
+                                          video,
+                                          audio,
+                                          save=counted,
+                                          save_tag=save_tag)
         means = counted_stats.reduce(contribute=self.is_sp_leader)
         summary = summarize(means, num_rungs, self.weights)
         for name in ("first", "last"):
@@ -351,7 +469,8 @@ class OmniRefPDDQADMethod(TrainingMethod):
                          timesteps: Any,
                          teacher_video: torch.Tensor,
                          teacher_audio: torch.Tensor,
-                         save: bool = False) -> None:
+                         save: bool = False,
+                         save_tag: str = "") -> None:
         """Student's own 8-forward sample vs the teacher's: endpoint rel-L2 and latent keyframe fidelity."""
         video, audio = prepared.video, prepared.audio
         for rung in range(self.student.num_rungs):
@@ -360,16 +479,21 @@ class OmniRefPDDQADMethod(TrainingMethod):
             video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
         cut = target_slices(prepared)
         if save and self.eval_save_dir and self.is_sp_leader:
-            path = Path(self.eval_save_dir) / f"step{self._eval_iteration:05d}" / f"{prepared.spec.id}.pt"
+            step_dir = f"step{self._eval_iteration:05d}" + (f"_{save_tag}" if save_tag else "")
+            path = Path(self.eval_save_dir) / step_dir / f"{prepared.spec.id}.pt"
             path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "student_video": video[cut["video"]].float().cpu(),
                     "teacher_video": teacher_video[cut["video"]].float().cpu(),
+                    # Audio for decoded stats (spectral centroid, >8 kHz share, dynamic range, log-mel distance).
+                    "student_audio": audio[cut["audio"]].float().cpu(),
+                    "teacher_audio": teacher_audio[cut["audio"]].float().cpu(),
                     "latent_shape": prepared.latent_shape,
                     "case": prepared.spec.case,
                     "seed": prepared.spec.seed
-                }, path)
+                },
+                path)
         for modality, student, teacher in (("video", video, teacher_video), ("audio", audio, teacher_audio)):
             s, t = student[cut[modality]].float(), teacher[cut[modality]].float()
             stats.add_scalar(f"endpoint.{modality}", (s - t).norm() / t.norm().clamp_min(1e-12))
@@ -399,11 +523,17 @@ class OmniRefPDDQADMethod(TrainingMethod):
         if torch.distributed.is_initialized():
             torch.distributed.all_reduce(diff, op=torch.distributed.ReduceOp.MAX)
         out["init/noquant_vs_teacher_max_abs"] = float(diff)
+        sha = getattr(self.student, "amax_sha256", "")
+        if sha:  # first 32 bits of the pinned calibration table's sha256, for W&B
+            out["init/amax_sha256_u32"] = float(int(sha[:8], 16))
         if self.require_bitwise_init and float(diff) != 0.0:
             raise RuntimeError(f"student with quantization disabled differs from the teacher (max |diff| "
                                f"{float(diff):.3e}); refusing to train from a student that is not the teacher")
         weights_only = self._evaluate(rows, rollout=False, attention=False)
-        out.update({f"init/ptq_bf16_attn/{k}": v for k, v in weights_only.items() if k.startswith(("x0_rel", "score"))})
+        out.update({
+            f"init/ptq_bf16_attn/{k}": v
+            for k, v in weights_only.items() if k.startswith(("x0_rel", "v_rel", "score"))
+        })
         out.update(self._compare_ptq_reference(weights_only))
         return out
 
@@ -445,7 +575,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
         deviations = []
         for modality in MODALITIES:
             for rung, value in enumerate(reference.get(modality, [])):
-                ours = weights_only.get(f"x0_rel_l2/{modality}/rung{rung}")
+                ours = weights_only.get(f"{self.ptq_reference_metric}/{modality}/rung{rung}")
                 if ours is not None and value:
                     deviations.append(abs(ours / float(value) - 1.0))
         worst = max(deviations, default=float("nan"))

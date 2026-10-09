@@ -16,7 +16,9 @@ teacher was trained sparse and the student is deployed sparse, so dense attentio
 configuration that never runs.
 
 The loss per unit is the relative squared error ``||s - t||^2 / ||t||^2`` (late FFN outputs reach ~1e6, so an
-unnormalized sum would only train those), averaged over R.
+unnormalized sum would only train those), averaged over R. With a ``GroupedRelError`` it is computed per row group
+(target video, target audio, conditioning) and weighted: over the whole packed sequence audio is ~1.4% of the rows
+and massive text tokens dominate ``||t||^2``, so an ungrouped ratio barely trains audio.
 """
 from __future__ import annotations
 
@@ -29,9 +31,58 @@ def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
     return getattr(module, "_checkpoint_wrapped_module", module)
 
 
-def _rel_sq(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
-    teacher = teacher.float()
-    return (student.float() - teacher).pow(2).mean() / teacher.pow(2).mean().clamp_min(1e-20)
+GROUPS = ("video", "audio", "condition")  # target video rows, target audio rows, text + reference rows
+
+
+def packed_row_groups(layout: Any, sequence_length: int) -> torch.Tensor:
+    """Group id per packed row: 0 target video, 1 target audio, 2 conditioning (text, references)."""
+    groups = torch.full((sequence_length, ), 2, dtype=torch.long)
+    groups[layout.video_indices[layout.num_condition_video_rows:]] = 0
+    groups[layout.audio_indices[layout.num_condition_audio_rows:]] = 1
+    return groups
+
+
+def local_row_groups(groups: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """This sequence-parallel rank's rows of ``groups`` as the transformer shards them; padding is -1."""
+    from fastvideo.distributed import get_sp_world_size, model_parallel_is_initialized
+    from fastvideo.distributed.communication_op import sequence_model_parallel_shard
+
+    shifted = (groups + 1).to(device)
+    if model_parallel_is_initialized() and get_sp_world_size() > 1:
+        shifted, _ = sequence_model_parallel_shard(shifted, dim=0)  # pads with 0 -> -1 after the shift
+    return shifted - 1
+
+
+class GroupedRelError:
+    """Weighted mean over row groups of ``||s - t||^2 / ||t||^2`` with sequence-parallel-global sums.
+
+    Each rank backpropagates ``w_g * num_local / den_global``; summed over ranks that is the global ratio, so
+    a group living on one rank (e.g. target audio) is weighted exactly as if unsharded. Groups absent from the
+    sequence are dropped from the weight normalization.
+    """
+
+    def __init__(self, groups: torch.Tensor, weights: dict[str, float]) -> None:
+        self.groups = groups
+        self.weights = torch.tensor([float(weights.get(name, 0.0)) for name in GROUPS], device=groups.device)
+
+    def __call__(self, student: torch.Tensor, teacher: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(local loss to backprop, global per-group relative error [3], detached)``."""
+        from fastvideo.distributed import get_sp_group, get_sp_world_size, model_parallel_is_initialized
+
+        teacher = teacher.float().reshape(-1, teacher.shape[-1])
+        err = (student.float().reshape(-1, teacher.shape[-1]) - teacher).pow(2).sum(-1)
+        ref = teacher.pow(2).sum(-1)
+        one_hot = (self.groups[:, None] == torch.arange(len(GROUPS), device=err.device)[None, :]).float()
+        num = err @ one_hot  # [3], differentiable
+        totals = torch.stack((num.detach(), ref @ one_hot))  # [2, 3]
+        if model_parallel_is_initialized() and get_sp_world_size() > 1:
+            totals = get_sp_group().all_reduce(totals)
+        present = totals[1] > 0
+        den = totals[1].clamp_min(1e-30)
+        weights = torch.where(present, self.weights, torch.zeros_like(self.weights))
+        norm = weights.sum().clamp_min(1e-30)
+        loss = (weights * num / den).sum() / norm
+        return loss, torch.where(present, totals[0] / den, torch.full_like(den, float("nan")))
 
 
 class _Replace:
@@ -65,15 +116,31 @@ class BlockReconstruction:
     Use as a context manager around the teacher's ``forward_rung``, with grad disabled for the teacher.
     """
 
-    def __init__(self, teacher: torch.nn.Module, student: torch.nn.Module, scale: float) -> None:
+    def __init__(self,
+                 teacher: torch.nn.Module,
+                 student: torch.nn.Module,
+                 scale: float,
+                 criterion: GroupedRelError | None = None,
+                 measure_only: bool = False) -> None:
         self.teacher_blocks = list(teacher.transformer_blocks)
         self.student_blocks = list(student.transformer_blocks)
         if len(self.teacher_blocks) != len(self.student_blocks):
             raise ValueError("teacher and student block counts differ")
         self.scale = scale
+        self.criterion = criterion
+        self.measure_only = measure_only
         self.attn_rel: list[torch.Tensor] = []
         self.ff_rel: list[torch.Tensor] = []
+        self.group_rel: list[torch.Tensor] = []  # [3] per unit, global, detached
         self._handles: list[Any] = []
+
+    def _unit_loss(self, student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+        if self.criterion is None:
+            teacher_f = teacher.float()
+            return (student.float() - teacher_f).pow(2).mean() / teacher_f.pow(2).mean().clamp_min(1e-20)
+        loss, per_group = self.criterion(student, teacher)
+        self.group_rel.append(per_group)
+        return loss
 
     def __enter__(self) -> BlockReconstruction:
         for index, block in enumerate(self.teacher_blocks):
@@ -109,16 +176,17 @@ class BlockReconstruction:
             inner.ff.register_forward_hook(replace_ff.post)
         ]
         try:
-            with torch.enable_grad():
+            with torch.set_grad_enabled(not self.measure_only):
                 # The block's own hidden input only feeds norm1 and the residual, whose results are unused; the
                 # teacher attention input has the right shape. The call goes through the block, and the block
                 # input and output join the graph (zero weight), so FSDP's pre-/post-backward hooks re-gather the
                 # block's weights for backward and reduce-scatter its gradients.
-                hidden = attn.input.detach().requires_grad_(True)
+                hidden = attn.input.detach().requires_grad_(not self.measure_only)
                 block_out = block(hidden, *block_args[1:])
-                attn_rel = _rel_sq(replace_attn.output, attn.output)
-                ff_rel = _rel_sq(replace_ff.output, ff.output)
-                ((attn_rel + ff_rel) * self.scale + 0.0 * block_out.float().sum()).backward()
+                attn_rel = self._unit_loss(replace_attn.output, attn.output)
+                ff_rel = self._unit_loss(replace_ff.output, ff.output)
+                if not self.measure_only:
+                    ((attn_rel + ff_rel) * self.scale + 0.0 * block_out.float().sum()).backward()
         finally:
             for handle in handles:
                 handle.remove()
@@ -126,14 +194,22 @@ class BlockReconstruction:
         self.ff_rel.append(ff_rel.detach())
 
     def loss(self) -> torch.Tensor:
-        """Mean relative error over all units of this forward (detached; already backpropagated)."""
+        """Mean (group-weighted) relative error over all units of this forward, sequence-parallel-global, detached."""
+        if self.criterion is not None and self.group_rel:
+            rel = torch.stack(self.group_rel)  # [units, 3], NaN for absent groups
+            weights = self.criterion.weights.expand_as(rel) * (~rel.isnan())
+            return ((weights * rel.nan_to_num()).sum(-1) / weights.sum(-1).clamp_min(1e-30)).mean()
         return (torch.stack(self.attn_rel).sum() + torch.stack(self.ff_rel).sum()) / (2 * len(self.attn_rel))
 
     def metrics(self, prefix: str) -> dict[str, torch.Tensor]:
         attn, ff = torch.stack(self.attn_rel), torch.stack(self.ff_rel)
         third = max(1, len(attn) // 3)
+        groups = {}
+        if self.group_rel:
+            per_group = torch.stack(self.group_rel).nanmean(dim=0)
+            groups = {f"{prefix}/{name}_rel": per_group[i] for i, name in enumerate(GROUPS)}
         return {
-            f"{prefix}/attn_rel": attn.mean(),
+            **groups, f"{prefix}/attn_rel": attn.mean(),
             f"{prefix}/ff_rel": ff.mean(),
             f"{prefix}/attn_rel_first_third": attn[:third].mean(),
             f"{prefix}/attn_rel_last_third": attn[-third:].mean(),
@@ -141,4 +217,4 @@ class BlockReconstruction:
         }
 
 
-__all__ = ["BlockReconstruction"]
+__all__ = ["BlockReconstruction", "GROUPS", "GroupedRelError", "local_row_groups", "packed_row_groups"]

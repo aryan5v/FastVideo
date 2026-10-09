@@ -121,6 +121,36 @@ def load_eval_rows(manifest_json: str,
     return rows
 
 
+def top_up_eval_rows(eval_rows: list[RowSpec], groups: dict[tuple[str, str], list[dict[str, Any]]], seed: int,
+                     per_group: dict[str, int]) -> list[RowSpec]:
+    """Fill each (case, resolution) up to ``per_group`` with fresh held-out rows (call before the training plan).
+
+    Extra rows come from the generator's plan rule at ``seed``, skipping sources already in ``eval_rows``;
+    the training plan must then exclude every eval source. Result is interleaved across groups.
+    """
+    have: dict[tuple[str, str], int] = defaultdict(int)
+    for row in eval_rows:
+        have[(row.case, row.resolution)] += 1
+    taken = frozenset(row.source for row in eval_rows)
+    extra = []
+    for key in sorted(groups):
+        need = int(per_group.get(key[1], 0)) - have[key]
+        if need > 0:
+            extra += select_rows({key: groups[key]}, seed, {key[1]: need}, taken)
+    return interleave_by_group(eval_rows + extra)
+
+
+def interleave_by_group(rows: list[RowSpec]) -> list[RowSpec]:
+    """Round-robin over (case, resolution) groups, so any prefix covers every case."""
+    buckets: dict[tuple[str, str], list[RowSpec]] = defaultdict(list)
+    for row in rows:
+        buckets[(row.case, row.resolution)].append(row)
+    ordered = [buckets[key] for key in sorted(buckets)]
+    return [
+        bucket[i] for i in range(max((len(b) for b in ordered), default=0)) for bucket in ordered if i < len(bucket)
+    ]
+
+
 class RowStream:
     """Infinite, deterministic per-data-parallel-rank row stream (every SP rank of a group sees the same row)."""
 
@@ -242,6 +272,6 @@ def prepare_row(spec: RowSpec, row: dict[str, Any], *, patch_size: tuple[int, in
 
 
 __all__ = [
-    "OMNIREF_CASES", "PreparedRow", "RowSpec", "RowStream", "load_eval_rows", "load_manifest_groups", "prepare_row",
-    "read_row", "select_rows"
+    "OMNIREF_CASES", "PreparedRow", "RowSpec", "RowStream", "interleave_by_group", "load_eval_rows",
+    "load_manifest_groups", "top_up_eval_rows", "prepare_row", "read_row", "select_rows"
 ]

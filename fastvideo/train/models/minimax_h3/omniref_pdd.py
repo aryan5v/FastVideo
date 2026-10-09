@@ -109,6 +109,7 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         self.qad_linears: dict[str, Any] = {}
         self.fp4_numerics: Any = None
         self.provisional_rows = 0
+        self.amax_sha256 = ""
         self.eval_rows: list[Any] = []
         self.train_rows: list[Any] = []
         if self.qad_config.get("enabled", False):
@@ -138,6 +139,9 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         if linears.get("enabled", True):
             amax_path = linears.get("amax_json")
             table = load_amax_table(amax_path) if amax_path else None
+            if amax_path:
+                self.amax_sha256 = _pin_amax(amax_path, linears.get("amax_sha256"),
+                                             self.training_config.checkpoint.output_dir)
             plan = NVFP4QADPlan(quantize_attention=bool(linears.get("attention", True)),
                                 quantize_gate=bool(linears.get("gate", True)),
                                 quantize_ffn=bool(linears.get("ffn", True)),
@@ -177,16 +181,26 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
             install_fp4_vsa_attention(self.transformer, self.fp4_numerics)
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
-        from fastvideo.train.models.minimax_h3.omniref_data import (OMNIREF_CASES, RowStream, load_eval_rows,
-                                                                    load_manifest_groups, select_rows)
+        from fastvideo.train.models.minimax_h3.omniref_data import (OMNIREF_CASES, RowStream, interleave_by_group,
+                                                                    load_eval_rows, load_manifest_groups, select_rows,
+                                                                    top_up_eval_rows)
         cfg = self.data_config
         cases = tuple(cfg.get("cases", OMNIREF_CASES))
-        eval_rows = load_eval_rows(cfg["eval_manifest"], cases, tuple(cfg.get("eval_resolutions", ("480p", ))),
-                                   cfg.get("eval_per_group", 2), int(cfg.get("eval_max_frames", 0)))
+        resolutions = tuple(cfg.get("eval_resolutions", ("480p", )))
+        eval_per_group = cfg.get("eval_per_group", 2)
+        eval_rows = load_eval_rows(cfg["eval_manifest"], cases, resolutions, eval_per_group,
+                                   int(cfg.get("eval_max_frames", 0)))
         groups = load_manifest_groups(list(cfg["manifests"]), cases, int(cfg.get("max_frames", 243)))
         missing = sorted(set(cases) - {case for case, _ in groups})
         if missing:
             logger.warning("OmniRef cases with no rows in the given manifests: %s", missing)
+        if isinstance(eval_per_group, dict):
+            # More held-out rows than the precomputed eval manifest holds: draw them before the training plan.
+            eval_groups = {key: entries for key, entries in groups.items() if key[1] in resolutions}
+            eval_rows = top_up_eval_rows(eval_rows, eval_groups, int(cfg.get("eval_seed", 20261008)),
+                                         dict(eval_per_group))
+        else:
+            eval_rows = interleave_by_group(eval_rows)
         plan = select_rows(groups, int(cfg.get("seed", 20261007)), dict(cfg.get("per_group", {"480p": 400})),
                            frozenset(row.source for row in eval_rows))
         if int(cfg.get("max_train_rows", 0)) > 0:  # smoke tests: overfit a few rows
@@ -307,6 +321,25 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
 
     def sp_group(self) -> Any:
         return get_sp_group()
+
+
+def _pin_amax(path: str, expected_sha256: str | None, output_dir: str) -> str:
+    """Check the calibration table's sha256 (when pinned) and keep a copy next to the run's checkpoints.
+
+    The static FFN scales are fixed buffers that QAD learns around, so a run must never pick up a table that was
+    rewritten in place (it happened once, at 08:43 on 2026-10-09).
+    """
+    import hashlib
+    import shutil
+
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if expected_sha256 and digest != expected_sha256:
+        raise ValueError(f"{path} has sha256 {digest}, but the config pins {expected_sha256}")
+    if output_dir and get_world_group().rank == 0:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, Path(output_dir) / f"amax-{digest[:12]}.json")
+    logger.info("NVFP4 calibration table %s sha256 %s", path, digest)
+    return digest
 
 
 def _count(rows: list[Any]) -> dict[str, int]:
