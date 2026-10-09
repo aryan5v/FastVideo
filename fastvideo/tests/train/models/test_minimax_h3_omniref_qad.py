@@ -345,3 +345,19 @@ def test_audio_stats_and_seed_floor_gate():
     assert seed_floor_gate(good, teacher, other)["pass"]
     result = seed_floor_gate(dull, teacher, other)
     assert not result["pass"] and not result["spectral_centroid_hz/pass"]
+
+
+def test_fp32_boundary_modules_match_inference_and_stay_frozen(cpu_loader, single_process_group):  # noqa: F811
+    """The QAD loader keeps H3's FP32 boundary modules FP32 (as inference) and refuses to train them."""
+    from types import SimpleNamespace
+    from fastvideo.train.models.minimax_h3.omniref_pdd import MiniMaxH3OmniRefPDDModel
+    model = _tiny_model().to(torch.float32)
+    assert not model.config.uniform_parameter_dtype
+    fp32 = {n for n, _ in model.named_parameters() if model._get_parameter_dtype(n, torch.bfloat16) == torch.float32}
+    assert fp32 and {n.split(".", 1)[0] for n in fp32} <= set(model._keep_in_fp32_modules)
+    model.requires_grad_(False)
+    fake = SimpleNamespace(transformer=model)
+    MiniMaxH3OmniRefPDDModel._check_fp32_modules_frozen(fake)
+    model.proj_in.weight.requires_grad_(True)
+    with pytest.raises(ValueError, match="must stay frozen"):
+        MiniMaxH3OmniRefPDDModel._check_fp32_modules_frozen(fake)

@@ -89,7 +89,11 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         self.contract = PDDContract.read(init_from)
         if self.contract.vsa_tile_size != 128:
             raise ValueError(f"the FP4 VSA emulator models tile 128; this export uses {self.contract.vsa_tile_size}")
-        training_config.pipeline_config.dit_config.uniform_parameter_dtype = True  # type: ignore[attr-defined]
+        # Inference keeps proj_in/out, audio_proj_in/out and the time embedder in FP32; FSDP mixed precision would
+        # compute them in BF16 and the harness would no longer be the deployed operating point (E1: -7.6% v_rel at
+        # forward 0). They are frozen here, so they stay FP32 and replicated outside FSDP.
+        training_config.pipeline_config.dit_config.uniform_parameter_dtype = False  # type: ignore[attr-defined]
+        training_config.pipeline_config.dit_config.replicate_fp32_modules = True  # type: ignore[attr-defined]
         self._init_from = str(init_from)
         self.training_config = training_config
         self.qad_config = dict(qad or {})
@@ -103,6 +107,7 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         if trainable and checkpointing:
             self.transformer = apply_activation_checkpointing(self.transformer, checkpointing_type=checkpointing)
         self.num_trainable = self._apply_trainable(trainable_patterns if trainable else None)
+        self._check_fp32_modules_frozen()
         self.patch_size = tuple(int(v) for v in self.transformer.patch_size)
         self._plan: Any = None
         self._vsa_builder: Any = None
@@ -130,6 +135,17 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         if regex is not None and count == 0:
             raise ValueError(f"trainable_patterns {pattern!r} matched no parameters")
         return count
+
+    def _check_fp32_modules_frozen(self) -> None:
+        """FP32 boundary modules are replicated outside FSDP: training them would desynchronize the ranks."""
+        selector = getattr(self.transformer, "_get_parameter_dtype", None)
+        for name, parameter in self.transformer.named_parameters():
+            clean = name.replace("_checkpoint_wrapped_module.", "")
+            if callable(selector) and selector(clean, torch.bfloat16) == torch.float32:
+                if parameter.requires_grad:
+                    raise ValueError(f"{clean} is an FP32 replicated module and must stay frozen")
+                if parameter.dtype != torch.float32:
+                    raise ValueError(f"{clean} should be FP32 (as inference), got {parameter.dtype}")
 
     def _install_qad(self) -> None:
         from fastvideo.attention.backends.fp4_vsa_qat import FP4AttentionNumerics, install_fp4_vsa_attention
