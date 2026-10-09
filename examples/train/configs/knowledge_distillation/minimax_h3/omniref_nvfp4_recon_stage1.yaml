@@ -1,0 +1,117 @@
+# Stage 1 of the OmniRef NVFP4 + FP4-attention QAD: layer-wise reconstruction warmup (JetDiffusion/VSQA
+# Eq. 6), adapted to the deployed sparse VSA-128 FP4 attention and the 8-forward PDD ladder.
+#
+# Every block's attention sub-layer (NVFP4 q/k/v/gate/out + QK norms + sparse FP4 attention) and FFN sub-layer
+# (NVFP4 fc_in/fc_out) is fed the frozen teacher's input to that sub-layer and matches its output (relative
+# squared error, mean over the 100 units). Student blocks run and backpropagate inside the teacher forward
+# (no end-to-end backward, no activation recompute). States are the teacher's PDD trajectory (no rollout).
+# Paper recipe: batch 16 states (8 rows x 2 forwards), lr 1e-5, 500 updates. Best checkpoint by teacher
+# alignment (the student's own 8-step sample vs the teacher's, same seed); the same step-0 checks and guards.
+# Stage 2 (optional): objective "output+recon", recon_lambda 1, resumed from a Stage-1 checkpoint.
+#
+# Cost (smoke-measured, see notes): see omniref-qad.md section 7.
+
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: true
+    enable_gradient_checkpointing_type: null
+    qad:
+      enabled: true
+      linears:
+        enabled: true
+        amax_json: /mnt/nfs/vlm-aryan/h3-omniref-nvfp4/out/calib/amax.json
+        attention: true
+        gate: true
+        ffn: true
+        skip_blocks: []
+      fp4_attention:
+        enabled: true
+        two_level_p: false
+        smooth_k: false
+        first_block_max_floor: null
+    data:
+      manifests:
+      - /mnt/lustre/vlm-wlsaidhi/fastvideo/data/omniref-v4-processed/20260919T001000Z/encoded/full/MANIFEST.jsonl
+      cases:
+      - first_frame
+      - first_last_frame
+      - storyboard
+      - continue_scene
+      - continue_shot
+      - full_scene_audio_image_reference
+      per_group:
+        480p: 400
+        768p: 50
+      seed: 20261007
+      max_frames: 243
+      eval_manifest: /mnt/nfs/vlm-aryan/h3-nvfp4-decoder/gen-latents/omniref-eval/manifest.json
+      eval_resolutions:
+      - 480p
+      eval_per_group: 2
+    trainable_patterns: transformer_blocks\.\d+\.(attn\.(to_q|to_k|to_v|to_out|to_gate_compress|norm_q|norm_k)|ff\.(fc_in|fc_out))\.
+  teacher:
+    _target_: fastvideo.train.models.minimax_h3.omniref_pdd.MiniMaxH3OmniRefPDDModel
+    init_from: /mnt/nfs/vlm-aryan/h3-omniref-qad/model
+    trainable: false
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.pdd_qad.OmniRefPDDQADMethod
+  video_weight: 1.0
+  audio_weight: 1.0
+  rollout_fraction: 0.0
+  rollout_start_step: 0
+  rungs_per_row: 2
+  eval_every: 50
+  patience: 3
+  fidelity_tolerance: 0.05
+  require_bitwise_init: true
+  save_best: true
+  ptq_reference_json: null
+  ptq_tolerance: 0.05
+  objective: recon
+  recon_lambda: 1.0
+  select_metric: endpoint/video
+training:
+  distributed:
+    num_gpus: 16
+    sp_size: 4
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 16
+    pin_cpu_memory: false
+  data:
+    train_batch_size: 1
+    seed: 1234
+  optimizer:
+    learning_rate: 1.0e-05
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    weight_decay: 0.0
+    lr_scheduler: cosine_with_min_lr
+    lr_warmup_steps: 25
+    min_lr_ratio: 0.3
+  loop:
+    max_train_steps: 500
+    gradient_accumulation_steps: 2
+  checkpoint:
+    output_dir: /mnt/nfs/vlm-aryan/h3-omniref-qad/runs/recon-stage1-v1
+    training_state_checkpointing_steps: 50
+    checkpoints_total_limit: 2
+    resume_from_checkpoint: ''
+  tracker:
+    trackers:
+    - wandb
+    project_name: fasth3-omniref-nvfp4
+    run_name: recon-stage1-v1
+  model:
+    enable_gradient_checkpointing_type: null
+  dit_precision: fp32
+  vsa_sparsity: 0.0
+callbacks:
+  grad_clip:
+    _target_: fastvideo.train.callbacks.grad_clip.GradNormClipCallback
+    max_grad_norm: 1.0
+pipeline: {}

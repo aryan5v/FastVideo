@@ -41,6 +41,8 @@ MODES = {
     "two_level": dict(two_level_p=True),
     "single_floor0": dict(two_level_p=False, first_block_max_floor=0.0),
     "two_level_floor0": dict(two_level_p=True, first_block_max_floor=0.0),
+    "single_smoothk": dict(two_level_p=False, smooth_k=True),
+    "two_level_smoothk": dict(two_level_p=True, smooth_k=True),
 }
 
 
@@ -88,7 +90,8 @@ def capture(args: argparse.Namespace) -> None:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = [m for m in json.loads(Path(args.eval_manifest).read_text()) if m["resolution"] == "480p"][:args.rows]
+    rows = [m for m in json.loads(Path(args.eval_manifest).read_text())
+            if m["resolution"] == "480p" and m["case"] in args.cases][:args.rows]
     driver = gen.OmniRefLatentGenerator(argparse.Namespace(model_path=args.model_path, master_port=args.port))
     recorder = _Recorder(set(args.layers), args.heads, out_dir)
     transformer = driver.pipeline.get_module("transformer")
@@ -137,19 +140,24 @@ def compare(args: argparse.Namespace) -> None:
         lists_equal = all(torch.equal(a.int(), b.int()) for a, b in zip(mine, theirs[:3], strict=True))
         q, k, v = (data[n].cuda().transpose(1, 2).contiguous() for n in "qkv")  # BSHD for the kernel
         row = {"capture": path.name, "lists_equal": lists_equal}
-        for two_level, (mode_a, mode_b) in ((False, ("single", "single_floor0")),
-                                            (True, ("two_level", "two_level_floor0"))):
-            kernel = api.sageattn_blackwell_sparse_bshd(q, k, v, *theirs[:3], theirs[3],
-                                                        single_level_p_quant=not two_level, validate=True)
-            name = "two_level" if two_level else "single"
-            row[f"{name}/kernel_vs_bf16"] = _rel(kernel.cpu(), data["bf16_out"])
-            for mode in (mode_a, mode_b):
-                row[f"{mode}/gb200_emulator_vs_kernel"] = _rel(data["emulator"][mode], kernel.cpu())
-                local = train.fp4_vsa_attn_qat(*(data[n].cuda() for n in "qkv"), *mine, **MODES[mode])
-                row[f"{mode}/local_emulator_vs_kernel"] = _rel(local, kernel)
+        kernels: dict[tuple[bool, bool], torch.Tensor] = {}
+        for mode, kwargs in MODES.items():
+            two_level, smooth = kwargs.get("two_level_p", False), kwargs.get("smooth_k", False)
+            if (two_level, smooth) not in kernels:
+                # The bshd entry never smooths K itself; smooth exactly as the emulator does (input dtype, all rows).
+                k_in = k - k.mean(dim=1, keepdim=True) if smooth else k
+                kernels[(two_level, smooth)] = api.sageattn_blackwell_sparse_bshd(
+                    q, k_in, v, *theirs[:3], theirs[3], single_level_p_quant=not two_level, validate=True)
+            kernel = kernels[(two_level, smooth)]
+            row[f"{mode}/kernel_vs_bf16"] = _rel(kernel.cpu(), data["bf16_out"])
+            row[f"{mode}/gb200_emulator_vs_kernel"] = _rel(data["emulator"][mode], kernel.cpu())
+            local = train.fp4_vsa_attn_qat(*(data[n].cuda() for n in "qkv"), *mine, **kwargs)
+            row[f"{mode}/local_emulator_vs_kernel"] = _rel(local, kernel)
         results.append(row)
         print(json.dumps({k: (round(v, 5) if isinstance(v, float) else v) for k, v in row.items()}), flush=True)
     summary = {key: max(r[key] for r in results) for key in results[0] if key.endswith("_vs_kernel")} if results else {}
+    summary.update({f"mean/{key}": sum(r[key] for r in results) / len(results) for key in results[0]
+                    if key.endswith("_vs_bf16")} if results else {})
     report = {"gate": GATE, "worst": summary, "passes": {k: v <= GATE for k, v in summary.items()},
               "lists_equal": all(r["lists_equal"] for r in results), "captures": results}
     Path(args.report).write_text(json.dumps(report, indent=1))
@@ -167,6 +175,7 @@ def main() -> None:
     cap.add_argument("--rungs", type=int, nargs="+", default=[0, 4, 7])
     cap.add_argument("--layers", type=int, nargs="+", default=[0, 20, 41])
     cap.add_argument("--heads", type=int, default=8)
+    cap.add_argument("--cases", nargs="+", default=["first_frame", "first_last_frame", "storyboard"])
     cap.add_argument("--port", type=int, default=29700)
     cmp_ = sub.add_parser("compare")
     cmp_.add_argument("--captures", required=True)

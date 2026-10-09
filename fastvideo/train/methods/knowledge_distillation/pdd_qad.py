@@ -34,6 +34,7 @@ import torch
 from fastvideo.distributed import get_world_group
 from fastvideo.logger import init_logger
 from fastvideo.train.methods.base import LogScalar, TrainingMethod
+from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import BlockReconstruction
 from fastvideo.train.methods.knowledge_distillation.pdd_qad_metrics import (MODALITIES, RungStats, keyframe_latents,
                                                                             rel_l2, step_packed, summarize,
                                                                             target_slices, x0_pair)
@@ -63,6 +64,26 @@ class OmniRefPDDQADMethod(TrainingMethod):
         self.rollout_start_step = int(mc.get("rollout_start_step", 0))
         # Student forward+backward on this many of the 8 forwards per row (the teacher walks all of them).
         self.rungs_per_row = int(mc.get("rungs_per_row", 0))
+        # "output": per-forward x0 regression. "recon": layer-wise reconstruction (Stage 1, VSQA Eq. 6).
+        # "output+recon": x0 regression + lambda * reconstruction (Stage 2, VSQA Eq. 10).
+        self.objective = str(mc.get("objective", "output"))
+        if self.objective not in ("output", "recon", "output+recon"):
+            raise ValueError(f"objective must be output, recon or output+recon, got {self.objective!r}")
+        recon_lambda = float(mc.get("recon_lambda", 1.0))
+        self.output_weight = {"output": 1.0, "recon": 0.0, "output+recon": 1.0 / (1.0 + recon_lambda)}[self.objective]
+        self.recon_weight = {
+            "output": 0.0,
+            "recon": 1.0,
+            "output+recon": recon_lambda / (1.0 + recon_lambda)
+        }[self.objective]
+        if self.objective == "recon" and float(mc.get("rollout_fraction", 0.0)) > 0:
+            raise ValueError("reconstruction trains on teacher states only; set rollout_fraction: 0")
+        # Best checkpoint by this eval key (lower is better): "score" (teacher-forced x0 rel-L2) or
+        # "endpoint/video" (the student's own sample vs the teacher's: teacher alignment).
+        self.select_metric = str(mc.get("select_metric", "score"))
+        # Save each eval's final latents (student's own sample, teacher's) for side-by-side decoding.
+        self.eval_save_dir = mc.get("eval_save_dir")
+        self._eval_iteration = 0
         self.eval_every = int(mc.get("eval_every", 50))
         self.patience = int(mc.get("patience", 3))
         self.fidelity_tolerance = float(mc.get("fidelity_tolerance", 0.05))
@@ -142,9 +163,24 @@ class OmniRefPDDQADMethod(TrainingMethod):
         }
         started = time.perf_counter()
         for rung in range(num_rungs):
+            recon = None
             with torch.no_grad(), self.teacher.rung_scope(prepared, rung, timesteps) as rt:
-                teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
-            if rung not in trained:
+                if rung in trained and self.recon_weight > 0:
+                    # Student blocks train inside the teacher forward, on the teacher's sub-layer inputs.
+                    scale = self.recon_weight / (2 * len(self.student.transformer.transformer_blocks) * len(trained) *
+                                                 accum)
+                    with BlockReconstruction(self.teacher.transformer, self.student.transformer, scale) as recon:
+                        teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
+                else:
+                    teacher_out = self.teacher.forward_rung(prepared, video, audio, rt)
+            if recon is not None:
+                recon_loss = recon.loss()
+                if not torch.isfinite(recon_loss):
+                    raise FloatingPointError(f"non-finite reconstruction loss at step {iteration}, rung {rung}")
+                total += self.recon_weight * recon_loss / len(trained)
+                for key, value in recon.metrics("train/recon").items():
+                    metrics[f"{key}/rung{rung}"] = value
+            if rung not in trained or self.output_weight == 0:
                 if rollout:  # the student's own trajectory still needs its (no-grad) forward here
                     with torch.no_grad(), self.student.rung_scope(prepared, rung, timesteps) as rt:
                         student_out = self.student.forward_rung(prepared, video, audio, rt)
@@ -160,8 +196,8 @@ class OmniRefPDDQADMethod(TrainingMethod):
                 loss = self._rung_loss(pair, rung, metrics)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite QAD loss at step {iteration}, row {spec.id}, rung {rung}")
-                (loss / (len(trained) * accum)).backward()
-            total += loss.detach() / len(trained)
+                (self.output_weight * loss / (len(trained) * accum)).backward()
+            total += self.output_weight * loss.detach() / len(trained)
             step_out = tuple(v.detach() for v in student_out) if rollout else teacher_out
             video, audio = step_packed(schedulers, prepared, rung, video, audio, *step_out)
         metrics["train/row_seconds"] = time.perf_counter() - started
@@ -197,7 +233,9 @@ class OmniRefPDDQADMethod(TrainingMethod):
         rows = self._rank_rows()
         metrics: dict[str, LogScalar] = {}
         started = time.perf_counter()
-        if first:
+        self._eval_iteration = iteration
+        if first and iteration == 0:
+            # Fresh start only: a resumed run (e.g. Stage 2 from a Stage-1 checkpoint) is no longer the teacher.
             metrics.update(self._initial_checks(rows))
         summary = self._evaluate(rows, rollout=True)
         metrics.update({f"eval/{k}": v for k, v in summary.items()})
@@ -207,7 +245,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
                 for m in MODALITIES
             }
             self.step0 = dict(summary)
-            self.best_score = summary["score"]
+            self.best_score = summary.get(self.select_metric, summary["score"])
         else:
             metrics.update(self._guardrails(iteration, summary))
         metrics["eval/seconds"] = time.perf_counter() - started
@@ -236,13 +274,14 @@ class OmniRefPDDQADMethod(TrainingMethod):
 
     def _guardrails(self, iteration: int, summary: dict[str, float]) -> dict[str, LogScalar]:
         worse = summary["score"] > self.step0["score"]
-        for name in ("first", "last"):
-            key = f"keyframe/vs_teacher/{name}"
+        # Teacher alignment: the student's own sample (same seed) and its keyframes vs the teacher's.
+        for key in ("endpoint/video", "endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last"):
             if key in summary and key in self.step0:
                 worse |= summary[key] > self.step0[key] * (1.0 + self.fidelity_tolerance)
         self.bad_evals = self.bad_evals + 1 if worse else 0
-        if summary["score"] < self.best_score:
-            self.best_score = summary["score"]
+        selected = summary.get(self.select_metric, summary["score"])
+        if selected < self.best_score:
+            self.best_score = selected
             self._checkpoint_request = "best" if self.save_best else None
         if self.bad_evals >= self.patience:
             self.stop_requested = True
@@ -255,11 +294,16 @@ class OmniRefPDDQADMethod(TrainingMethod):
         }
 
     @torch.no_grad()
-    def _evaluate(self, rows: list[tuple[Any, bool]], *, rollout: bool, attention: bool = True) -> dict[str, float]:
+    def _evaluate(self,
+                  rows: list[tuple[Any, bool]],
+                  *,
+                  rollout: bool,
+                  attention: bool = True,
+                  linears: bool = True) -> dict[str, float]:
         num_rungs = self.student.num_rungs
         stats = RungStats(num_rungs)
         counted_stats = stats
-        with self.student.quantization(linears=True, attention=attention):
+        with self.student.quantization(linears=linears, attention=attention):
             for spec, counted in rows:
                 stats = counted_stats if counted else RungStats(num_rungs)
                 prepared = self._row(spec)
@@ -279,7 +323,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
                         }))
                     video, audio = step_packed(schedulers, prepared, rung, video, audio, *teacher_out)
                 if rollout:
-                    self._rollout_metrics(stats, prepared, schedulers, timesteps, video, audio)
+                    self._rollout_metrics(stats, prepared, schedulers, timesteps, video, audio, save=counted)
         means = counted_stats.reduce(contribute=self.is_sp_leader)
         summary = summarize(means, num_rungs, self.weights)
         for name in ("first", "last"):
@@ -288,8 +332,14 @@ class OmniRefPDDQADMethod(TrainingMethod):
                 summary[f"keyframe/drop/{name}"] = student / max(teacher, 1e-12) - 1.0
         return summary
 
-    def _rollout_metrics(self, stats: RungStats, prepared: Any, schedulers: tuple[Any, Any], timesteps: Any,
-                         teacher_video: torch.Tensor, teacher_audio: torch.Tensor) -> None:
+    def _rollout_metrics(self,
+                         stats: RungStats,
+                         prepared: Any,
+                         schedulers: tuple[Any, Any],
+                         timesteps: Any,
+                         teacher_video: torch.Tensor,
+                         teacher_audio: torch.Tensor,
+                         save: bool = False) -> None:
         """Student's own 8-forward sample vs the teacher's: endpoint rel-L2 and latent keyframe fidelity."""
         video, audio = prepared.video, prepared.audio
         for rung in range(self.student.num_rungs):
@@ -297,6 +347,17 @@ class OmniRefPDDQADMethod(TrainingMethod):
                 out = self.student.forward_rung(prepared, video, audio, rt)
             video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
         cut = target_slices(prepared)
+        if save and self.eval_save_dir and self.is_sp_leader:
+            path = Path(self.eval_save_dir) / f"step{self._eval_iteration:05d}" / f"{prepared.spec.id}.pt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "student_video": video[cut["video"]].float().cpu(),
+                    "teacher_video": teacher_video[cut["video"]].float().cpu(),
+                    "latent_shape": prepared.latent_shape,
+                    "case": prepared.spec.case,
+                    "seed": prepared.spec.seed
+                }, path)
         for modality, student, teacher in (("video", video, teacher_video), ("audio", audio, teacher_audio)):
             s, t = student[cut[modality]].float(), teacher[cut[modality]].float()
             stats.add_scalar(f"endpoint.{modality}", (s - t).norm() / t.norm().clamp_min(1e-12))

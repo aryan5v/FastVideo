@@ -171,3 +171,24 @@ def test_qad_linear_forward_is_the_deployed_nvfp4_linear(input_amax):
     out.backward(grad)
     torch.testing.assert_close(weight_master.grad, (grad.float().t() @ x.float()), rtol=2e-2, atol=1e-2)
     torch.testing.assert_close(x_grad.grad.float(), grad.float() @ weight.float(), rtol=2e-2, atol=1e-2)
+
+
+def test_block_reconstruction_is_local_and_zero_at_identity(cpu_loader, single_process_group):  # noqa: F811
+    from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import BlockReconstruction
+    teacher = _tiny_model()
+    student = copy.deepcopy(teacher).train().requires_grad_(True)
+    teacher.requires_grad_(False)
+    with BlockReconstruction(teacher, student, scale=1.0) as recon:
+        _forward(teacher)
+    assert len(recon.attn_rel) == 2 and float(recon.loss()) == 0.0
+    assert all(p.grad is None or float(p.grad.abs().max()) == 0.0 for p in student.parameters())
+    # Perturb block 1's FFN only: its FFN unit errs; block 0 and every attention unit stay exact.
+    with torch.no_grad():
+        student.transformer_blocks[1].ff.fc_out.weight.mul_(1.1)
+    student.zero_grad(set_to_none=True)
+    with BlockReconstruction(teacher, student, scale=1.0) as recon:
+        _forward(teacher)
+    assert float(recon.ff_rel[1]) > 0 and float(recon.ff_rel[0]) == 0.0
+    assert all(float(a) == 0.0 for a in recon.attn_rel)
+    grads = {n: p.grad for n, p in student.named_parameters() if p.grad is not None and p.grad.abs().max() > 0}
+    assert grads and all(n.startswith("transformer_blocks.1.ff.") for n in grads), sorted(grads)
