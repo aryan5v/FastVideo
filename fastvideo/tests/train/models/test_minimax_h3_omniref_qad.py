@@ -401,3 +401,33 @@ def test_block_first_call_keeps_the_fsdp_root(single_process_group):  # noqa: F8
     fixed.transformer_blocks[0](x)
     assert fixed(x).shape == (2, 4)
     ensure_fsdp_root_initialized(torch.nn.Linear(2, 2))  # no FSDP: no-op
+
+
+def test_step0_cache_round_trip_and_fingerprint(tmp_path):
+    from fastvideo.train.methods.knowledge_distillation.pdd_qad_step0 import (load_step0, restore_step0, save_step0,
+                                                                              step0_fingerprint_inputs)
+    method = {"init_student_dcp": "/runs/e3/best", "noise_floor_eval": True, "eligibility_keys": ["endpoint/audio"],
+              "recon_group_weights": {"video": 1.0, "audio": 1.0}, "eval_every": 20}
+    data = {"eval_manifest": "/m.json", "eval_per_group": {"480p": 4, "768p": 2}, "cases": ["first_frame"]}
+    qad = {"linears": {"skip_blocks": [42, 43]}, "fp4_attention": {"two_level_p": True}}
+    inputs = step0_fingerprint_inputs(method, data, qad, "ab" * 32, 30)
+    metrics = {"eval/score": 0.31, "eval/x0_mse/video/rung0": 0.2, "eval/seconds": 6000.0,
+               "init/recon_step0/rung0": 0.04, "init/recon_step0/rung1": 0.03,
+               "init/noise_sigma/endpoint/audio": 0.05, "init/noise_sigma/score": 0.001}
+    path = tmp_path / "step0.json"
+    assert load_step0(path, inputs) is None
+    save_step0(path, inputs, metrics)
+    # Settings that cannot change step 0 (eval cadence) do not invalidate the cache.
+    same = step0_fingerprint_inputs({**method, "eval_every": 40}, data, qad, "ab" * 32, 30)
+    cached = load_step0(path, same)
+    assert cached is not None and "eval/seconds" not in cached and cached["eval/score"] == 0.31
+    summary, recon_norm, tolerances = restore_step0(cached, 2, recon=True, noise_floor=True, min_tolerance=0.02)
+    assert summary == {"score": 0.31, "x0_mse/video/rung0": 0.2}
+    assert recon_norm == [0.04, 0.03]
+    assert tolerances == {"endpoint/audio": pytest.approx(0.1), "score": 0.02}
+    for changed in (step0_fingerprint_inputs({**method, "init_student_dcp": "/runs/e3b/best"}, data, qad, "ab" * 32, 30),
+                    step0_fingerprint_inputs(method, {**data, "eval_per_group": 1}, qad, "ab" * 32, 30),
+                    step0_fingerprint_inputs(method, data, {**qad, "linears": {"skip_blocks": []}}, "ab" * 32, 30),
+                    step0_fingerprint_inputs(method, data, qad, "cd" * 32, 30)):
+        with pytest.raises(ValueError, match="other inputs"):
+            load_step0(path, changed)

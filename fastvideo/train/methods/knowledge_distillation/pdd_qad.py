@@ -35,6 +35,8 @@ from fastvideo.distributed import get_world_group
 from fastvideo.logger import init_logger
 from fastvideo.train.methods.base import LogScalar, TrainingMethod
 from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import BlockReconstruction
+from fastvideo.train.methods.knowledge_distillation.pdd_qad_step0 import (load_step0, restore_step0, save_step0,
+                                                                          step0_fingerprint_inputs)
 from fastvideo.train.methods.knowledge_distillation.pdd_qad_metrics import (MODALITIES, RungStats, keyframe_latents,
                                                                             rel_l2, step_packed, summarize,
                                                                             target_slices, x0_pair)
@@ -125,6 +127,9 @@ class OmniRefPDDQADMethod(TrainingMethod):
         # Stage A's per-rung reference metric for the step-0 PTQ match (v_rel is sign-independent).
         self.ptq_reference_metric = str(mc.get("ptq_reference_metric", "v_rel_l2"))
         self._recon_criteria: dict[str, Any] = {}
+        # Reuse (or write) this run's step-0 evaluation, keyed by a fingerprint of everything it depends on.
+        self.step0_cache = mc.get("step0_cache")
+        self._method_config_snapshot = mc
         self.student.init_preprocessors(cfg.training)
         tc = self.training_config
         params = [p for p in self.student.transformer.parameters() if p.requires_grad]
@@ -340,16 +345,23 @@ class OmniRefPDDQADMethod(TrainingMethod):
         metrics: dict[str, LogScalar] = {}
         started = time.perf_counter()
         self._eval_iteration = iteration
-        if first and iteration == 0 and not self.init_student_dcp:
-            # Fresh start only: a resumed run (e.g. Stage 2 from a Stage-1 checkpoint) is no longer the teacher.
-            metrics.update(self._initial_checks(rows))
-        if first and self.recon_normalize == "step0" and self.recon_weight > 0:
-            metrics.update(self._calibrate_recon(rows))
-        full = first or (iteration % self.full_eval_every == 0)
-        summary = self._evaluate(rows, rollout=full)
-        metrics.update({f"eval/{k}": v for k, v in summary.items()})
-        if first and self.noise_floor_eval:
-            metrics.update(self._noise_floor(rows, summary))
+        cached = self._load_step0() if first else None
+        if cached is not None:
+            summary = self._restore_step0(cached)
+            metrics.update(cached)
+        else:
+            if first and iteration == 0 and not self.init_student_dcp:
+                # Fresh start only: a resumed run (e.g. Stage 2 from a Stage-1 checkpoint) is no longer the teacher.
+                metrics.update(self._initial_checks(rows))
+            if first and self._needs_recon_norm():
+                metrics.update(self._calibrate_recon(rows))
+            full = first or (iteration % self.full_eval_every == 0)
+            summary = self._evaluate(rows, rollout=full)
+            metrics.update({f"eval/{k}": v for k, v in summary.items()})
+            if first and self.noise_floor_eval:
+                metrics.update(self._noise_floor(rows, summary))
+            if first and self.step0_cache and get_world_group().rank == 0:
+                save_step0(self.step0_cache, self._step0_inputs(), {k: float(v) for k, v in metrics.items()})
         if first:
             self.normalizers = {
                 m: [max(summary[f"x0_mse/{m}/rung{r}"], 1e-20) for r in range(self.student.num_rungs)]
@@ -369,6 +381,29 @@ class OmniRefPDDQADMethod(TrainingMethod):
                             for k, v in metrics.items()
                         }))
         return metrics
+
+    def _needs_recon_norm(self) -> bool:
+        return self.recon_normalize == "step0" and self.recon_weight > 0
+
+    def _step0_inputs(self) -> dict[str, Any]:
+        return step0_fingerprint_inputs(self._method_config_snapshot, self.student.data_config, self.student.qad_config,
+                                        self.student.amax_sha256, len(self.student.eval_rows))
+
+    def _load_step0(self) -> dict[str, float] | None:
+        if not self.step0_cache:
+            return None
+        cached = load_step0(self.step0_cache, self._step0_inputs())
+        if cached is not None and get_world_group().rank == 0:
+            logger.info("QAD step 0 restored from %s (no step-0 evaluation)", self.step0_cache)
+        return cached
+
+    def _restore_step0(self, cached: dict[str, float]) -> dict[str, float]:
+        summary, recon_norm, tolerances = restore_step0(cached, self.student.num_rungs, self._needs_recon_norm(),
+                                                        self.noise_floor_eval, self.min_eligibility_tolerance)
+        if recon_norm is not None:
+            self.recon_norm = recon_norm
+        self.tolerances.update(tolerances)
+        return summary
 
     def _rank_rows(self) -> list[tuple[Any, bool]]:
         """This data-parallel group's eval rows, padded so every group runs the same number of forwards.
