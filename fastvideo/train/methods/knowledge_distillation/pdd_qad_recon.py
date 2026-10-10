@@ -27,6 +27,18 @@ from typing import Any
 import torch
 
 
+def ensure_fsdp_root_initialized(module: torch.nn.Module) -> None:
+    """Make ``module`` its FSDP2 tree's root before any of its sharded blocks runs on its own.
+
+    FSDP2 picks the root lazily, at the first forward of any sharded module. If a block runs first (as in
+    reconstruction, which calls student blocks directly), that block claims the root and the model's next full
+    forward fails with "FSDP state has already been lazily initialized". Idempotent; a no-op without FSDP2.
+    """
+    get_state = getattr(module, "_get_fsdp_state", None)
+    if get_state is not None:
+        get_state()._lazy_init()
+
+
 def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
     return getattr(module, "_checkpoint_wrapped_module", module)
 
@@ -122,6 +134,8 @@ class BlockReconstruction:
                  scale: float,
                  criterion: GroupedRelError | None = None,
                  measure_only: bool = False) -> None:
+        ensure_fsdp_root_initialized(teacher)
+        ensure_fsdp_root_initialized(student)
         self.teacher_blocks = list(teacher.transformer_blocks)
         self.student_blocks = list(student.transformer_blocks)
         if len(self.teacher_blocks) != len(self.student_blocks):

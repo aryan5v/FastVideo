@@ -361,3 +361,43 @@ def test_fp32_boundary_modules_match_inference_and_stay_frozen(cpu_loader, singl
     model.proj_in.weight.requires_grad_(True)
     with pytest.raises(ValueError, match="must stay frozen"):
         MiniMaxH3OmniRefPDDModel._check_fp32_modules_frozen(fake)
+
+
+def test_block_first_call_keeps_the_fsdp_root(single_process_group):  # noqa: F811
+    """Stage 2 from a checkpoint calibrates reconstruction (student blocks called directly) before any full student
+    forward; without pinning the root first, FSDP2 makes block 0 the root and the next full forward fails."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+
+    from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import ensure_fsdp_root_initialized
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    class Toy(torch.nn.Module):
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.transformer_blocks = torch.nn.ModuleList(torch.nn.Linear(4, 4) for _ in range(2))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for block in self.transformer_blocks:
+                x = block(x)
+            return x
+
+    def sharded() -> Toy:
+        mesh = init_device_mesh(device, (1, ))
+        model = Toy().to(device)
+        for block in model.transformer_blocks:
+            fully_shard(block, mesh=mesh)
+        return fully_shard(model, mesh=mesh)
+
+    x = torch.randn(2, 4, device=device)
+    broken = sharded()
+    broken.transformer_blocks[0](x)
+    with pytest.raises(RuntimeError, match="already been lazily initialized"):
+        broken(x)
+    fixed = sharded()
+    ensure_fsdp_root_initialized(fixed)
+    ensure_fsdp_root_initialized(fixed)  # idempotent
+    fixed.transformer_blocks[0](x)
+    assert fixed(x).shape == (2, 4)
+    ensure_fsdp_root_initialized(torch.nn.Linear(2, 2))  # no FSDP: no-op
