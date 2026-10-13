@@ -34,6 +34,10 @@ adds a calibrated static activation scale per linear
 (``_nvfp4_input_global_sf`` = 448 * 6 / amax) from a JSON of input amax keyed
 ``b<block>.<module>`` (e.g. ``b3.ff.fc_in``); without it activations use the
 unit global scale, which saturates inputs above 2688 (H3's ``ff.fc_out``).
+Every FFN linear needs an entry; attention projections and gates without one
+keep the unit scale, as in the V2 Consumer layout (OmniRef:
+``--quantize-ffn --act-amax amax.json --quantize-attention --quantize-gate``
+on the bf16 ``transformer_ref``).
 
 Every exported linear is probed on random BF16 rows through the same
 ``mm_fp4`` path the loader runs; the relative error against a BF16 matmul with
@@ -76,6 +80,21 @@ def fastvideo_module_name(diffusers_prefix: str) -> str:
     for pattern, replacement in _RENAMES:
         name = pattern.sub(replacement, name)
     return name
+
+
+def act_amax_for(module: str, amax_table: dict[str, float], required: bool) -> float | None:
+    """The calibrated input amax of ``module`` (key ``b<block>.<sub>``), or None for the unit scale.
+
+    FFN linears must have an entry; attention projections and gates without one keep the unit
+    activation scale (the V2 Consumer layout calibrates the FFN only).
+    """
+    block = re.match(r"transformer_blocks\.(\d+)\.(.+)$", module)
+    key = f"b{block.group(1)}.{block.group(2)}" if block else module
+    if key in amax_table:
+        return amax_table[key]
+    if required:
+        raise SystemExit(f"--act-amax has no entry {key!r} for {module}; nothing written")
+    return None
 
 
 def dequantize_modelopt(packed: torch.Tensor, scale: torch.Tensor, scale_2: torch.Tensor) -> torch.Tensor:
@@ -214,12 +233,10 @@ def main() -> None:
             raise SystemExit(f"probe error {error:.3f} on {prefix} exceeds {args.max_probe_error}; nothing written")
         module = fastvideo_module_name(prefix)
         if amax_table is not None:
-            block = re.match(r"transformer_blocks\.(\d+)\.(.+)$", module)
-            key = f"b{block.group(1)}.{block.group(2)}"
-            if key not in amax_table:
-                raise SystemExit(f"--act-amax has no entry {key!r} for {module}; nothing written")
-            buffers["_nvfp4_input_global_sf"] = torch.tensor((448.0 * 6.0) / max(amax_table[key], 1e-12),
-                                                             dtype=torch.float32)
+            amax = act_amax_for(module, amax_table, required=bool(_BLOCK_FFN.match(prefix)))
+            if amax is not None:
+                buffers["_nvfp4_input_global_sf"] = torch.tensor((448.0 * 6.0) / max(amax, 1e-12),
+                                                                 dtype=torch.float32)
         for name, value in buffers.items():
             export[f"{module}::{name}"] = value.cpu()
     save_file(export, str(args.dst / EXPORT_FILENAME))
