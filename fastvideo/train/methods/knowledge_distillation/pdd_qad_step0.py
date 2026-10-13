@@ -65,8 +65,10 @@ def step0_fingerprint_inputs(method_config: Any, data_config: Any, qad_config: A
             key: data.get(key)
             for key in DATA_KEYS
         },
-        "provisional_plan": {key: data.get(key)
-                             for key in PROVISIONAL_DATA_KEYS} if provisional else None,
+        "provisional_plan": {
+            key: data.get(key)
+            for key in PROVISIONAL_DATA_KEYS
+        } if provisional else None,
         "qad": {
             key: qad.get(key)
             for key in QAD_KEYS

@@ -213,8 +213,10 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         if isinstance(eval_per_group, dict):
             # More held-out rows than the precomputed eval manifest holds: draw them before the training plan,
             # under the same eval length cap as the manifest rows.
-            eval_groups = limit_frames({key: entries
-                                        for key, entries in groups.items() if key[1] in resolutions}, eval_max_frames)
+            eval_groups = limit_frames({
+                key: entries
+                for key, entries in groups.items() if key[1] in resolutions
+            }, eval_max_frames)
             eval_rows = top_up_eval_rows(eval_rows, eval_groups, int(cfg.get("eval_seed", 20261008)),
                                          dict(eval_per_group))
         else:
