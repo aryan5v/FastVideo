@@ -72,8 +72,8 @@ def load_manifest_groups(paths: list[str], cases: tuple[str, ...],
                 entry = json.loads(line)
                 match = _BUCKET_FRAMES.search(entry["parquet"])
                 key = (entry["id"], entry["resolution"])
-                if (match is None or entry["case"] not in cases or entry["resolution"] not in RESOLUTIONS
-                        or key in seen or int(match.group(1)) > max_frames):
+                if (match is None or entry["case"] not in cases or entry["resolution"] not in RESOLUTIONS or key in seen
+                        or int(match.group(1)) > max_frames):
                     continue
                 seen.add(key)
                 groups[(entry["case"], entry["resolution"])].append(entry)

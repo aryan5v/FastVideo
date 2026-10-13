@@ -46,7 +46,6 @@ from fastvideo.train.utils.optimizer import build_optimizer_and_scheduler
 
 logger = init_logger(__name__)
 
-
 # Teacher alignment: the student's own sample (same seed) and its keyframes vs the teacher's; full evaluations only.
 ALIGNMENT_KEYS = ("endpoint/video", "endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last")
 BASELINE_FORMAT = 1
