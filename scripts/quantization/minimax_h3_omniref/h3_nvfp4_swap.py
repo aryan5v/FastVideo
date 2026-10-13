@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -45,6 +46,30 @@ class Variant:
     @classmethod
     def load(cls, path: str | None) -> Variant:
         return cls() if not path else cls.from_json(json.loads(Path(path).read_text()))
+
+    def flat_amax(self, calibrated: dict[str, float]) -> dict[str, float]:
+        """The flat ``b<block>.<sub>`` -> input amax table of ``--act-amax`` and ``qad.linears.amax_json``.
+
+        ``calibrated`` is the calibration's own table (``amax.json``, the export's scales); this variant's
+        clipped scales replace its entries. Linears kept bf16 keep an entry, as the converter needs one per FFN
+        linear. Dynamic (per-call) scales have no static value, so such a variant has no table.
+        """
+        if self.dynamic:
+            raise ValueError(f"{len(self.dynamic)} linears use dynamic activation scales; no static table exists")
+        table = dict(calibrated)
+        for name, amax in self.amax.items():
+            match = re.fullmatch(r"transformer_blocks\.(\d+)\.(.+)", name)
+            if match is None:
+                raise ValueError(f"variant scale {name!r} is not a transformer block linear")
+            key = f"b{match.group(1)}.{match.group(2)}"
+            if key not in table:
+                raise KeyError(f"variant scale {name!r} has no calibrated entry {key!r}")
+            table[key] = float(amax)
+        return table
+
+    def bf16_blocks(self) -> list[int]:
+        """Blocks with linears kept bf16: ``qad.linears.skip_blocks`` for QAD."""
+        return sorted({int(m.group(1)) for m in (re.match(r"transformer_blocks\.(\d+)\.", n) for n in self.bf16) if m})
 
 
 def _resolve(modules: dict[str, torch.nn.Module], prefix: str) -> tuple[str, torch.nn.Module]:

@@ -11,7 +11,10 @@
 ``choose``: per-layer MSE-optimal candidate, block ranking by audio error, and the variant arms.
 ``arms``: teacher-forced x0 error of every arm on other calibration rows.
 ``select``: per-rung ratios against the V2 baseline; picks the variant (fewest bf16 blocks among
-those passing video and audio <= 1.2x V2, else the lowest worst ratio) and writes ``variant.json``.
+those passing video and audio <= 1.2x V2, else the lowest worst ratio) and writes ``variant.json``
+(for ``eval_omniref_nvfp4.py --variant``) and ``amax-<variant>.json``, the flat ``b<block>.<sub>`` table
+that ``convert_minimax_h3_modelopt_nvfp4_dit.py --act-amax`` and ``qad.linears.amax_json`` read. Its bf16
+blocks (``selected_skip_blocks`` in ``sweep_report.json``) go to ``qad.linears.skip_blocks``.
 
 Activation tokens of all modalities share each linear, so a separate audio scale is not possible;
 audio can only be helped by the shared clip choice or by keeping linears in higher precision.
@@ -313,7 +316,19 @@ def select(args: argparse.Namespace) -> None:
     else:
         best = min(summary, key=lambda a: max(summary[a]["video_ratio_max"], summary[a]["audio_ratio_max"]))
     (out / "variant.json").write_text(json.dumps(arms[best], indent=1) + "\n")
+    selected = Variant.from_json(arms[best])
+    calibrated = {k: float(v) for k, v in json.loads((Path(args.calib_dir) / "amax.json").read_text()).items()}
+    flat_path = None
+    if selected.dynamic:
+        print(json.dumps({"warning": f"{best} uses dynamic activation scales; no static amax table written"}),
+              flush=True)
+    else:
+        flat_path = out / f"amax-{best}.json"
+        flat_path.write_text(json.dumps(selected.flat_amax(calibrated), indent=1, sort_keys=True) + "\n")
     (out / "sweep_report.json").write_text(json.dumps({"rows": len(rows), "selected": best, "passing": passing,
+                                                       "selected_amax_json": None if flat_path is None else
+                                                       str(flat_path),
+                                                       "selected_skip_blocks": selected.bf16_blocks(),
                                                        "arms": summary}, indent=1) + "\n")
     print(json.dumps({"selected": best, "passing": passing, **{a: [round(s["video_ratio_max"], 3),
                                                                      round(s["audio_ratio_max"], 3)]

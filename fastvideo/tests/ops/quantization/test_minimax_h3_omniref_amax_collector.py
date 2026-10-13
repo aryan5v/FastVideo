@@ -252,3 +252,25 @@ def test_variant_overrides_scales_and_restores() -> None:
     with pytest.raises(ValueError, match="not exported"):
         with swap.enabled(variant=swap_mod.Variant(bf16=frozenset({"nope"}))):
             pass
+
+
+def test_variant_flat_amax_is_the_converter_and_qad_table(tmp_path) -> None:
+    """The sweep's selected variant must reach the converter and QAD as a flat ``b<block>.<sub>`` table."""
+    from fastvideo.layers.quantization.nvfp4_qad import load_amax_table
+
+    swap_mod = _load("h3_nvfp4_swap", SCRIPTS / "h3_nvfp4_swap.py")
+    converter = _load("convert_minimax_h3_modelopt_nvfp4_dit", CONVERTER)
+    calibrated = {f"b{b}.ff.{sub}": 100.0 + b for b in range(3) for sub in ("fc_in", "fc_out")}
+    bf16 = frozenset(f"transformer_blocks.2.{sub}" for sub in ("ff.fc_in", "ff.fc_out", "attn.to_q"))
+    variant = swap_mod.Variant(amax={"transformer_blocks.1.ff.fc_out": 42.0}, bf16=bf16)
+    flat = variant.flat_amax(calibrated)
+    assert flat == {**calibrated, "b1.ff.fc_out": 42.0} and calibrated["b1.ff.fc_out"] == 101.0
+    assert variant.bf16_blocks() == [2]
+    path = tmp_path / "amax-mse_bf16_top1.json"
+    path.write_text(json.dumps(flat))
+    assert load_amax_table(path) == flat
+    assert converter.act_amax_for("transformer_blocks.1.ff.fc_out", flat, required=True) == 42.0
+    with pytest.raises(ValueError, match="dynamic"):
+        swap_mod.Variant(dynamic=frozenset({"transformer_blocks.0.ff.fc_in"})).flat_amax(calibrated)
+    with pytest.raises(KeyError):
+        swap_mod.Variant(amax={"transformer_blocks.9.ff.fc_in": 1.0}).flat_amax(calibrated)
