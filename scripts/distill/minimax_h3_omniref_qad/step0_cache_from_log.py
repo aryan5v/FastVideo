@@ -3,7 +3,8 @@
 
 For runs that predate the cache: their step-0 metrics are in the rank-0 ``QAD eval @0`` log line (rounded to five
 decimals, < 0.1% relative for every normalizer). The fingerprint is computed from that run's ``cfg.yaml``; a rerun
-with the same init checkpoint, calibration table, quantization plan, eval set and tolerances will accept it.
+with the same teacher and student checkpoints, calibration table, quantization plan, eval set, tolerances and
+score weights will accept it.
 
     python step0_cache_from_log.py --cfg runs/x/cfg.yaml --log logs/x.log --out runs/y/step0.json
 """
@@ -45,7 +46,13 @@ def main() -> None:
     student = cfg["models"]["student"]
     amax = student["qad"]["linears"]["amax_json"]
     sha = student["qad"]["linears"].get("amax_sha256") or hashlib.sha256(Path(amax).read_bytes()).hexdigest()
-    inputs = step0_fingerprint_inputs(cfg["method"], student["data"], student["qad"], sha, num_eval_rows(log_text))
+    inputs = step0_fingerprint_inputs(cfg["method"],
+                                      student["data"],
+                                      student["qad"],
+                                      sha,
+                                      num_eval_rows(log_text),
+                                      student_init_from=student["init_from"],
+                                      teacher_init_from=cfg["models"]["teacher"]["init_from"])
     metrics = step0_metrics(log_text)
     save_step0(args.out, inputs, metrics)
     print(json.dumps({"out": args.out, "metrics": len(metrics), "num_eval_rows": inputs["num_eval_rows"]}))

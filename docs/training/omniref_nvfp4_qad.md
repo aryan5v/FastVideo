@@ -110,11 +110,16 @@ very slowly.
 - **Noise floor:** `noise_floor_eval` re-runs the step-0 eval at seed+1.
 - **Best checkpoint:** selected by the teacher-forced score. A checkpoint only counts if audio and keyframe
   alignment stay within step-0 × (1 + max(2σ, 2%)).
-- **Auto-stop:** after `patience` consecutive bad evals.
+- **Auto-stop:** after `patience` consecutive bad evals. The teacher-forced score is checked at every eval;
+  teacher alignment (own sample and keyframes) only at full evals, and a teacher-forced-only eval leaves that
+  count unchanged.
 - **Audio gate:** `audio_stats_gate.py` decodes saved samples and compares spectral centroid, energy above
   8 kHz, dynamic range and loudness spread with the teacher's own seed-to-seed spread.
-- **Step-0 cache:** `pdd_qad_step0.py` caches the step-0 evaluation by a fingerprint of the init checkpoint,
-  calibration, quantization plan and eval set, so reruns skip it.
+- **Step-0 cache:** `pdd_qad_step0.py` caches the step-0 evaluation by a fingerprint of the teacher and
+  student checkpoints, calibration, quantization plan, eval set and score weights, so reruns skip it.
+- **Resume:** regular checkpoints carry the step-0 baseline (loss normalizers, reconstruction normalizers,
+  tolerances) and the guard state (best score, bad-eval counts) as `method.qad_baseline`, so a resumed run
+  keeps its loss scale and stop history. Checkpoints without it cannot be resumed.
 
 ## Running
 

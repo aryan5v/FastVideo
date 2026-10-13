@@ -18,7 +18,9 @@ teacher; quantized error vs the Stage A PTQ number), per-(rung, modality)
 loss normalization by the step-0 PTQ error, held-out evaluation every
 ``eval_every`` steps (teacher-forced x0 rel-L2 per forward, student-rollout
 endpoint, latent keyframe fidelity), best-checkpoint requests, and a stop
-request after ``patience`` consecutive evaluations worse than step 0.
+request after ``patience`` consecutive evaluations worse than step 0 (teacher
+alignment counts full evaluations only). The step-0 baseline and the guard
+state are checkpointed (``method.qad_baseline``), so a resumed run keeps them.
 """
 from __future__ import annotations
 
@@ -43,6 +45,24 @@ from fastvideo.train.methods.knowledge_distillation.pdd_qad_metrics import (MODA
 from fastvideo.train.utils.optimizer import build_optimizer_and_scheduler
 
 logger = init_logger(__name__)
+
+
+# Teacher alignment: the student's own sample (same seed) and its keyframes vs the teacher's; full evaluations only.
+ALIGNMENT_KEYS = ("endpoint/video", "endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last")
+BASELINE_FORMAT = 1
+
+
+class _BaselineState:
+    """DCP-stateful step-0 baseline and guard state of an ``OmniRefPDDQADMethod`` (one JSON string)."""
+
+    def __init__(self, method: OmniRefPDDQADMethod) -> None:
+        self.method = method
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"json": json.dumps(self.method._baseline_state(), sort_keys=True)}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.method._load_baseline_state(json.loads(state_dict["json"]))
 
 
 def _unit_hash(*parts: Any) -> float:
@@ -143,15 +163,24 @@ class OmniRefPDDQADMethod(TrainingMethod):
         self.normalizers: dict[str, list[float]] | None = None
         self.step0: dict[str, float] = {}
         self.best_score = math.inf
+        # Consecutive evaluations with a worse teacher-forced score (every eval) and with worse teacher alignment
+        # (full evals only); ``bad_evals`` is the larger.
+        self.bad_score_evals = 0
+        self.bad_alignment_evals = 0
         self.bad_evals = 0
         self.stop_requested = False
         self._checkpoint_request: str | None = None
         if self.init_student_dcp:
             import torch.distributed.checkpoint as dcp
 
-            from fastvideo.training.checkpointing_utils import ModelWrapper
-            dcp.load({"roles.student.transformer": ModelWrapper(self.student.transformer)},
-                     checkpoint_id=str(Path(self.init_student_dcp) / "dcp"))
+            # The same DCP wrapper the checkpoint manager saves tagged/regular student weights with.
+            states = {
+                key: value
+                for key, value in self.checkpoint_state().items() if key == "roles.student.transformer"
+            }
+            if not states:
+                raise ValueError("init_student_dcp needs a trainable 'student' role with a transformer")
+            dcp.load(states, checkpoint_id=str(Path(self.init_student_dcp) / "dcp"))
             logger.info("QAD student initialized from %s", self.init_student_dcp)
         world = get_world_group()
         self.sp_size = int(tc.distributed.sp_size or 1)
@@ -184,6 +213,58 @@ class OmniRefPDDQADMethod(TrainingMethod):
     def consume_checkpoint_request(self) -> str | None:
         request, self._checkpoint_request = self._checkpoint_request, None
         return request
+
+    # ------------------------------------------------------------------ resume
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Roles, optimizer and scheduler, plus the step-0 baseline and guard state.
+
+        Without the baseline a resumed run would re-measure step 0 on its trained weights (wrong loss scale,
+        stop history and best-checkpoint reference); a checkpoint without ``method.qad_baseline`` cannot be
+        resumed (DCP reports the missing key).
+        """
+        return {**super().checkpoint_state(), "method.qad_baseline": _BaselineState(self)}
+
+    def _baseline_state(self) -> dict[str, Any]:
+        provisional = {}
+        if getattr(self.student, "provisional_rows", 0) > 0:
+            provisional = {
+                name: m.input_amax
+                for name, m in self.student.qad_linears.items() if m.act_scale == "static" and m.input_amax is not None
+            }
+        return {
+            "format": BASELINE_FORMAT,
+            "normalizers": self.normalizers,
+            "step0": self.step0,
+            "recon_norm": self.recon_norm,
+            "tolerances": self.tolerances,
+            "best_score": self.best_score,
+            "bad_score_evals": self.bad_score_evals,
+            "bad_alignment_evals": self.bad_alignment_evals,
+            "provisional_amax": provisional,
+        }
+
+    def _load_baseline_state(self, state: dict[str, Any]) -> None:
+        if state.get("format") != BASELINE_FORMAT:
+            raise ValueError(f"unsupported QAD baseline state format {state.get('format')!r}")
+        if state["normalizers"] is None:
+            raise ValueError("the checkpoint has no step-0 baseline (saved before the step-0 evaluation)")
+        self.normalizers = {m: [float(v) for v in values] for m, values in state["normalizers"].items()}
+        self.step0 = {k: float(v) for k, v in state["step0"].items()}
+        self.recon_norm = None if state["recon_norm"] is None else [float(v) for v in state["recon_norm"]]
+        self.tolerances = {k: float(v) for k, v in state["tolerances"].items()}
+        self.best_score = float(state["best_score"])
+        self.bad_score_evals = int(state["bad_score_evals"])
+        self.bad_alignment_evals = int(state["bad_alignment_evals"])
+        self.bad_evals = max(self.bad_score_evals, self.bad_alignment_evals)
+        for name, amax in state.get("provisional_amax", {}).items():
+            method = self.student.qad_linears.get(name)
+            if method is None:
+                raise KeyError(f"checkpoint has a provisional scale for {name}, which is not a QAD linear here")
+            if method.input_amax is None:
+                method.set_input_amax(float(amax))
+        if get_world_group().rank == 0:
+            logger.info("QAD step-0 baseline restored from the checkpoint (score %.5f, bad evals %d/%d)",
+                        self.step0.get("score", float("nan")), self.bad_score_evals, self.bad_alignment_evals)
 
     # ------------------------------------------------------------------ one training row
     def _row(self, spec: Any) -> Any:
@@ -353,11 +434,14 @@ class OmniRefPDDQADMethod(TrainingMethod):
 
     # ------------------------------------------------------------------ evaluation and guardrails
     def on_validation_begin(self, iteration: int = 0) -> dict[str, LogScalar]:
+        # Smoke runs without Stage A's table: calibrate the FFN scales before anything uses them, whether step 0
+        # is measured, restored from the cache, or skipped by a resume. A no-op once every scale is set.
+        calibration = self._provisional_calibration()
         first = self.normalizers is None
         if not first and (self.eval_every <= 0 or iteration % self.eval_every):
-            return {}
+            return dict(calibration)
         rows = self._rank_rows()
-        metrics: dict[str, LogScalar] = {}
+        metrics: dict[str, LogScalar] = dict(calibration)
         started = time.perf_counter()
         self._eval_iteration = iteration
         cached = self._load_step0() if first else None
@@ -401,8 +485,13 @@ class OmniRefPDDQADMethod(TrainingMethod):
         return self.recon_normalize == "step0" and self.recon_weight > 0
 
     def _step0_inputs(self) -> dict[str, Any]:
-        return step0_fingerprint_inputs(self._method_config_snapshot, self.student.data_config, self.student.qad_config,
-                                        self.student.amax_sha256, len(self.student.eval_rows))
+        return step0_fingerprint_inputs(self._method_config_snapshot,
+                                        self.student.data_config,
+                                        self.student.qad_config,
+                                        self.student.amax_sha256,
+                                        len(self.student.eval_rows),
+                                        student_init_from=self.student._init_from,
+                                        teacher_init_from=self.teacher._init_from)
 
     def _load_step0(self) -> dict[str, float] | None:
         if not self.step0_cache:
@@ -441,12 +530,14 @@ class OmniRefPDDQADMethod(TrainingMethod):
                    if key in self.step0 and key in summary)
 
     def _guardrails(self, iteration: int, summary: dict[str, float]) -> dict[str, LogScalar]:
-        worse = summary["score"] > self.step0["score"]
-        # Teacher alignment: the student's own sample (same seed) and its keyframes vs the teacher's.
-        for key in ("endpoint/video", "endpoint/audio", "keyframe/vs_teacher/first", "keyframe/vs_teacher/last"):
-            if key in summary and key in self.step0:
-                worse |= summary[key] > self.step0[key] * (1.0 + self._tolerance(key))
-        self.bad_evals = self.bad_evals + 1 if worse else 0
+        worse_score = summary["score"] > self.step0["score"]
+        self.bad_score_evals = self.bad_score_evals + 1 if worse_score else 0
+        # Teacher alignment is measured by full evaluations only; a teacher-forced-only one leaves its count as is.
+        measured = [key for key in ALIGNMENT_KEYS if key in summary and key in self.step0]
+        if measured:
+            misaligned = any(summary[key] > self.step0[key] * (1.0 + self._tolerance(key)) for key in measured)
+            self.bad_alignment_evals = self.bad_alignment_evals + 1 if misaligned else 0
+        self.bad_evals = max(self.bad_score_evals, self.bad_alignment_evals)
         selected = summary.get(self.select_metric)
         eligible = self._eligible(summary)
         if selected is not None and selected < self.best_score and eligible:
@@ -459,6 +550,8 @@ class OmniRefPDDQADMethod(TrainingMethod):
         return {
             "eval/eligible": float(eligible),
             "eval/bad_evals": float(self.bad_evals),
+            "eval/bad_score_evals": float(self.bad_score_evals),
+            "eval/bad_alignment_evals": float(self.bad_alignment_evals),
             "eval/best_score": self.best_score,
             "eval/stop_requested": float(self.stop_requested)
         }
@@ -556,7 +649,7 @@ class OmniRefPDDQADMethod(TrainingMethod):
 
     def _initial_checks(self, rows: list[tuple[Any, bool]]) -> dict[str, LogScalar]:
         """Bit-identity with quantization off, and the PTQ error with bf16 attention (Stage A's protocol)."""
-        out: dict[str, LogScalar] = self._provisional_calibration()
+        out: dict[str, LogScalar] = {}
         diff = torch.zeros((), device=self.student.device, dtype=torch.float64)
         if rows:
             prepared = self._row(rows[0][0])
