@@ -60,6 +60,7 @@ async function newBallot(env, bundle, rawVoter) {
     clip_id: clip.clip_id,
     prompt: clip.prompt,
     guidance: clip.guidance || "",
+    reference_url: clip.reference || "",
     // Whether the clip has an audio track; null means unknown (the page then probes the media).
     has_audio: clip.has_audio ?? null,
     left_url: `/video/${ballotId}/left`,

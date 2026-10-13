@@ -121,10 +121,19 @@ function writePublic(out, bundle, salt) {
     const hasAudio = flags.some((f) => f === true) ? true : flags.every((f) => f === false) ? false : null;
     return {
       clip_id: clip.clip_id, prompt: clip.prompt, guidance: clip.guidance, group: clip.group, meta: clip.meta, videos,
-      audio, has_audio: hasAudio,
+      audio, has_audio: hasAudio, reference: clip.reference ? copyReference(pub, clip.reference) : "",
     };
   });
   return { clips, bytes };
+}
+
+// Reference images are shared by every arm of a clip, so a content-hash name reveals nothing.
+function copyReference(pub, file) {
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const asset = `/r/${digest.slice(0, HASH_HEX_CHARS)}${path.extname(file).toLowerCase()}`;
+  fs.mkdirSync(path.join(pub, "r"), { recursive: true });
+  fs.copyFileSync(file, path.join(pub, asset));
+  return asset;
 }
 
 function wranglerToml(opts) {

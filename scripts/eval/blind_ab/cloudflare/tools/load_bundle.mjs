@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const VIDEO_SUFFIXES = [".mp4", ".webm", ".mov", ".m4v"];
+const REFERENCE_SUFFIXES = [".jpg", ".jpeg", ".png", ".webp"];
 const SIDE_POLICIES = ["balanced", "random"];
 const SITE_TEXT_KEYS = ["title", "heading", "reveal_label", "guidance_label"];
 const CHOICE_KEYS = ["left", "right", "tie", "both_bad"];
@@ -100,10 +101,25 @@ export function parsePromptEntry(raw, clipId, source) {
   if (!isPlainObject(meta) || Object.values(meta).some((v) => v !== null && typeof v === "object")) {
     throw new BundleError(`${source}: 'meta' for '${clipId}' must be a flat object`);
   }
-  return {
+  const entry = {
     prompt: String(raw.prompt || ""), guidance: String(raw.guidance || ""), group: String(raw.group || ""),
     meta: { ...meta },
   };
+  if (raw.reference) entry.reference = resolveReference(raw.reference, clipId, source);
+  return entry;
+}
+
+/** Port of bundle.resolve_reference: an image path inside the bundle (relative to prompts.json's directory). */
+export function resolveReference(value, clipId, source) {
+  if (typeof value !== "string") throw new BundleError(`${source}: 'reference' for '${clipId}' must be a path string`);
+  const root = fs.realpathSync(path.dirname(source));
+  const full = path.resolve(root, value);
+  const inside = full.startsWith(root + path.sep);
+  if (!inside || !REFERENCE_SUFFIXES.includes(path.extname(full).toLowerCase()) || !isFile(full)) {
+    throw new BundleError(`${source}: 'reference' for '${clipId}' must be an existing `
+      + `${REFERENCE_SUFFIXES.join("/")} file inside the bundle, got ${JSON.stringify(value)}`);
+  }
+  return fs.realpathSync(full);
 }
 
 /** Port of bundle.load_site: the optional site.json (page text and side policy). */

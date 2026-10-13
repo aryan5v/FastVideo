@@ -116,6 +116,10 @@ that share a source (one problem, several seeds): the scheduler prefers the
 groups this voter, then everyone, has seen least, so votes cover every group
 before any group repeats. `meta` (a flat object) is stored with every vote on
 that clip (D1 `extra` column, extra keys in `votes.jsonl`).
+`reference` (optional) is an image path inside the bundle, e.g.
+`"refs/P1.jpg"`, shown above both videos as "Reference given to the model"
+(conditioning frames of a reference-to-video model). It is the same for every
+arm of a clip, so it does not reveal which arm is which.
 
 `site.json` overrides the page text: `{"title", "heading", "intro": [paragraphs],
 "choices": {"left", "right", "tie", "both_bad"}, "guidance_label",

@@ -304,6 +304,9 @@ async function loadBallot() {
   document.querySelectorAll(".choice").forEach((b) => { b.disabled = false; b.classList.remove("picked"); });
   $("guidance-text").textContent = data.guidance || "";
   $("guidance").classList.toggle("hidden", !data.guidance);
+  $("reference").classList.toggle("hidden", !data.reference_url);
+  if (data.reference_url) $("reference-img").src = data.reference_url;
+  else $("reference-img").removeAttribute("src");
   $("prompt-text").textContent = data.prompt || "(no prompt text in bundle)";
   $("prompt-preview").textContent = (data.prompt || "").slice(0, 140) + ((data.prompt || "").length > 140 ? "..." : "");
   totalVotes = data.voter_votes;

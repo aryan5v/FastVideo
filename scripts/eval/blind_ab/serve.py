@@ -17,7 +17,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -42,6 +42,8 @@ VIDEO_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktim
 MAX_BODY_BYTES = 16 * 1024
 CHUNK_BYTES = 256 * 1024
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+REFERENCE_ROUTE_RE = re.compile(r"^/reference/([^/]{1,256})$")
+REFERENCE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 VIDEO_ROUTE_RE = re.compile(r"^/video/([A-Za-z0-9_-]{1,64})/(left|right)$")
 
 
@@ -143,6 +145,8 @@ class Handler(BaseHTTPRequestHandler):
                              {"Content-Disposition": 'attachment; filename="votes.jsonl"'})
         elif (match := VIDEO_ROUTE_RE.match(path)) is not None:
             self._serve_video(match.group(1), match.group(2))
+        elif (match := REFERENCE_ROUTE_RE.match(path)) is not None:
+            self._serve_reference(unquote(match.group(1)))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -181,6 +185,13 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found")
             return
         self._send_bytes(HTTPStatus.OK, (STATIC_DIR / name).read_bytes(), content_type)
+
+    def _serve_reference(self, clip_id: str) -> None:
+        image = self.state.reference_path(clip_id)
+        if image is None:
+            self._error(HTTPStatus.NOT_FOUND, "no reference for this clip")
+            return
+        self._send_bytes(HTTPStatus.OK, image.read_bytes(), REFERENCE_TYPES[image.suffix.lower()])
 
     def _serve_video(self, ballot_id: str, side: str) -> None:
         try:

@@ -8,10 +8,12 @@ Two layouts are supported:
 * **Simple layout**: ``arms.json`` plus ``arms/<arm>/<clip_id>.mp4``. Files with
   the same ``<clip_id>`` across arms are the same prompt + seed. Optional
   ``prompts.json`` maps ``clip_id`` to the prompt text, or to an object
-  ``{"prompt", "guidance", "group", "meta"}``: ``guidance`` is a short "what to
+  ``{"prompt", "guidance", "group", "meta", "reference"}``: ``guidance`` is a short "what to
   look for" note shown with the clip, ``group`` ties clips that share a source
   (e.g. one problem rendered with several seeds) so pairing spreads over groups,
-  and ``meta`` (flat JSON object) is stored with every vote on that clip.
+  ``meta`` (flat JSON object) is stored with every vote on that clip, and
+  ``reference`` (an image path inside the bundle) is shown above both videos,
+  e.g. the conditioning frames of a reference-to-video model.
 
 An optional ``site.json`` customizes the page text (title, intro paragraphs,
 choice labels) and the side policy; see ``load_site``.
@@ -35,6 +37,7 @@ ARMS_NAME = "arms.json"
 PROMPTS_NAME = "prompts.json"
 SITE_NAME = "site.json"
 SIDE_POLICIES = ("balanced", "random")
+REFERENCE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 SITE_TEXT_KEYS = ("title", "heading", "reveal_label", "guidance_label")
 CHOICE_KEYS = ("left", "right", "tie", "both_bad")
 VIDEO_SUFFIXES = (".mp4", ".webm", ".mov", ".m4v")
@@ -67,6 +70,7 @@ class Clip:
     guidance: str = ""
     group: str = ""
     meta: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    reference: Path | None = None  # optional reference image shown with every pair of this clip
 
     def has_arms(self, a: str, b: str) -> bool:
         return a in self.videos and b in self.videos
@@ -202,12 +206,27 @@ def parse_prompt_entry(raw: Any, clip_id: str, source: Path) -> dict[str, Any]:
     meta = raw.get("meta") or {}
     if not isinstance(meta, dict) or any(isinstance(v, (dict, list)) for v in meta.values()):
         raise BundleError(f"{source}: 'meta' for {clip_id!r} must be a flat object")
-    return {
+    entry = {
         "prompt": str(raw.get("prompt") or ""),
         "guidance": str(raw.get("guidance") or ""),
         "group": str(raw.get("group") or ""),
         "meta": MappingProxyType(dict(meta)),
     }
+    if raw.get("reference"):
+        entry["reference"] = resolve_reference(raw["reference"], clip_id, source)
+    return entry
+
+
+def resolve_reference(value: Any, clip_id: str, source: Path) -> Path:
+    """A ``reference`` image path, relative to the bundle root (prompts.json's directory); must stay inside it."""
+    if not isinstance(value, str):
+        raise BundleError(f"{source}: 'reference' for {clip_id!r} must be a path string")
+    root = source.parent.resolve()
+    path = (root / value).resolve()
+    if root not in path.parents or path.suffix.lower() not in REFERENCE_SUFFIXES or not path.is_file():
+        raise BundleError(f"{source}: 'reference' for {clip_id!r} must be an existing "
+                          f"{'/'.join(REFERENCE_SUFFIXES)} file inside the bundle, got {value!r}")
+    return path
 
 
 def load_site(root: Path) -> Mapping[str, Any]:

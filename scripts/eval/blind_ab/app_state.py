@@ -9,6 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 from .bundle import Bundle
 from .pairing import Matchup, PastMatchup, choose_matchup
@@ -70,10 +71,18 @@ class AppState:
             "clip_id": clip.clip_id,
             "prompt": clip.prompt,
             "guidance": clip.guidance,
+            "reference_url": f"/reference/{quote(clip.clip_id, safe='')}" if clip.reference else "",
             "left_url": f"/video/{ballot.ballot_id}/left",
             "right_url": f"/video/{ballot.ballot_id}/right",
             "voter_votes": sum(1 for v in self.votes.all() if v.voter == voter_name),
         }
+
+    def reference_path(self, clip_id: str) -> Path | None:
+        """The clip's reference image (shared by every arm, so it reveals nothing), or None."""
+        try:
+            return self.bundle.clip(clip_id).reference
+        except KeyError:
+            return None
 
     def video_path(self, ballot_id: str, side: str) -> Path:
         if side not in SIDES:
