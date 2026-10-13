@@ -290,9 +290,12 @@ class CheckpointManager:
         Tagged directories are not ``checkpoint-<step>`` and are never pruned;
         they hold no optimizer state (resume from regular checkpoints).
         """
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag) or _CHECKPOINT_DIR_RE.match(tag):
+        # A leading alphanumeric excludes "." and ".." (the run directory and its parent, which rmtree would delete).
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", tag) or _CHECKPOINT_DIR_RE.match(tag):
             raise ValueError(f"invalid checkpoint tag {tag!r}")
         tagged_dir = Path(self.output_dir) / tag
+        if tagged_dir.resolve().parent != Path(self.output_dir).resolve():
+            raise ValueError(f"checkpoint tag {tag!r} does not name a directory directly inside {self.output_dir}")
         dcp_dir = tagged_dir / "dcp"
         if _rank() == 0:
             if tagged_dir.exists():

@@ -136,7 +136,12 @@ class NVFP4QADLinearMethod:
 
     def __getattr__(self, name: str) -> Any:
         # Callers probe optional quant-method hooks (e.g. wants_prequantized_input); fall back to the original.
-        return getattr(self.__dict__["original"], name)
+        # Before __init__ (copy.deepcopy, unpickling) there is no original: AttributeError keeps hasattr working.
+        try:
+            original = self.__dict__["original"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(original, name)
 
 
 @dataclass(frozen=True)

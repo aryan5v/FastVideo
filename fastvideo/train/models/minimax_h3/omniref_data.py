@@ -59,20 +59,38 @@ def clip_seed(base_seed: int, clip_id: str) -> int:
 
 def load_manifest_groups(paths: list[str], cases: tuple[str, ...],
                          max_frames: int) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    """Manifest entries grouped by (case, resolution); several manifests (v4 + v5 additions) merge."""
+    """Manifest entries grouped by (case, resolution); several manifests (v4 + v5 additions) merge.
+
+    An entry repeated across manifests is kept once per (id, resolution): the same source at 480p and 768p is
+    two rows.
+    """
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for path in paths:
         with open(path) as handle:
             for line in handle:
                 entry = json.loads(line)
                 match = _BUCKET_FRAMES.search(entry["parquet"])
+                key = (entry["id"], entry["resolution"])
                 if (match is None or entry["case"] not in cases or entry["resolution"] not in RESOLUTIONS
-                        or entry["id"] in seen or int(match.group(1)) > max_frames):
+                        or key in seen or int(match.group(1)) > max_frames):
                     continue
-                seen.add(entry["id"])
+                seen.add(key)
                 groups[(entry["case"], entry["resolution"])].append(entry)
     return groups
+
+
+def limit_frames(groups: dict[tuple[str, str], list[dict[str, Any]]],
+                 max_frames: int) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """``groups`` without entries whose bucket is longer than ``max_frames`` (0 = no limit); a new mapping."""
+    if not max_frames:
+        return dict(groups)
+
+    def frames(entry: dict[str, Any]) -> int:
+        match = _BUCKET_FRAMES.search(entry["parquet"])
+        return int(match.group(1)) if match else max_frames + 1
+
+    return {key: [entry for entry in entries if frames(entry) <= max_frames] for key, entries in groups.items()}
 
 
 def select_rows(groups: dict[tuple[str, str], list[dict[str, Any]]],
