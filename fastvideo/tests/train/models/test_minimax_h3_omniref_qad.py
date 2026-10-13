@@ -306,8 +306,8 @@ def _bare_method(**attrs):
     method = object.__new__(OmniRefPDDQADMethod)
     defaults = dict(eligibility_keys=("endpoint/audio", "keyframe/vs_teacher/first"), tolerances={},
                     fidelity_tolerance=0.05, min_eligibility_tolerance=0.02, select_metric="score",
-                    best_score=1.0, save_best=True, patience=3, bad_evals=0, stop_requested=False,
-                    _checkpoint_request=None)
+                    best_score=1.0, save_best=True, patience=3, bad_evals=0, bad_score_evals=0,
+                    bad_alignment_evals=0, stop_requested=False, _checkpoint_request=None)
     method.__dict__.update({**defaults, **attrs})
     return method
 
@@ -365,6 +365,67 @@ def test_best_requires_eligibility_on_full_eval():
     fine = {"score": 0.21, "endpoint/video": 0.4, "endpoint/audio": 0.43, "keyframe/vs_teacher/first": 0.31}
     out = method._guardrails(75, fine)
     assert method._checkpoint_request == "best" and method.best_score == 0.21 and method.bad_evals == 0
+
+
+def test_teacher_forced_evals_do_not_reset_alignment_failures():
+    """eval_every 15 / full_eval_every 30 / patience 2: persistent alignment regressions must still stop the run."""
+    method = _bare_method(step0={"score": 0.30, "endpoint/video": 0.40, "endpoint/audio": 0.40},
+                          best_score=0.30, patience=2)
+    full_regressed = {"score": 0.25, "endpoint/video": 0.40, "endpoint/audio": 0.60}
+    method._guardrails(30, full_regressed)
+    assert (method.bad_alignment_evals, method.bad_evals, method.stop_requested) == (1, 1, False)
+    method._guardrails(45, {"score": 0.24})  # teacher-forced only: better score, alignment unmeasured
+    assert (method.bad_score_evals, method.bad_alignment_evals, method.stop_requested) == (0, 1, False)
+    out = method._guardrails(60, full_regressed)
+    assert method.stop_requested and out["eval/bad_alignment_evals"] == 2.0
+    method = _bare_method(step0={"score": 0.30, "endpoint/audio": 0.40}, patience=2)
+    method._guardrails(30, {"score": 0.25, "endpoint/video": 0.4, "endpoint/audio": 0.60})
+    method._guardrails(60, {"score": 0.25, "endpoint/video": 0.4, "endpoint/audio": 0.40})  # recovered
+    assert method.bad_alignment_evals == 0 and not method.stop_requested
+    method._guardrails(75, {"score": 0.31})
+    method._guardrails(90, {"score": 0.32, "endpoint/video": 0.4, "endpoint/audio": 0.40})
+    assert method.bad_score_evals == 2 and method.stop_requested  # the score count still runs on every eval
+
+
+def test_baseline_state_round_trips_through_dcp(tmp_path, single_process_group):  # noqa: F811
+    """Resume restores the step-0 baseline, guard counters and provisional scales instead of re-measuring."""
+    import torch.distributed.checkpoint as dcp
+    from types import SimpleNamespace
+    from fastvideo.train.methods.knowledge_distillation.pdd_qad import _BaselineState
+
+    def student(amax):
+        linears = {"transformer_blocks.0.ff.fc_in": NVFP4QADLinearMethod(object(), "fc_in", "static", amax,
+                                                                         allow_uncalibrated=True)}
+        return SimpleNamespace(provisional_rows=2, qad_linears=linears)
+
+    saved = _bare_method(normalizers={"video": [0.2, 0.1], "audio": [0.4, 0.3]}, step0={"score": 0.3},
+                         recon_norm=[0.05, 0.04], tolerances={"endpoint/audio": 0.1}, best_score=0.27,
+                         bad_score_evals=1, bad_alignment_evals=2, student=student(7.5))
+    dcp.save({"method.qad_baseline": _BaselineState(saved)}, checkpoint_id=str(tmp_path))
+    resumed = _bare_method(normalizers=None, step0={}, recon_norm=None, best_score=math.inf, student=student(None))
+    dcp.load({"method.qad_baseline": _BaselineState(resumed)}, checkpoint_id=str(tmp_path))
+    for key in ("normalizers", "step0", "recon_norm", "tolerances", "best_score", "bad_score_evals",
+                "bad_alignment_evals"):
+        assert getattr(resumed, key) == getattr(saved, key), key
+    assert resumed.bad_evals == 2
+    assert resumed.student.qad_linears["transformer_blocks.0.ff.fc_in"].input_amax == 7.5
+    with pytest.raises(ValueError, match="no step-0 baseline"):
+        _bare_method(student=student(None))._load_baseline_state({**saved._baseline_state(), "normalizers": None})
+
+
+def test_provisional_calibration_runs_on_a_step0_cache_hit(single_process_group):  # noqa: F811
+    from types import SimpleNamespace
+    calls = []
+    cached = {"eval/score": 0.3, "eval/x0_mse/video/rung0": 0.2, "eval/x0_mse/audio/rung0": 0.4}
+    method = _bare_method(normalizers=None, step0={}, eval_every=15, student=SimpleNamespace(num_rungs=1),
+                          _rank_rows=lambda: [], _load_step0=lambda: cached,
+                          _restore_step0=lambda c: {k[len("eval/"):]: v for k, v in c.items()},
+                          _provisional_calibration=lambda: calls.append(1) or {"init/provisional_calibration_rows": 2})
+    metrics = method.on_validation_begin(0)
+    assert calls == [1] and metrics["init/provisional_calibration_rows"] == 2
+    assert method.normalizers == {"video": [0.2], "audio": [0.4]}
+    method.on_validation_begin(7)  # not an eval step (e.g. a resume): calibration still gets its chance
+    assert calls == [1, 1]
 
 
 def test_eval_top_up_is_held_out_and_interleaved():
@@ -485,7 +546,8 @@ def test_step0_cache_round_trip_and_fingerprint(tmp_path):
               "recon_group_weights": {"video": 1.0, "audio": 1.0}, "eval_every": 20}
     data = {"eval_manifest": "/m.json", "eval_per_group": {"480p": 4, "768p": 2}, "cases": ["first_frame"]}
     qad = {"linears": {"skip_blocks": [42, 43]}, "fp4_attention": {"two_level_p": True}}
-    inputs = step0_fingerprint_inputs(method, data, qad, "ab" * 32, 30)
+    models = dict(student_init_from="/ckpt/student", teacher_init_from="/ckpt/teacher")
+    inputs = step0_fingerprint_inputs(method, data, qad, "ab" * 32, 30, **models)
     metrics = {"eval/score": 0.31, "eval/x0_mse/video/rung0": 0.2, "eval/seconds": 6000.0,
                "init/recon_step0/rung0": 0.04, "init/recon_step0/rung1": 0.03,
                "init/noise_sigma/endpoint/audio": 0.05, "init/noise_sigma/score": 0.001}
@@ -493,16 +555,25 @@ def test_step0_cache_round_trip_and_fingerprint(tmp_path):
     assert load_step0(path, inputs) is None
     save_step0(path, inputs, metrics)
     # Settings that cannot change step 0 (eval cadence) do not invalidate the cache.
-    same = step0_fingerprint_inputs({**method, "eval_every": 40}, data, qad, "ab" * 32, 30)
+    same = step0_fingerprint_inputs({**method, "eval_every": 40}, data, qad, "ab" * 32, 30, **models)
     cached = load_step0(path, same)
     assert cached is not None and "eval/seconds" not in cached and cached["eval/score"] == 0.31
     summary, recon_norm, tolerances = restore_step0(cached, 2, recon=True, noise_floor=True, min_tolerance=0.02)
     assert summary == {"score": 0.31, "x0_mse/video/rung0": 0.2}
     assert recon_norm == [0.04, 0.03]
     assert tolerances == {"endpoint/audio": pytest.approx(0.1), "score": 0.02}
-    for changed in (step0_fingerprint_inputs({**method, "init_student_dcp": "/runs/e3b/best"}, data, qad, "ab" * 32, 30),
-                    step0_fingerprint_inputs(method, {**data, "eval_per_group": 1}, qad, "ab" * 32, 30),
-                    step0_fingerprint_inputs(method, data, {**qad, "linears": {"skip_blocks": []}}, "ab" * 32, 30),
-                    step0_fingerprint_inputs(method, data, qad, "cd" * 32, 30)):
+    # Training-plan keys only matter with provisional calibration (no amax_json).
+    assert load_step0(path, step0_fingerprint_inputs(method, {**data, "seed": 5}, qad, "ab" * 32, 30, **models))
+    provisional = {**qad, "linears": {"skip_blocks": [42, 43], "provisional_calibration_rows": 2}}
+    for changed in (step0_fingerprint_inputs({**method, "init_student_dcp": "/runs/e3b/best"}, data, qad, "ab" * 32, 30,
+                                             **models),
+                    step0_fingerprint_inputs(method, {**data, "eval_per_group": 1}, qad, "ab" * 32, 30, **models),
+                    step0_fingerprint_inputs(method, data, {**qad, "linears": {"skip_blocks": []}}, "ab" * 32, 30,
+                                             **models),
+                    step0_fingerprint_inputs(method, data, qad, "cd" * 32, 30, **models),
+                    step0_fingerprint_inputs(method, data, qad, "ab" * 32, 30, **{**models, "student_init_from": "/x"}),
+                    step0_fingerprint_inputs(method, data, qad, "ab" * 32, 30, **{**models, "teacher_init_from": "/x"}),
+                    step0_fingerprint_inputs({**method, "audio_weight": 2.0}, data, qad, "ab" * 32, 30, **models),
+                    step0_fingerprint_inputs(method, data, provisional, "ab" * 32, 30, **models)):
         with pytest.raises(ValueError, match="other inputs"):
             load_step0(path, changed)

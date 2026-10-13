@@ -3,9 +3,10 @@
 
 A Stage-2 run from a fixed checkpoint spends most of its first ~1.75 h on step 0: the full held-out evaluation,
 the same evaluation at seed+1 for the noise floor, and the reconstruction calibration. All of it is a deterministic
-function of the student initialization, the calibration table, the quantization plan and the evaluation set, so a
-rerun with the same inputs can load it. The cache is keyed by a fingerprint of exactly those inputs; any change
-(another init checkpoint, eval rows, tolerances, ...) is a mismatch and the run refuses to start.
+function of the teacher and student checkpoints (``init_from``, plus ``init_student_dcp``), the calibration table
+(or the provisional-calibration rows), the quantization plan, the evaluation set and the score weights, so a rerun
+with the same inputs can load it. The cache is keyed by a fingerprint of exactly those inputs; any change (another
+init checkpoint, eval rows, tolerances, modality weights, ...) is a mismatch and the run refuses to start.
 
 No torch import, so the fingerprint can be computed offline from a run's ``cfg.yaml``.
 """
@@ -17,12 +18,14 @@ import math
 from pathlib import Path
 from typing import Any
 
-STEP0_FORMAT = 1
+STEP0_FORMAT = 2
 METHOD_KEYS = ("init_student_dcp", "max_eval_rows", "max_rollout_rows", "noise_floor_eval", "min_eligibility_tolerance",
                "eligibility_keys", "fidelity_tolerance", "objective", "recon_normalize", "recon_norm_rows",
                "recon_group_weights", "rungs_per_row")
 DATA_KEYS = ("manifests", "cases", "max_frames", "eval_manifest", "eval_resolutions", "eval_per_group",
              "eval_max_frames", "eval_seed")
+# The training-row plan; it only reaches step 0 through provisional FFN calibration (no amax_json).
+PROVISIONAL_DATA_KEYS = ("seed", "per_group", "max_train_rows")
 QAD_KEYS = ("linears", "fp4_attention")
 # Logged per evaluation but not part of the step-0 result.
 VOLATILE = ("eval/seconds", "eval/score_vs_ptq")
@@ -38,18 +41,32 @@ def _plain(value: Any) -> Any:
 
 
 def step0_fingerprint_inputs(method_config: Any, data_config: Any, qad_config: Any, amax_sha256: str,
-                             num_eval_rows: int) -> dict[str, Any]:
+                             num_eval_rows: int, *, student_init_from: str, teacher_init_from: str) -> dict[str, Any]:
+    """Everything step 0 depends on. The init paths stand for their weights and ``fastvideo_inference.json``."""
     method, data, qad = _plain(method_config), _plain(data_config), _plain(qad_config)
+    linears = qad.get("linears") or {}
+    provisional = int(linears.get("provisional_calibration_rows") or 0) > 0 and not linears.get("amax_json")
     return {
         "format": STEP0_FORMAT,
+        "models": {
+            "student_init_from": str(student_init_from),
+            "teacher_init_from": str(teacher_init_from)
+        },
         "method": {
             key: method.get(key)
             for key in METHOD_KEYS
+        },
+        # ``summarize`` weights the score with these; best_score and the guards compare against it.
+        "score_weights": {
+            modality: float(method.get(f"{modality}_weight", 1.0))
+            for modality in ("video", "audio")
         },
         "data": {
             key: data.get(key)
             for key in DATA_KEYS
         },
+        "provisional_plan": {key: data.get(key)
+                             for key in PROVISIONAL_DATA_KEYS} if provisional else None,
         "qad": {
             key: qad.get(key)
             for key in QAD_KEYS
