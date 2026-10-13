@@ -198,21 +198,23 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
 
     def init_preprocessors(self, training_config: TrainingConfig) -> None:
         from fastvideo.train.models.minimax_h3.omniref_data import (OMNIREF_CASES, RowStream, interleave_by_group,
-                                                                    load_eval_rows, load_manifest_groups, select_rows,
-                                                                    top_up_eval_rows)
+                                                                    limit_frames, load_eval_rows, load_manifest_groups,
+                                                                    select_rows, top_up_eval_rows)
         cfg = self.data_config
         cases = tuple(cfg.get("cases", OMNIREF_CASES))
         resolutions = tuple(cfg.get("eval_resolutions", ("480p", )))
         eval_per_group = cfg.get("eval_per_group", 2)
-        eval_rows = load_eval_rows(cfg["eval_manifest"], cases, resolutions, eval_per_group,
-                                   int(cfg.get("eval_max_frames", 0)))
+        eval_max_frames = int(cfg.get("eval_max_frames", 0))
+        eval_rows = load_eval_rows(cfg["eval_manifest"], cases, resolutions, eval_per_group, eval_max_frames)
         groups = load_manifest_groups(list(cfg["manifests"]), cases, int(cfg.get("max_frames", 243)))
         missing = sorted(set(cases) - {case for case, _ in groups})
         if missing:
             logger.warning("OmniRef cases with no rows in the given manifests: %s", missing)
         if isinstance(eval_per_group, dict):
-            # More held-out rows than the precomputed eval manifest holds: draw them before the training plan.
-            eval_groups = {key: entries for key, entries in groups.items() if key[1] in resolutions}
+            # More held-out rows than the precomputed eval manifest holds: draw them before the training plan,
+            # under the same eval length cap as the manifest rows.
+            eval_groups = limit_frames({key: entries
+                                        for key, entries in groups.items() if key[1] in resolutions}, eval_max_frames)
             eval_rows = top_up_eval_rows(eval_rows, eval_groups, int(cfg.get("eval_seed", 20261008)),
                                          dict(eval_per_group))
         else:

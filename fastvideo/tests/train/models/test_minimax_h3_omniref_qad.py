@@ -103,6 +103,21 @@ def _generator_module():
     return module
 
 
+def test_qad_student_can_be_deep_copied_and_pickled(cpu_loader, single_process_group):  # noqa: F811
+    """EMA copies and teacher snapshots deep-copy the student after install_nvfp4_qad."""
+    import pickle
+    student = _tiny_model()
+    install_nvfp4_qad(student, _amax_table(), NVFP4QADPlan())
+    clone = copy.deepcopy(student)
+    method = clone.transformer_blocks[0].ff.fc_in.quant_method
+    assert isinstance(method, NVFP4QADLinearMethod) and method.input_amax == 3.0
+    assert method.original is not student.transformer_blocks[0].ff.fc_in.quant_method.original
+    restored = pickle.loads(pickle.dumps(student.transformer_blocks[0].ff.fc_out.quant_method))
+    assert restored.prefix.endswith("transformer_blocks.0.ff.fc_out") and restored.input_amax == 3.0
+    with pytest.raises(AttributeError):
+        object.__new__(NVFP4QADLinearMethod).anything
+
+
 def test_row_plan_is_the_latent_generators_plan():
     groups = {(case, res): [{"id": f"{case}:src{i}", "case": case, "resolution": res, "parquet": f"/p/{case}{i}"}
                             for i in range(12)] for case in ("first_frame", "storyboard") for res in ("480p", "768p")}
@@ -426,6 +441,36 @@ def test_provisional_calibration_runs_on_a_step0_cache_hit(single_process_group)
     assert method.normalizers == {"video": [0.2], "audio": [0.4]}
     method.on_validation_begin(7)  # not an eval step (e.g. a resume): calibration still gets its chance
     assert calls == [1, 1]
+
+
+def test_manifest_groups_keep_each_resolution_of_a_shared_id(tmp_path):
+    import json
+    from fastvideo.train.models.minimax_h3.omniref_data import load_manifest_groups
+
+    def entry(res, frames, case="first_frame", source="a"):
+        return {"id": f"{case}:{source}", "case": case, "resolution": res,
+                "parquet": f"/d/bucket=832x480-{frames}f/{source}-{res}.parquet"}
+
+    first, second = tmp_path / "v4.jsonl", tmp_path / "v5.jsonl"
+    first.write_text("\n".join(json.dumps(e) for e in (entry("480p", 121), entry("768p", 121))) + "\n")
+    second.write_text("\n".join(json.dumps(e) for e in (entry("480p", 121), entry("480p", 241, source="b"))) + "\n")
+    groups = load_manifest_groups([str(first), str(second)], ("first_frame", ), 243)
+    assert {key: [e["id"] for e in entries] for key, entries in groups.items()} == {
+        ("first_frame", "480p"): ["first_frame:a", "first_frame:b"],  # the v5 repeat of (a, 480p) is dropped
+        ("first_frame", "768p"): ["first_frame:a"],
+    }
+
+
+def test_eval_top_up_respects_the_eval_frame_cap():
+    from fastvideo.train.models.minimax_h3.omniref_data import limit_frames, top_up_eval_rows
+    groups = {("storyboard", "480p"): [{"id": f"storyboard:s{i}", "case": "storyboard", "resolution": "480p",
+                                        "parquet": f"/d/bucket=832x480-{121 if i % 2 else 241}f/s{i}.parquet"}
+                                       for i in range(8)]}
+    assert limit_frames(groups, 0) == groups
+    capped = limit_frames(groups, 121)
+    assert len(capped[("storyboard", "480p")]) == 4 and len(groups[("storyboard", "480p")]) == 8
+    rows = top_up_eval_rows([], capped, 7, {"480p": 3})
+    assert len(rows) == 3 and all(int(row.source[1:]) % 2 for row in rows)
 
 
 def test_eval_top_up_is_held_out_and_interleaved():
