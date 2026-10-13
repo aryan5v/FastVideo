@@ -38,9 +38,18 @@ The deployed student uses three formats:
    - dynamic scales.
 
    It also attributes teacher-forced error to blocks, then picks among whole-model variants (clip rule ×
-   number of bf16 blocks) by teacher-forced error against the shipped V2 NVFP4 model.
-3. **Export.** `convert_minimax_h3_modelopt_nvfp4_dit.py --act-amax <table>` writes the packed NVFP4
-   export. FFN layers need an amax entry; attention and gate linears without one keep the unit scale.
+   number of bf16 blocks) by teacher-forced error against the shipped V2 NVFP4 model. `select` writes:
+   - `variant.json`: the selected variant (scale overrides and bf16 linears) for
+     `eval_omniref_nvfp4.py --variant`;
+   - `amax-<variant>.json` (e.g. `amax-mse_bf16_top8.json`): the flat `b<block>.<module>` table, i.e. the
+     calibrated `amax.json` with the variant's clipped scales. Both the converter's `--act-amax` and QAD's
+     `qad.linears.amax_json` read it. A variant with dynamic scales has no static table;
+   - `sweep_report.json`, whose `selected_skip_blocks` lists the variant's bf16 blocks for
+     `qad.linears.skip_blocks`.
+3. **Export.** `convert_minimax_h3_modelopt_nvfp4_dit.py --act-amax amax-<variant>.json` writes the packed
+   NVFP4 export. FFN layers need an amax entry; attention and gate linears without one keep the unit scale.
+   The converter quantizes every block: the bf16 blocks take effect in Gate A through `--variant` and in QAD
+   through `skip_blocks`, not in the packed export.
 4. **Gate A.** Two checks:
    - `eval_omniref_nvfp4.py` (T1) measures teacher-forced per-forward error on held-out rows. Each DiT call
      is replayed with the NVFP4 linears on identical inputs, so trajectory divergence doesn't enter.

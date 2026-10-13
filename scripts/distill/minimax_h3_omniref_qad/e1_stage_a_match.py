@@ -22,6 +22,15 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12))
 
 
+def _gather_results(local: list[dict]) -> list[dict]:
+    """Every data-parallel group's rows (contributed by its SP leader), sorted by id."""
+    if not torch.distributed.is_initialized():
+        return local
+    parts: list[list[dict] | None] = [None] * torch.distributed.get_world_size()
+    torch.distributed.all_gather_object(parts, local)
+    return sorted((row for part in parts for row in part or []), key=lambda row: row["id"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -47,11 +56,12 @@ def main() -> None:
             record = json.loads(line)
             records[record["id"]] = record
     rank0 = get_world_group().rank == 0
-    rows, results = [spec for spec, counted in method._rank_rows() if counted], []
+    results = []
     with torch.no_grad(), student.quantization(linears=True, attention=False):
-        for spec in rows:
-            if spec.id not in records:
-                continue
+        # Every data-parallel group runs the same number of rows (padded repeats included), so the FSDP gathers stay in
+        # lockstep; padded repeats and rows without a Stage A record run but are not reported.
+        for spec, counted in method._rank_rows():
+            record = records.get(spec.id) if counted else None
             prepared = method._row(spec)
             schedulers = student.schedulers()
             timesteps = (schedulers[0].timesteps, schedulers[1].timesteps)
@@ -71,6 +81,8 @@ def main() -> None:
                 with student.rung_scope(prepared, rung, timesteps) as rt:
                     out = student.forward_rung(prepared, video, audio, rt)
                 video, audio = step_packed(schedulers, prepared, rung, video, audio, *out)
+            if record is None:
+                continue
             cut = target_slices(prepared)
             channels, frames, height, width = prepared.latent_shape
 
@@ -81,7 +93,7 @@ def main() -> None:
             stem = spec.id
             nvfp4 = torch.load(next(Path(args.stage_a, "nvfp4").glob(f"{stem}__nvfp4_s0.pt")), map_location="cpu")
             bf16 = torch.load(next(Path(args.bf16_dir).glob(f"{stem}__bf16_s0.pt")), map_location="cpu")
-            stage_a = records[spec.id]["forwards"]
+            stage_a = record["forwards"]
             results.append({
                 "id": spec.id, "case": spec.case,
                 "v_rel": per_rung,
@@ -91,10 +103,11 @@ def main() -> None:
                 "endpoint_teacher_vs_stage_a_bf16": {"video": _rel(unpatch(teacher_video), bf16["video"]),
                                                      "audio": _rel(teacher_audio[cut["audio"]].cpu(), bf16["audio"])},
                 "endpoint_student_vs_harness_teacher": _rel(unpatch(video), unpatch(teacher_video)),
-                "stage_a_final_video_rel_vs_bf16": records[spec.id].get("final_video_rel_vs_bf16"),
+                "stage_a_final_video_rel_vs_bf16": record.get("final_video_rel_vs_bf16"),
             })
-            if method.is_sp_leader and get_world_group().rank == 0:
+            if method.is_sp_leader:
                 print("E1ROW " + json.dumps(results[-1]), flush=True)
+    results = _gather_results(results if method.is_sp_leader else [])
     if rank0 and results:
         summary = {}
         for modality in ("video", "audio"):
