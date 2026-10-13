@@ -68,9 +68,13 @@ def local_row_groups(groups: torch.Tensor, device: torch.device) -> torch.Tensor
 class GroupedRelError:
     """Weighted mean over row groups of ``||s - t||^2 / ||t||^2`` with sequence-parallel-global sums.
 
-    Each rank backpropagates ``w_g * num_local / den_global``; summed over ranks that is the global ratio, so
-    a group living on one rank (e.g. target audio) is weighted exactly as if unsharded. Groups absent from the
-    sequence are dropped from the weight normalization.
+    Each rank backpropagates ``sp_size * w_g * num_local / den_global``. Summed over ranks, ``w_g * num_local /
+    den_global`` is the global ratio, so a group living on one rank (e.g. target audio) is weighted exactly as
+    if unsharded. The ``sp_size`` factor matches the x0 output loss: FSDP averages gradients over every rank,
+    SP ranks included, and the output loss is identical on every SP rank, where the transformer's output
+    all-gather backward (a SUM reduce-scatter) gives each rank ``sp_size`` times its share of the gradient.
+    Reconstruction has no gather, so without the factor the averaged gradient would be ``1 / sp_size`` of the
+    global ratio's. Groups absent from the sequence are dropped from the weight normalization.
     """
 
     def __init__(self, groups: torch.Tensor, weights: dict[str, float]) -> None:
@@ -78,7 +82,11 @@ class GroupedRelError:
         self.weights = torch.tensor([float(weights.get(name, 0.0)) for name in GROUPS], device=groups.device)
 
     def __call__(self, student: torch.Tensor, teacher: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(local loss to backprop, global per-group relative error [3], detached)``."""
+        """``(local loss to backprop, global per-group relative error [3], detached)``.
+
+        The local loss is this rank's ``sp_size``-scaled share (see the class docstring); the detached global
+        per-group errors are what to log.
+        """
         from fastvideo.distributed import get_sp_group, get_sp_world_size, model_parallel_is_initialized
 
         teacher = teacher.float().reshape(-1, teacher.shape[-1])
@@ -87,13 +95,14 @@ class GroupedRelError:
         one_hot = (self.groups[:, None] == torch.arange(len(GROUPS), device=err.device)[None, :]).float()
         num = err @ one_hot  # [3], differentiable
         totals = torch.stack((num.detach(), ref @ one_hot))  # [2, 3]
-        if model_parallel_is_initialized() and get_sp_world_size() > 1:
+        sp_size = get_sp_world_size() if model_parallel_is_initialized() else 1
+        if sp_size > 1:
             totals = get_sp_group().all_reduce(totals)
         present = totals[1] > 0
         den = totals[1].clamp_min(1e-30)
         weights = torch.where(present, self.weights, torch.zeros_like(self.weights))
         norm = weights.sum().clamp_min(1e-30)
-        loss = (weights * num / den).sum() / norm
+        loss = sp_size * (weights * num / den).sum() / norm
         return loss, torch.where(present, totals[0] / den, torch.full_like(den, float("nan")))
 
 
@@ -148,13 +157,21 @@ class BlockReconstruction:
         self.group_rel: list[torch.Tensor] = []  # [3] per unit, global, detached
         self._handles: list[Any] = []
 
-    def _unit_loss(self, student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+    def _weighted(self, rel: torch.Tensor) -> torch.Tensor:
+        """Group-weighted mean of per-group relative errors ``[..., 3]`` (NaN = absent group, dropped)."""
+        assert self.criterion is not None
+        weights = self.criterion.weights.expand_as(rel) * (~rel.isnan())
+        return (weights * rel.nan_to_num()).sum(-1) / weights.sum(-1).clamp_min(1e-30)
+
+    def _unit_loss(self, student: torch.Tensor, teacher: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(loss to backprop, sequence-parallel-global relative error to log, detached)``."""
         if self.criterion is None:
             teacher_f = teacher.float()
-            return (student.float() - teacher_f).pow(2).mean() / teacher_f.pow(2).mean().clamp_min(1e-20)
+            loss = (student.float() - teacher_f).pow(2).mean() / teacher_f.pow(2).mean().clamp_min(1e-20)
+            return loss, loss.detach()
         loss, per_group = self.criterion(student, teacher)
         self.group_rel.append(per_group)
-        return loss
+        return loss, self._weighted(per_group)
 
     def __enter__(self) -> BlockReconstruction:
         for index, block in enumerate(self.teacher_blocks):
@@ -197,22 +214,20 @@ class BlockReconstruction:
                 # block's weights for backward and reduce-scatter its gradients.
                 hidden = attn.input.detach().requires_grad_(not self.measure_only)
                 block_out = block(hidden, *block_args[1:])
-                attn_rel = self._unit_loss(replace_attn.output, attn.output)
-                ff_rel = self._unit_loss(replace_ff.output, ff.output)
+                attn_loss, attn_rel = self._unit_loss(replace_attn.output, attn.output)
+                ff_loss, ff_rel = self._unit_loss(replace_ff.output, ff.output)
                 if not self.measure_only:
-                    ((attn_rel + ff_rel) * self.scale + 0.0 * block_out.float().sum()).backward()
+                    ((attn_loss + ff_loss) * self.scale + 0.0 * block_out.float().sum()).backward()
         finally:
             for handle in handles:
                 handle.remove()
-        self.attn_rel.append(attn_rel.detach())
-        self.ff_rel.append(ff_rel.detach())
+        self.attn_rel.append(attn_rel)
+        self.ff_rel.append(ff_rel)
 
     def loss(self) -> torch.Tensor:
         """Mean (group-weighted) relative error over all units of this forward, sequence-parallel-global, detached."""
         if self.criterion is not None and self.group_rel:
-            rel = torch.stack(self.group_rel)  # [units, 3], NaN for absent groups
-            weights = self.criterion.weights.expand_as(rel) * (~rel.isnan())
-            return ((weights * rel.nan_to_num()).sum(-1) / weights.sum(-1).clamp_min(1e-30)).mean()
+            return self._weighted(torch.stack(self.group_rel)).mean()  # [units, 3], NaN for absent groups
         return (torch.stack(self.attn_rel).sum() + torch.stack(self.ff_rel).sum()) / (2 * len(self.attn_rel))
 
     def metrics(self, prefix: str) -> dict[str, torch.Tensor]:

@@ -223,6 +223,52 @@ def test_grouped_rel_error_weights_groups_and_drops_absent():
     assert math.isnan(float(per_group[1]))
 
 
+def test_grouped_rel_error_sp_gradient_matches_unsharded(monkeypatch):
+    """FSDP averages gradients over SP ranks; the mean of the shards' gradients must be the unsharded gradient.
+
+    The x0 output loss already has this scale (its all-gather backward sums over SP ranks), so reconstruction
+    must too, or ``recon_lambda`` is silently divided by ``sp_size``.
+    """
+    import fastvideo.distributed as distributed
+    from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import GroupedRelError
+    torch.manual_seed(0)
+    weights = {"video": 1.0, "audio": 1.0, "condition": 0.25}
+    groups = torch.tensor([0, 0, 0, 1, 2, 2, 0, 1, 2, 0, 0, -1])  # 2 shards of 6 rows, last row is SP padding
+    x, teacher = torch.randn(12, 5), torch.randn(12, 3)
+    weight = torch.randn(3, 5, requires_grad=True)
+
+    def grad(loss: torch.Tensor) -> torch.Tensor:
+        weight.grad = None
+        loss.backward()
+        return weight.grad.clone()
+
+    monkeypatch.setattr(distributed, "model_parallel_is_initialized", lambda: False)
+    full_loss, full_rel = GroupedRelError(groups, weights)(x @ weight.T, teacher)
+    full_grad = grad(full_loss)
+
+    sp_size, shard = 2, 6
+    local_totals: list[torch.Tensor] = []
+
+    class _Group:  # all_reduce = the sum of every shard's totals, recorded in a first pass
+
+        def all_reduce(self, totals: torch.Tensor) -> torch.Tensor:
+            local_totals.append(totals)
+            return sum(local_totals[:sp_size]) if len(local_totals) > sp_size else totals
+
+    monkeypatch.setattr(distributed, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(distributed, "get_sp_world_size", lambda: sp_size)
+    monkeypatch.setattr(distributed, "get_sp_group", lambda: _Group())
+    rows = [slice(rank * shard, (rank + 1) * shard) for rank in range(sp_size)]
+    for part in rows:  # first pass: record each shard's local totals
+        GroupedRelError(groups[part], weights)(x[part] @ weight.T, teacher[part])
+    shard_grads = []
+    for part in rows:
+        loss, rel = GroupedRelError(groups[part], weights)(x[part] @ weight.T, teacher[part])
+        torch.testing.assert_close(rel, full_rel)
+        shard_grads.append(grad(loss))
+    torch.testing.assert_close(sum(shard_grads) / sp_size, full_grad)  # FSDP's mean over the SP ranks
+
+
 def test_packed_row_groups_from_layout():
     from types import SimpleNamespace
     from fastvideo.train.methods.knowledge_distillation.pdd_qad_recon import local_row_groups, packed_row_groups
