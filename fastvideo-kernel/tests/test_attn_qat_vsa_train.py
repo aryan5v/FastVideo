@@ -185,6 +185,24 @@ def test_triton_backward_matches_ste_reference(two_level_p):
 
 
 @needs_gpu
+def test_triton_qk_only_is_exact_softmax_on_quantized_qk():
+    """QK-only mode = exact sparse softmax over NVFP4 Q/K with BF16 V; STE gradients reach Q, K and V."""
+    q, k, v, q2k_idx, q2k_num, kv_valid, _, _ = _problem(5, heads=2, seed=10, device="cuda")
+    q, k, v = (t.clone().requires_grad_(True) for t in (q, k, v))
+    out = _triton().fp4_vsa_attn_qat(q, k, v, q2k_idx, q2k_num, kv_valid, quantize_pv=False, smooth_k=True)
+    k_smooth = (k - k.mean(dim=-2, keepdim=True)).detach()
+    q_hat, k_hat, _ = ref.fake_quant_qkv(q.detach(), k_smooth, v.detach())
+    expected = ref.fp4_vsa_attention_reference(q_hat.bfloat16(), k_hat.bfloat16(), v.detach(), q2k_idx, q2k_num,
+                                               kv_valid, quantize=False)
+    full = _triton().fp4_vsa_attn_qat(q, k, v, q2k_idx, q2k_num, kv_valid, smooth_k=True)
+    assert _rel(out, expected) < 5e-3 < _rel(full, expected)
+    grads = torch.autograd.grad(out, (q, k, v), torch.randn_like(out))
+    assert all(bool(g.float().norm() > 0) for g in grads)
+    with pytest.raises(ValueError):
+        _triton().fp4_vsa_attn_qat(q, k, v, q2k_idx, q2k_num, kv_valid, quantize_pv=False, two_level_p=True)
+
+
+@needs_gpu
 def test_triton_dv_reaches_every_head_on_long_sequences():
     """Regression for the GB10 Attn-QAT bug: re-quantized normalized P underflowed and zeroed dV per head."""
     q, k, v, q2k_idx, q2k_num, kv_valid, _, _ = _problem(64, heads=4, keep=0.9, seed=8, device="cuda")

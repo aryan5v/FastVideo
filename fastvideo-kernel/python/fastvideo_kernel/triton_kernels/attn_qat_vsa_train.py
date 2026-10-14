@@ -111,12 +111,17 @@ def _fake_quant_kernel(X, Y, n_rows, D: tl.constexpr, ROWS: tl.constexpr, ALONG_
     tl.store(Y + offs_r[:, None] * D + offs_d[None, :], y.to(Y.dtype.element_ty))
 
 
-def fake_quant_qkv_triton(q: torch.Tensor, k: torch.Tensor,
-                          v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def fake_quant_qkv_triton(q: torch.Tensor,
+                          k: torch.Tensor,
+                          v: torch.Tensor,
+                          quantize_v: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``fake_quant_qkv`` (Q/K along D, V along tokens) as one Triton pass each; BF16 ``[B, H, L, D]`` out."""
     outs = []
     for x, along_rows in ((q, False), (k, False), (v, True)):
         x = x.contiguous()
+        if along_rows and not quantize_v:
+            outs.append(x.to(torch.bfloat16))
+            continue
         y = torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
         rows = x.numel() // x.shape[-1]
         _fake_quant_kernel[(rows // _QUANT_ROWS, )](x, y, rows, D=x.shape[-1], ROWS=_QUANT_ROWS,
@@ -280,8 +285,8 @@ def _bwd_dkdv_kernel(Q, K, V, DO, LSE, DELTA, MRUN, DK, DV, K2Q_IDX, K2Q_SLOT, K
 class _FP4VSAAttnQAT(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, q2k_idx, q2k_num, kv_valid, quantize, two_level_p, first_block_max_floor, sm_scale,
-                high_prec_o):  # type: ignore[override]
+    def forward(ctx, q, k, v, q2k_idx, q2k_num, kv_valid, quantize, quantize_pv, two_level_p, first_block_max_floor,
+                sm_scale, high_prec_o):  # type: ignore[override]
         batch, heads, seq_len, dim = q.shape
         if seq_len % BLOCK or dim not in (64, 128):
             raise ValueError(f"need L % {BLOCK} == 0 and D in (64, 128), got L={seq_len}, D={dim}")
@@ -289,7 +294,7 @@ class _FP4VSAAttnQAT(torch.autograd.Function):
         if q2k_idx.shape[:3] != (batch, heads, n_blocks):
             raise ValueError(f"q2k_idx {tuple(q2k_idx.shape)} does not match {(batch, heads, n_blocks)}")
         if quantize:
-            q_hat, k_hat, v_hat = fake_quant_qkv_triton(q, k, v)
+            q_hat, k_hat, v_hat = fake_quant_qkv_triton(q, k, v, quantize_v=quantize_pv)
         else:
             q_hat, k_hat, v_hat = (t.to(torch.bfloat16).contiguous() for t in (q, k, v))
         q2k_idx = q2k_idx.to(torch.int32).contiguous()
@@ -304,6 +309,8 @@ class _FP4VSAAttnQAT(torch.autograd.Function):
         scale_log2 = sm_scale * LOG2E
         offset = LOG2_INV_TWO_LEVEL if two_level_p else 0.0
         floor = first_block_max_floor is not None
+        # Only the P quantizer reads the kernel's QUANT path; QK-only mode runs it with exact softmax.
+        quantize = bool(quantize and quantize_pv)
         grid = (n_blocks * (BLOCK // _ROWS), batch * heads)
         _fwd_kernel[grid](q_hat, k_hat, v_hat, out, out_hp, lse, m_run, q2k_idx, q2k_num, kv_valid_arg, seq_len,
                           n_blocks, width, scale_log2, OFFSET=offset, QUANT=bool(quantize), HAS_VALID=has_valid,
@@ -337,7 +344,7 @@ class _FP4VSAAttnQAT(torch.autograd.Function):
                                OFFSET=offset, QUANT=quantize, HAS_VALID=has_valid, FLOOR=floor,
                                FLOOR_VALUE=floor_value, D=dim, ROWS=_ROWS, BLOCK_N=BLOCK, num_warps=_WARPS,
                                num_stages=2)
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
 
 def fp4_vsa_attn_qat(q: torch.Tensor,
@@ -348,6 +355,7 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
                      kv_valid: torch.Tensor | None = None,
                      *,
                      quantize: bool = True,
+                     quantize_pv: bool = True,
                      two_level_p: bool = False,
                      smooth_k: bool = False,
                      first_block_max_floor: float | None = None,
@@ -359,13 +367,17 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
     pad rows zero); the lists are ``vsa_tile_mask_to_fp4_blocks(mask, 128, vbs)``
     outputs (``q2k_quad`` must be None: 128-token tiles map 1:1 onto blocks).
     ``smooth_k`` subtracts each head's token mean from K first (exact for
-    softmax, differentiable through autograd). Returns ``[B, H, L, D]`` BF16.
+    softmax, differentiable through autograd). ``quantize_pv=False`` quantizes
+    Q/K only and keeps P and V in BF16 (the FA4 NVFP4-QK + BF16-PV kernel).
+    Returns ``[B, H, L, D]`` BF16.
     """
+    if quantize and not quantize_pv and (two_level_p or first_block_max_floor is not None):
+        raise ValueError("two_level_p and first_block_max_floor shape the P quantizer; QK-only mode has none")
     if smooth_k:
         k = k - k.mean(dim=-2, keepdim=True)
     scale = sm_scale if sm_scale is not None else 1.0 / math.sqrt(q.shape[-1])
-    return _FP4VSAAttnQAT.apply(q, k, v, q2k_idx, q2k_num, kv_valid, quantize, two_level_p, first_block_max_floor,
-                                scale, high_prec_o)
+    return _FP4VSAAttnQAT.apply(q, k, v, q2k_idx, q2k_num, kv_valid, quantize, quantize_pv, two_level_p,
+                                first_block_max_floor, scale, high_prec_o)
 
 
 __all__ = ["fake_quant_qkv_triton", "fp4_vsa_attn_qat"]
