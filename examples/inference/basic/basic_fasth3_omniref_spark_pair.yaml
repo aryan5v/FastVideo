@@ -60,6 +60,11 @@ request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.
   negative_prompt: ""
+  inputs:
+    references:
+      # Ordered: the clip is conditioned on these. Replace with your own media.
+      - source: assets/images/couple.jpg
+        media_type: image
   sampling:
     seed: 1234
     height: 480
