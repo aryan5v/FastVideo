@@ -1,27 +1,23 @@
-# FastH3 OmniRef (Ref2VA) on one RTX 4090 (24 GB, no FP4): the full NVFP4 stack, one clip per prompt.
+# FastH3 OmniRef (Ref2VA) on one RTX 4090 (24 GB, no FP4): the FP8/bf16 equivalent, one clip per prompt.
 #
 # Point model_path at a composed OmniRef model directory: the distilled
 # transformer_ref export (with its packed nvfp4_weights.safetensors) symlinked
 # together with base MiniMax-H3's text_encoder, tokenizer, processor, vae and
 # audio_vae. examples/inference/basic/basic_fasth3_omniref_pdd.py builds that
-# directory and runs the same stack with --profile rtx-4090.
+# directory and runs it with --profile rtx-4090.
 #
 # The contract in the export's fastvideo_inference.json fixes the attention
 # backend, the VSA tile size and the eight-forward PDD partition; the run only
 # picks the device's offload policy and its environment:
 #
-# sm_89 has no FP4 hardware, so this profile is the closest equivalent rather
-# than the FP4 stack: FP8 linears, bf16 VSA attention (the sm_89 kernel or the
-# dense path), and the small decoder. The 24 GB card also wants a streamed DiT
-# and a hard allocator cap.
+# sm_89 has no FP4 hardware, so this profile is the closest equivalent rather than
+# the FP4 stack: FP8 linears, bf16 VSA attention, the dense light VAE decoder (the
+# NVFP4 one needs FP4 hardware too), a non-resident encoder and a hard allocator cap.
 #
 # FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3
 # FASTVIDEO_H3_VSA_SM89_KERNEL=bf16
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# FASTVIDEO_H3_ADALN_TABLE=/path/to/adaln_table.pt \
-# FASTVIDEO_H3_VAE_NVFP4_DECODER=/path/to/decoder-nvfp4.safetensors
-#
-# The NVFP4 decoder still runs on sm_89: its GEMMs fall back to CUTLASS.
+# FASTVIDEO_H3_ADALN_TABLE=/path/to/adaln_table.pt
 # fastvideo generate --config examples/inference/basic/basic_fasth3_omniref_rtx4090.yaml
 #
 # See docs/inference/fasth3_omniref_consumer.md.
@@ -54,6 +50,11 @@ request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.
   negative_prompt: ""
+  inputs:
+    references:
+      # Ordered: the clip is conditioned on these. Replace with your own media.
+      - source: assets/images/couple.jpg
+        media_type: image
   sampling:
     seed: 1234
     height: 480

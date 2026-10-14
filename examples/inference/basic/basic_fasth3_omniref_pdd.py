@@ -22,10 +22,11 @@ sequence is split across them (sequence parallelism).
 References are ordered. Pass them in order with --image / --video / --audio,
 for example ``--video dance.mp4 --image outfit.png --audio voice.wav``.
 
-``--profile {spark,rtx-pro-6000,rtx-5090}`` runs the full NVFP4 consumer stack on
+``--profile {spark,rtx-pro-6000,rtx-5090,rtx-4090}`` runs the consumer stack on
 one of those devices: a packed NVFP4 export, FP4 sparse attention with the dense
 prefix rows split off at 8-bit Q/K, and the pre-packed NVFP4 decoder, with the
-device's own offload policy and geometry. See
+device's own offload policy and geometry. The 4090, having no FP4 hardware, runs
+the closest equivalent (FP8 linears, bf16 VSA, the dense decoder) instead. See
 docs/inference/fasth3_omniref_consumer.md.
 
 ``--lossless-accel`` turns on every bit-identical speed-up the pipeline has
@@ -291,9 +292,11 @@ class DeviceProfile:
     # cannot hold the text encoder and the DiT at once (the 24/32 GB recipes use it).
     sequential_load: bool = False
     # Linear quantization. sm_89 has no FP4 hardware, so the 4090 profile is the
-    # closest equivalent rather than the FP4 stack.
+    # closest equivalent rather than the FP4 stack, in the DiT and - because the
+    # NVFP4 decoder's GEMMs need it too - in the VAE.
     transformer_quant: str = "NVFP4"
     layer_profile: str | None = "h3_dit_vsa"
+    nvfp4_decoder: bool = True
 
 
 DEVICE_PROFILES: dict[str, DeviceProfile] = {
@@ -339,8 +342,8 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
         offload=OffloadConfig(dit=False, dit_layerwise=False, text_encoder=True, vae=False, pin_cpu_memory=True),
         sequential_load=True,
         env={
-            # No FP4 hardware: FP8 linears and bf16 VSA attention instead. The
-            # NVFP4 decoder still runs; its GEMMs fall back to CUTLASS.
+            # No FP4 hardware: FP8 linears and bf16 VSA attention instead, and the
+            # dense light VAE because the NVFP4 decoder's GEMMs need FP4 too.
             "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3",
             "FASTVIDEO_H3_VSA_SM89_KERNEL": "bf16",
             "FASTVIDEO_MINIMAX_H3_FUSIONS": "all",
@@ -353,6 +356,7 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
         },
         transformer_quant="FP8",
         layer_profile=None,
+        nvfp4_decoder=False,
     ),
 }
 
@@ -361,8 +365,11 @@ def apply_profile(profile: DeviceProfile, decoder: str | None, adaln_table: str 
     """Set a profile's environment, keeping any value already in the environment."""
     for name, value in profile.env.items():
         os.environ.setdefault(name, value)
-    if decoder:
+    if decoder and profile.nvfp4_decoder:
         os.environ.setdefault("FASTVIDEO_H3_VAE_NVFP4_DECODER", decoder)
+    elif decoder:
+        print(f"--decoder ignored on {profile.label}: the NVFP4 decoder needs FP4 hardware; "
+              "this profile decodes with the VAE folder's own (dense) decoder")
     if adaln_table:
         # The AdaLN projections are a third of the DiT's bytes on disk; the
         # precomputed table drops them entirely. Every profile takes it: on the

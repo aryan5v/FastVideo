@@ -10,8 +10,7 @@
 # backend, the VSA tile size and the eight-forward PDD partition; the run only
 # picks the device's offload policy and its environment:
 #
-# GB10: cuDNN mm_fp4 and the dense batched decoder; unified memory needs both
-# # the encoder and the VAE off the GPU between stages.
+# GB10: everything stays resident; cuDNN mm_fp4 and the dense batched decoder.
 # FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3
 # FASTVIDEO_H3_VSA_FP4=1 FASTVIDEO_H3_VSA_FP4_PREFIX=fp8
 # FASTVIDEO_MINIMAX_H3_FUSIONS=all
@@ -53,6 +52,11 @@ request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.
   negative_prompt: ""
+  inputs:
+    references:
+      # Ordered: the clip is conditioned on these. Replace with your own media.
+      - source: assets/images/couple.jpg
+        media_type: image
   sampling:
     seed: 1234
     height: 480

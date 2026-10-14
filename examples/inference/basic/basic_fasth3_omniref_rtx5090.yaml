@@ -10,7 +10,8 @@
 # backend, the VSA tile size and the eight-forward PDD partition; the run only
 # picks the device's offload policy and its environment:
 #
-# 32 GB: the encoder stays off the GPU and the DiT runs one block at a time.
+# 32 GB: the text encoder stays off the GPU, the denoise modules load on demand and
+# the AdaLN table replaces adaln_proj. The DiT itself stays whole - no layerwise streaming.
 # FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3
 # FASTVIDEO_H3_VSA_FP4=1 FASTVIDEO_H3_VSA_FP4_PREFIX=fp8
 # FASTVIDEO_MINIMAX_H3_FUSIONS=all
@@ -51,6 +52,11 @@ request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.
   negative_prompt: ""
+  inputs:
+    references:
+      # Ordered: the clip is conditioned on these. Replace with your own media.
+      - source: assets/images/couple.jpg
+        media_type: image
   sampling:
     seed: 1234
     height: 480

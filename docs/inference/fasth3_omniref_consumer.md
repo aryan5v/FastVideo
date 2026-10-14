@@ -75,8 +75,9 @@ The NVFP4 stack the Blackwell profiles run is:
   weights of its quantized linears.
 
 The RTX 4090 profile substitutes FP8 linears for NVFP4 and bf16 VSA attention
-for the FP4 kernel; the NVFP4 decoder still runs, because its GEMMs fall back to
-CUTLASS on sm_89.
+for the FP4 kernel, and decodes with the VAE folder's own dense light decoder:
+the NVFP4 decoder's GEMMs need FP4 hardware too, so `--decoder` does not apply
+there.
 
 ## Environment
 
@@ -128,8 +129,8 @@ without it are a third of the DiT and do not fit alongside the rest.
 |---|---|---|
 | DiT weights on disk | 44.5 GB | 18.5 GB |
 | Qwen3-VL text encoder | 24.7 GiB (measured) | same |
-| 36-block decoder, frozen | 0.31 GiB (measured) | same |
-| 8-block `fast-8L` decoder | ~0.07 GiB | same |
+| 36-block decoder, frozen | ~1.4 GiB | same |
+| 8-block `fast-8L` decoder | 0.31 GiB (measured) | same |
 
 So the resident set is ~45 GiB where the encoder can stay, and ~19 GiB where it
 cannot. The 32 GB card is the only one of these that has to stream anything.

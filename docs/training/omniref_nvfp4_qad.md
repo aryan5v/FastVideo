@@ -48,8 +48,11 @@ The deployed student uses three formats:
      `qad.linears.skip_blocks`.
 3. **Export.** `convert_minimax_h3_modelopt_nvfp4_dit.py --act-amax amax-<variant>.json` writes the packed
    NVFP4 export. FFN layers need an amax entry; attention and gate linears without one keep the unit scale.
-   The converter quantizes every block: the bf16 blocks take effect in Gate A through `--variant` and in QAD
-   through `skip_blocks`, not in the packed export.
+   `--skip-blocks <blocks>` omits those blocks' linears from the packed file and records them in its
+   safetensors metadata, making a mixed export; the loader follows that recorded list and keeps those blocks
+   on the dense shards, so the bf16 choice carries into inference rather than being declared at run time.
+   Without `--skip-blocks` the converter quantizes every block, and the bf16 blocks then take effect only in
+   Gate A through `--variant` and in QAD through `skip_blocks`.
 4. **Gate A.** Two checks:
    - `eval_omniref_nvfp4.py` (T1) measures teacher-forced per-forward error on held-out rows. Each DiT call
      is replayed with the NVFP4 linears on identical inputs, so trajectory divergence doesn't enter.
