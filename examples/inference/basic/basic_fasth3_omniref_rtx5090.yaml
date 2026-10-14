@@ -15,6 +15,7 @@
 # FASTVIDEO_H3_VSA_FP4=1 FASTVIDEO_H3_VSA_FP4_PREFIX=fp8
 # FASTVIDEO_MINIMAX_H3_FUSIONS=all
 # FASTVIDEO_VSA_TRITON=1 FASTVIDEO_VSA_SM100A=0 FASTVIDEO_FA4=0
+# FASTVIDEO_H3_ADALN_TABLE=/path/to/adaln_table.pt \
 # FASTVIDEO_H3_VAE_NVFP4_DECODER=/path/to/decoder-nvfp4.safetensors
 # FASTVIDEO_H3_VAE_TILE_BATCH=4
 # fastvideo generate --config examples/inference/basic/basic_fasth3_omniref_rtx5090.yaml
@@ -33,9 +34,9 @@ generator:
       sp_size: 1
     offload:
       dit: false
-      dit_layerwise: true
+      dit_layerwise: false
       text_encoder: true
-      vae: true
+      vae: false
       pin_cpu_memory: true
       lazy_module_load: false
   pipeline:
@@ -45,6 +46,7 @@ generator:
     experimental:
       attention_backend: VIDEO_SPARSE_ATTN_H3
       video_decode_backend: h3-vae
+      h3_sequential_load: true
 request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.

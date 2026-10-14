@@ -36,9 +36,10 @@ generator:
     offload:
       dit: false
       dit_layerwise: false
-      text_encoder: true
-      vae: true
-      pin_cpu_memory: true
+      text_encoder: false
+      image_encoder: false
+      vae: false
+      pin_cpu_memory: false
       lazy_module_load: false
   pipeline:
     workload_type: i2v

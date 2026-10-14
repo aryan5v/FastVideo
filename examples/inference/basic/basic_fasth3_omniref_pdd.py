@@ -143,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="pre-packed NVFP4 VAE decoder (decoder-nvfp4.safetensors) used by --profile "
                         "instead of the VAE folder's own decoder")
+    parser.add_argument("--adaln-table",
+                        default=None,
+                        help="precomputed AdaLN modulation table for the small-memory profiles, so the "
+                        "26 GB of adaln_proj never loads (write one with FASTVIDEO_H3_ADALN_DUMP)")
     return parser
 
 
@@ -282,6 +286,9 @@ class DeviceProfile:
     height: int
     offload: OffloadConfig
     env: dict[str, str]
+    # Defer the denoise modules until the sampler needs them, for the cards that
+    # cannot hold the text encoder and the DiT at once (the 24/32 GB recipes use it).
+    sequential_load: bool = False
     # Linear quantization. sm_89 has no FP4 hardware, so the 4090 profile is the
     # closest equivalent rather than the FP4 stack.
     transformer_quant: str = "NVFP4"
@@ -293,8 +300,9 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
         label="NVIDIA DGX Spark (GB10, 128 GB unified)",
         width=832,
         height=480,
-        # Unified memory cannot hold the encoder and the DiT decode at once.
-        offload=OffloadConfig(dit=False, dit_layerwise=False, text_encoder=True, vae=True, pin_cpu_memory=True),
+        # 128 GB unified holds the encoder, the DiT and the decoder at once:
+        # the same resident policy as the released Spark recipe.
+        offload=OffloadConfig(dit=False, dit_layerwise=False, text_encoder=False, vae=False, pin_cpu_memory=False),
         env={
             **_CONSUMER_ENV,
             # cuDNN mm_fp4 is 2.7-3x faster than CUTLASS on the H3 FFN shapes on GB10.
@@ -315,16 +323,20 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
         label="NVIDIA RTX 5090 (32 GB)",
         width=832,
         height=480,
-        # 32 GB needs the encoder and the DiT streamed; layerwise offload keeps
-        # one block resident at a time.
-        offload=OffloadConfig(dit=False, dit_layerwise=True, text_encoder=True, vae=True, pin_cpu_memory=True),
+        # The encoder is not resident, and the denoise modules load only when the
+        # sampler needs them. The DiT itself stays whole: no layerwise streaming.
+        offload=OffloadConfig(dit=False, dit_layerwise=False, text_encoder=True, vae=False, pin_cpu_memory=True),
+        sequential_load=True,
         env={**_CONSUMER_ENV, "FASTVIDEO_H3_VAE_TILE_BATCH": "4"},
     ),
     "rtx-4090": DeviceProfile(
         label="NVIDIA RTX 4090 (24 GB, sm_89, no FP4)",
         width=832,
         height=480,
-        offload=OffloadConfig(dit=False, dit_layerwise=True, text_encoder=True, vae=True, pin_cpu_memory=True),
+        # As the 5090, but 24 GB and FP8 linears (double the bytes of NVFP4):
+        # set FASTVIDEO_DIT_LAYERWISE to stream blocks if this still OOMs.
+        offload=OffloadConfig(dit=False, dit_layerwise=False, text_encoder=True, vae=False, pin_cpu_memory=True),
+        sequential_load=True,
         env={
             # No FP4 hardware: FP8 linears and bf16 VSA attention instead. The
             # NVFP4 decoder still runs; its GEMMs fall back to CUTLASS.
@@ -344,12 +356,16 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
 }
 
 
-def apply_profile(profile: DeviceProfile, decoder: str | None) -> None:
+def apply_profile(profile: DeviceProfile, decoder: str | None, adaln_table: str | None = None) -> None:
     """Set a profile's environment, keeping any value already in the environment."""
     for name, value in profile.env.items():
         os.environ.setdefault(name, value)
     if decoder:
         os.environ.setdefault("FASTVIDEO_H3_VAE_NVFP4_DECODER", decoder)
+    if adaln_table and profile.sequential_load:
+        # The AdaLN projections are a third of the DiT's bytes on disk; the
+        # precomputed table drops them entirely, which is what makes 24/32 GB work.
+        os.environ.setdefault("FASTVIDEO_H3_ADALN_TABLE", adaln_table)
 
 
 def build_generator_config(model_dir: Path,
@@ -363,7 +379,7 @@ def build_generator_config(model_dir: Path,
         quantization = QuantizationConfig(transformer_quant=profile.transformer_quant,
                                           layer_profile=profile.layer_profile)
         offload = profile.offload
-        experimental = {}
+        experimental = {"h3_sequential_load": True} if profile.sequential_load else {}
     elif lossless_accel:
         # Resident encoders skip streaming the 63 GB text encoder (and the
         # VAEs) from host memory on every clip; pinned buffers copy the
@@ -407,7 +423,7 @@ def main() -> None:
 
     profile = DEVICE_PROFILES[args.profile] if args.profile else None
     if profile is not None:
-        apply_profile(profile, args.decoder)
+        apply_profile(profile, args.decoder, args.adaln_table)
         args.width = args.width if args.width != DEFAULT_WIDTH else profile.width
         args.height = args.height if args.height != DEFAULT_HEIGHT else profile.height
         print(f"Profile: {profile.label}")

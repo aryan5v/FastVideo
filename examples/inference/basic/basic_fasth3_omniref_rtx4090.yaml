@@ -18,6 +18,7 @@
 # FASTVIDEO_ATTENTION_BACKEND=VIDEO_SPARSE_ATTN_H3
 # FASTVIDEO_H3_VSA_SM89_KERNEL=bf16
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# FASTVIDEO_H3_ADALN_TABLE=/path/to/adaln_table.pt \
 # FASTVIDEO_H3_VAE_NVFP4_DECODER=/path/to/decoder-nvfp4.safetensors
 #
 # The NVFP4 decoder still runs on sm_89: its GEMMs fall back to CUTLASS.
@@ -36,9 +37,9 @@ generator:
       sp_size: 1
     offload:
       dit: false
-      dit_layerwise: true
+      dit_layerwise: false
       text_encoder: true
-      vae: true
+      vae: false
       pin_cpu_memory: true
       lazy_module_load: false
   pipeline:
@@ -48,6 +49,7 @@ generator:
     experimental:
       attention_backend: VIDEO_SPARSE_ATTN_H3
       video_decode_backend: h3-vae
+      h3_sequential_load: true
 request:
   prompt: >-
     A person on a sofa, lit by a warm lamp, speaking to camera.

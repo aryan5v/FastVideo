@@ -44,10 +44,20 @@ the same clip as on another. Only the memory policy differs.
 
 | Profile | Device | Geometry | Offload |
 |---|---|---|---|
-| `spark` | DGX Spark, GB10, 128 GB unified | 480p | encoder + VAE off the GPU; unified memory cannot hold both |
-| `rtx-pro-6000` | RTX PRO 6000, sm_120, 96 GB | 768p | resident encoder, DiT and decoder |
-| `rtx-5090` | RTX 5090, sm_120, 32 GB | 480p | encoder off the GPU, DiT blocks streamed one at a time |
+| `spark` | DGX Spark, GB10, 128 GB unified | 480p | none: encoder, DiT and decoder all resident, as the released Spark recipe |
+| `rtx-pro-6000` | RTX PRO 6000, sm_120, 96 GB | 768p | none: encoder, DiT and decoder all resident |
+| `rtx-5090` | RTX 5090, sm_120, 32 GB | 480p | encoder not resident, denoise modules load on demand, AdaLN table |
 | `rtx-4090` | RTX 4090, sm_89, 24 GB | 480p | as the 5090, with a hard allocator cap |
+
+The DiT itself stays whole on every profile - no layerwise block streaming. The
+32 and 24 GB cards only give up the text encoder, which is the one component
+larger than the card, and the AdaLN projections (a third of the DiT's bytes on
+disk), which the precomputed table replaces.
+
+This is a lower memory stack than the earlier INT8 deployments: NVFP4 halves
+every quantized weight against INT8, in the DiT, the encoder and the decoder,
+and the 8-block `fast-8L` decoder is a further 4.5x smaller than the 36-block
+one. The 32 GB card fit the INT8 stack before; NVFP4 makes it comfortable.
 
 The NVFP4 stack the Blackwell profiles run is:
 
@@ -74,6 +84,7 @@ The profiles set these; set them yourself if you drive the YAML recipes.
 
 | Variable | Value | Why |
 |---|---|---|
+| `FASTVIDEO_H3_ADALN_TABLE` | path, 24/32 GB only | drops the 26 GB of `adaln_proj` |
 | `FASTVIDEO_ATTENTION_BACKEND` | `VIDEO_SPARSE_ATTN_H3` | the trained backend; the contract fixes the tile size |
 | `FASTVIDEO_H3_VSA_FP4` | `1` | FP4 sparse attention (sm_120/sm_121) |
 | `FASTVIDEO_H3_VSA_FP4_PREFIX` | `fp8` | the prefix split; `bf16` is the higher-precision variant |
@@ -109,19 +120,23 @@ export already keeps blocks 42-49 in bf16.
 
 ## Memory
 
-Rough per-device working sets at 480p with one image reference, after the
-packed decoder is in place. The encoder is the dominant term when it is
-resident; streaming it is what makes 32 GB and unified memory work.
+What each component costs, at 480p with one image reference. The AdaLN column is
+why the 24 and 32 GB cards pass `FASTVIDEO_H3_ADALN_TABLE`; the same weights
+without it are a third of the DiT and do not fit alongside the rest.
 
-| Device | Resident | Streamed | Fit |
-|---|---|---|---|
-| RTX 5090, 32 GB | DiT block, decoder | Qwen3-VL encoder, DiT blocks | expected to fit |
-| RTX PRO 6000, 96 GB | encoder, DiT, decoder | - | expected to fit at 768p |
-| DGX Spark, 128 GB unified | DiT, decoder | encoder, VAE | expected to fit |
-| RTX 4090, 24 GB | FP8 DiT block | encoder, DiT blocks | expected to fit |
+| Component | NVFP4, bf16 AdaLN | with the AdaLN table |
+|---|---|---|
+| DiT weights on disk | 44.5 GB | 18.5 GB |
+| Qwen3-VL text encoder | 24.7 GiB (measured) | same |
+| 36-block decoder, frozen | 0.31 GiB (measured) | same |
+| 8-block `fast-8L` decoder | ~0.07 GiB | same |
 
-These are estimates until the devices are in hand; see the device-test checklist
-in the branch notes.
+So the resident set is ~45 GiB where the encoder can stay, and ~19 GiB where it
+cannot. The 32 GB card is the only one of these that has to stream anything.
+
+These are estimates until the devices are in hand, apart from the encoder and
+decoder figures, which were measured. See the device-test checklist in the
+branch notes.
 
 ## Apple Silicon
 
