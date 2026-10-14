@@ -62,6 +62,10 @@ class FP4AttentionNumerics:
     two_level_p: bool = False
     smooth_k: bool = False
     first_block_max_floor: float | None = None
+    # Q/K-only error-reduction studies (forward-only except ``hadamard``); see ``fp4_vsa_attn_qat``.
+    hadamard: bool = False
+    smooth_q: str | None = None
+    prefix_precision: str | None = None
 
 
 class FP4VSAFineAttention:
@@ -70,6 +74,9 @@ class FP4VSAFineAttention:
     def __init__(self, numerics: FP4AttentionNumerics) -> None:
         self.numerics = numerics
         self._reference, self._train = load_qat_vsa_modules()
+        # Listed 128x128 key blocks visited by dense-prefix query tiles vs all query tiles (FLOP share).
+        self.prefix_blocks = 0.0
+        self.total_blocks = 0.0
 
     def __call__(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask: torch.Tensor,
                  metadata: Any) -> torch.Tensor:
@@ -77,6 +84,10 @@ class FP4VSAFineAttention:
             raise ValueError(f"the FP4 VSA emulator models 128-token tiles only, got {metadata.tile_elems}")
         q2k_idx, q2k_num, kv_valid = self._reference.tile128_mask_to_fp4_blocks(mask, metadata.variable_block_sizes)
         q, k, v = (t.transpose(1, 2) for t in (query, key, value))
+        num_prefix_tiles = int(getattr(metadata, "num_prefix_tiles", 0) or 0)
+        if self.numerics.prefix_precision is not None:
+            self.prefix_blocks += float(q2k_num[..., :num_prefix_tiles].sum())
+            self.total_blocks += float(q2k_num.sum())
         out = self._train.fp4_vsa_attn_qat(q,
                                            k,
                                            v,
@@ -87,7 +98,11 @@ class FP4VSAFineAttention:
                                            quantize_pv=self.numerics.quantize_pv,
                                            two_level_p=self.numerics.two_level_p,
                                            smooth_k=self.numerics.smooth_k,
-                                           first_block_max_floor=self.numerics.first_block_max_floor)
+                                           first_block_max_floor=self.numerics.first_block_max_floor,
+                                           hadamard=self.numerics.hadamard,
+                                           smooth_q=self.numerics.smooth_q,
+                                           prefix_precision=self.numerics.prefix_precision,
+                                           num_prefix_tiles=num_prefix_tiles)
         return out.transpose(1, 2)
 
 
