@@ -174,7 +174,10 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
                                                      quantize_pv=bool(attention.get("quantize_pv", True)),
                                                      two_level_p=bool(attention.get("two_level_p", False)),
                                                      smooth_k=bool(attention.get("smooth_k", False)),
-                                                     first_block_max_floor=None if floor is None else float(floor))
+                                                     first_block_max_floor=None if floor is None else float(floor),
+                                                     hadamard=bool(attention.get("hadamard", False)),
+                                                     smooth_q=attention.get("smooth_q"),
+                                                     prefix_precision=attention.get("prefix_precision"))
         elif self._trainable:
             # Tile 128 has no other grad-capable kernel: train through the emulator with exact softmax.
             self.fp4_numerics = FP4AttentionNumerics(quantize=False)
