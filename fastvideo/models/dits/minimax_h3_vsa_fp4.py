@@ -159,10 +159,16 @@ def _shared_input_projections(linears: tuple[Any, ...], x: torch.Tensor) -> list
 
 @torch.compile(dynamic=True, fullgraph=True)
 def _fp8_per_token(x: torch.Tensor) -> torch.Tensor:
-    """``[..., D]`` BF16 -> per-(row, head) FP8 E4M3 -> BF16, the prefix Q/K precision of the QK study."""
+    """``[..., D]`` BF16 -> per-(row, head) FP8 E4M3 -> BF16, the prefix Q/K precision of the QK study.
+
+    Element for element the emulator's ``fp8_per_token_fake_quant``. The zero
+    scale is spelled as a reciprocal rather than a clamp so that a row with a
+    subnormal amax rounds the same way in both.
+    """
     xf = x.float()
-    scale = (xf.abs().amax(dim=-1, keepdim=True) / _FP8_MAX).clamp_min(1e-12)
-    return ((xf / scale).to(_FP8).float() * scale).to(torch.bfloat16)
+    scale = xf.abs().amax(dim=-1, keepdim=True) / _FP8_MAX
+    inv = torch.where(scale == 0, torch.zeros_like(scale), 1.0 / scale)
+    return (xf * inv).clamp(-_FP8_MAX, _FP8_MAX).to(_FP8).float().mul(scale).to(torch.bfloat16)
 
 
 def _half_row_valid(kv_valid: torch.Tensor, half: int) -> torch.Tensor:
@@ -177,16 +183,18 @@ def _prefix_dense_attention(query: torch.Tensor, key: torch.Tensor, value: torch
     VSA gives every prefix (non-video) query tile every key column, so those rows need no
     block lists. Running them off the FP4 kernel lets their Q/K stay at 8-bit precision,
     which is where most of the FP4 attention error sits (the dense prefix rows carry the
-    text, reference and audio queries). K smoothing is exact - it shifts every score row
-    by the same constant - and is applied before the FP8 rounding.
+    text, reference and audio queries).
+
+    K smoothing is exact - it shifts every score row by the same constant - and runs
+    before the FP8 rounding, in the order the emulator and the QAD student use.
     """
     import torch.nn.functional as F
 
     q, k, v = query[:, :prefix_rows], key[:, :logical], value[:, :logical]
+    k = k - k.mean(dim=1, keepdim=True)
     if precision == "fp8":
         q, k = _fp8_per_token(q), _fp8_per_token(k)
     valid = key_valid[:logical]
-    k = k - k.sum(dim=1, keepdim=True) / valid.sum().clamp_min(1)
     out = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
                                          attn_mask=valid[None, None, None, :],
                                          scale=1.0 / math.sqrt(q.shape[-1]))
@@ -297,9 +305,12 @@ def vsa_fp4_attention(attn: Any, hidden_states: torch.Tensor, rotary_emb: tuple[
             with STAGES.span("prefix_attention"):
                 prefix_out = _prefix_dense_attention(query, key, value, prefix_rows, logical, key_valid, prefix_mode)
             # Lists come from vsa_tile_mask_to_fp4_blocks and are in range; skip the per-call host sync.
-            video_out = _sparse_fp4_attention(api, query[:, prefix_rows:logical], key, value, q2k_idx[:, :, head:],
-                                              q2k_num[:, :, head:], kv_valid,
-                                              None if q2k_quad is None else q2k_quad[:, :, head:])
+            # The kernel reads the lists as dense tensors, and slicing the query blocks
+            # leaves a gap between heads, so make the views contiguous.
+            video_out = _sparse_fp4_attention(api, query[:, prefix_rows:logical], key, value,
+                                              q2k_idx[:, :, head:].contiguous(), q2k_num[:, :, head:].contiguous(),
+                                              kv_valid,
+                                              None if q2k_quad is None else q2k_quad[:, :, head:].contiguous())
             out = torch.cat((prefix_out, video_out), dim=2)
             if layout.rows > logical:  # pad rows only feed the untile gather
                 out = torch.cat((out, query.new_zeros((query.shape[0], *query.shape[2:], layout.rows - logical))), dim=2)

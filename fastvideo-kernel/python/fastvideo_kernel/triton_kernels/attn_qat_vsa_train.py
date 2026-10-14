@@ -491,7 +491,7 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
         n_groups = 2 if smooth_q == "segment" else 1
         groups = _query_groups(n_blocks, num_prefix_tiles, smooth_q == "segment", q.device)
         q_lo, bias = _smooth_queries(q_lo, k_lo, groups, n_groups)
-    out = _FP4VSAAttnQAT.apply(q_lo, k_lo, v, q2k_idx, num_fp4, kv_valid, True, quantize_pv, two_level_p,
+    out = _FP4VSAAttnQAT.apply(q_lo, k_lo, v, q2k_idx, num_fp4, kv_valid, quantize, quantize_pv, two_level_p,
                                first_block_max_floor, scale, high_prec_o, bias, groups)
     if not hp_tiles:
         return out
