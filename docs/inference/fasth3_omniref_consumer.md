@@ -89,6 +89,24 @@ The profiles set these; set them yourself if you drive the YAML recipes.
 `fastvideo-kernel` must be built for the device: `12.0a` on sm_120, `12.1a` on
 GB10 (which needs CUDA 13). Building on the machine resolves the right one.
 
+### Fallbacks, and what they cost
+
+The FP4 attention route needs that kernel build. If it is missing or fails, the
+attention falls back in this order, and never silently:
+
+1. **FP4 kernel + prefix split** (the profiles above): fastest, the validated
+   numerics.
+2. **`FASTVIDEO_H3_VSA_FINE_ATTENTION=emulator-mix8`**: the Triton emulator of
+   the same kernel, with the same prefix split. Needs no consumer-Blackwell
+   kernel build, but is slower. Use it to confirm a bad clip is the kernel and
+   not the model.
+3. **bf16 VSA**: unset `FASTVIDEO_H3_VSA_FP4`. The reference quality, no FP4
+   kernel needed. This is what an sm_89 device runs.
+
+Dropping a component for a whole run is the last resort. If one NVFP4 component
+fails a quality check, keep the rest and move the smallest piece - the way the
+export already keeps blocks 42-49 in bf16.
+
 ## Memory
 
 Rough per-device working sets at 480p with one image reference, after the
