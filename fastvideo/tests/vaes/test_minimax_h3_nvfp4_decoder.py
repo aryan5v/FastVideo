@@ -514,7 +514,7 @@ def test_loader_applies_exported_nvfp4_decoder(tmp_path):
     assert isinstance(layer, NVFP4DecoderLinear) and layer.act_scale == "unit" and not layer.frozen  # CPU
     state = vae.decoder.state_dict()
     for key, value in expected.items():
-        assert torch.equal(state[key].to(value.dtype), value), key
+        assert torch.equal(state[key].to(value.dtype).cpu(), value), key
     assert not any(parameter.requires_grad for parameter in vae.parameters())
 
 
@@ -671,7 +671,7 @@ def test_loader_applies_packed_safetensors_without_master_weights(tmp_path):
     for key, value in checkpoint["decoder"].items():
         module, _, param = key.rpartition(".")
         actual = getattr(named[module], param)
-        assert actual.dtype == value.dtype and torch.equal(actual, value), key
+        assert actual.dtype == value.dtype and torch.equal(actual.cpu(), value), key
     assert not any(parameter.requires_grad for parameter in vae.parameters())
 
 
