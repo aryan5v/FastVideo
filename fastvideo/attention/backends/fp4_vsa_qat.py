@@ -34,6 +34,11 @@ def _load(name: str) -> ModuleType:
         return importlib.import_module(f"fastvideo_kernel.triton_kernels.{name}")
     except ImportError:
         pass
+    except KeyError:
+        # An earlier failed `fastvideo_kernel` import leaves a None entry in
+        # sys.modules, and the machinery then raises KeyError instead of
+        # ImportError. Same meaning for us: fall back to this checkout's tree.
+        pass
     if _PRIVATE_PACKAGE not in sys.modules:
         if not (_KERNEL_DIR / f"{name}.py").is_file():
             raise ImportError(f"{name}.py is neither in the installed fastvideo_kernel nor in {_KERNEL_DIR}")
