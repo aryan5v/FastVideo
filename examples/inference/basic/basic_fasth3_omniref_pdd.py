@@ -282,6 +282,10 @@ class DeviceProfile:
     height: int
     offload: OffloadConfig
     env: dict[str, str]
+    # Linear quantization. sm_89 has no FP4 hardware, so the 4090 profile is the
+    # closest equivalent rather than the FP4 stack.
+    transformer_quant: str = "NVFP4"
+    layer_profile: str | None = "h3_dit_vsa"
 
 
 DEVICE_PROFILES: dict[str, DeviceProfile] = {
@@ -316,6 +320,27 @@ DEVICE_PROFILES: dict[str, DeviceProfile] = {
         offload=OffloadConfig(dit=False, dit_layerwise=True, text_encoder=True, vae=True, pin_cpu_memory=True),
         env={**_CONSUMER_ENV, "FASTVIDEO_H3_VAE_TILE_BATCH": "4"},
     ),
+    "rtx-4090": DeviceProfile(
+        label="NVIDIA RTX 4090 (24 GB, sm_89, no FP4)",
+        width=832,
+        height=480,
+        offload=OffloadConfig(dit=False, dit_layerwise=True, text_encoder=True, vae=True, pin_cpu_memory=True),
+        env={
+            # No FP4 hardware: FP8 linears and bf16 VSA attention instead. The
+            # NVFP4 decoder still runs; its GEMMs fall back to CUTLASS.
+            "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3",
+            "FASTVIDEO_H3_VSA_SM89_KERNEL": "bf16",
+            "FASTVIDEO_MINIMAX_H3_FUSIONS": "all",
+            "FASTVIDEO_VSA_TRITON": "1",
+            "FASTVIDEO_VSA_SM100A": "0",
+            "FASTVIDEO_FA4": "0",
+            # A 24 GB card fragments easily once the DiT is streamed.
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "FASTVIDEO_H3_VAE_TILE_BATCH": "4",
+        },
+        transformer_quant="FP8",
+        layer_profile=None,
+    ),
 }
 
 
@@ -335,7 +360,8 @@ def build_generator_config(model_dir: Path,
     if profile is not None:
         # `h3_dit_vsa` matches the packed export the consumer weights ship; the
         # export's metadata names its bf16 blocks, so no skip list is needed.
-        quantization = QuantizationConfig(transformer_quant="NVFP4", layer_profile="h3_dit_vsa")
+        quantization = QuantizationConfig(transformer_quant=profile.transformer_quant,
+                                          layer_profile=profile.layer_profile)
         offload = profile.offload
         experimental = {}
     elif lossless_accel:
