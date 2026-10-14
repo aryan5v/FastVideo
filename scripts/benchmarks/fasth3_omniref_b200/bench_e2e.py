@@ -19,6 +19,13 @@ environment variable passed with ``--env NAME=VALUE`` before the workers start.
 * ``default``: FastVideo's OmniRef example as shipped (FSDP DiT, text encoder and
   VAEs offloaded to host between uses).
 * ``lossless``: the example's ``--lossless-accel`` (bit-identical to ``default``).
+
+``--nvfp4-dit`` loads the composed directory's packed NVFP4 ``transformer_ref``
+(``layer_profile="h3_dit_vsa"``; replicated weights, since FSDP inference takes
+no packed NVFP4). The NVFP4 text encoder is the composed directory's
+``text_encoder`` (its ``config.json`` selects the serialized NVFP4 path); the
+NVFP4 decoder and the FA4 attention are environment switches
+(``FASTVIDEO_H3_VAE_NVFP4_DECODER``, ``FASTVIDEO_H3_VSA_FINE_ATTENTION``).
 """
 
 from __future__ import annotations
@@ -164,8 +171,18 @@ def summarize(runs: list[dict], num_gpus: int) -> dict:
     }
 
 
-def build_config(example, model_dir: Path, num_gpus: int, preset: str):
-    return example.build_generator_config(model_dir, num_gpus, lossless_accel=preset == "lossless")
+def build_config(example, model_dir: Path, num_gpus: int, preset: str, nvfp4_dit: bool):
+    from dataclasses import replace
+
+    from fastvideo.api import QuantizationConfig
+
+    config = example.build_generator_config(model_dir, num_gpus, lossless_accel=preset == "lossless")
+    if not nvfp4_dit:
+        return config
+    engine = replace(config.engine,
+                     use_fsdp_inference=False,
+                     quantization=QuantizationConfig(transformer_quant="NVFP4", layer_profile="h3_dit_vsa"))
+    return replace(config, engine=engine)
 
 
 def main() -> None:
@@ -177,6 +194,7 @@ def main() -> None:
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--preset", choices=("default", "lossless"), default="lossless")
     parser.add_argument("--env", nargs="*", default=[], help="NAME=VALUE set before the workers start")
+    parser.add_argument("--nvfp4-dit", action="store_true", help="packed NVFP4 DiT from the composed directory")
     parser.add_argument("--warm-runs", type=int, default=5)
     parser.add_argument("--label", default="")
     parser.add_argument("--out", required=True)
@@ -199,7 +217,7 @@ def main() -> None:
     from fastvideo import VideoGenerator
 
     load_started = time.perf_counter()
-    generator = VideoGenerator.from_config(build_config(example, model_dir, args.num_gpus, args.preset))
+    generator = VideoGenerator.from_config(build_config(example, model_dir, args.num_gpus, args.preset, args.nvfp4_dit))
     load_s = time.perf_counter() - load_started
     results = []
     try:
@@ -223,6 +241,7 @@ def main() -> None:
     report = {
         "label": args.label,
         "preset": args.preset,
+        "nvfp4_dit": args.nvfp4_dit,
         "env": args.env,
         "num_gpus": args.num_gpus,
         "model_path": str(model_dir),

@@ -27,6 +27,7 @@ VARIANTS = {
     "qk_sqseg": dict(quantize_pv=False, smooth_k=True, smooth_q="segment"),
     "qk_mix16": dict(quantize_pv=False, smooth_k=True, prefix_precision="bf16"),
     "qk_mix8": dict(quantize_pv=False, smooth_k=True, prefix_precision="fp8"),
+    "qk_mixmx": dict(quantize_pv=False, smooth_k=True, prefix_precision="mxfp8"),
     "qk_had_mix16": dict(quantize_pv=False, smooth_k=True, hadamard=True, prefix_precision="bf16"),
     "qk_had_mix8": dict(quantize_pv=False, smooth_k=True, hadamard=True, prefix_precision="fp8"),
     "qk_had_sq": dict(quantize_pv=False, smooth_k=True, hadamard=True, smooth_q="global"),

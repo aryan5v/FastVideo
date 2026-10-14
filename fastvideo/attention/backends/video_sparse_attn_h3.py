@@ -538,6 +538,24 @@ def _sm100a_unavailable_reason(sm100a_mod: Any, query_bhsd: torch.Tensor, variab
     return None
 
 
+@functools.cache
+def _fine_attention_from_name(name: str) -> Any:
+    kind, _, mode = name.partition("-")
+    if kind == "fa4":
+        from fastvideo.attention.backends.fa4_vsa_h3 import FA4VSAFineAttention
+        return FA4VSAFineAttention(mode)
+    from fastvideo.attention.backends.fp4_vsa_qat import FP4AttentionNumerics, FP4VSAFineAttention
+    prefix = {"mix8": "fp8", "mixmx": "mxfp8", "qk": None}[mode]
+    return FP4VSAFineAttention(
+        FP4AttentionNumerics(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision=prefix))
+
+
+def fine_attention_from_env() -> Any:
+    """The ``FASTVIDEO_H3_VSA_FINE_ATTENTION`` replacement of the tile-128 fine kernel (shared), or None."""
+    name = envs.FASTVIDEO_H3_VSA_FINE_ATTENTION.get()
+    return _fine_attention_from_name(name) if name else None
+
+
 class MiniMaxH3VSAImpl(AttentionImpl):
 
     def __init__(
@@ -577,7 +595,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         # ``fn(query, key, value, mask, metadata) -> [B, S, H, D]`` on the
         # logical tile-ordered rows. Quantization-aware training installs its
         # FP4 emulator here; it is also the only grad-capable tile-128 route.
-        self.fine_attention_override: Any = None
+        self.fine_attention_override: Any = fine_attention_from_env()
 
     def prepare_for_compile(self, device: torch.device) -> None:
         """Tensorize per-layer state shared by every torch.compile route."""

@@ -18,13 +18,14 @@ attention of every VSA-H3 layer:
 * ``kernel``: the deployed bf16 sm_100a VSA-128 kernel;
 * ``emulator-<mode>``: the QAD FP4 attention emulator (``fp4_vsa_qat``) in the
   given numerics: ``mix8`` (NVFP4 Q/K video rows, per-token FP8 prefix rows, bf16
-  P.V, K smoothing), ``qk`` (NVFP4 Q/K everywhere) or ``mxfp8`` (MXFP8 prefix rows);
+  P.V, K smoothing), ``qk`` (NVFP4 Q/K everywhere) or ``mixmx`` (MXFP8 prefix rows, the FA4 kernel numerics);
 * ``fa4-<mode>``: the FA4 sm_100 kernels (``fastvideo.attention.backends.fa4_vsa_h3``).
 
 Per row the saved target video and audio rows are compared (rel-L2) with the
 sample file's ``--compare-key`` entries (``student`` = the QAD harness's own
 8-forward sample, ``teacher`` = its bf16 teacher), and written to ``--out`` with
-the same keys for later quality scoring.
+the harness's sample keys (``student_*`` = this run, ``teacher_*`` copied from the saved sample) so
+``audio_stats_gate.py`` and the endpoint metrics read it like a harness eval directory.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ sys.path.insert(0, str(HERE.parents[2] / "distill" / "minimax_h3_omniref_qad"))
 EMULATOR_MODES = {
     "mix8": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="fp8"),
     "mix16": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="bf16"),
-    "mxfp8": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="mxfp8"),
+    "mixmx": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="mxfp8"),
     "qk": dict(quantize=True, quantize_pv=False, smooth_k=True),
 }
 
@@ -156,8 +157,13 @@ def main() -> None:
                           video_bit_exact=bool(torch.equal(video, ref_video.float())),
                           audio_bit_exact=bool(torch.equal(audio, ref_audio.float())))
         if rank == 0:
-            torch.save({"video": video, "audio": audio, "seed": int(spec["seed"]), "case": spec["case"]},
-                       out_dir / f"{spec['id']}.pt")
+            sample = {"student_video": video, "student_audio": audio, "seed": int(spec["seed"]), "case": spec["case"]}
+            if sample_path is not None and sample_path.is_file():
+                sample.update(teacher_video=saved["teacher_video"], teacher_audio=saved["teacher_audio"],
+                              latent_shape=saved.get("latent_shape"))
+                record.update(video_vs_teacher=round(rel_l2(video, saved["teacher_video"]), 5),
+                              audio_vs_teacher=round(rel_l2(audio, saved["teacher_audio"]), 5))
+            torch.save(sample, out_dir / f"{spec['id']}.pt")
             print("VERIFY", json.dumps(record), flush=True)
         results.append(record)
     if rank == 0:
@@ -169,6 +175,8 @@ def main() -> None:
             "mean_audio_rel_l2": round(sum(r["audio_rel_l2"] for r in compared) / max(len(compared), 1), 5),
             "max_video_rel_l2": max((r["video_rel_l2"] for r in compared), default=None),
             "max_audio_rel_l2": max((r["audio_rel_l2"] for r in compared), default=None),
+            "mean_video_vs_teacher": round(sum(r["video_vs_teacher"] for r in compared) / max(len(compared), 1), 5),
+            "mean_audio_vs_teacher": round(sum(r["audio_vs_teacher"] for r in compared) / max(len(compared), 1), 5),
         }
         (out_dir / "summary.json").write_text(
             json.dumps({

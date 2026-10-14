@@ -378,6 +378,20 @@ def fp8_per_token_fake_quant(x: torch.Tensor) -> torch.Tensor:
     return (xf * inv).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale
 
 
+def mxfp8_fake_quant(x: torch.Tensor) -> torch.Tensor:
+    """MXFP8 fake quant along the last dim: E4M3 values, one E8M0 (power-of-two) scale per 32; fp32 out.
+
+    The scale is ``2**ceil(log2(amax / 448))``, bit-identical to ``flashinfer.mxfp8_quantize`` (the FA4
+    MXFP8 Q/K operands) on sm_100.
+    """
+    if x.shape[-1] % 32:
+        raise ValueError(f"last dim {x.shape[-1]} is not a multiple of 32")
+    xf = x.float().unflatten(-1, (-1, 32))
+    amax = xf.abs().amax(dim=-1, keepdim=True).clamp_min(1e-30)
+    scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)).clamp(-127.0, 127.0))
+    return ((xf / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale).flatten(-2)
+
+
 def _query_groups(n_blocks: int, num_prefix_tiles: int | None, segmented: bool, device: torch.device) -> torch.Tensor:
     """Per query tile: 0 for dense-prefix tiles, 1 for video tiles (all 0 unless ``segmented``)."""
     groups = torch.zeros(n_blocks, dtype=torch.int32, device=device)
@@ -436,9 +450,11 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
       one mean for the dense-prefix query tiles and one for the video tiles;
       the exact correction ``mu_q . k_j`` is added to every score as a
       high-precision per-key bias.
-    * ``prefix_precision``: ``"bf16"`` or ``"fp8"`` (E4M3, per-token scales)
-      Q/K for the first ``num_prefix_tiles`` query tiles (text, reference and
-      audio rows), as a second call over the same lists; video rows stay FP4.
+    * ``prefix_precision``: ``"bf16"``, ``"fp8"`` (E4M3, per-token scales) or
+      ``"mxfp8"`` (E4M3, power-of-two scale per 32 channels, the FA4 kernel's
+      MXFP8 operands) Q/K for the first ``num_prefix_tiles`` query tiles (text,
+      reference and audio rows), as a second call over the same lists; video
+      rows stay FP4.
     """
     qk_only = quantize and not quantize_pv
     if quantize and not quantize_pv and (two_level_p or first_block_max_floor is not None):
@@ -447,8 +463,8 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
         raise ValueError("hadamard / smooth_q / prefix_precision are Q/K-only (quantize_pv=False) options")
     if smooth_q not in (None, "global", "segment"):
         raise ValueError(f"smooth_q must be None, 'global' or 'segment', got {smooth_q!r}")
-    if prefix_precision not in (None, "bf16", "fp8"):
-        raise ValueError(f"prefix_precision must be None, 'bf16' or 'fp8', got {prefix_precision!r}")
+    if prefix_precision not in (None, "bf16", "fp8", "mxfp8"):
+        raise ValueError(f"prefix_precision must be None, 'bf16', 'fp8' or 'mxfp8', got {prefix_precision!r}")
     if (smooth_q == "segment" or prefix_precision) and num_prefix_tiles is None:
         raise ValueError("smooth_q='segment' and prefix_precision need num_prefix_tiles")
     if smooth_k:
@@ -477,10 +493,11 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
     if not hp_tiles:
         return out
     num_hp = q2k_num - num_fp4
-    q_hp, k_hp = (q, k) if prefix_precision == "bf16" else (fp8_per_token_fake_quant(q), fp8_per_token_fake_quant(k))
+    hp_quant = {"bf16": lambda t: t, "fp8": fp8_per_token_fake_quant, "mxfp8": mxfp8_fake_quant}[prefix_precision]
+    q_hp, k_hp = hp_quant(q), hp_quant(k)
     out_hp = _FP4VSAAttnQAT.apply(q_hp, k_hp, v, q2k_idx, num_hp, kv_valid, False, True, False, None, scale,
                                   high_prec_o, None, None)
     return out + out_hp
 
 
-__all__ = ["fake_quant_qkv_triton", "fp4_vsa_attn_qat", "fp8_per_token_fake_quant"]
+__all__ = ["fake_quant_qkv_triton", "fp4_vsa_attn_qat", "fp8_per_token_fake_quant", "mxfp8_fake_quant"]
