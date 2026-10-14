@@ -40,7 +40,7 @@ generator:
       text_encoder: false
       image_encoder: false
       vae: false
-      pin_cpu_memory: true
+      pin_cpu_memory: false
       lazy_module_load: false
     compile:
       enabled: false
