@@ -171,6 +171,7 @@ class MiniMaxH3OmniRefPDDModel(ModelBase):
         if attention.get("enabled", True):
             floor = attention.get("first_block_max_floor")
             self.fp4_numerics = FP4AttentionNumerics(quantize=True,
+                                                     quantize_pv=bool(attention.get("quantize_pv", True)),
                                                      two_level_p=bool(attention.get("two_level_p", False)),
                                                      smooth_k=bool(attention.get("smooth_k", False)),
                                                      first_block_max_floor=None if floor is None else float(floor))

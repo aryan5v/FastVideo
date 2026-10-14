@@ -54,9 +54,11 @@ class FP4AttentionNumerics:
     """Numeric mode of the deployed kernel; mirror whatever inference ships.
 
     ``quantize=False`` keeps the emulator's sparse structure with exact
-    softmax (a BF16, grad-capable tile-128 route).
+    softmax (a BF16, grad-capable tile-128 route). ``quantize_pv=False``
+    quantizes Q/K only, with P and V in BF16 (FA4 NVFP4-QK + BF16 PV).
     """
     quantize: bool = True
+    quantize_pv: bool = True
     two_level_p: bool = False
     smooth_k: bool = False
     first_block_max_floor: float | None = None
@@ -82,6 +84,7 @@ class FP4VSAFineAttention:
                                            q2k_num,
                                            kv_valid,
                                            quantize=self.numerics.quantize,
+                                           quantize_pv=self.numerics.quantize_pv,
                                            two_level_p=self.numerics.two_level_p,
                                            smooth_k=self.numerics.smooth_k,
                                            first_block_max_floor=self.numerics.first_block_max_floor)
