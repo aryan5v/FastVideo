@@ -337,8 +337,15 @@ def maybe_load_fsdp_model(
     weight_dir_list = dense_transformer_safetensors(weight_dir_list)
     quant_config = getattr(init_params.get("config"), "quant_config", None)
     packed_profiles = ("h3_dit", "h3_dit_ffn", "h3_dit_vsa")
-    packed_nvfp4_export = (packed_candidate
-                           if getattr(quant_config, "layer_profile", None) in packed_profiles else None)
+    packed_layer_profile = getattr(quant_config, "layer_profile", None)
+    packed_nvfp4_export = packed_candidate if packed_layer_profile in packed_profiles else None
+    if packed_candidate is not None and packed_nvfp4_export is None:
+        # A packed export leaves its quantized linears out of the dense shards, so
+        # loading it with any other profile misses those weights.
+        raise ValueError(
+            f"{packed_candidate} is a packed MiniMax-H3 NVFP4 export, which keeps the quantized linears out of "
+            f"the dense shards, but the quantization profile is {packed_layer_profile!r}. Load it with an NVFP4 "
+            f"config (layer_profile one of {', '.join(packed_profiles)}), or point the run at a dense export.")
     if packed_nvfp4_export is not None and lora_path is not None:
         raise ValueError("Packed MiniMax-H3 NVFP4 DiT export cannot be combined with lora_path; "
                          "merge the adapter before exporting, or load without the packed file.")
