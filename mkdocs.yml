@@ -185,6 +185,7 @@ nav:
     - Offloading: inference/offloading.md
     - Optimizations: inference/optimizations.md
     - FastH3 on RTX PRO 6000: inference/fasth3_rtx_pro_6000.md
+    - FastH3 OmniRef on consumer devices: inference/fasth3_omniref_consumer.md
     - ComfyUI: inference/comfyui.md
     - Support Matrix: inference/support_matrix.md
     - LTX-2.5: inference/ltx2_5.md
