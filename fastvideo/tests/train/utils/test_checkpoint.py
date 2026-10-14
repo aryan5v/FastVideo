@@ -353,3 +353,18 @@ def test_maybe_save_triggers_on_each_interval(tmp_path: Path) -> None:
     for step in range(1, 41):
         mgr.maybe_save(step=step)
     assert calls == [10, 20, 30, 40]
+
+
+# ---------------------------------------------------------------------------
+# save_tagged: tag validation (before any filesystem change)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tag", [".", "..", "", "-best", "a/b", "checkpoint-5", "../best"])
+def test_save_tagged_rejects_unsafe_tags_without_touching_disk(tmp_path: Path, tag: str) -> None:
+    run_dir = tmp_path / "run"
+    keep = _make_checkpoint_dir(run_dir, 10)
+    manager = _make_manager(run_dir)
+    with pytest.raises(ValueError):
+        manager.save_tagged(tag, 10)
+    assert keep.is_dir() and run_dir.is_dir()
