@@ -25,7 +25,7 @@
     <p id="intro-default">Each pair shows the same AI-generated clip rendered by two different video decoders. Composition and
       motion are identical; only the image quality differs (sharpness, texture, fine detail, color, flicker).
       Pick the one that looks better.</p>
-    <p id="intro-audio" class="hidden">Use the Audio control (or <kbd>M</kbd>) to choose which side you hear.</p>
+    <p id="intro-audio" class="hidden">Sound is on: you hear the video under your cursor (on a phone, the one you last tapped). <kbd>M</kbd> switches sides.</p>
     <p>Tip: press <kbd>Z</kbd> for a 1:1 zoom on fine detail.</p>
     <p class="muted">A session is 12 comparisons. You can stop any time — every vote counts.</p>
     <form id="intro-form" class="name-form">
@@ -75,12 +75,7 @@
     <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
     <span id="time" class="mono">0.0 / 0.0 s</span>
     <label title="Loop both videos"><input type="checkbox" id="loop-chk" checked> Loop</label>
-    <span id="audio-ctl" class="segmented hidden" role="group" aria-label="Audio">
-      <span class="seg-label">Audio:</span>
-      <button type="button" data-audio="off" aria-pressed="true">Off</button>
-      <button type="button" data-audio="left" aria-pressed="false">Left</button>
-      <button type="button" data-audio="right" aria-pressed="false">Right</button>
-    </span>
+    
     <span id="no-audio-note" class="muted small hidden">These clips have no sound</span>
     <label title="Show pixels at 1:1 and pan both views together (z)"><input type="checkbox" id="zoom-chk"> 1:1 zoom</label>
     <label title="Show which decoder was which after each vote"><input type="checkbox" id="reveal-chk" checked> Show names after vote</label>
@@ -102,7 +97,7 @@
   <p id="status" class="status" role="status"></p>
   <p class="muted small">You can stop any time — every vote counts.
     Keys: <kbd>1</kbd>-<kbd>4</kbd> vote, <kbd>space</kbd> play/pause, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> step 1 s,
-    <kbd>z</kbd> 1:1 zoom, <kbd>m</kbd> audio, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
+    <kbd>z</kbd> 1:1 zoom, <kbd>m</kbd> switch sound side, <kbd>p</kbd> prompt, <kbd>Enter</kbd>/<kbd>n</kbd> next.</p>
 </main>
 <script src="/static/app.js"></script>
 </body>

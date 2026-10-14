@@ -10,7 +10,8 @@ const STORE = {
 };
 const MAX_NAME_LEN = 64;
 const AUDIO_PROBE_S = 0.5;  // fallback detection: check decoded audio bytes after this much playback
-const DRIFT_TOLERANCE_S = 0.08;
+const DRIFT_TOLERANCE_S = 0.04;   // follower drift below this is ignored
+const RESEEK_S = 0.5;              // only a drift this large is fixed by seeking (a seek interrupts audio)
 const SESSION_GOAL = 12;
 
 let ballot = null;          // current ballot from the server
@@ -21,8 +22,8 @@ let playedMs = 0;           // wall time spent playing for this ballot
 let lastTick = 0;
 let seeking = false;
 let totalVotes = null;      // this voter's votes across all sessions, from the server
-const AUDIO_CHOICES = ["off", "left", "right"];
-let audioChoice = "off";    // which side you hear (remembered across ballots)
+const AUDIO_CHOICES = ["left", "right"];
+let audioChoice = "left";   // the side you hear: follows the video under the pointer or last tapped
 let clipHasAudio = false;   // whether the current clip has an audio track
 let audioProbePending = false;
 
@@ -31,7 +32,7 @@ function loadSettings() {
   $("reveal-chk").checked = localStorage.getItem(STORE.reveal) !== "0";
   $("loop-chk").checked = localStorage.getItem(STORE.loop) !== "0";
   const saved = localStorage.getItem(STORE.audio);
-  audioChoice = AUDIO_CHOICES.includes(saved) ? saved : "off";
+  audioChoice = AUDIO_CHOICES.includes(saved) ? saved : "left";
   applyAudio();
 }
 function saveSetting(key, value) { localStorage.setItem(key, value); }
@@ -135,6 +136,8 @@ function setStatus(text, isError) {
 // ---------- playback sync ----------
 function durationOf(v) { return Number.isFinite(v.duration) ? v.duration : 0; }
 function master() {
+  // The audible video is the timing master, so the follower correction never touches the sound.
+  if (clipHasAudio && durationOf(videos[audioChoice])) return videos[audioChoice];
   return durationOf(videos.right) > durationOf(videos.left) ? videos.right : videos.left;
 }
 function maxDuration() { return Math.max(durationOf(videos.left), durationOf(videos.right)); }
@@ -183,10 +186,19 @@ function tick(now) {
   lastTick = now;
   const m = master();
   const s = m === videos.left ? videos.right : videos.left;
-  if (!seeking && durationOf(s) && m.currentTime < durationOf(s) - 0.05
-      && Math.abs(s.currentTime - m.currentTime) > DRIFT_TOLERANCE_S) {
-    s.currentTime = m.currentTime;
+  if (!seeking && durationOf(s) && m.currentTime < durationOf(s) - 0.05) {
+    const drift = s.currentTime - m.currentTime;
+    if (Math.abs(drift) > RESEEK_S) {
+      s.currentTime = m.currentTime;
+      s.playbackRate = 1;
+    } else if (Math.abs(drift) > DRIFT_TOLERANCE_S) {
+      // Nudge the muted follower's speed instead of seeking it every frame.
+      s.playbackRate = drift > 0 ? 0.95 : 1.05;
+    } else {
+      s.playbackRate = 1;
+    }
   }
+  if (m.playbackRate !== 1) m.playbackRate = 1;
   updateTimeUi();
   requestAnimationFrame(tick);
 }
@@ -208,23 +220,19 @@ function onEnded(event) {
   }
 }
 
-// ---------- audio: Off / Left / Right, with the audible side highlighted ----------
+// ---------- audio: always on, from the video under the pointer (or last tapped) ----------
 function applyAudio() {
-  const active = clipHasAudio ? audioChoice : "off";
+  const active = clipHasAudio ? audioChoice : "none";
   for (const side of ["left", "right"]) {
     videos[side].muted = active !== side;
     viewports[side].classList.toggle("audible", active === side);
     $(`speaker-${side}`).classList.toggle("hidden", active !== side);
   }
-  document.querySelectorAll("#audio-ctl button").forEach((b) => {
-    b.setAttribute("aria-pressed", String(b.dataset.audio === audioChoice));
-  });
-  $("audio-ctl").classList.toggle("hidden", !clipHasAudio);
   $("no-audio-note").classList.toggle("hidden", clipHasAudio);
 }
 
 function setAudio(choice) {
-  if (!AUDIO_CHOICES.includes(choice)) return;
+  if (!AUDIO_CHOICES.includes(choice) || choice === audioChoice) return;
   audioChoice = choice;
   saveSetting(STORE.audio, choice);
   applyAudio();
@@ -403,7 +411,10 @@ document.addEventListener("keydown", (e) => {
 $("play-btn").addEventListener("click", togglePlay);
 $("next-btn").addEventListener("click", advance);
 $("voter-btn").addEventListener("click", showIntro);
-document.querySelectorAll("#audio-ctl button").forEach((b) => b.addEventListener("click", () => setAudio(b.dataset.audio)));
+for (const side of ["left", "right"]) {
+  viewports[side].addEventListener("pointerenter", () => setAudio(side));
+  viewports[side].addEventListener("pointerdown", () => setAudio(side));
+}
 $("voter-input").addEventListener("input", () => {
   updateStartButton();
   $("name-hint").textContent = "Your name is saved with each vote.";
