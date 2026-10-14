@@ -55,7 +55,9 @@ The NVFP4 stack the Blackwell profiles run is:
 - **Attention:** VSA sparsity 0.9, 128-token tiles, reference keep 0.1, on the
   FP4 sparse kernel, with the dense prefix rows split off and run at 8-bit Q/K
   and bf16 P·V. The prefix split is what keeps the text, reference and audio
-  rows - the conditioning the clip is built from - out of the FP4 rounding.
+  rows - the conditioning the clip is built from - out of the FP4 rounding. It
+  is single-rank for now: at `sp_size` above 1 every row still goes through the
+  FP4 kernel.
 - **Text encoder:** the NVFP4 Qwen3-VL encoder, unchanged from the 8-step V2
   NVFP4 consumer release, including the vision tokens every reference adds.
 - **Decoder:** the pre-packed NVFP4 decoder (`decoder-nvfp4.safetensors`), which
