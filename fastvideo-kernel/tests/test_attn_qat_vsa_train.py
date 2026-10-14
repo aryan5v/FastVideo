@@ -221,3 +221,63 @@ def test_triton_fake_quant_is_bit_identical_to_reference():
     want = ref.fake_quant_qkv(q, k, v)
     for name, a, b in zip("qkv", got, want, strict=True):
         assert torch.equal(a.float(), b.to(torch.bfloat16).float()), name
+
+
+def _bias_reference(q, k, v, token_mask, bias):
+    """fp32 softmax((q k^T + bias[key]) / sqrt(D)) v over ``token_mask``."""
+    s = (q.float() @ k.float().transpose(-1, -2) + bias[..., None, :]) / math.sqrt(q.shape[-1])
+    p = torch.softmax(s.masked_fill(~token_mask, float("-inf")), -1).nan_to_num(0.0)
+    return p @ v.float()
+
+
+@needs_gpu
+def test_triton_key_bias_matches_reference():
+    """The eval-only per-key score bias (Q-smoothing correction) enters the scores before the softmax."""
+    q, k, v, q2k_idx, q2k_num, kv_valid, _, _ = _problem(5, heads=2, seed=11, device="cuda")
+    bias = 3.0 * torch.randn(1, 2, 1, q.shape[2], device="cuda")
+    out = _triton()._FP4VSAAttnQAT.apply(q, k, v, q2k_idx, q2k_num, kv_valid, False, True, False, None,
+                                         1 / math.sqrt(128), True, bias, None)
+    token_mask = ref.dense_block_mask(q2k_idx, q2k_num, q.shape[2], kv_valid)
+    assert _rel(out, _bias_reference(q, k, v, token_mask, bias[:, :, 0])) < 5e-3
+
+
+@pytest.mark.parametrize("n_groups", [1, 2])
+def test_query_smoothing_correction_is_exact(n_groups):
+    q, k, *_ = _problem(4, heads=2, seed=12)
+    groups = torch.tensor([0, 0, 1, 1], dtype=torch.int32) if n_groups == 2 else torch.zeros(4, dtype=torch.int32)
+    q_c, bias = _triton()._smooth_queries(q, k, groups, n_groups)
+    row_group = groups.repeat_interleave(ref.BLOCK).long()
+    rebuilt = q_c @ k.float().transpose(-1, -2) + bias[:, :, row_group]
+    assert _rel(rebuilt, q.float() @ k.float().transpose(-1, -2)) < 1e-5
+    assert q_c[:, :, row_group == 0].mean(-2).abs().max() < 1e-5
+
+
+def test_hadamard_is_orthogonal():
+    h = _triton()._hadamard(128, torch.device("cpu"))
+    assert torch.allclose(h @ h.T, torch.eye(128), atol=1e-6)
+
+
+@needs_gpu
+def test_triton_qk_variants_reduce_to_known_modes():
+    """Hadamard = QK-only on rotated inputs; BF16 prefix rows = exact rows; all-prefix = no quantization."""
+    q, k, v, q2k_idx, q2k_num, kv_valid, _, _ = _problem(6, heads=2, seed=13, device="cuda")
+    fn = _triton().fp4_vsa_attn_qat
+    qk = dict(quantize_pv=False, smooth_k=True)
+    rot = _triton()._hadamard(128, q.device)
+    k_s = k - k.mean(dim=-2, keepdim=True)
+    q_hat, k_hat, _ = ref.fake_quant_qkv(q.float() @ rot, k_s.float() @ rot, v)
+    expected = ref.fp4_vsa_attention_reference(q_hat.bfloat16(), k_hat.bfloat16(), v, q2k_idx, q2k_num, kv_valid,
+                                               quantize=False)
+    assert _rel(fn(q, k, v, q2k_idx, q2k_num, kv_valid, hadamard=True, **qk), expected) < 5e-3
+    exact = fn(q, k, v, q2k_idx, q2k_num, kv_valid, quantize=False, smooth_k=True)
+    plain = fn(q, k, v, q2k_idx, q2k_num, kv_valid, **qk)
+    mixed = fn(q, k, v, q2k_idx, q2k_num, kv_valid, prefix_precision="bf16", num_prefix_tiles=2, **qk)
+    rows = 2 * ref.BLOCK
+    assert _rel(mixed[:, :, :rows], exact[:, :, :rows]) < 1e-3
+    assert _rel(mixed[:, :, rows:], plain[:, :, rows:]) < 1e-3
+    all_hp = fn(q, k, v, q2k_idx, q2k_num, kv_valid, prefix_precision="bf16", num_prefix_tiles=6, **qk)
+    assert _rel(all_hp, exact) < 1e-3
+    smoothed = fn(q, k, v, q2k_idx, q2k_num, kv_valid, smooth_q="global", **qk)
+    assert _rel(smoothed, exact) < 0.5
+    with pytest.raises(ValueError):
+        fn(q, k, v, q2k_idx, q2k_num, kv_valid, hadamard=True)  # P.V quantized: not a Q/K-only mode
