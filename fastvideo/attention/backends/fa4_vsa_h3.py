@@ -10,6 +10,11 @@ block-sparse attention over the selected tiles is replaced. Numerics per mode:
   dense-prefix query tiles (text, reference, audio;
   ``MiniMaxH3VSAMetadata.num_prefix_tiles``), BF16 P.V, K smoothing. The QAD
   emulator's ``prefix_precision="mxfp8"`` is the same computation.
+* ``mix8`` (the validated QAD numerics): as ``mixmx`` but the prefix Q/K are E4M3
+  with one fp32 scale per token (``amax / 448``, the emulator's
+  ``prefix_precision="fp8"``). The E4M3 codes run through the MXFP8 MMA with unit
+  block scales; the kernel multiplies each score by ``q_scale[row] * k_scale[col]``
+  before the row max.
 * ``qk``: NVFP4 Q/K for every query tile, BF16 P.V, K smoothing.
 * ``bf16``: BF16 Q/K (FA4's dense kernel with the same block lists); a layout check.
 
@@ -46,6 +51,7 @@ TILE = 128
 PAIR = 2 * TILE
 MODES: dict[str, tuple[str, str]] = {
     # mode -> (prefix query tiles, video query tiles)
+    "mix8": ("fp8tok", "nvfp4"),
     "mixmx": ("mxfp8", "nvfp4"),
     "qk": ("nvfp4", "nvfp4"),
     "bf16": ("bf16", "bf16"),
@@ -53,14 +59,14 @@ MODES: dict[str, tuple[str, str]] = {
 
 
 @functools.cache
-def _fa4() -> tuple[Any, Any, Any]:
+def _fa4() -> tuple[Any, Any, Any, Any]:
     from flash_attn.cute.block_sparsity import BlockSparseTensorsTorch
     from flash_attn.cute.interface import _flash_attn_fwd
 
-    return _flash_attn_fwd, BlockSparseTensorsTorch, _vsa_mask_mod()
+    return _flash_attn_fwd, BlockSparseTensorsTorch, _vsa_mask_mod(False), _vsa_mask_mod(True)
 
 
-def _vsa_mask_mod() -> Any:
+def _vsa_mask_mod(token_scales: bool) -> Any:
     """``mask_mod`` keeping key ``n`` for query ``m`` iff ``n % 128 < limit[b, h, m // 128, n // 128]``."""
     import cutlass
     import cutlass.cute as cute
@@ -78,6 +84,9 @@ def _vsa_mask_mod() -> Any:
     # Our FA4 build applies this mask as one column limit per (query tile, key block) (``mask.py``); the
     # per-element body above is the reference semantics and the fallback on builds without that path.
     vsa_tile_mask.vsa_col_limit = True
+    # Per-token FP8 operands: the kernel also scales every score by q_scale[row] * k_scale[col]
+    # (aux_tensors[1], aux_tensors[2]); only our FA4 build implements this.
+    vsa_tile_mask.vsa_token_scales = token_scales
     return vsa_tile_mask
 
 
@@ -85,6 +94,8 @@ def _quantize(x: torch.Tensor, fmt: str) -> tuple[torch.Tensor, torch.Tensor | N
     """``[B, S, H, D]`` BF16 -> FA4 token-major operand and its swizzled scale factors (groups along D)."""
     if fmt == "bf16":
         return x, None
+    if fmt == "fp8tok":
+        raise ValueError("per-token FP8 operands come from _quantize_fp8_per_token")
     from flashinfer.quantization import SfLayout, mxfp8_quantize, nvfp4_quantize
 
     b, s, h, d = x.shape
@@ -104,10 +115,26 @@ def _quantize(x: torch.Tensor, fmt: str) -> tuple[torch.Tensor, torch.Tensor | N
         sf = sf.view(torch.float8_e8m0fnu)
     else:
         raise ValueError(f"unknown FA4 operand format {fmt!r}")
-    rest_k = (d // vec) // 4
-    sf = sf.reshape(b, s // TILE, h, rest_k, 32, 4, 4)
-    sf = sf.permute(0, 2, 1, 3, 4, 5, 6).contiguous().permute(4, 5, 2, 6, 3, 1, 0)
-    return data, sf
+    return data, _sf_layout(sf, b, s, h, d, vec)
+
+
+def _quantize_fp8_per_token(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``[B, S, H, D]`` -> E4M3 codes of ``x / s`` (``s = amax / 448`` per token and head, the emulator's
+    ``fp8_per_token_fake_quant``), unit MXFP8 block scales in FA4's layout, and ``s`` as ``[B, H, S]`` fp32."""
+    b, s, h, d = x.shape
+    xf = x.float()
+    scale = xf.abs().amax(dim=-1, keepdim=True) / 448.0
+    inv = torch.where(scale == 0, torch.zeros_like(scale), 1.0 / scale)
+    codes = (xf * inv).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    unit = torch.full((b * s, h * d // 32), 127, dtype=torch.uint8, device=x.device)  # E8M0 2**0
+    return codes, _sf_layout(unit.view(torch.float8_e8m0fnu), b, s, h, d, 32), scale[..., 0].permute(0, 2,
+                                                                                                     1).contiguous()
+
+
+def _sf_layout(sf: torch.Tensor, b: int, s: int, h: int, d: int, vec: int) -> torch.Tensor:
+    """Swizzled 128x4 scale factors ``[b * s, h * d / vec]`` -> the token-major layout FA4 reads."""
+    sf = sf.reshape(b, s // TILE, h, (d // vec) // 4, 32, 4, 4)
+    return sf.permute(0, 2, 1, 3, 4, 5, 6).contiguous().permute(4, 5, 2, 6, 3, 1, 0)
 
 
 def _pair_lists(limit: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -145,6 +172,21 @@ def _groups(mode: str, n_tiles: int, num_prefix_tiles: int) -> list[tuple[str, i
             (prefix_fmt, 0, min(n_tiles, prefix + prefix % 2), 0, prefix)]
 
 
+def _merge_lists(cnt_a: torch.Tensor, idx_a: torch.Tensor, cnt_b: torch.Tensor,
+                 idx_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Union of two packed-left block lists (disjoint), packed left again."""
+    n = idx_a.shape[-1]
+    cols = torch.arange(n, device=idx_a.device)
+    keep = torch.zeros(*idx_a.shape[:-1], n + 1, dtype=torch.bool, device=idx_a.device)
+    for cnt, idx in ((cnt_a, idx_a), (cnt_b, idx_b)):
+        valid = cols < cnt[..., None]
+        keep.scatter_(-1, torch.where(valid, idx.long(), n), valid)
+    keep = keep[..., :n]
+    count = keep.sum(dim=-1, dtype=torch.int32)
+    idx = torch.where(keep, cols.to(torch.int32), n).sort(dim=-1).values.clamp_max(n - 1).to(torch.int32)
+    return count.contiguous(), idx.contiguous()
+
+
 def fa4_vsa_attention(query: torch.Tensor,
                       key: torch.Tensor,
                       value: torch.Tensor,
@@ -159,7 +201,7 @@ def fa4_vsa_attention(query: torch.Tensor,
     """
     if mode not in MODES:
         raise ValueError(f"FA4 VSA mode must be one of {sorted(MODES)}, got {mode!r}")
-    flash_attn_fwd, block_sparse_tensors, mask_mod = _fa4()
+    flash_attn_fwd, block_sparse_tensors, mask_mod, scaled_mask_mod = _fa4()
     b, s, h, d = query.shape
     n_tiles = tile_mask.shape[-1]
     if s != n_tiles * TILE:
@@ -176,14 +218,30 @@ def fa4_vsa_attention(query: torch.Tensor,
     lists = _pair_lists(limit)
     out = torch.empty_like(query)
     scale = 1.0 / math.sqrt(d)
-    keys: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
+    keys: dict[str, tuple[Any, ...]] = {}
     for fmt, t0, t1, _own0, own1 in _groups(mode, n_tiles, num_prefix_tiles):
-        if fmt not in keys:
-            keys[fmt] = _quantize(key, fmt)
-        k_op, sf_k = keys[fmt]
-        q_op, sf_q = _quantize(query[:, t0 * TILE:t1 * TILE], fmt)
         p0, p1 = t0 // 2, (t1 + 1) // 2
-        mask_cnt, mask_idx, full_cnt, full_idx = (t[:, :, p0:p1] for t in lists)
+        aux = [limit[:, :, t0:t0 + 2 * (p1 - p0)].contiguous()]
+        if fmt == "fp8tok":
+            if fmt not in keys:
+                keys[fmt] = _quantize_fp8_per_token(key)
+            k_op, sf_k, k_scale = keys[fmt]
+            q_op, sf_q, q_scale = _quantize_fp8_per_token(query[:, t0 * TILE:t1 * TILE])
+            # Rows of a trailing half-filled Q block read q_scale too: pad it to whole Q256 blocks.
+            q_scale = torch.nn.functional.pad(q_scale, (0, 2 * (p1 - p0) * TILE - q_scale.shape[-1]))
+            aux += [k_scale, q_scale]
+            # Every listed block needs the score scaling, so none may take the unmasked "full" path.
+            full_cnt, full_idx = lists[2][:, :, p0:p1], lists[3][:, :, p0:p1]
+            mask_cnt, mask_idx = _merge_lists(lists[0][:, :, p0:p1], lists[1][:, :, p0:p1], full_cnt, full_idx)
+            full_cnt, full_idx = torch.zeros_like(full_cnt), torch.zeros_like(full_idx)
+            group_mask_mod = scaled_mask_mod
+        else:
+            if fmt not in keys:
+                keys[fmt] = _quantize(key, fmt)
+            k_op, sf_k = keys[fmt]
+            q_op, sf_q = _quantize(query[:, t0 * TILE:t1 * TILE], fmt)
+            mask_cnt, mask_idx, full_cnt, full_idx = (t[:, :, p0:p1] for t in lists)
+            group_mask_mod = mask_mod
         sparse = block_sparse_tensors(mask_block_cnt=mask_cnt.contiguous(),
                                       mask_block_idx=mask_idx.contiguous(),
                                       full_block_cnt=full_cnt.contiguous(),
@@ -196,9 +254,9 @@ def fa4_vsa_attention(query: torch.Tensor,
                                 k_op,
                                 value,
                                 softmax_scale=scale,
-                                mask_mod=mask_mod,
+                                mask_mod=group_mask_mod,
                                 block_sparse_tensors=sparse,
-                                aux_tensors=[limit[:, :, t0:t0 + 2 * (p1 - p0)].contiguous()],
+                                aux_tensors=aux,
                                 out=target if target.is_contiguous() else None,
                                 mSFQ=sf_q,
                                 mSFK=sf_k)

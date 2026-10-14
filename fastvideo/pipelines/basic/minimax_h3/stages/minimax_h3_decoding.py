@@ -59,6 +59,37 @@ def _decode_participation(fastvideo_args: FastVideoArgs, want_parallel: bool) ->
     return sp_group, is_output_rank, False
 
 
+def _maybe_dump_generation(batch: ForwardBatch, layout: Any) -> None:
+    """``FASTVIDEO_H3_DUMP_DIR``: save the request's final target rows and its text conditioning for evaluation.
+
+    Writes ``<seed>-<prompt sha1[:12]>.pt`` with ``video`` / ``audio`` (the target rows the decoders read, fp32),
+    ``prompt_embeds`` and ``text_token_tags``.
+    """
+    import hashlib
+    import os
+
+    import fastvideo.envs as envs
+
+    directory = envs.FASTVIDEO_H3_DUMP_DIR.get()
+    if not directory:
+        return
+    from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_conditioning import MINIMAX_H3_TEXT_TOKEN_TAGS_KEY
+
+    os.makedirs(directory, exist_ok=True)
+    tag = hashlib.sha1(str(batch.prompt).encode()).hexdigest()[:12]
+    audio = batch.audio_latents
+    record = {
+        "seed": batch.seed,
+        "prompt": batch.prompt,
+        "video": batch.latents[layout.num_condition_video_rows:].float().cpu(),
+        "audio": None if audio is None else audio[layout.num_condition_audio_rows:].float().cpu(),
+        "prompt_embeds": batch.prompt_embeds[0].float().cpu() if batch.prompt_embeds else None,
+        "text_token_tags": batch.extra.get(MINIMAX_H3_TEXT_TOKEN_TAGS_KEY),
+        "raw_latent_shape": tuple(batch.raw_latent_shape),
+    }
+    torch.save(record, os.path.join(directory, f"{batch.seed}-{tag}.pt"))
+
+
 class MiniMaxH3VideoDecodingStage(PipelineStage):
     """Drop visual condition rows, unpatchify, and decode the target video."""
 
@@ -114,6 +145,8 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
         layout = _layout(batch)
         if batch.latents is None or batch.raw_latent_shape is None or len(batch.raw_latent_shape) != 5:
             raise ValueError("MiniMax-H3 video latents or raw geometry are missing at decode.")
+        if is_output_rank:
+            _maybe_dump_generation(batch, layout)
         _, channels, num_frames, latent_height, latent_width = batch.raw_latent_shape
         latents = unpatchify_video_tokens(
             batch.latents[layout.num_condition_video_rows:],

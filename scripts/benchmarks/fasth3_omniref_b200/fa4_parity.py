@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import torch
 
 EMULATOR = {
+    "mix8": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="fp8"),
     "mixmx": dict(quantize=True, quantize_pv=False, smooth_k=True, prefix_precision="mxfp8"),
     "qk": dict(quantize=True, quantize_pv=False, smooth_k=True),
     "bf16": dict(quantize=False),
