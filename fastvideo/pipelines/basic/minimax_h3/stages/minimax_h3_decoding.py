@@ -76,7 +76,10 @@ def _maybe_dump_generation(batch: ForwardBatch, layout: Any) -> None:
     from fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_conditioning import MINIMAX_H3_TEXT_TOKEN_TAGS_KEY
 
     os.makedirs(directory, exist_ok=True)
-    tag = hashlib.sha1(str(batch.prompt).encode()).hexdigest()[:12]
+    # The geometry is part of the tag: the same prompt and seed at two shapes are
+    # two different clips, and only the filename separates their dumps.
+    geometry = repr(tuple(batch.raw_latent_shape))
+    tag = hashlib.sha1(f"{batch.prompt}\x00{geometry}".encode()).hexdigest()[:12]
     audio = batch.audio_latents
     record = {
         "seed": batch.seed,
@@ -181,6 +184,10 @@ class MiniMaxH3VideoDecodingStage(PipelineStage):
         if self.vae is None:
             raise RuntimeError("MiniMax-H3 full VAE decode requires a loaded video VAE.")
         pinned_offload.load(self.vae, device, pin=fastvideo_args.pin_cpu_memory)
+        # An NVFP4 decoder swapped in on the CPU could not pack its linears there;
+        # freeze them now that the VAE is on the device, on the first decode.
+        from fastvideo.models.vaes.minimax_h3_nvfp4_decoder import freeze_nvfp4_linears_on_device
+        freeze_nvfp4_linears_on_device(self.vae)
         try:
             latents = self.vae.denormalize_latents(latents.to(device=device, dtype=torch.float32))
             if fastvideo_args.output_type == "latent":

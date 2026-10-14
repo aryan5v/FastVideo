@@ -264,6 +264,16 @@ class NVFP4DecoderLinear(nn.Module):
             self._fused = (version, state)
         return self._fused[1]
 
+    def clear_offload_caches(self) -> None:
+        """Drop the packed and fused caches, which are plain attributes and so invisible to offload.
+
+        ``pinned_offload`` moves parameters and buffers only; these caches hold device
+        tensors, so without this they stay on the GPU after an unload and accumulate
+        across clips. The data-pointer keys re-create them on the next forward.
+        """
+        self._packed = None
+        self._fused = None
+
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"rotation_group={self.rotation_group}, act_scale={self.act_scale}, frozen={self.frozen}")
@@ -341,6 +351,9 @@ def enable_fused_blocks(decoder: nn.Module) -> None:
 
 
 def nvfp4_linears(module: nn.Module) -> list[NVFP4DecoderLinear]:
+    """Every NVFP4 decoder linear under ``module``; empty for a stub that is not an ``nn.Module``."""
+    if not isinstance(module, nn.Module):
+        return []
     return [sub for sub in module.modules() if isinstance(sub, NVFP4DecoderLinear)]
 
 
@@ -381,6 +394,27 @@ def nvfp4_decoder_metadata(names: list[str], rotation_group: int | None, skip_bl
 def freeze_nvfp4_linears(module: nn.Module) -> int:
     """``freeze()`` every NVFP4 linear under ``module`` (inference only); return how many."""
     layers = nvfp4_linears(module)
+    for layer in layers:
+        layer.freeze()
+    return len(layers)
+
+
+def freeze_nvfp4_linears_on_device(module: nn.Module) -> int:
+    """``freeze_nvfp4_linears`` once ``module`` is on an accelerator; 0 when it is not.
+
+    ``_apply_h3_nvfp4_decoder`` cannot freeze a VAE that was built on the CPU,
+    because packing needs the CUDA FP4 kernels. With VAE offload that is every
+    load, so the layers keep their fp32 masters and a plain-attribute packed
+    cache for the whole decode. Freeze at the first CUDA load instead: the packed
+    weight is then a buffer, which is both smaller and movable by ``pinned_offload``.
+    """
+    if not isinstance(module, nn.Module):
+        return 0
+    layers = [layer for layer in nvfp4_linears(module)
+              if not layer.frozen and not layer.dense_bypass and not layer.calibrating]
+    parameters = next(module.parameters(), None)
+    if not layers or parameters is None or parameters.device.type != "cuda":
+        return 0
     for layer in layers:
         layer.freeze()
     return len(layers)

@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import statistics
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,9 +47,20 @@ NVML_POLL_S = 0.1
 
 
 def _example():
+    """The example module, loaded by path.
+
+    ``@dataclass`` resolves the example's postponed annotations through the
+    defining module's ``__dict__``, so it has to be registered in ``sys.modules``
+    before it runs - ``module_from_spec`` alone leaves that entry missing.
+    """
     spec = importlib.util.spec_from_file_location("basic_fasth3_omniref_pdd", EXAMPLE)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 
@@ -79,6 +91,8 @@ class GpuMemoryPeak:
     def __exit__(self, *exc) -> None:
         self._stop.set()
         self._thread.join()
+        # Release the init count this context took, so repeated calls do not stack.
+        self._nvml.nvmlShutdown()
 
 
 def load_case(path: str, selector: str) -> dict:

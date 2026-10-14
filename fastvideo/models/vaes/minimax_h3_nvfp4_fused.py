@@ -575,6 +575,11 @@ def _run_blocks(plans: list[_BlockPlan], hidden: torch.Tensor, rotary_emb: tuple
 GRAPH_MAX_ROWS = 4 * 1797
 
 
+# Replayed geometries kept at once. Each entry holds static tensors and a graph's memory pool, so a
+# long-lived generator that walks through tile batching choices must not keep every shape it has seen.
+GRAPH_CACHE_LIMIT = 2
+
+
 class _GraphedStack(NamedTuple):
     plan_ids: tuple[int, ...]
     graph: torch.cuda.CUDAGraph
@@ -584,11 +589,44 @@ class _GraphedStack(NamedTuple):
     out: torch.Tensor
 
 
+def _weight_pointers(blocks: nn.ModuleList) -> tuple[int, ...]:
+    """A signature of where the blocks' weights live.
+
+    A captured graph bakes the weight addresses into its kernels, so a replay is
+    only valid while they stay put. ``pinned_offload`` hands out fresh device
+    storage on every load, which changes them; including them in the cache key
+    re-captures instead of replaying against freed addresses.
+    """
+    return tuple(t.data_ptr() for t in blocks.parameters())
+
+
+def _trim_graphs(graphs: dict) -> None:
+    """Keep the most recent ``GRAPH_CACHE_LIMIT`` geometries (the ``warm`` markers are tiny)."""
+    geometries = [key for key in graphs if not (isinstance(key, tuple) and key[:1] == ("warm", ))]
+    for key in geometries[:-GRAPH_CACHE_LIMIT]:
+        graphs.pop(key, None)
+        graphs.pop(("warm", key), None)
+
+
+def _clear_graph_entries(graphs: dict) -> None:
+    """Release every captured graph (and its memory pool) in ``graphs``."""
+    for entry in graphs.values():
+        if isinstance(entry, _GraphedStack):
+            entry.graph.reset()
+    graphs.clear()
+
+
 def _graphed_blocks(blocks: nn.ModuleList, plans: list[_BlockPlan], hidden: torch.Tensor,
                     rotary_emb: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     """``_run_blocks`` through a CUDA graph captured per input geometry (same kernels, same bits)."""
-    key = (hidden.device, tuple(hidden.shape), tuple(rotary_emb[0].shape), rotary_emb[0].dtype)
+    key = (hidden.device, tuple(hidden.shape), tuple(rotary_emb[0].shape), rotary_emb[0].dtype,
+           _weight_pointers(blocks))
     graphs: dict = blocks.__dict__.setdefault("_nvfp4_cuda_graphs", {})
+    if "clear_offload_caches" not in blocks.__dict__:
+        # The graph cache lives on this ModuleList, not on a parameter or buffer of
+        # it, so the generic offload walk needs a hook to find it. An unload hands
+        # out fresh device storage, and a replay against the old addresses is wrong.
+        blocks.__dict__["clear_offload_caches"] = lambda: _clear_graph_entries(graphs)
     plan_ids = tuple(id(plan) for plan in plans)
     entry = graphs.get(key)
     if entry is None or entry.plan_ids != plan_ids:
@@ -603,6 +641,7 @@ def _graphed_blocks(blocks: nn.ModuleList, plans: list[_BlockPlan], hidden: torc
             static_out = _run_blocks(plans, static_hidden, (static_cos, static_sin))
         entry = _GraphedStack(plan_ids, graph, static_hidden, static_cos, static_sin, static_out)
         graphs[key] = entry
+        _trim_graphs(graphs)
     entry.hidden.copy_(hidden)
     entry.cos.copy_(rotary_emb[0])
     entry.sin.copy_(rotary_emb[1])

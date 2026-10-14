@@ -25,6 +25,11 @@ def rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12))
 
 
+def rel_or_none(a: torch.Tensor | None, b: torch.Tensor | None) -> float | None:
+    """``rel`` when both sides carry the modality; a dump without audio writes None."""
+    return None if a is None or b is None else round(rel(a, b), 5)
+
+
 def load(directory: str) -> dict[str, dict]:
     """Dumps keyed by prompt hash (the seed differs between a seed and a seed+1 arm)."""
     out = {}
@@ -51,7 +56,7 @@ def main() -> None:
         if a["seed"] != b["seed"]:
             raise SystemExit(f"{key}: seeds differ ({a['seed']} vs {b['seed']})")
         row = {"prompt_hash": key, "seed": a["seed"], "video": round(rel(a["video"], b["video"]), 5),
-               "audio": round(rel(a["audio"], b["audio"]), 5)}
+               "audio": rel_or_none(a.get("audio"), b.get("audio"))}
         if a.get("prompt_embeds") is not None and b.get("prompt_embeds") is not None:
             tags = torch.as_tensor(b["text_token_tags"]).long()
             ea, eb = a["prompt_embeds"][0], b["prompt_embeds"][0]
@@ -65,7 +70,7 @@ def main() -> None:
                 row["vision_tokens"] = int((~text).sum())
         if key in seed1:
             row["ref_seed_floor_video"] = round(rel(seed1[key]["video"], b["video"]), 5)
-            row["ref_seed_floor_audio"] = round(rel(seed1[key]["audio"], b["audio"]), 5)
+            row["ref_seed_floor_audio"] = rel_or_none(seed1[key].get("audio"), b.get("audio"))
         rows.append(row)
         print("COMPARE", json.dumps(row), flush=True)
         if args.samples_out:
