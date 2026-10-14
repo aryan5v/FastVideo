@@ -145,8 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "instead of the VAE folder's own decoder")
     parser.add_argument("--adaln-table",
                         default=None,
-                        help="precomputed AdaLN modulation table for the small-memory profiles, so the "
-                        "26 GB of adaln_proj never loads (write one with FASTVIDEO_H3_ADALN_DUMP)")
+                        help="precomputed AdaLN modulation table, so the 26 GB of adaln_proj never loads "
+                        "(write one once with FASTVIDEO_H3_ADALN_DUMP). Strongly recommended: the 24/32 GB "
+                        "profiles need it to keep the DiT resident")
     return parser
 
 
@@ -362,9 +363,11 @@ def apply_profile(profile: DeviceProfile, decoder: str | None, adaln_table: str 
         os.environ.setdefault(name, value)
     if decoder:
         os.environ.setdefault("FASTVIDEO_H3_VAE_NVFP4_DECODER", decoder)
-    if adaln_table and profile.sequential_load:
+    if adaln_table:
         # The AdaLN projections are a third of the DiT's bytes on disk; the
-        # precomputed table drops them entirely, which is what makes 24/32 GB work.
+        # precomputed table drops them entirely. Every profile takes it: on the
+        # 24/32 GB cards it is what makes residency possible, and elsewhere it
+        # buys headroom for the reference tokens.
         os.environ.setdefault("FASTVIDEO_H3_ADALN_TABLE", adaln_table)
 
 

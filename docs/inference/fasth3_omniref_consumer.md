@@ -84,7 +84,7 @@ The profiles set these; set them yourself if you drive the YAML recipes.
 
 | Variable | Value | Why |
 |---|---|---|
-| `FASTVIDEO_H3_ADALN_TABLE` | path, 24/32 GB only | drops the 26 GB of `adaln_proj` |
+| `FASTVIDEO_H3_ADALN_TABLE` | path, every device | drops the 26 GB of `adaln_proj`; the 24/32 GB profiles need it to stay resident |
 | `FASTVIDEO_ATTENTION_BACKEND` | `VIDEO_SPARSE_ATTN_H3` | the trained backend; the contract fixes the tile size |
 | `FASTVIDEO_H3_VSA_FP4` | `1` | FP4 sparse attention (sm_120/sm_121) |
 | `FASTVIDEO_H3_VSA_FP4_PREFIX` | `fp8` | the prefix split; `bf16` is the higher-precision variant |

@@ -18,6 +18,7 @@
 # FASTVIDEO_H3_VAE_TILE_BATCH=12 FASTVIDEO_H3_VAE_INT8_OVERLAY=0 \
 # FASTVIDEO_MINIMAX_H3_FUSIONS=all \
 # FASTVIDEO_VSA_TRITON=1 FASTVIDEO_VSA_SM100A=0 FASTVIDEO_FA4=0 \
+# FASTVIDEO_H3_ADALN_TABLE=/path/to/adaln_table.pt \
 # FASTVIDEO_H3_VAE_NVFP4_DECODER=/path/to/decoder-nvfp4.safetensors \
 # fastvideo generate --config examples/inference/basic/basic_fasth3_omniref_spark_pair.yaml
 #
