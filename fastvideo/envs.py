@@ -582,6 +582,15 @@ FASTVIDEO_H3_VSA_FP4 = EnvBool(False,
                                category="attention",
                                doc="Run MiniMax-H3 VSA attention on the block-sparse SageAttention3 FP4 kernel "
                                "(sm_120 or GB10 sm_121, no-grad, single sequence-parallel rank).")
+FASTVIDEO_H3_VSA_FP4_PREFIX = EnvChoice(
+    "",
+    choices=("", "fp8", "bf16"),
+    category="attention",
+    doc="Prefix split for the FP4 sparse attention kernel: keep the dense prefix query tiles (text, "
+    "reference and audio rows) off the FP4 kernel and run those rows densely with fp8 or bf16 Q/K and "
+    "bf16 P.V, while video query tiles stay on the FP4 kernel. The fp8 variant is the validated "
+    "training-time numerics and recovers most of the audio error that FP4 quantizes away. Needs "
+    "128-token tiles. Empty keeps every row on the FP4 kernel.")
 FASTVIDEO_H3_VSA_FINE_ATTENTION = EnvChoice(
     "",
     choices=("", "fa4-mix8", "fa4-mixmx", "fa4-qk", "emulator-mix8", "emulator-mixmx", "emulator-qk"),
