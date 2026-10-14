@@ -457,10 +457,13 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
       rows stay FP4.
     """
     qk_only = quantize and not quantize_pv
-    if quantize and not quantize_pv and (two_level_p or first_block_max_floor is not None):
+    if qk_only and (two_level_p or first_block_max_floor is not None):
         raise ValueError("two_level_p and first_block_max_floor shape the P quantizer; QK-only mode has none")
-    if (hadamard or smooth_q or prefix_precision) and not qk_only:
-        raise ValueError("hadamard / smooth_q / prefix_precision are Q/K-only (quantize_pv=False) options")
+    # ``hadamard`` and ``smooth_q`` rewrite Q/K, which only the QK-only route reads.
+    # ``prefix_precision`` also works with FP4 P.V, so the FP4 call below takes the
+    # caller's P quantizer settings rather than assuming the QK-only ones.
+    if (hadamard or smooth_q) and not qk_only:
+        raise ValueError("hadamard / smooth_q are Q/K-only (quantize_pv=False) options")
     if smooth_q not in (None, "global", "segment"):
         raise ValueError(f"smooth_q must be None, 'global' or 'segment', got {smooth_q!r}")
     if prefix_precision not in (None, "bf16", "fp8", "mxfp8"):
@@ -488,8 +491,8 @@ def fp4_vsa_attn_qat(q: torch.Tensor,
         n_groups = 2 if smooth_q == "segment" else 1
         groups = _query_groups(n_blocks, num_prefix_tiles, smooth_q == "segment", q.device)
         q_lo, bias = _smooth_queries(q_lo, k_lo, groups, n_groups)
-    out = _FP4VSAAttnQAT.apply(q_lo, k_lo, v, q2k_idx, num_fp4, kv_valid, True, False, False, None, scale,
-                               high_prec_o, bias, groups)
+    out = _FP4VSAAttnQAT.apply(q_lo, k_lo, v, q2k_idx, num_fp4, kv_valid, True, quantize_pv, two_level_p,
+                               first_block_max_floor, scale, high_prec_o, bias, groups)
     if not hp_tiles:
         return out
     num_hp = q2k_num - num_fp4
