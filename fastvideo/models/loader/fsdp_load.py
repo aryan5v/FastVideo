@@ -343,7 +343,8 @@ def maybe_load_fsdp_model(
     has_mixed_parameter_dtypes = callable(dtype_selector) and any(
         dtype_selector(_strip_checkpoint_wrapper_prefix(name), param_dtype) != param_dtype
         for name, _ in model.named_parameters())
-    if training_mode and has_mixed_parameter_dtypes:
+    frozen_fp32_ok = bool(getattr(getattr(model, "config", None), "replicate_fp32_modules", False))
+    if training_mode and has_mixed_parameter_dtypes and not frozen_fp32_ok:
         raise NotImplementedError("FSDP training with model-selected mixed parameter dtypes requires "
                                   "separate gradient synchronization for replicated parameters.")
 
