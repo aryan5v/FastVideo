@@ -591,6 +591,27 @@ FASTVIDEO_H3_VSA_FP4_PREFIX = EnvChoice(
     "bf16 P.V, while video query tiles stay on the FP4 kernel. The fp8 variant is the validated "
     "training-time numerics and recovers most of the audio error that FP4 quantizes away. Needs "
     "128-token tiles. Empty keeps every row on the FP4 kernel.")
+FASTVIDEO_H3_PREFIX_PREP_COMPILE = EnvBool(False,
+                                           category="attention",
+                                           doc="Fuse the prefix split's K smoothing, FP8 fake-quant and valid-key "
+                                           "gather into one torch.compile region (about 3 s per generation; "
+                                           "rounds within one bf16 ulp of the eager path).")
+FASTVIDEO_H3_REF_NATIVE_SIZE = EnvBool(False,
+                                       category="performance",
+                                       doc="Keep a MiniMax-H3 reference image at its own size (32-pixel grid) "
+                                       "instead of upscaling it to the released 2048-short-edge canvas; only larger "
+                                       "images shrink. Far fewer reference rows, but the output changes.")
+FASTVIDEO_H3_NVFP4_TAIL_BLOCKS = EnvStr("",
+                                        category="performance",
+                                        doc="Main-block range, e.g. 42-49, whose bf16 linears (a mixed NVFP4 export "
+                                        "keeps them dense) are quantized to NVFP4 at load with a dynamic "
+                                        "activation scale. Trades quality for speed.")
+FASTVIDEO_NVFP4_MM_ROW_SPLIT = EnvChoice(
+    "table",
+    choices=("off", "table", "auto"),
+    category="performance",
+    doc="Run large cuDNN NVFP4 GEMMs over row chunks where its plan heuristic is slow: off, table (fixed "
+    "per-shape chunk counts) or auto (time 1/2/4 chunks once per shape; not deterministic across runs).")
 FASTVIDEO_H3_VSA_FINE_ATTENTION = EnvChoice(
     "",
     choices=("", "fa4-mix8", "fa4-mixmx", "fa4-qk", "emulator-mix8", "emulator-mixmx", "emulator-qk", "emulator-bf16"),

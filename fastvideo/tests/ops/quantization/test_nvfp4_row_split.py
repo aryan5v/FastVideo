@@ -20,3 +20,10 @@ def test_row_chunks_cover_rows_in_order(rows: int, parts: int) -> None:
         assert chunk_scale[0, 0].item() == offset
         offset += chunk.shape[0]
     assert offset == rows
+
+
+def test_tail_block_range_parsing() -> None:
+    from fastvideo.layers.quantization.nvfp4_config import _parse_block_range
+    assert _parse_block_range("42-49") == frozenset(range(42, 50))
+    assert _parse_block_range("3, 5-6") == frozenset({3, 5, 6})
+    assert _parse_block_range("") == frozenset()

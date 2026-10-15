@@ -527,6 +527,8 @@ def maybe_load_fsdp_model(
     # from the freshly-loaded bf16 weights. No-op when no quantized layers
     # are present (lazy imports inside the helper).
     _maybe_quantize_model(model, defer_weight_conversion_until_lora_merge=lora_path is not None)
+    from fastvideo.layers.quantization.nvfp4_config import quantize_h3_tail_blocks_online
+    quantize_h3_tail_blocks_online(model)
 
     if enable_torch_compile and training_mode:
         if not regional_compile:

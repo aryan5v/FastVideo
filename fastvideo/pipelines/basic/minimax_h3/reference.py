@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageOps
 import torch
 
+import fastvideo.envs as envs
 from fastvideo.models.vision_utils import load_image
 from fastvideo.pipelines.basic.minimax_h3.packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
@@ -210,6 +211,8 @@ def resolve_reference_image_size(width: int, height: int) -> tuple[int, int]:
     if width > 4 * height or height > 4 * width:
         raise ValueError(f"A reference image must be within 1:4 and 4:1, got {width}x{height}.")
     scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
+    if envs.FASTVIDEO_H3_REF_NATIVE_SIZE.get():
+        scale = min(scale, 1.0)  # references only shrink, as in the uniserve serving path
     multiple = MINIMAX_H3_CANVAS_MULTIPLE
     return (
         max(multiple,

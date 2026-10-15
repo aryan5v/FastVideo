@@ -396,7 +396,7 @@ def _mm_fp4(
     if alpha is not None and not torch.is_tensor(alpha):
         alpha = torch.tensor(alpha, device=a.device, dtype=torch.float32)
     if (out is None and backend in ("cudnn", "auto") and a.shape[0] >= _SPLIT_MIN_ROWS
-            and not torch.compiler.is_compiling()):
+            and envs.FASTVIDEO_NVFP4_MM_ROW_SPLIT.get() != "off" and not torch.compiler.is_compiling()):
         return _mm_fp4_row_split(a, b, a_scale, b_scale, alpha, out_dtype, block_size, use_8x4_sf_layout, backend,
                                  use_nvfp4)
     return torch.ops.fastvideo_fp4.mm_fp4(
@@ -417,6 +417,9 @@ def _mm_fp4(
 _SPLIT_MIN_ROWS = 16384
 _SPLIT_CANDIDATES = (1, 2, 4)
 _SPLIT_CHOICE: dict[tuple[int, int, int, str], int] = {}
+# Measured on GB10 (cuDNN 9.20 via FlashInfer 0.6): (packed K, N) -> chunks. H3's FF down projection is the only
+# shape that falls off the plan heuristic; the others are fastest whole.
+_SPLIT_TABLE: dict[tuple[int, int], int] = {(7168, 5376): 2}
 
 
 def _mm_fp4_row_chunks(a: torch.Tensor, a_scale: torch.Tensor, parts: int) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -447,6 +450,8 @@ def _mm_fp4_row_split(a, b, a_scale, b_scale, alpha, out_dtype, block_size, use_
     once per shape and keep the fastest.
     """
     key = (a.shape[0], a.shape[1], b.shape[1], backend)
+    if envs.FASTVIDEO_NVFP4_MM_ROW_SPLIT.get() == "table":
+        _SPLIT_CHOICE.setdefault(key, _SPLIT_TABLE.get((a.shape[1], b.shape[1]), 1))
     args = (a, b, a_scale, b_scale, alpha, out_dtype, block_size, use_8x4_sf_layout, backend, use_nvfp4)
     if key not in _SPLIT_CHOICE:
         if a_scale.dim() != 2 or a_scale.shape[0] < a.shape[0]:
@@ -841,6 +846,53 @@ def convert_model_to_nvfp4(model: torch.nn.Module) -> None:
             purged_bytes / (1 << 30),
             retained,
         )
+
+
+def _parse_block_range(spec: str) -> frozenset[int]:
+    """``"42-49"`` / ``"42,45-47"`` -> block indices."""
+    blocks: set[int] = set()
+    for part in (p.strip() for p in spec.split(",") if p.strip()):
+        lo, _, hi = part.partition("-")
+        blocks.update(range(int(lo), int(hi or lo) + 1))
+    return frozenset(blocks)
+
+
+def quantize_h3_tail_blocks_online(model: torch.nn.Module) -> int:
+    """Quantize the bf16 linears of ``FASTVIDEO_H3_NVFP4_TAIL_BLOCKS`` to NVFP4 after load.
+
+    A mixed export (OmniRef QAD) keeps blocks 42-49 dense. This swaps their attention and FFN
+    linears to NVFP4 with weights quantized from the loaded bf16 (max-calibrated per-tensor scale)
+    and a per-call dynamic activation scale; it is post-training quantization, not QAD.
+    """
+    spec = envs.FASTVIDEO_H3_NVFP4_TAIL_BLOCKS.get()
+    if not spec:
+        return 0
+    from fastvideo.layers.linear import LinearBase
+
+    blocks = _parse_block_range(spec)
+    SfLayout, _, _ = _require_flashinfer()
+    converted = 0
+    for name, mod in model.named_modules():
+        weight = getattr(mod, "weight", None)
+        if (not isinstance(mod, LinearBase) or weight is None or getattr(mod, "_nvfp4_weight", None) is not None
+                or minimax_h3_block_index(name) not in blocks or not is_minimax_h3_nvfp4_dit_linear_prefix(name)):
+            continue
+        method = NVFP4QuantizeMethod(layer_prefix=name)
+        method._dynamic_act_cached = True
+        method._retain_original_weights = False
+        w = weight.detach()
+        weight_global_sf = (448 * 6) / w.float().abs().nan_to_num().max()
+        fp4_w, fp4_s = _nvfp4_quantize(w, weight_global_sf, sfLayout=SfLayout.layout_128x4, do_shuffle=False)
+        sf = torch.as_tensor(weight_global_sf, device=w.device, dtype=torch.float32)
+        mod.register_buffer("_nvfp4_weight", fp4_w, persistent=False)
+        mod.register_buffer("_nvfp4_weight_scale", fp4_s, persistent=False)
+        mod.register_buffer("_weight_global_sf", sf.to(dtype=torch.bfloat16), persistent=False)
+        mod.register_buffer("_nvfp4_alpha", (1.0 / sf).to(dtype=torch.float32), persistent=False)
+        mod.register_parameter("weight", None)
+        mod.quant_method = method
+        converted += 1
+    logger.info("Quantized %d bf16 linears of blocks %s to NVFP4 (dynamic activation scale)", converted, spec)
+    return converted
 
 
 def nvfp4_linear_weight_param_names(model: torch.nn.Module) -> set[str]:

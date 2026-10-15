@@ -176,6 +176,16 @@ def _half_row_valid(kv_valid: torch.Tensor, half: int) -> torch.Tensor:
     return (torch.arange(half, device=kv_valid.device).unsqueeze(0) < kv_valid.unsqueeze(1)).reshape(-1)
 
 
+@torch.compile(dynamic=True)
+def _prefix_prep(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, valid_index: torch.Tensor,
+                 quantize: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """K smoothing, optional FP8 fake-quant of Q/K and the valid-key gather as one fused region."""
+    k = k - k.mean(dim=1, keepdim=True)
+    if quantize:
+        q, k = _fp8_per_token(q), _fp8_per_token(k)
+    return q, k.index_select(1, valid_index), v.index_select(1, valid_index)
+
+
 def _prefix_dense_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, prefix_rows: int,
                             logical: int, key_valid: torch.Tensor, precision: str) -> torch.Tensor:
     """Dense attention for the prefix query rows, ``[B, H, prefix_rows, D]``.
@@ -191,13 +201,16 @@ def _prefix_dense_attention(query: torch.Tensor, key: torch.Tensor, value: torch
     import torch.nn.functional as F
 
     q, k, v = query[:, :prefix_rows], key[:, :logical], value[:, :logical]
-    k = k - k.mean(dim=1, keepdim=True)
-    if precision == "fp8":
-        q, k = _fp8_per_token(q), _fp8_per_token(k)
     # Attend only the valid keys. Gathering them keeps SDPA on its unmasked (flash) kernel; a boolean
     # mask over all rows falls back to the memory-efficient kernel, 3-4x slower at OmniRef prefix sizes.
     valid_index = key_valid[:logical].nonzero().squeeze(1)
-    k, v = k.index_select(1, valid_index), v.index_select(1, valid_index)
+    if envs.FASTVIDEO_H3_PREFIX_PREP_COMPILE.get():
+        q, k, v = _prefix_prep(q, k, v, valid_index, precision == "fp8")
+    else:
+        k = k - k.mean(dim=1, keepdim=True)
+        if precision == "fp8":
+            q, k = _fp8_per_token(q), _fp8_per_token(k)
+        k, v = k.index_select(1, valid_index), v.index_select(1, valid_index)
     return F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
                                           scale=1.0 / math.sqrt(q.shape[-1]))
 
