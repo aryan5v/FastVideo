@@ -97,6 +97,23 @@ python examples/inference/basic/basic_fasth3_omniref_pdd.py \
 Replace `./FastH3-OmniRef-Dense` with your dense or FP8 student export, including
 its Ref2VA PDD inference contract.
 
+### Creating an FP8 export
+
+`scripts/checkpoint_conversion/quantize_minimax_h3_dit_fp8.py` turns a dense OmniRef `transformer_ref` into the
+pre-quantized FP8 format the loader reads (the `FastVideo-FastH3-8-Step-V2-FP8` format): `float8_e4m3fn` weights with a
+float32 `weight_scale` per output channel for q/k/v/out and the FFN of every block, everything else (AdaLN projections,
+norms, VSA gates, token refiner) left in bf16.
+
+```bash
+python scripts/checkpoint_conversion/quantize_minimax_h3_dit_fp8.py \
+  --src ./FastH3-OmniRef-Dense/transformer_ref --dst ./FastH3-OmniRef-FP8/transformer_ref
+```
+
+Quantize the original distilled student, not an NVFP4 QAD checkpoint: on the held-out OmniRef rows the FP8 student scored
+0.131 (video 0.094, audio 0.168) against the bf16 teacher, against 0.200 for the QAD v2 masters, which QAD had already
+moved 0.184 away from the teacher. Static (calibrated) activation scales scored 0.134 and are not supported by the FP8
+loader. `scripts/distill/minimax_h3_omniref_fp8/` holds the FP8 scoring tools for the QAD harness.
+
 ### What this does and does not buy
 
 Two things this first version does not do, so the numbers are not read as more
