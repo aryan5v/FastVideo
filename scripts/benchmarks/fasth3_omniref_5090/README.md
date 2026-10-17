@@ -64,6 +64,22 @@ clip. `--quality` writes one untimed clip per reference set. Neither produces
 timing medians. Run the previous checkpoint with its own AdaLN table and the
 same prompts, references, seed, decoder, and attention settings for comparisons.
 
+Add `--profile --smoke` for an untimed diagnostic run. It logs actual packed
+tokens, padded attention rows, prefix sizes, and CUDA-event spans per forward.
+Profiling adds synchronization, so keep those runs out of the timing table.
+
+After both checkpoint versions finish, create native-resolution comparisons:
+
+```bash
+python scripts/benchmarks/fasth3_omniref_5090/compare.py /root/omniref-5090-results
+```
+
+Each comparison keeps two separate original AAC tracks, previous QAD first and
+v2 second. The helper checks frame count, dimensions, audio channels, duration,
+finite decoded samples, RMS, full-scale samples, quiet windows, and EBU R128
+loudness. It saves the measurements in `media_validation.json` and five frames
+per pair for visual inspection. Signal measurements do not judge speech or music.
+
 The benchmark defaults to the cuDNN NVFP4 GEMM backend and expandable allocator
 segments. Explicit environment settings override those defaults. No inference
 compilation is enabled by the example's generator configuration.

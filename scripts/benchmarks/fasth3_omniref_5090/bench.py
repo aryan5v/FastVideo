@@ -77,6 +77,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--smoke", action="store_true", help="One untimed full-size clip only")
     parser.add_argument("--quality", action="store_true", help="One untimed clip for each reference set")
+    parser.add_argument("--profile", action="store_true", help="Log CUDA stage spans and attention token geometry")
     args = parser.parse_args()
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -84,11 +85,37 @@ def main():
     os.environ.setdefault("FASTVIDEO_NVFP4_MM_BACKEND", "cudnn")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("CUDNN_FRONTEND_CUDART_LIB_NAME", "libcudart.so.13")
+    if args.profile:
+        os.environ["FASTVIDEO_H3_SP_PROFILE"] = "1"
 
     import torch
     from fastvideo import VideoGenerator
     from fastvideo.api import GenerationRequest, InputConfig, OutputConfig, SamplingConfig
     from fastvideo.pipelines.basic.minimax_h3 import MiniMaxH3Reference
+
+    if args.profile:
+        from fastvideo.models.dits import minimax_h3_vsa_fp4
+
+        original_layout = minimax_h3_vsa_fp4._layout_for
+        seen_geometry = set()
+
+        def logged_layout(meta, rotary_emb):
+            layout = original_layout(meta, rotary_emb)
+            geometry = (int(meta.untile_combined_index.numel()), layout.rows, int(meta.num_prefix_tiles),
+                        layout.tile, layout.n_tiles)
+            if geometry not in seen_geometry:
+                seen_geometry.add(geometry)
+                prefix = meta.variable_block_sizes[:meta.num_prefix_tiles]
+                print("ATTENTION_GEOMETRY " + json.dumps({
+                    "packed_tokens": geometry[0], "padded_rows": layout.rows,
+                    "prefix_valid_tokens": int(prefix.sum().item()),
+                    "prefix_padded_rows": int(meta.num_prefix_tiles) * layout.tile,
+                    "tile_size": layout.tile, "tiles": layout.n_tiles,
+                    "sparsity": float(meta.VSA_sparsity),
+                }), flush=True)
+            return layout
+
+        minimax_h3_vsa_fp4._layout_for = logged_layout
 
     example = load_example()
     profile = example.DEVICE_PROFILES["rtx-5090"]
