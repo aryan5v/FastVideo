@@ -17,6 +17,8 @@ submodule to `/root/FastVideo`. Exclude `.git`, virtual environments, and output
 Run `setup.sh` on the pod, using local disk for the environment and model copy.
 The network volume only supplies existing models. Offline Hugging Face mode
 prevents missing components from triggering downloads.
+The checked-in constraints pin the packages tested on the assigned RTX 5090;
+FastVideo and its kernel still install from the synced checkout.
 
 ```bash
 bash /root/FastVideo/scripts/benchmarks/fasth3_omniref_5090/setup.sh

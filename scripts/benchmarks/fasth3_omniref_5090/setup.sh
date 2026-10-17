@@ -7,6 +7,7 @@ venv=${OMNIREF_VENV:-/root/fv}
 source_model=${OMNIREF_SOURCE_MODEL:-/workspace/models/FastH3-Omni-NVFP4-QAD-v2}
 local_model=${OMNIREF_LOCAL_MODEL:-/root/models/FastH3-Omni-NVFP4-QAD-v2}
 export UV_LINK_MODE=copy
+export UV_CONSTRAINT="$repo/scripts/benchmarks/fasth3_omniref_5090/constraints-cu130.txt"
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 export PATH="$CUDA_HOME/bin:$PATH"
 export MAX_JOBS=${MAX_JOBS:-4}
