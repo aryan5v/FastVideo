@@ -111,10 +111,7 @@ def parse_blocks(text: str) -> tuple[int, ...]:
     blocks: set[int] = set()
     for part in filter(None, (p.strip() for p in text.split(","))):
         low, _, high = part.partition("-")
-        start, end = int(low), int(high or low)
-        if end < start:
-            raise ValueError(f"Invalid block range {part!r}: end ({end}) is below start ({start})")
-        blocks.update(range(start, end + 1))
+        blocks.update(range(int(low), int(high or low) + 1))
     return tuple(sorted(blocks))
 
 

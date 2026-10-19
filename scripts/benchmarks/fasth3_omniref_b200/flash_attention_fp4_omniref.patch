@@ -1,9 +1,10 @@
---- a/flash_attn/cute/__init__.py
-+++ b/flash_attn/cute/__init__.py
+diff -ruN a/flash_attn/cute/__init__.py b/flash_attn/cute/__init__.py
+--- a/flash_attn/cute/__init__.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/__init__.py	2026-10-13 22:47:33
 @@ -16,6 +16,16 @@
-
+ 
  import cutlass.cute as cute
-
+ 
 +# cutlass-dsl >= 4.6 dropped cute.make_fragment (renamed make_rmem_tensor, same arguments).
 +if not hasattr(cute, "make_fragment"):
 +    cute.make_fragment = cute.make_rmem_tensor
@@ -17,8 +18,9 @@
  from .interface import (
      flash_attn_func,
      flash_attn_varlen_func,
---- a/flash_attn/cute/block_sparse_utils.py
-+++ b/flash_attn/cute/block_sparse_utils.py
+diff -ruN a/flash_attn/cute/block_sparse_utils.py b/flash_attn/cute/block_sparse_utils.py
+--- a/flash_attn/cute/block_sparse_utils.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/block_sparse_utils.py	2026-10-13 22:47:33
 @@ -733,7 +733,7 @@
      sScale: cute.Tensor,
      stats: list,
@@ -28,8 +30,9 @@
      tOtO: cute.Tensor,
      sO: cute.Tensor,
      pipeline_sm_stats: cutlass.pipeline.PipelineAsync,
---- /dev/null
-+++ b/flash_attn/cute/block_sparse_utils_fp4.py
+diff -ruN a/flash_attn/cute/block_sparse_utils_fp4.py b/flash_attn/cute/block_sparse_utils_fp4.py
+--- a/flash_attn/cute/block_sparse_utils_fp4.py	1969-12-31 16:00:00
++++ b/flash_attn/cute/block_sparse_utils_fp4.py	2026-10-13 22:47:33
 @@ -0,0 +1,805 @@
 +"""
 +Block-sparse runtime utilities for CUTE DSL kernels.
@@ -836,8 +839,9 @@
 +        s0_s1_sequence_phase,
 +        total_block_cnt == 0,
 +    )
---- a/flash_attn/cute/flash_bwd_sm100.py
-+++ b/flash_attn/cute/flash_bwd_sm100.py
+diff -ruN a/flash_attn/cute/flash_bwd_sm100.py b/flash_attn/cute/flash_bwd_sm100.py
+--- a/flash_attn/cute/flash_bwd_sm100.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/flash_bwd_sm100.py	2026-10-13 22:47:33
 @@ -1669,11 +1669,11 @@
      @cute.jit
      def load(
@@ -899,8 +903,9 @@
          tdKVtdKV: cute.Tensor,
          mdKV: cute.Tensor,
          sdKV: cute.Tensor,
---- a/flash_attn/cute/flash_bwd_sm90.py
-+++ b/flash_attn/cute/flash_bwd_sm90.py
+diff -ruN a/flash_attn/cute/flash_bwd_sm90.py b/flash_attn/cute/flash_bwd_sm90.py
+--- a/flash_attn/cute/flash_bwd_sm90.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/flash_bwd_sm90.py	2026-10-13 22:47:33
 @@ -1015,7 +1015,7 @@
      def apply_score_mod(
          self,
@@ -919,8 +924,9 @@
          batch_idx,
          head_idx,
          m_block,
---- a/flash_attn/cute/flash_fwd_sm100.py
-+++ b/flash_attn/cute/flash_fwd_sm100.py
+diff -ruN a/flash_attn/cute/flash_fwd_sm100.py b/flash_attn/cute/flash_fwd_sm100.py
+--- a/flash_attn/cute/flash_fwd_sm100.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/flash_fwd_sm100.py	2026-10-13 22:47:33
 @@ -1308,8 +1308,8 @@
      @cute.jit
      def load(
@@ -992,15 +998,16 @@
          stage: Int32,
 @@ -2741,7 +2741,7 @@
          5. Preparation for efficient TMA store operations
-
+ 
          :param thr_mma: Thread MMA operation for the computation
 -        :type thr_mma: cute.core.ThrMma
 +        :type thr_mma: cute.ThrMma
          :param tOtO: Tensor containing accumulated attention output
          :type tOtO: cute.Tensor
          :param scale: Final scaling factor to apply to the output
---- a/flash_attn/cute/flash_fwd_sm100_fp4.py
-+++ b/flash_attn/cute/flash_fwd_sm100_fp4.py
+diff -ruN a/flash_attn/cute/flash_fwd_sm100_fp4.py b/flash_attn/cute/flash_fwd_sm100_fp4.py
+--- a/flash_attn/cute/flash_fwd_sm100_fp4.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/flash_fwd_sm100_fp4.py	2026-10-13 22:47:33
 @@ -39,7 +39,7 @@
  from flash_attn.cute.seqlen_info import SeqlenInfoQK
  from flash_attn.cute.block_info import BlockInfo
@@ -1041,6 +1048,15 @@
          tStSi: cute.Tensor,
          sScale: cute.Tensor,
          mLSE: Optional[cute.Tensor],
+@@ -3056,7 +3056,7 @@
+             if const_expr(self.quant_pv):
+                 # P range targets the quantized dtype's max: E2M1 max = 6,
+                 # E4M3 max = 448 (MXFP8 PV).
+-                _max_offset = _math.log2(6) if const_expr(self.v_dtype.width == 4) else _math.log2(448)
++                _max_offset = (float(os.getenv('FA4_FP4_P_MAX', '6.0')) and _math.log2(float(os.getenv('FA4_FP4_P_MAX', '6.0')))) if const_expr(self.v_dtype.width == 4) else _math.log2(448)
+                 _rescale_threshold = 0.0
+             elif const_expr(not self.quant_pv and self.v_dtype.width == 8):
+                 # FP8 PV: P is already per-tile normalized to [0, 1] before the
 @@ -3790,7 +3790,7 @@
          softmax: SoftmaxSm100,
          mbar_ptr: cute.Pointer,
@@ -1081,7 +1097,7 @@
          stage: Int32,
 @@ -4520,7 +4520,7 @@
          5. Preparation for efficient TMA store operations
-
+ 
          :param thr_mma: Thread MMA operation for the computation
 -        :type thr_mma: cute.core.ThrMma
 +        :type thr_mma: cute.ThrMma
@@ -1099,14 +1115,13 @@
          )
          if const_expr(self.use_correction_warps_for_epi):
              assert(not self.use_tma_O)
---- a/flash_attn/cute/interface.py
-+++ b/flash_attn/cute/interface.py
-@@ -195,6 +195,15 @@
-     # NOTE: We should revisit this heuristic after persistence is supported for split KV.
-     # Sometimes, it's ideal to over-schedule splits for better efficiency.
+diff -ruN a/flash_attn/cute/interface.py b/flash_attn/cute/interface.py
+--- a/flash_attn/cute/interface.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/interface.py	2026-10-13 22:47:33
+@@ -197,6 +197,15 @@
      return min(num_SMs // total_mblocks, max_splits, num_n_blocks)
-+
-+
+ 
+ 
 +def _block_sparse_call_args(tensors):
 +    """BlockSparseTensorsTorch -> the 8-field BlockSparseTensors order the compiled kernel was traced with."""
 +    if tensors is None:
@@ -1114,9 +1129,11 @@
 +    return (tensors.mask_block_cnt, tensors.mask_block_idx, tensors.full_block_cnt, tensors.full_block_idx,
 +            tensors.cu_total_m_blocks, tensors.cu_block_idx_offsets, tensors.dq_write_order,
 +            tensors.dq_write_order_full)
-
-
++
++
  def _flash_attn_fwd(
+     q: Union[torch.Tensor, cute.Tensor],
+     k: Union[torch.Tensor, cute.Tensor],
 @@ -813,7 +822,7 @@
                  raise ValueError("Block sparsity requires fixed-length sequences (seqlen_q must be known).")
              expected_count_shape, expected_index_shape = get_block_sparse_expected_shapes(
@@ -1143,13 +1160,14 @@
 +        _block_sparse_call_args(normalized_block_sparse_tensors),
          aux_tensors,
      ]
-
---- a/flash_attn/cute/mask.py
-+++ b/flash_attn/cute/mask.py
-@@ -427,6 +427,32 @@
+ 
+diff -ruN a/flash_attn/cute/mask.py b/flash_attn/cute/mask.py
+--- a/flash_attn/cute/mask.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/mask.py	2026-10-13 22:47:33
+@@ -427,6 +427,22 @@
                          rank1=True,
                      )
-
+ 
 +        elif const_expr(not mask_causal and not mask_local and mask_mod is not None
 +                        and getattr(mask_mod, "vsa_col_limit", False)):
 +            # VSA tile masks (FastVideo VSA-H3): every 128-row stage is one query tile and every n_block one key
@@ -1160,16 +1178,6 @@
 +            col_limit = aux_tensors[0][batch_idx, head_idx, row_idx // self.tile_m, n_block]
 +            if const_expr(mask_seqlen):
 +                col_limit = cutlass.min(col_limit, seqlenk_col_limit)
-+            if const_expr(getattr(mask_mod, "vsa_token_scales", False)):
-+                # E4M3 Q/K codes use unit MMA block scales. Restore each
-+                # token's scale before softmax computes the row maximum.
-+                # aux_tensors = [tile limits, K scales, local Q scales].
-+                for i in cutlass.range_constexpr(cute.size(tScS_t2r.shape)):
-+                    q_row = tScS_t2r[i][0] + m_block * self.tile_m
-+                    k_col = tScS_t2r[i][1] + n_block * self.tile_n
-+                    q_scale = aux_tensors[2][batch_idx, head_idx, q_row]
-+                    k_scale = aux_tensors[1][batch_idx, head_idx, k_col]
-+                    acc_S[i] = acc_S[i] * q_scale * k_scale
 +            mask_r2p_lambda(
 +                acc_S,
 +                lambda s: r2p_bitmask_below(col_limit, s),
@@ -1179,11 +1187,12 @@
          elif const_expr(not mask_causal and not mask_local and mask_mod is not None):
              # Block sparse case w/ mask_mod
              has_fastdiv = const_expr(
---- a/flash_attn/cute/utils.py
-+++ b/flash_attn/cute/utils.py
+diff -ruN a/flash_attn/cute/utils.py b/flash_attn/cute/utils.py
+--- a/flash_attn/cute/utils.py	2026-10-13 22:47:33
++++ b/flash_attn/cute/utils.py	2026-10-13 22:47:33
 @@ -283,7 +283,7 @@
-
-
+ 
+ 
  def mma_make_fragment_A(
 -    smem: cute.Tensor, thr_mma: cute.core.ThrMma, swapAB: cutlass.Constexpr[bool] = False
 +    smem: cute.Tensor, thr_mma: cute.ThrMma, swapAB: cutlass.Constexpr[bool] = False
@@ -1191,8 +1200,8 @@
      if const_expr(swapAB):
          return mma_make_fragment_B(smem, thr_mma)
 @@ -292,7 +292,7 @@
-
-
+ 
+ 
  def mma_make_fragment_B(
 -    smem: cute.Tensor, thr_mma: cute.core.ThrMma, swapAB: cutlass.Constexpr[bool] = False
 +    smem: cute.Tensor, thr_mma: cute.ThrMma, swapAB: cutlass.Constexpr[bool] = False
