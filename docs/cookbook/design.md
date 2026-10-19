@@ -18,7 +18,7 @@ Native serving YAML + option schemas + deployment manifests
                          |
                Generated JSON catalogs
                          |
-                 MkDocs / static hosting
+                 Blume / static hosting
                          |
             cookbook-config.js + UI edits
                          |
@@ -34,7 +34,7 @@ Native serving YAML + option schemas + deployment manifests
 | `docs/js/cookbook-config.mjs` | Load catalogs, preview fields, validate edits and produce output |
 
 Catalog generation runs in Node without importing FastVideo or loading model
-weights. The docs build generates assets before MkDocs copies them into the
+weights. The docs build generates assets before Blume copies them into the
 published site. Generated JSON, the combined API/validator bundle and its license notices
 are Git-ignored build output published together under `assets/cookbook-config/`.
 Website visitors need only the static assets. The schemas are author-maintained
@@ -74,7 +74,7 @@ to documentation, not embedded HTML.
 
 ## Shared JavaScript API
 
-`docs/js/cookbook-config.mjs` exports the four functions below. The generated
+`docs/js/cookbook-config.mjs` exports the five functions below. The generated
 `assets/cookbook-config/cookbook-config.js` bundles them with Ajv and exposes
 the browser global `FastVideoConfigCookbook` and CommonJS exports:
 
@@ -84,6 +84,12 @@ the browser global `FastVideoConfigCookbook` and CommonJS exports:
 | `loadDeployment(index, id, {signal, fetcher} = {})` | Promise of the selected complete catalog |
 | `getOptions(catalog, config = catalog.base_config, edits = {})` | `[{path, schema, value}]`, including GPU-dependent degree limits |
 | `resolveConfig(catalog, edits = {})` | `config`, `yaml`, `argv`, `command`, `clientRequest`, `clientCommand`, optional `websocketUrl` |
+| `sampleRequest(metadata, config)` | `{body, command}` and optional `websocketUrl` for a native serving baseline |
+
+`sampleRequest()` is also used by model pages backed by a checked-in serving
+YAML rather than a full editable catalog. Its metadata supplies `model.id`,
+`workload`, and `runtime.interface`/`runtime.server_defaults`. It builds client
+instructions only; it does not validate the configuration or run a request.
 
 For WebSocket deployments, `clientRequest` is `null` and `websocketUrl` is
 present. REST deployments return a request object and omit `websocketUrl`.
@@ -209,16 +215,9 @@ Memory estimates, measured hardware support, format versioning and HTTP cache
 freshness remain separate follow-ups. No general arithmetic validator or CLI
 override workflow is introduced here.
 
-## Coexistence with the current cookbook
+## Cookbook interface
 
-Family pages still load `docs/assets/cookbook-recipes.json` through `cookbook.js`
-for generate commands, hardware evidence, and the H3 "Run a server" panel.
-Those pages are unchanged. This catalog and API sit beside them: manifests under
-`docs/cookbook/recipes/` point at the same `examples/serving/*.yaml` baselines
-the family pages already advertise, plus authored editable-field metadata.
-
-A later UI change can call `loadIndex` / `resolveConfig` from those pages so
-users download a customized serving YAML instead of copying a static file. Until
-then, keep recipe IDs aligned with the family catalog (`fasth3-8step`,
-`fastwan21`, `wan21-i2v`, `ltx2-distilled`) and treat `cookbook-recipes.json`
-`serving.source` as the native baseline, not a second options schema.
+Family and model pages use the React cookbook in `docs-site/`. The model inventory
+comes from `docs/assets/cookbook-recipes.json`; the shared configuration API
+continues to own editable serving recipes. The old family JavaScript selector
+and site-theme assets have been removed.

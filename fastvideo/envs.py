@@ -458,6 +458,11 @@ FASTVIDEO_FLUX2_DISABLE_BF16_REDUCED_PRECISION_REDUCTION = EnvBool(
     category="performance",
     doc="Flux denoising disables reduced-precision reductions in bf16 matmuls, which tightens accumulation for "
     "the 4-step Klein model.")
+FASTVIDEO_ENABLE_FUSED_NORM = EnvBool(
+    False,
+    category="performance",
+    doc="Opt into Wan's inference-only Triton residual + LayerNorm + modulation fusion. "
+    "Its reduction order changes numerical outputs; the default keeps eager reference compatibility.")
 # Global kill switch for the opt-in, inference-only Triton fusion in
 # fastvideo/layers/triton_fused_norm.py, for debugging numerics or Triton issues.
 FASTVIDEO_DISABLE_FUSED_NORM = EnvBool(False,
@@ -612,6 +617,12 @@ FASTVIDEO_H3_FP8_GRANULARITY = EnvChoice("tensor",
                                          choices=("tensor", "channel"),
                                          category="performance",
                                          doc="FP8 scaling granularity for FASTVIDEO_H3_FP8_ATTENTION.")
+FASTVIDEO_LORA_SIDE_BRANCH = EnvBool(False,
+                                     category="performance",
+                                     doc="Apply inference LoRA adapters as a bf16 side branch next to every "
+                                     "target linear instead of merging them, so the adapter strength can change "
+                                     "at runtime. Packed NVFP4 or FP8 linears without their original dense "
+                                     "weight always use the side branch.")
 FASTVIDEO_NVFP4_MM_BACKEND = EnvStr("auto",
                                     category="performance",
                                     doc="FlashInfer mm_fp4 backend for NVFP4 linears, e.g. auto or cutlass.")

@@ -318,3 +318,64 @@ For reusable UI methods and configuration guarantees, see the
 [design and API contract](../cookbook/design.md). Streaming client instructions
 follow the [WebSocket contract](../design/server_contracts/streaming.md); a health
 response alone does not establish generation readiness.
+
+## Model pages in the cookbook
+
+The Blume cookbook starts at `/cookbook` with model cards filtered by Video,
+Image, Audio, or World. FastH3 appears first. Each model has its own page in a
+sidebar family group.
+
+`docs-site/lib/cookbook-pages.ts` derives the inventory from
+`docs/assets/cookbook-recipes.json`. Recipes sharing a checkpoint become variants
+on one model page. `transfer-docs.mjs` generates source-recipe pages and sidebar
+entries. Preparation publishes checked-in YAML under `assets/cookbook-sources/`
+and Python examples with source locations for editable literals under
+`assets/cookbook-examples/`. Python examples are parsed with AST, never imported.
+Explicit values in the maintained launch command take priority over argparse
+defaults. The editor rewrites those literals and preserves required launch flags
+and preparation commands. Controls inherited from a helper may use an explicitly
+declared cookbook knob. Settings without a source binding stay hidden.
+
+For a model with an editable serving catalog, add its display metadata to
+`recipePages`, map the checkpoint in `backendModels`, and add an MDX overlay with
+`<Cookbook modelId="your-model-key" />`. Use `mode: frame` so the island owns the
+logo, heading, and YAML actions. Add the route to its sidebar family.
+Presentation metadata must not define editable options or compatibility claims.
+
+Editable pages organize catalog fields into a compact option matrix. The shared
+API owns validation and YAML/command generation. Each model owns one page. Hardware backend buttons select declared
+deployments, so unsupported NVIDIA, AMD, or MLX choices do not appear. Precision
+and encoder controls appear only when the deployment declares them.
+
+GPU targets are URL preferences for setup guidance. GPU count and parallelism
+use backend fields. Automatic parallelism sets the supported degrees to `-1`;
+it does not estimate memory. All configurations carry an unverified-recipe
+label until hardware-fit and runtime validation are connected.
+
+Old `/cookbook?deployment=<id>` links open the corresponding model page.
+
+Provider labels follow the displayed logo. FastVideo-owned releases and converted
+checkpoints using its mark display `FastVideo` as provider. FastH3 Trim replaces
+the obsolete CompactH3 catalog entry. Its editable NVFP4 deployment uses the
+released checkpoint and the maintained one-Spark inference configuration, with
+a serving adaptation under `examples/serving/`. Do not restore the old local
+assembly recipes or their four-forward sampling settings.
+
+Every model uses the same header, run modes, command toolbar, hardware matrix,
+settings, and reset controls. The top choices are Python SDK, CLI, and Serving,
+limited to supported routes. Hardware backends display CUDA or MLX. Serving
+appears only where a native server baseline exists.
+
+The toolbar's Copy action writes the edited YAML or Python example with a quoted
+heredoc, then runs the matching command. CUDA catalog pages use the same generator
+settings for SDK, CLI, and serving. Inference uses `request`; serving uses `server`
+and `default_request`. These commands assume the platform's installation guide
+has already been followed. cURL and environment tools appear where the recipe
+provides them. Do not invent CLI flags, serving support, or container commands.
+
+Custom hardware names can be added through the matrix and persist in the page
+URL. This is a device preference, not a memory lookup or compatibility result.
+The component explorer is a design preview for weights, encoders, and decoders.
+It does not alter serving YAML. Choosing an alternate component on an editable
+recipe suppresses generated output until the baseline components are restored.
+Connect those choices only after a matching backend recipe is defined.
