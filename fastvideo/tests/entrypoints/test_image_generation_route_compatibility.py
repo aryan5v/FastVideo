@@ -14,7 +14,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from fastvideo.api.parser import parse_config
 from fastvideo.api.sampling_param import SamplingParam
+from fastvideo.api.schema import GenerationRequest
 from fastvideo.fastvideo_args import WorkloadType
 from fastvideo.tests.entrypoints.test_video_generator import (
     _single_video_args, _single_video_generator, _single_video_output_batch, _small_sampling_param,
@@ -77,6 +79,67 @@ def test_image_generation_routes(path, response_format, output_format, monkeypat
     assert generate.call_args.kwargs["prompt"] == "a cat"
     assert generate.call_args.kwargs["num_frames"] == 1
     engine.run_serialized.assert_awaited_once()
+
+
+def test_image_generation_inherits_server_defaults(monkeypatch, tmp_path):
+    image_bytes = b"test-image-content"
+    generator = VideoGenerator.__new__(VideoGenerator)
+    generator.fastvideo_args = SimpleNamespace(workload_type=WorkloadType.from_string("t2i"))
+
+    def save_image(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(image_bytes)
+
+    generate = Mock(side_effect=save_image)
+
+    async def run_serialized(fn, **kwargs):
+        return fn(**kwargs)
+
+    engine = SimpleNamespace(generator=SimpleNamespace(generate_video=generate),
+                             run_serialized=AsyncMock(side_effect=run_serialized))
+    default_request = parse_config(
+        GenerationRequest,
+        {
+            "negative_prompt": "baseline negative",
+            "sampling": {
+                "width": 768,
+                "height": 512,
+                "seed": 7,
+                "num_inference_steps": 28,
+                "guidance_scale": 3.5,
+            },
+        },
+    )
+    monkeypatch.setattr(image_api, "get_serving_engine", lambda: engine)
+    monkeypatch.setattr(image_api, "get_output_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(image_api, "get_default_request", lambda: default_request)
+    monkeypatch.setattr(image_api, "IMAGE_STORE", AsyncDictStore())
+    app = FastAPI()
+    app.include_router(image_api.router)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/images/generations",
+                               json={"prompt": "a cat", "response_format": "b64_json"})
+        assert response.status_code == 200, response.text
+        kwargs = generate.call_args.kwargs
+        assert (kwargs["width"], kwargs["height"]) == (768, 512)
+        assert kwargs["seed"] == 7
+        assert kwargs["num_inference_steps"] == 28
+        assert kwargs["guidance_scale"] == 3.5
+        assert kwargs["negative_prompt"] == "baseline negative"
+
+        response = client.post(
+            "/v1/images/generations",
+            json={
+                "prompt": "a cat",
+                "size": "1024x1024",
+                "seed": 99,
+                "response_format": "b64_json",
+            },
+        )
+        assert response.status_code == 200, response.text
+        kwargs = generate.call_args.kwargs
+        assert (kwargs["width"], kwargs["height"]) == (1024, 1024)
+        assert kwargs["seed"] == 99
 
 
 @pytest.mark.parametrize("path", ["/v1/images/generations", "/v1/images", "/v1/images/edits"])

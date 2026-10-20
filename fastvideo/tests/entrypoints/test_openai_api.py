@@ -150,6 +150,44 @@ class TestImageBuildGenerationKwargs:
         kw = self._build(seed=42)
         assert kw["seed"] == 42
 
+    def test_default_request_supplies_omitted_image_fields(self):
+        default_request = parse_config(
+            GenerationRequest,
+            {
+                "negative_prompt": "baseline negative",
+                "sampling": {
+                    "width": 768,
+                    "height": 512,
+                    "seed": 7,
+                    "num_inference_steps": 28,
+                    "guidance_scale": 3.5,
+                },
+            },
+        )
+        kw = self._build(default_request=default_request)
+        assert (kw["width"], kw["height"]) == (768, 512)
+        assert kw["seed"] == 7
+        assert kw["num_inference_steps"] == 28
+        assert kw["guidance_scale"] == 3.5
+        assert kw["negative_prompt"] == "baseline negative"
+
+    def test_explicit_image_fields_override_default_request(self):
+        default_request = parse_config(
+            GenerationRequest,
+            {"sampling": {
+                "width": 768,
+                "height": 512,
+                "seed": 7
+            }},
+        )
+        kw = self._build(size="640x480", seed=99, default_request=default_request)
+        assert (kw["width"], kw["height"]) == (640, 480)
+        assert kw["seed"] == 99
+
+    def test_missing_size_falls_back_to_openai_default(self):
+        kw = self._build()
+        assert (kw["width"], kw["height"]) == (1024, 1024)
+
     @pytest.mark.parametrize("n", [0, -1, 11, 20])
     def test_invalid_n_is_rejected(self, n):
         with pytest.raises(HTTPException) as error:

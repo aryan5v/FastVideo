@@ -12,6 +12,8 @@ import imageio.v2 as imageio
 from fastapi import (APIRouter, File, Form, HTTPException, Path, Query, Request, UploadFile)
 from fastapi.responses import FileResponse
 
+from fastvideo.api.compat import explicit_request_updates
+from fastvideo.api.schema import GenerationRequest
 from fastvideo.entrypoints.openai.protocol import (
     ImageGenerationsRequest,
     ImageResponse,
@@ -23,6 +25,7 @@ from fastvideo.entrypoints.openai.request_adapter import (
     validate_served_model_name,
 )
 from fastvideo.entrypoints.openai.state import (
+    get_default_request,
     get_output_dir,
     get_served_model_name,
     get_server_args,
@@ -76,9 +79,21 @@ def _build_generation_kwargs(
     true_cfg_scale: float | None = None,
     negative_prompt: str | None = None,
     enable_teacache: bool | None = None,
+    default_request: GenerationRequest | None = None,
 ) -> dict:
-    """Convert API request params to VideoGenerator.generate_video kwargs"""
+    """Convert API request params to VideoGenerator.generate_video kwargs.
+
+    ``default_request`` is an operator-pinned baseline. The caller passes
+    ``None`` for fields the client omitted, so explicit request values win and
+    omitted values inherit the baseline. Image requests are always one frame.
+    """
     kwargs: dict = {"prompt": prompt}
+    if default_request is not None:
+        defaults = explicit_request_updates(default_request)
+        for name in ("width", "height", "seed", "num_inference_steps", "guidance_scale", "true_cfg_scale",
+                     "negative_prompt", "enable_teacache"):
+            if name in defaults:
+                kwargs[name] = defaults[name]
     if not 1 <= n <= 10:
         raise HTTPException(status_code=400, detail="n must be between 1 and 10")
     if output_format is not None and output_format.lower() not in {"png", "jpeg", "jpg", "webp"}:
@@ -90,6 +105,9 @@ def _build_generation_kwargs(
             raise HTTPException(status_code=400, detail="size must contain positive WIDTHxHEIGHT dimensions")
         kwargs["width"] = w
         kwargs["height"] = h
+    else:
+        kwargs.setdefault("width", 1024)
+        kwargs.setdefault("height", 1024)
 
     ext = choose_image_ext(output_format, background)
     output_dir = os.path.join(get_output_dir(), "images")
@@ -111,8 +129,8 @@ def _build_generation_kwargs(
         kwargs["true_cfg_scale"] = true_cfg_scale
     if negative_prompt is not None:
         kwargs["negative_prompt"] = negative_prompt
-    if enable_teacache:
-        kwargs["enable_teacache"] = True
+    if enable_teacache is not None:
+        kwargs["enable_teacache"] = enable_teacache
     if image_path:
         kwargs["image_path"] = image_path[0] if len(image_path) == 1 else image_path
 
@@ -184,19 +202,21 @@ async def generations(request: ImageGenerationsRequest):
     request_id = generate_request_id()
     engine = get_serving_engine()
 
+    explicit = request.model_fields_set
     gen_kwargs = _build_generation_kwargs(
         request_id=request_id,
         prompt=request.prompt,
         n=1 if request.n is None else request.n,
-        size=request.size,
+        size=request.size if "size" in explicit else None,
         output_format=request.output_format,
         background=request.background,
-        seed=request.seed,
+        seed=request.seed if "seed" in explicit else None,
         num_inference_steps=request.num_inference_steps,
         guidance_scale=request.guidance_scale,
         true_cfg_scale=request.true_cfg_scale,
         negative_prompt=request.negative_prompt,
-        enable_teacache=request.enable_teacache,
+        enable_teacache=request.enable_teacache if "enable_teacache" in explicit else None,
+        default_request=get_default_request(),
     )
 
     start = time.perf_counter()
@@ -263,6 +283,7 @@ async def edits(
         true_cfg_scale=true_cfg_scale,
         negative_prompt=negative_prompt,
         enable_teacache=enable_teacache,
+        default_request=get_default_request(),
     )
 
     # Save input images
