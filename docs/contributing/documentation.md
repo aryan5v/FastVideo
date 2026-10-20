@@ -31,6 +31,49 @@ than between setup commands. Link to installation instead of repeating it.
 The main quick start owns the first generation example; specialized guides
 build on it. Keep model IDs in the catalog and runnable sources consistent.
 
+## HTTP schema and serving docs
+
+The OpenAI-compatible HTTP schema is derived from the mounted FastAPI routes.
+Do not maintain a second route table by hand. Edit the route, Pydantic model, or
+`fastvideo/entrypoints/openai/openapi_contract.py`, then regenerate and commit
+the document:
+
+```bash
+python scripts/export_openapi.py
+python scripts/export_openapi.py --check
+```
+
+The generated file is `docs/openapi/fastvideo-openai.json`. The export
+constructs the app but never enters its lifespan, loads weights, starts CUDA or
+MLX, downloads a model, or contacts the network. It does import the project
+runtime, so run it in the normal development environment, not the docs-only
+Python environment. The docs site owns the public reference route and copies
+the static document; keep the checked-in path stable unless a coordinated route
+change updates both sides. The schema is OpenAPI 3.1.0 and reports the package
+version in `info.version`.
+
+When adding a serving baseline, update
+[`docs/cookbook/serving-coverage.md`](../cookbook/serving-coverage.md) and the
+capability matrix in
+[`docs/cookbook/serving-compatibility.md`](../cookbook/serving-compatibility.md).
+Declare the workload and runtime, mark source-backed and GPU-verified evidence
+separately, and state unsupported cases. A generated schema does not prove that
+a model supports an operation.
+
+Run the focused contract tests and the pinned clients when changing the HTTP
+surface:
+
+```bash
+pytest fastvideo/tests/entrypoints/test_openapi_contract.py \
+  fastvideo/tests/entrypoints/test_openai_serving_engine.py \
+  fastvideo/tests/entrypoints/test_serving_family_baselines.py \
+  fastvideo/tests/entrypoints/test_openai_video_client.py -q
+```
+
+The Python client pin is `openai==3.6.0`; the Node client pin is
+`openai@7.8.0`. Do not broaden a compatibility statement beyond the behavior
+those tests and clients actually exercise.
+
 ## Build and check
 
 From the repository root, use Node 24 and Python 3.12:

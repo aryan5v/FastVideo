@@ -19,11 +19,13 @@ from fastvideo.entrypoints.openai.state import (
     set_state,
 )
 from fastvideo.entrypoints.openai.serving_engine import OpenAIServingEngine, ServingGenerator
+from fastvideo.entrypoints.openai.openapi_contract import install_openapi_contract
 from fastvideo.entrypoints.openai.protocol import VideoGenerationRequest
 from fastvideo.entrypoints.video_generator import VideoGenerator
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.registry import get_preset_selection
+from fastvideo.version import __version__
 from fastvideo.worker.executor import reject_external_launcher
 
 logger = init_logger(__name__)
@@ -113,7 +115,7 @@ def create_app(
 
     app = FastAPI(
         title="FastVideo OpenAI-Compatible API",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.fastvideo_args = fastvideo_args
@@ -183,6 +185,7 @@ def create_app(
             raise HTTPException(status_code=503, detail=engine.unhealthy_reason or "generation engine is unhealthy")
         return {"status": "ok"}
 
+    install_openapi_contract(app)
     return app
 
 

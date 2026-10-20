@@ -18,11 +18,11 @@ requests. HTTP handling and job polling remain asynchronous.
 | --- | --- | --- |
 | `GET` | `/v1/models` | List the served model and optional startup adapter |
 | `GET` | `/v1/models/{model}` | Retrieve one served model card |
-| `POST` | `/v1/videos` | Submit an asynchronous video job |
-| `POST` | `/v1/videos/sync` | Generate and return an MP4 response directly |
+| `POST` | `/v1/videos` | Submit an asynchronous video or audio job |
+| `POST` | `/v1/videos/sync` | Generate and return MP4 or WAV bytes directly |
 | `GET` | `/v1/videos` | List in-memory jobs with `after`, `limit`, and `order` |
 | `GET` | `/v1/videos/{id}` | Retrieve job status and metadata |
-| `GET` | `/v1/videos/{id}/content` | Download a completed MP4 |
+| `GET` | `/v1/videos/{id}/content` | Download a completed MP4 or WAV |
 | `DELETE` | `/v1/videos/{id}` | Delete a job and its completed artifact |
 | `POST` | `/v1/images` | Generate an image |
 | `POST` | `/v1/images/generations` | OpenAI-compatible alias for image generation |
@@ -32,6 +32,9 @@ requests. HTTP handling and job polling remain asynchronous.
 
 `POST /v1/videos/generations` remains an alias for older FastVideo clients, and
 `POST /v1/images/generations` is the OpenAI Python client's image generation path.
+Audio jobs reuse the video-job routes because the store and polling contract are
+shared; a job's `media_type` is `audio/wav` and its content response carries WAV
+bytes. `POST /v1/videos/sync` returns either `video/mp4` or `audio/wav`.
 The OpenAI Python and JavaScript clients can create, retrieve, list, download,
 and delete video jobs. Use the [H3 server cookbook](../../cookbook/openai-api.md)
 for pinned client versions and executable examples. Download variants other
@@ -93,7 +96,13 @@ Reference objects support URL or local-path strings through `image_url`,
 return HTTP 400 because FastVideo does not provide an OpenAI Files store.
 Image URLs, data URLs, local paths, and multipart `input_reference` uploads are
 materialized and decoded under the configured output directory during
-admission. Invalid media returns HTTP 400 before a job is created.
+admission. Invalid media returns HTTP 400 before a job is created. URL downloads
+are bounded by `server.media_reference_max_bytes` (default 2 GiB); server-owned
+copies are removed after the job, while caller-owned local paths are untouched.
+
+Audio requests use `seconds` or `audio_start_in_s`/`audio_end_in_s`. Video
+geometry fields are rejected for audio instead of being silently ignored.
+MMAudio requires a video reference; Stable Audio is text-to-audio.
 
 ## Jobs and synchronous responses
 
@@ -102,10 +111,10 @@ status advances through `in_progress` to `completed` or `failed`. Completed
 jobs expose `file_name`, the FastVideo compatibility extension `file_path`,
 timings, and peak-memory metadata when the pipeline reports them.
 
-`POST /v1/videos/sync` returns `video/mp4` bytes. It includes
+`POST /v1/videos/sync` returns `video/mp4` or `audio/wav` bytes. It includes
 `X-Request-Id`, `X-Model`, `X-Inference-Time-S`, `X-Stage-Durations`, and
-`X-Peak-Memory-MB` headers. Its temporary MP4 is removed after the response is
-streamed. Asynchronous artifacts remain available until their job is deleted.
+`X-Peak-Memory-MB` headers. Its temporary artifact is removed after the response
+is streamed. Asynchronous artifacts remain available until their job is deleted.
 
 Output paths are controlled by the server. Clients cannot choose filesystem
 destinations; every video is written beneath `server.output_dir` with a unique
@@ -156,6 +165,19 @@ The released FastH3 pipeline generates one packed video/audio result per
 request, uses 24 fps, requires guidance scale 1, and accepts frame counts on
 its causal-VAE grid. The serving examples pin its five-point distilled sigma
 schedule (four DiT forwards).
+
+## OpenAPI
+
+`GET /openapi.json` is generated from the mounted FastAPI routes. The same
+document is checked in at `docs/openapi/fastvideo-openai.json` and is checked
+for staleness by the Python test suite. It removes FastAPI's default 422
+response and documents the OpenAI-style 400 envelope, binary MP4/WAV/image
+responses, and the JSON video body that is parsed from a raw `Request`. It is a
+route-derived schema, not a second hand-maintained route table.
+
+The document describes the tested FastVideo surface, not full OpenAI API or SDK
+compatibility. Model, task and runtime support still depends on the loaded serve
+configuration; see `docs/cookbook/serving-compatibility.md`.
 
 ## Defaults and errors
 

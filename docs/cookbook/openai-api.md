@@ -1,11 +1,20 @@
 # Run H3 with a server and playground
 
-Start FastH3 on CUDA, one DGX Spark, or Apple Silicon MLX, then iterate on prompts in a browser,
-with cURL, or from your app. The server and clients can run on the same machine.
+Start a supported FastVideo model on CUDA, one DGX Spark, or Apple Silicon MLX,
+then iterate on prompts in a browser, with cURL, or from your app. The server and
+clients can run on the same machine.
 
-The server supports the OpenAI-compatible video-job API. The Python and
-JavaScript client examples use that interface, but requests go to FastVideo.
-You do not need an OpenAI account or cloud key.
+The server exposes OpenAI-compatible **video jobs**, image routes, and audio
+media jobs. The Python and JavaScript client examples use the video-job
+interface, but requests go to FastVideo. You do not need an OpenAI account or
+cloud key. This is the tested FastVideo surface, not a claim of full OpenAI API
+or SDK compatibility; see [HTTP serving compatibility](serving-compatibility.md).
+
+The walkthrough below uses FastH3 because it has the longest-running playground
+and client coverage. For another family, pick a baseline from the
+[serving ledger](serving-coverage.md) and use its `fastvideo serve --config`
+command. The request, polling and download steps stay the same when that loaded
+pipeline supports the requested task.
 
 The [H3 recipe selector](minimax-h3.md) provides the same workflow with runtime
 selection. This guide covers FastH3 V1 (four forwards) and FastH3 V2
@@ -205,6 +214,46 @@ bash examples/serving/clients/video.sh
 
 <include>/_snippets/clients/video.sh.md</include>
 
+## Images and audio
+
+Image baselines serve `/v1/images/generations`, `/v1/images`, and
+`/v1/images/edits`. Start one with its checked-in config, then send the
+advertised model alias:
+
+```bash
+fastvideo serve --config examples/serving/openai_flux1_dev.yaml
+curl --fail-with-body http://127.0.0.1:8000/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"flux1-dev","prompt":"a photo of a cat","size":"1024x1024","response_format":"b64_json"}'
+```
+
+SD3.5 Medium is gated; accept its license and authenticate before starting that
+server. The FLUX defaults come from the loaded model's sampling-param class, so
+omitting `num_inference_steps` or `guidance_scale` uses the model's own defaults,
+not a generic image default. The image routes are not mounted by the native MLX
+H3/Wan server.
+
+Audio uses the same video-job routes so one polling and deletion contract works:
+submit to `POST /v1/videos`, poll `GET /v1/videos/{id}`, then download
+`GET /v1/videos/{id}/content`. Check `media_type`; a WAV job returns
+`audio/wav`, not `video/mp4`. Set `seconds`, or
+`audio_start_in_s`/`audio_end_in_s`; do not send image geometry fields.
+
+```bash
+FASTVIDEO_MODEL=stable-audio FASTVIDEO_SECONDS=6 \
+  python examples/serving/clients/audio.py
+FASTVIDEO_MODEL=mmaudio-large-44k-v2 \
+FASTVIDEO_VIDEO_REFERENCE=/path/to/clip.mp4 \
+  python examples/serving/clients/audio.py
+```
+
+Node and cURL versions are in `examples/serving/clients/audio.mjs` and
+`audio.sh`.
+MMAudio requires `video_reference`; Stable Audio is text-to-audio. The
+[serving compatibility matrix](serving-compatibility.md) lists which families
+target each workload, and the [coverage ledger](serving-coverage.md) records
+which baselines exist.
+
 ## Connect your app
 
 Set `FASTVIDEO_BASE_URL` to the FastVideo endpoint, including `/v1`, and
@@ -235,37 +284,64 @@ set `FASTVIDEO_API_KEY` on your backend. Never reuse an OpenAI cloud key here.
 
 ## Compatibility and limits
 
-The client examples target the OpenAI video-job API, not Chat Completions.
-The compatibility tests cover real HTTP requests with the pinned SDKs and a
-fake generator. They establish client and protocol behavior, not GPU generation
-quality, latency, or memory use. The server configuration still needs a recorded
-H3 hardware run before it can be marked Verified in the cookbook.
+The pinned clients cover a tested subset of the OpenAI video-job interface.
+They do not establish full OpenAI API compatibility. The compatibility tests
+send real HTTP requests to the pinned SDKs against a fake generator, so they
+establish client and protocol behavior, not GPU output quality, latency, or
+memory use. The server configuration still needs a recorded generation run
+before it can be marked Verified in the cookbook.
 
 | Operation | Endpoint |
 | --- | --- |
 | List served models | `GET /v1/models` |
-| Create a video job | `POST /v1/videos` |
+| Create a video or audio job | `POST /v1/videos` |
 | Retrieve status, including a failed job | `GET /v1/videos/{id}` |
 | List jobs | `GET /v1/videos` |
-| Download the MP4 | `GET /v1/videos/{id}/content` |
+| Download MP4, WAV, PNG, JPEG, or WebP content | `GET /v1/videos/{id}/content`, `GET /v1/images/{id}/content` |
 | Delete a job and its artifact | `DELETE /v1/videos/{id}` |
+| Generate an image | `POST /v1/images/generations`, `POST /v1/images` |
+| Edit an image | `POST /v1/images/edits` |
+| Synchronous media response | `POST /v1/videos/sync` (FastVideo extension) |
+| Liveness and engine health | `GET /health` |
 
-Failed jobs return HTTP 200 with `status: "failed"` and an `error` object so
-SDK polling can stop. Invalid requests return HTTP 400; missing jobs return
-HTTP 404. The download endpoint supports only the `video` variant, not
-thumbnails or spritesheets. Remix, extensions, characters, and an OpenAI Files
-store are not implemented. `/v1/videos/sync` is a FastVideo extension and is
-not used by these client examples.
+Failed async jobs return HTTP 200 with `status: "failed"` and an `error` object,
+so SDK polling can stop. Invalid requests return HTTP 400 with the OpenAI-style
+error envelope even when FastAPI's validator rejected the body; the OpenAPI
+document therefore removes FastAPI's default 422. Missing jobs return 404,
+synchronous generation failures return 500, and unhealthy `/health` returns
+503. The video download endpoint supports only the `video` variant, not
+thumbnails or spritesheets.
 
-OpenAI marks its hosted Sora API as deprecated. FastVideo runs its own models;
-the [OpenAI video API reference](https://developers.openai.com/api/reference/python/resources/videos/methods/create)
-describes the client interface, not FastVideo model availability. The examples
-pin tested SDK versions because future SDKs may change or remove video helpers.
+Chat Completions, Responses, Embeddings, Files, Batches, fine-tuning, vector
+stores, assistants, realtime, and audio transcription/translation/speech routes
+are not implemented. Remix, extensions, characters, thumbnail and spritesheet
+operations are not implemented. There is no OpenAI streaming video mode or SSE
+stream; async jobs are polled. `/v1/videos/sync` is a FastVideo extension and is
+not used by the pinned client examples.
+
+The generated HTTP schema is checked in at
+[`docs/openapi/fastvideo-openai.json`](../openapi/fastvideo-openai.json); a
+running server serves the same document at `/openapi.json`. It is derived from
+the mounted FastAPI routes and is not a hand-maintained second route table.
+[HTTP serving compatibility](serving-compatibility.md) records the exact tested
+client versions, extension fields, capability matrix, and unsupported features.
+
+The server has no built-in API-key check. The examples' `local` key is a
+placeholder required by the SDK, not authentication; the default CORS policy is
+permissive. For remote access, use authenticated TLS, restrict origins and
+request rates, and do not expose an inference server directly to the public
+internet. Local and cluster media URLs are a trusted surface; URL downloads are
+bounded by `server.media_reference_max_bytes` (default 2 GiB), and server-owned
+copies are removed after the job.
 
 The server serializes generation through one loaded pipeline. Job metadata is
 in memory and is lost on restart. Async artifacts remain on disk until deleted
 through the API; establish a retention policy for production use. Deleting an
-in-progress job does not interrupt an already running CUDA call.
+in-progress job removes the API resource but does not interrupt an already
+running CUDA call.
 
 For model-specific request fields and reference media, see the
-[HTTP contract](../design/server_contracts/openai.md).
+[HTTP contract](../design/server_contracts/openai.md). OpenAI marks its hosted
+Sora API as deprecated; FastVideo runs its own models, and the
+[OpenAI video API reference](https://developers.openai.com/api/reference/python/resources/videos/methods/create)
+describes the client interface, not FastVideo model availability.
