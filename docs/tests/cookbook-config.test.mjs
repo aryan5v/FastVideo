@@ -474,6 +474,30 @@ test("sample requests follow effective alias, host and port without repinning re
   assert.equal(resolveConfig(image).clientRequest.input_reference, "/absolute/path/to/first-frame.png");
 });
 
+test("image and audio workloads sample their declared endpoints", () => {
+  const image = catalog();
+  image.workload = "t2i";
+  const imageResult = resolveConfig(image);
+  assert.match(imageResult.clientCommand, /\/v1\/images\/generations/);
+  assert.equal(imageResult.clientRequest.size, "1024x1024");
+  assert.match(imageResult.clientCommand, /--output output\.png/);
+
+  const audio = catalog();
+  audio.workload = "t2a";
+  audio.base_config.default_request.sampling = { audio_start_in_s: 0, audio_end_in_s: 6 };
+  const audioResult = resolveConfig(audio);
+  assert.match(audioResult.clientCommand, /\/v1\/videos\/sync/);
+  assert.equal(audioResult.clientRequest.seconds, 6);
+  assert.match(audioResult.clientCommand, /--output output\.wav/);
+
+  const videoToAudio = catalog();
+  videoToAudio.workload = "v2a";
+  videoToAudio.base_config.default_request.sampling = { audio_start_in_s: 2, audio_end_in_s: 8 };
+  const videoToAudioResult = resolveConfig(videoToAudio);
+  assert.deepEqual(videoToAudioResult.clientRequest.video_reference, { video_url: "/absolute/path/to/clip.mp4" });
+  assert.equal(videoToAudioResult.clientRequest.seconds, 6);
+});
+
 test("LoRA sample requests use the startup adapter instead of an edited server alias", () => {
   const data = catalog();
   const components = { lora_path: "/models/adapter.safetensors", lora_nickname: "my-adapter" };

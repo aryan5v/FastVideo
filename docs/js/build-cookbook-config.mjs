@@ -348,8 +348,10 @@ export function buildCatalogs({
     expected(
       definition.workloads,
       (value) =>
-        Array.isArray(value) && value.length > 0 && value.every((workload) => ["t2v", "i2v"].includes(workload)),
-      "nonempty list of t2v or i2v workloads",
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((workload) => ["t2v", "i2v", "t2i", "t2a", "v2a"].includes(workload)),
+      "nonempty list of t2v, i2v, t2i, t2a or v2a workloads",
       `${context}.workloads`,
     );
     const options = mergeOptions(declarations.options, definition.options, context);

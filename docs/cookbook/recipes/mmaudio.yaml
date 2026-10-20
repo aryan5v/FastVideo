@@ -1,0 +1,20 @@
+title: MMAudio large-44k-v2
+summary: Video-to-audio generation through the OpenAI-compatible media-job routes.
+
+deployments:
+  cuda-rest:
+    runtime: fastvideo-cuda-rest
+    workload: v2a
+    defaults: examples/serving/openai_mmaudio.yaml
+    requirements:
+      - >-
+        Each request must supply video_reference with a local path or URL; the
+        server does not define a default video.
+    options:
+      - server.*
+      - generator.engine.num_gpus
+      - default_request.sampling.audio_start_in_s
+      - default_request.sampling.audio_end_in_s
+    overrides:
+      default_request.sampling.audio_end_in_s:
+        minimum: 0.1

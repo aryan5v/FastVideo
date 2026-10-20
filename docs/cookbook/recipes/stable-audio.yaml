@@ -1,0 +1,20 @@
+title: Stable Audio Open 1.0
+summary: Text-to-audio generation through the OpenAI-compatible media-job routes.
+
+deployments:
+  cuda-rest:
+    runtime: fastvideo-cuda-rest
+    workload: t2a
+    defaults: examples/serving/openai_stable_audio.yaml
+    requirements:
+      - >-
+        Install the optional Stable Audio inference dependencies listed in
+        examples/inference/basic/basic_stable_audio.py.
+    options:
+      - server.*
+      - generator.engine.num_gpus
+      - default_request.sampling.audio_start_in_s
+      - default_request.sampling.audio_end_in_s
+    overrides:
+      default_request.sampling.audio_end_in_s:
+        minimum: 0.1

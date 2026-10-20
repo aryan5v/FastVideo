@@ -44,7 +44,7 @@ runtimes:
         host: 0.0.0.0
         port: 8000
         served_model_name: null
-    workloads: [t2v, i2v]
+    workloads: [t2v, i2v, t2i, t2a, v2a]
     options: &cuda_options
       server.served_model_name:
         anyOf:
@@ -115,6 +115,16 @@ runtimes:
         default: 1280
         minimum: 1
         maximum: 4096
+      default_request.sampling.audio_start_in_s:
+        title: Audio start
+        description: Seconds into the request's audio timeline; audio workloads only.
+        type: number
+        minimum: 0
+      default_request.sampling.audio_end_in_s:
+        title: Audio end
+        description: Seconds into the request's audio timeline; audio workloads only.
+        type: number
+        minimum: 0
       default_request.sampling.fps:
         title: FPS
         type: integer

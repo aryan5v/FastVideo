@@ -351,21 +351,37 @@ export function sampleRequest(catalog, config) {
   }
   const components = config.generator?.pipeline?.components;
   const model = components?.lora_path ? components.lora_nickname : server.served_model_name || catalog.model.id;
+  const sampling = config.default_request?.sampling ?? {};
   const body = {
     ...(model === undefined ? {} : { model }),
     prompt: config.default_request?.prompt ?? "A river flowing through a peaceful forest",
   };
-  if (catalog.workload === "i2v") body.input_reference = "/absolute/path/to/first-frame.png";
+  let endpoint = "/v1/videos/sync";
+  let output = "output.mp4";
+  if (catalog.workload === "t2i") {
+    body.size = `${sampling.width ?? 1024}x${sampling.height ?? 1024}`;
+    body.response_format = "b64_json";
+    endpoint = "/v1/images/generations";
+    output = "output.png";
+  } else if (catalog.workload === "t2a" || catalog.workload === "v2a") {
+    const start = Number(sampling.audio_start_in_s ?? 0);
+    const end = Number(sampling.audio_end_in_s ?? 0);
+    body.seconds = end > start ? Number((end - start).toFixed(3)) : 4;
+    if (catalog.workload === "v2a") body.video_reference = { video_url: "/absolute/path/to/clip.mp4" };
+    output = "output.wav";
+  } else if (catalog.workload === "i2v") {
+    body.input_reference = "/absolute/path/to/first-frame.png";
+  }
   const argv = [
     "curl",
     "--fail-with-body",
-    `http://${host}:${server.port}/v1/videos/sync`,
+    `http://${host}:${server.port}${endpoint}`,
     "-H",
     "Content-Type: application/json",
     "--data",
     JSON.stringify(body),
   ];
-  argv.push("--output", "output.mp4");
+  argv.push("--output", output);
   return { body, command: argv.map(shellQuote).join(" ") };
 }
 
