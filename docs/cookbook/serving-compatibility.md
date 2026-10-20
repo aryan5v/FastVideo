@@ -7,8 +7,8 @@ configuration and its hardware path; the schema cannot prove that a loaded
 pipeline supports an operation.
 
 The machine-readable contract is generated from the mounted FastAPI routes:
-`docs/openapi/fastvideo-openai.json`. A running server serves the same document
-at `/openapi.json`. See [the serving coverage ledger](serving-coverage.md) for
+[the OpenAPI document](/openapi/fastvideo-openai.json). A running server serves
+the same document at `/openapi.json`. See [the serving coverage ledger](serving-coverage.md) for
 baselines and [the HTTP contract](../design/server_contracts/openai.md) for
 request-field details.
 
