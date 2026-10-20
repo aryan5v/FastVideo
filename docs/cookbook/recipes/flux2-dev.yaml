@@ -1,0 +1,13 @@
+title: FLUX.2-dev
+summary: Text-to-image generation with FLUX.2-dev through the OpenAI-compatible image routes.
+
+deployments:
+  cuda-rest:
+    runtime: fastvideo-cuda-rest
+    workload: t2i
+    defaults: examples/serving/openai_flux2_dev.yaml
+    options:
+      - server.*
+      - generator.engine.num_gpus
+      - generator.engine.offload.text_encoder
+      - generator.engine.offload.vae

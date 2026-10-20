@@ -53,9 +53,9 @@ finishes; caller-owned local paths are never deleted.
 | `mlx_fasth3.yaml` | FastH3 V1 converted | `t2v` | MLX REST | none (legacy catalog only) | Source runtime; T2VA only |
 | `mlx_fasth3_8step.yaml` | FastH3 V2 converted | `t2v` | MLX REST | `fasth3-8step/mlx-rest` | Source runtime; T2VA only |
 | `openai_flux1_dev.yaml` | FLUX.1-dev | `t2i` | CUDA REST `/v1/images` | `flux1-dev` | Source-backed |
-| `openai_flux2_dev.yaml` | FLUX.2-dev | `t2i` | CUDA REST `/v1/images` | none | Source-backed; no image manifest yet |
-| `openai_flux2_klein.yaml` | FLUX.2-klein-4B | `t2i` | CUDA REST `/v1/images` | none | Source-backed; no image manifest yet |
-| `openai_sd35.yaml` | SD3.5 Medium | `t2i` | CUDA REST `/v1/images` | none | Source-backed; no image manifest yet |
+| `openai_flux2_dev.yaml` | FLUX.2-dev | `t2i` | CUDA REST `/v1/images` | `flux2-dev` | Source-backed |
+| `openai_flux2_klein.yaml` | FLUX.2-klein-4B | `t2i` | CUDA REST `/v1/images` | `flux2-klein` | Source-backed |
+| `openai_sd35.yaml` | SD3.5 Medium | `t2i` | CUDA REST `/v1/images` | `sd35` | Source-backed; gated checkpoint |
 | `openai_stable_audio.yaml` | Stable Audio Open 1.0 | `t2a` | CUDA REST media jobs | `stable-audio` | Source-backed; optional audio dependencies |
 | `openai_mmaudio.yaml` | MMAudio large-44k-v2 | `v2a` | CUDA REST media jobs | `mmaudio` | Source-backed; video reference required |
 
@@ -73,10 +73,10 @@ configuration in this checkout:
 - MagiHuman pipelines have no registry entry.
 
 Adding a baseline for one of these is a code and evidence task, not a catalog
-edit. FLUX.1 text-to-image, Stable Audio text-to-audio and MMAudio video-to-audio
-now have manifests through the shared `t2i`/`t2a`/`v2a` workload contract. The
-next reviewable batches are FLUX.2/SD3.5 image manifests, remaining audio
-variants, then the interactive and super-resolution families.
+edit. FLUX.1, FLUX.2-dev, FLUX.2-klein, SD3.5, Stable Audio and MMAudio now have
+manifests through the shared `t2i`/`t2a`/`v2a` workload contract. The next
+reviewable batches are remaining audio variants, then the interactive,
+adapter and super-resolution families.
 
 ## Hardware evidence found in recipes
 
