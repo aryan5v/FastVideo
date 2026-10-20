@@ -86,6 +86,7 @@ uncovered registry families.
 | --- | --- | --- | --- |
 | `openai_wan22_i2v_a14b.yaml` | Wan2.2 I2V A14B | image-to-video | 1 |
 | `openai_hunyuan15_t2v_480p.yaml` | HunyuanVideo 1.5 T2V 480p | text-to-video | 1 |
+| `openai_cosmos25_t2v.yaml` | Cosmos Predict2.5 2B | text-to-video | 1 |
 | `openai_kandinsky5_t2v.yaml` | Kandinsky-5.0 T2V Lite | text-to-video | 1 |
 | `openai_hunyuan15_i2v_480p.yaml` | HunyuanVideo 1.5 I2V 480p | image-to-video | 1 |
 | `openai_kandinsky6_ti2va.yaml` | Kandinsky 6 Pro TI2VA | text/image-to-video with audio | 1 |

@@ -29,6 +29,7 @@ BASELINES = {
     "openai_wan22_i2v_a14b.yaml": "i2v",
     "openai_hunyuan15_t2v_480p.yaml": "t2v",
     "openai_kandinsky5_t2v.yaml": "t2v",
+    "openai_cosmos25_t2v.yaml": "t2v",
     "openai_hunyuan15_i2v_480p.yaml": "i2v",
     "openai_kandinsky6_ti2va.yaml": "t2v",
     "openai_kandinsky6_ti2va_distilled.yaml": "t2v",

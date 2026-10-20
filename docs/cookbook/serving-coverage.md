@@ -44,6 +44,7 @@ finishes; caller-owned local paths are never deleted.
 | `openai_wan22_ti2v_5b.yaml` | Wan2.2 TI2V 5B | `t2v` | CUDA REST | none | Source-backed |
 | `openai_hunyuan15_t2v_480p.yaml` | HunyuanVideo 1.5 T2V 480p | `t2v` | CUDA REST | `hunyuan15-t2v-480p` | Source-backed |
 | `openai_kandinsky5_t2v.yaml` | Kandinsky-5.0 T2V Lite | `t2v` | CUDA REST | `kandinsky5-t2v` | Source-backed |
+| `openai_cosmos25_t2v.yaml` | Cosmos Predict2.5 2B | `t2v` | CUDA REST | `cosmos25-t2v` | Source-backed |
 | `openai_hunyuan15_i2v_480p.yaml` | HunyuanVideo 1.5 I2V 480p | `i2v` | CUDA REST | `hunyuan15-i2v-480p` | Source-backed |
 | `openai_kandinsky6_ti2va.yaml` | Kandinsky 6 Pro TI2VA | `t2v` | CUDA REST | `kandinsky6-ti2va` | Source-backed |
 | `openai_kandinsky6_ti2va_distilled.yaml` | Kandinsky 6 Pro-distill TI2VA | `t2v` | CUDA REST | `kandinsky6-ti2va-distilled` | Source-backed |
@@ -65,7 +66,7 @@ still resolve through the typed API, but they do not have a checked-in serving
 configuration in this checkout:
 
 - Kandinsky 5 I2V and other checkpoints, Kandinsky 6 VSR, Kandinsky 5 SR.
-- Cosmos, Cosmos 2.5, GEN3C, Helios, HyWorld, LingBot Video/World/World2.
+- Cosmos, GEN3C, Helios, HyWorld, LingBot Video/World/World2.
 - MatrixGame 2/3 interactive generation.
 - Wan Fun InP/Control, Wan Animate, Wan S2V, Lucy Edit, Self-Forcing variants.
 - MMAudio small/medium variants, Stable Audio Open Small.
