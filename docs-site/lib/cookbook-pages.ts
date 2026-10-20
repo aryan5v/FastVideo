@@ -48,6 +48,133 @@ export const recipePages = [
     description: "Generate video with incremental delivery over WebSocket.",
     tags: ["Text to video", "Streaming"],
   },
+  {
+    id: "cosmos25-t2v",
+    family: "Cosmos",
+    title: "Cosmos Predict2.5 2B T2V",
+    mark: "Cosmos",
+    path: "/cookbook/cosmos/cosmos25-t2v",
+    description: "Text-to-video generation with the Cosmos Predict2.5 2B Diffusers checkpoint.",
+    tags: ["Text to video"],
+  },
+  {
+    id: "flux1-dev",
+    family: "FLUX",
+    title: "FLUX.1-dev",
+    mark: "FLUX",
+    path: "/cookbook/flux/flux1-dev",
+    description: "Text-to-image generation with FLUX.1-dev through the OpenAI-compatible image routes.",
+    tags: ["Text to image"],
+  },
+  {
+    id: "flux2-dev",
+    family: "FLUX",
+    title: "FLUX.2-dev",
+    mark: "FLUX",
+    path: "/cookbook/flux/flux2-dev",
+    description: "Text-to-image generation with FLUX.2-dev through the OpenAI-compatible image routes.",
+    tags: ["Text to image"],
+  },
+  {
+    id: "flux2-klein",
+    family: "FLUX",
+    title: "FLUX.2 Klein 4B",
+    mark: "FLUX",
+    path: "/cookbook/flux/flux2-klein",
+    description: "Text-to-image generation with the smaller FLUX.2-klein-4B checkpoint.",
+    tags: ["Text to image"],
+  },
+  {
+    id: "hunyuan15-i2v-480p",
+    family: "Hunyuan",
+    title: "HunyuanVideo 1.5 I2V 480p",
+    mark: "HY",
+    path: "/cookbook/hunyuan/hunyuan15-i2v-480p",
+    description: "First-frame-conditioned video generation with the step-distilled HunyuanVideo 1.5 model.",
+    tags: ["Image to video"],
+  },
+  {
+    id: "hunyuan15-t2v-480p",
+    family: "Hunyuan",
+    title: "HunyuanVideo 1.5 T2V 480p",
+    mark: "HY",
+    path: "/cookbook/hunyuan/hunyuan15-t2v-480p",
+    description: "Text-to-video generation at 480p with HunyuanVideo 1.5.",
+    tags: ["Text to video"],
+  },
+  {
+    id: "kandinsky5-t2v",
+    family: "Kandinsky 5",
+    title: "Kandinsky 5 T2V Lite",
+    mark: "K5",
+    path: "/cookbook/kandinsky5/kandinsky5-t2v",
+    description: "Text-to-video generation with the Kandinsky-5.0 Lite 5-second model.",
+    tags: ["Text to video"],
+  },
+  {
+    id: "kandinsky6-ti2va-distilled",
+    family: "Kandinsky 6",
+    title: "Kandinsky 6 TI2VA Distilled",
+    mark: "K6",
+    path: "/cookbook/kandinsky6/kandinsky6-ti2va-distilled",
+    description: "Ten-step pi-Flow Kandinsky 6 Pro video with synchronized audio.",
+    tags: ["Text to video", "Audio"],
+  },
+  {
+    id: "kandinsky6-ti2va",
+    family: "Kandinsky 6",
+    title: "Kandinsky 6 TI2VA",
+    mark: "K6",
+    path: "/cookbook/kandinsky6/kandinsky6-ti2va",
+    description: "Text- or image-conditioned video with synchronized audio from Kandinsky 6 Pro.",
+    tags: ["Text to video", "Audio"],
+  },
+  {
+    id: "mmaudio",
+    family: "MMAudio",
+    title: "MMAudio large-44k-v2",
+    mark: "Audio",
+    path: "/cookbook/mmaudio/mmaudio",
+    description: "Video-to-audio generation through the OpenAI-compatible media-job routes.",
+    tags: ["Video to audio"],
+  },
+  {
+    id: "sd35",
+    family: "Stable Diffusion",
+    title: "SD3.5 Medium",
+    mark: "SD",
+    path: "/cookbook/stable-diffusion/sd35",
+    description:
+      "Text-to-image generation with Stable Diffusion 3.5 Medium through the OpenAI-compatible image routes.",
+    tags: ["Text to image"],
+  },
+  {
+    id: "stable-audio",
+    family: "Stable Audio",
+    title: "Stable Audio Open 1.0",
+    mark: "Audio",
+    path: "/cookbook/stable-audio/stable-audio",
+    description: "Text-to-audio generation through the OpenAI-compatible media-job routes.",
+    tags: ["Text to audio"],
+  },
+  {
+    id: "wan21-t2v-14b",
+    family: "Wan",
+    title: "Wan2.1 T2V 14B",
+    mark: "Wan",
+    path: "/cookbook/wan/wan21-t2v-14b",
+    description: "Text-to-video generation with the Wan2.1 14B base model at 720p.",
+    tags: ["Text to video"],
+  },
+  {
+    id: "wan22-i2v-a14b",
+    family: "Wan",
+    title: "Wan2.2 I2V A14B",
+    mark: "Wan",
+    path: "/cookbook/wan/wan22-i2v-a14b",
+    description: "Image-conditioned video generation with the Wan2.2 mixture-of-experts model.",
+    tags: ["Image to video"],
+  },
 ];
 export type RecipePage = (typeof recipePages)[number];
 export function sitePath(path: string) {
@@ -96,6 +223,20 @@ const backendModels: Record<string, string> = {
   "FastVideo/FastWan2.1-T2V-1.3B-Diffusers": "fastwan21",
   "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers": "wan21-i2v",
   "FastVideo/LTX2-Distilled-Diffusers": "ltx2-distilled",
+  "KyleShao/Cosmos-Predict2.5-2B-Diffusers": "cosmos25-t2v",
+  "black-forest-labs/FLUX.1-dev": "flux1-dev",
+  "black-forest-labs/FLUX.2-dev": "flux2-dev",
+  "black-forest-labs/FLUX.2-klein-4B": "flux2-klein",
+  "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v_step_distilled": "hunyuan15-i2v-480p",
+  "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v": "hunyuan15-t2v-480p",
+  "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers": "kandinsky5-t2v",
+  "kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers": "kandinsky6-ti2va-distilled",
+  "kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers": "kandinsky6-ti2va",
+  "FastVideo/MMAudio-large-44k-v2-Diffusers": "mmaudio",
+  "stabilityai/stable-diffusion-3.5-medium": "sd35",
+  "FastVideo/stable-audio-open-1.0-Diffusers": "stable-audio",
+  "Wan-AI/Wan2.1-T2V-14B-Diffusers": "wan21-t2v-14b",
+  "Wan-AI/Wan2.2-I2V-A14B-Diffusers": "wan22-i2v-a14b",
 };
 const TASK_GROUPS: Array<[RegExp, string]> = [
   [/world/, "Text to world"],
@@ -115,56 +256,107 @@ export function taskLabel(value: string): string {
   return TASK_GROUPS.find(([pattern]) => pattern.test(normalized))?.[1] ?? "Text to video";
 }
 
-export const modelDirectory = [...new Set(sourceRecipes.map((recipe) => recipe.model))]
-  .map((model) => {
-    const recipes = sourceRecipes.filter((recipe) => recipe.model === model);
-    const first = recipes[0];
-    const family = familyInfo[first.family];
-    const backend = recipePages.find((page) => page.id === backendModels[model]);
-    const ownModel = model.startsWith("FastVideo/Fast");
-    const logo = ownModel ? "fastvideo" : family.logo;
-    const providers: Record<string, string> = {
-      fastvideo: "FastVideo",
-      minimax: "MiniMax",
-      "wan-ai": "Wan AI",
-      ltx: "Lightricks",
-      "tencent-hunyuan": "Tencent",
-      kandinsky: "Kandinsky Lab",
-      "black-forest-labs": "Black Forest Labs",
-      stabilityai: "Stability AI",
-      nvidia: "NVIDIA",
-    };
+const directoryModels = [...new Set(sourceRecipes.map((recipe) => recipe.model))].map((model) => {
+  const recipes = sourceRecipes.filter((recipe) => recipe.model === model);
+  const first = recipes[0];
+  const family = familyInfo[first.family];
+  const backend = recipePages.find((page) => page.id === backendModels[model]);
+  const ownModel = model.startsWith("FastVideo/Fast");
+  const logo = ownModel ? "fastvideo" : family.logo;
+  const providers: Record<string, string> = {
+    fastvideo: "FastVideo",
+    minimax: "MiniMax",
+    "wan-ai": "Wan AI",
+    ltx: "Lightricks",
+    "tencent-hunyuan": "Tencent",
+    kandinsky: "Kandinsky Lab",
+    "black-forest-labs": "Black Forest Labs",
+    stabilityai: "Stability AI",
+    nvidia: "NVIDIA",
+  };
+  return {
+    id: backend?.id ?? first.id,
+    model,
+    recipes,
+    title:
+      backend?.title ??
+      (model.includes("FastH3-4-step")
+        ? "FastH3 4-Step V1"
+        : model.includes("FastH3-Preview-v0.2")
+          ? "FastH3 Preview V0.2"
+          : model === "MiniMaxAI/MiniMax-H3"
+            ? "MiniMax H3"
+            : first.label.split(" on ")[0]),
+    family: first.family === "minimax_h3" ? "FastH3" : (backend?.family ?? family.title),
+    familyPath: `/cookbook/${family.path}`,
+    path: backend?.path ?? `/cookbook/${family.path}/models/${first.id}`,
+    logo,
+    provider: providers[logo],
+    category: family.category,
+    description: backend?.description ?? first.summary,
+    tags: backend?.tags ?? [...new Set(recipes.map((recipe) => recipe.task))],
+    task: taskLabel(backend?.tags[0] ?? first.task),
+    platforms: [...new Set(recipes.flatMap((recipe) => recipe.gpu_types))],
+    configurable: !!backend,
+    featured: backend?.featured ?? false,
+  };
+});
+const pageFamily: Record<string, string> = {
+  "cosmos25-t2v": "cosmos",
+  "flux1-dev": "flux",
+  "flux2-dev": "flux",
+  "flux2-klein": "flux",
+  "hunyuan15-i2v-480p": "hunyuan",
+  "hunyuan15-t2v-480p": "hunyuan",
+  "kandinsky5-t2v": "kandinsky5",
+  "kandinsky6-ti2va-distilled": "kandinsky6",
+  "kandinsky6-ti2va": "kandinsky6",
+  mmaudio: "mmaudio",
+  sd35: "sd35",
+  "stable-audio": "stable_audio",
+  "wan21-t2v-14b": "wan",
+  "wan22-i2v-a14b": "wan",
+};
+const directoryProviders: Record<string, string> = {
+  fastvideo: "FastVideo",
+  minimax: "MiniMax",
+  "wan-ai": "Wan AI",
+  ltx: "Lightricks",
+  "tencent-hunyuan": "Tencent",
+  kandinsky: "Kandinsky Lab",
+  "black-forest-labs": "Black Forest Labs",
+  stabilityai: "Stability AI",
+  nvidia: "NVIDIA",
+};
+const pageOnlyModels = recipePages
+  .filter((page) => !directoryModels.some((entry) => entry.id === page.id))
+  .map((page) => {
+    const model = Object.entries(backendModels).find(([, id]) => id === page.id)?.[0] ?? page.id;
+    const family = familyInfo[pageFamily[page.id]] ?? familyInfo.wan;
+    const logo = model.startsWith("FastVideo/Fast") ? "fastvideo" : family.logo;
     return {
-      id: backend?.id ?? first.id,
+      id: page.id,
       model,
-      recipes,
-      title:
-        backend?.title ??
-        (model.includes("FastH3-4-step")
-          ? "FastH3 4-Step V1"
-          : model.includes("FastH3-Preview-v0.2")
-            ? "FastH3 Preview V0.2"
-            : model === "MiniMaxAI/MiniMax-H3"
-              ? "MiniMax H3"
-              : first.label.split(" on ")[0]),
-      family: first.family === "minimax_h3" ? "FastH3" : (backend?.family ?? family.title),
+      recipes: [],
+      title: page.title,
+      family: page.family,
       familyPath: `/cookbook/${family.path}`,
-      path: backend?.path ?? `/cookbook/${family.path}/models/${first.id}`,
+      path: page.path,
       logo,
-      provider: providers[logo],
+      provider: directoryProviders[logo] ?? "FastVideo",
       category: family.category,
-      description: backend?.description ?? first.summary,
-      tags: backend?.tags ?? [...new Set(recipes.map((recipe) => recipe.task))],
-      task: taskLabel(backend?.tags[0] ?? first.task),
-      platforms: [...new Set(recipes.flatMap((recipe) => recipe.gpu_types))],
-      configurable: !!backend,
-      featured: backend?.featured ?? false,
+      description: page.description,
+      tags: page.tags,
+      task: taskLabel(page.tags[0]),
+      platforms: ["NVIDIA"],
+      configurable: true,
+      featured: page.featured ?? false,
     };
-  })
-  .sort(
-    (a, b) =>
-      Number(b.featured) - Number(a.featured) ||
-      Number(b.family === "FastH3") - Number(a.family === "FastH3") ||
-      Number(b.configurable) - Number(a.configurable),
-  );
+  });
+export const modelDirectory = [...directoryModels, ...pageOnlyModels].sort(
+  (a, b) =>
+    Number(b.featured) - Number(a.featured) ||
+    Number(b.family === "FastH3") - Number(a.family === "FastH3") ||
+    Number(b.configurable) - Number(a.configurable),
+);
 export type DirectoryModel = (typeof modelDirectory)[number];

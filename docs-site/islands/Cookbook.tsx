@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { Tabs } from "radix-ui";
-import { modelDirectory, recipePages, sitePath, type DirectoryModel } from "@/lib/cookbook-pages";
+import { modelDirectory, recipePages, sitePath, taskLabel, type DirectoryModel } from "@/lib/cookbook-pages";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -194,6 +194,30 @@ function FieldControl({
   );
 }
 
+function catalogFallback(catalog: Catalog, page: ReturnType<typeof recipePages.find>, id: string): DirectoryModel {
+  const generator = catalog.base_config.generator as Record<string, Value> | undefined;
+  const modelPath = typeof generator?.model_path === "string" ? generator.model_path : id;
+  const workload = catalog.workload;
+  const category = /audio/.test(workload) ? "Audio" : /image/.test(workload) ? "Image" : "Video";
+  return {
+    id,
+    model: modelPath,
+    recipes: [],
+    title: page?.title ?? catalog.title,
+    family: page?.family ?? "FastVideo",
+    familyPath: "/cookbook",
+    path: page?.path ?? "/cookbook",
+    logo: "fastvideo",
+    provider: "FastVideo",
+    category,
+    description: page?.description ?? catalog.summary ?? "",
+    tags: [taskLabel(workload)],
+    task: taskLabel(workload),
+    platforms: [catalog.runtime.label],
+    configurable: true,
+    featured: false,
+  };
+}
 function Editor({
   catalog,
   deployments,
@@ -275,7 +299,9 @@ function Editor({
   const mlx = catalog.runtime.backend === "mlx";
   const hardwareRecord = resolveHardware(hardware, hardwareCatalog.records);
   const gpuCount = gpuCountFrom(result?.config);
-  const model = modelDirectory.find((model) => model.id === catalog.id.split("/")[0])!;
+  const modelId = catalog.id.split("/")[0];
+  const recipePage = recipePages.find((page) => page.id === modelId);
+  const model = modelDirectory.find((entry) => entry.id === modelId) ?? catalogFallback(catalog, recipePage, modelId);
   const renderField = (field: Field) => (
     <FieldControl
       key={`${reset}-${field.path}`}

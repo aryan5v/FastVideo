@@ -223,7 +223,7 @@ test("inherited values, explicit false, zero and null retain their meanings", as
 test("catalog discovery opens dedicated model recipes and filters by family and task", async ({ page }) => {
   await page.goto("/FastVideo/cookbook");
   const cards = page.locator(".recipe-card");
-  await expect(cards).toHaveCount(34);
+  await expect(cards).toHaveCount(37);
   await expect(cards.first()).toContainText("FastH3 8-Step V2");
   await page.getByLabel("Model family", { exact: true }).selectOption("Wan");
   await page.getByLabel("Search recipes").fill("Wan2.1 I2V");
@@ -277,7 +277,7 @@ test("output tabs support keyboard navigation and precision chips use the backen
   await page.getByLabel("Search recipes").fill("does not exist");
   await expect(page.getByRole("heading", { name: "No matching recipes" })).toBeVisible();
   await page.getByRole("button", { name: "Clear filters" }).click();
-  await expect(page.locator(".recipe-card")).toHaveCount(34);
+  await expect(page.locator(".recipe-card")).toHaveCount(37);
 });
 
 test("cookbook cards and controls remain readable in dark mode and reflow at 320px", async ({ page }) => {
@@ -302,19 +302,18 @@ test("image and audio models have logos and dedicated source recipe pages", asyn
   await expect(card.locator("img")).toBeVisible();
   await card.click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("FLUX.2 Klein 4B");
-  await expect(page.getByLabel("Inference command")).toContainText("flux");
-  await expect(
-    page.getByRole("group", { name: "Run mode" }).getByRole("button", { name: "Python SDK", exact: true }),
-  ).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("button", { name: "Serving", exact: true })).toHaveCount(0);
-  await page.getByLabel("Seed", { exact: true }).fill("0");
-  await expect(page.getByRole("button", { name: "Copy example + command", exact: true })).toBeEnabled();
+  await expect(page.locator(".recipe-matrix")).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole("button", { name: "Serving", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy config + command", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Clear hardware target", exact: true })).toHaveCount(0);
   await page.goto("/FastVideo/cookbook");
   await page.getByRole("button", { name: "Audio", exact: true }).click();
   await expect(page.locator(".recipe-card")).toHaveCount(3);
-  await page.locator(".recipe-card").first().click();
-  await page.getByLabel("Audio duration", { exact: true }).fill("1.5");
-  await expect(page.getByRole("button", { name: "Copy example + command", exact: true })).toBeEnabled();
+  await page.locator(".recipe-card").filter({ hasText: "Stable Audio Open 1.0" }).click();
+  await expect(page.locator(".recipe-matrix")).toBeVisible({ timeout: 30000 });
+  await page.getByLabel("Audio start", { exact: true }).fill("0");
+  await page.getByLabel("Audio end", { exact: true }).fill("1.5");
+  await expect(page.getByRole("button", { name: "Copy config + command", exact: true })).toBeEnabled();
 });
 
 test("provider labels match FastVideo logos and CompactH3 is replaced by FastH3 Trim", async ({ page }) => {
@@ -427,12 +426,12 @@ test("source model hardware preferences survive hydration and reload", async ({ 
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(
-    "/FastVideo/cookbook/flux/models/flux2-klein-t2i?hardware=custom&hwName=RTX+4090&hwType=dedicated&hwMemory=24&hwUnit=GB",
+    "/FastVideo/cookbook/flux/flux2-klein?hardware=custom&hwName=RTX+4090&hwType=dedicated&hwMemory=24&hwUnit=GB",
   );
-  await expect(page.getByText("RTX 4090", { exact: true })).toBeVisible();
+  await expect(page.locator(".hardware-selected")).toContainText("RTX 4090", { timeout: 30000 });
   await expect(page.locator(".hardware-selected")).toContainText("24 GB VRAM");
   await page.reload();
-  await expect(page.getByText("RTX 4090", { exact: true })).toBeVisible();
+  await expect(page.locator(".hardware-selected")).toContainText("RTX 4090", { timeout: 30000 });
   expect(errors).toEqual([]);
 });
 
