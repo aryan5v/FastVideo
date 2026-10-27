@@ -150,6 +150,8 @@ A request that names an unknown adapter, or a strength outside its range, gets H
 checkpoint to change an adapter it cannot change, gets an `invalid_request` error event with the loader's
 message; the server keeps serving.
 
+**Byte-identical strength 0.** `BaseLayerWithLoRA.forward` is compiled with `torch.compile`, and the compiled wrapper's numerics differ from those of the unwrapped linear, so a strength-0 render through a wrapped transformer is not byte-identical to a render of a server that never wrapped it (measured on FastH3 V2.1 NVFP4: 22 dB PSNR). Set `TORCHDYNAMO_DISABLE=1` on the server when the comparison has to be exact; then a strength-0 shot and a shot without the adapter produce the same bytes. `FASTVIDEO_LORA_SIDE_BRANCH=1` does not change this.
+
 Runtime switching needs the adapter to run as a side branch. Packed NVFP4 and FP8 checkpoints do that
 automatically. A dense bf16 checkpoint merges the adapter, and a checkpoint whose BF16 weights NVFP4 removed
 rejects the change (the `RuntimeError` about "Runtime LoRA adapter changes are unsupported"); set
