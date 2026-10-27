@@ -5,8 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -21,7 +25,7 @@ from fastvideo.entrypoints.streaming_v2.messages import (
     ErrorEvent,
     GenerateRequest,
     LastFrameEvent,
-    LoraSelection,
+    Reference,
     VideoChunkEvent,
     VideoStartEvent,
     format_sse,
@@ -44,55 +48,59 @@ async def generate_segment(raw_request: Request) -> Response:
     state: ServerState = raw_request.app.state.streaming_v2
     try:
         body = GenerateRequest.model_validate(await raw_request.json())
-        generation_request = build_generation_request(body, state.default_request)
-        # An adapter this server does not allow, or a strength outside its range, is the request's fault.
+        references = _validate_request_references(body.references)
         state.validate_lora(body.lora)
-    except ValueError as error:  # malformed JSON, schema violations, undecodable images, reference limits, LoRA
+    except ValueError as error:  # malformed JSON, schema violations, bad references, unservable LoRA
         error_body = ErrorEvent(code="invalid_request", message=str(error))
         return JSONResponse(status_code=400, content=error_body.model_dump())
     return StreamingResponse(
-        stream_segment(state, generation_request, body.return_last_frame, received, body.lora),
+        stream_segment(state, body, references, received),
         media_type="text/event-stream",
     )
 
 
-def build_generation_request(body: GenerateRequest, default_request: GenerationRequest | None) -> GenerationRequest:
-    """Merge the operator's explicit defaults with the body; the body's prompt, size, frames, seed, and images win.
+def _validate_request_references(references: list[Reference]) -> list[MiniMaxH3Reference]:
+    """Decode and check the request's references; a request without any is text-to-video and is not checked."""
+    if not references:
+        return []
+    return validate_references([_decode_reference(index, reference) for index, reference in enumerate(references)])
 
-    Denoising steps and other sampling knobs come from the operator defaults or
-    the model preset. Frames and audio are returned in memory, not saved. A body
-    without reference images is a text-to-video request, which the served model
-    answers when it has no reference transformer; the images are checked as
-    references only when the request carries them.
+
+def build_generation_request(
+    body: GenerateRequest,
+    references: list[MiniMaxH3Reference],
+    default_request: GenerationRequest | None,
+) -> GenerationRequest:
+    """Merge the operator's explicit defaults with the body; the body's prompt, size, frames, seed, and references win.
+
+    Frames and audio are returned in memory, not saved.
     """
     kwargs: dict[str, Any] = explicit_request_updates(default_request) if default_request is not None else {}
     kwargs.update(width=body.width, height=body.height, num_frames=body.num_frames)
     if body.seed is not None:
         kwargs["seed"] = body.seed
-    images = [_decode_image(index, data) for index, data in enumerate(body.reference_images, start=1)]
-    kwargs["references"] = (validate_references([MiniMaxH3Reference(source=image) for image in images]) if images else [])
+    kwargs["references"] = references
     kwargs.update(save_video=False, return_frames=True)
     return legacy_generate_call_to_request(body.prompt, None, legacy_kwargs=kwargs)
 
 
 async def stream_segment(
     state: ServerState,
-    generation_request: GenerationRequest,
-    return_last_frame: bool,
+    body: GenerateRequest,
+    references: list[MiniMaxH3Reference],
     received: float,
-    lora: LoraSelection | None = None,
 ) -> AsyncIterator[str]:
     """Generate one segment and yield its SSE frames: optional ``last_frame``, ``video_start``, chunks, ``done``.
 
-    A ``ValueError`` from generation is the request's fault and ends the stream
-    with an ``invalid_request`` error; any other failure, including one while
-    encoding, ends it with ``generation_failed``. A LoRA adapter that fails to
-    load is the request's fault too, so it ends the same way.
+    The references' bytes go to a fresh directory once the stream runs; the generation task removes it when
+    generation finishes, even if the client has left. A ``ValueError`` is the request's fault and ends the stream
+    with ``invalid_request``; any other failure ends it with ``generation_failed``.
     """
     try:
-        result, generation_ms = await state.generate(generation_request, lora)
+        generation_request, reference_dir = _prepare_request(body, references, state.default_request)
+        result, generation_ms = await state.generate(generation_request, body.lora, reference_dir)
     except ValueError as error:
-        logger.warning("streaming_v2 rejected a request during generation: %s", error)
+        logger.warning("streaming_v2 rejected a request: %s", error)
         yield format_sse(ErrorEvent(code="invalid_request", message=str(error)))
         return
     except Exception as error:
@@ -102,7 +110,7 @@ async def stream_segment(
 
     try:
         frames, audio, sample_rate = _unpack_result(result)
-        if return_last_frame:
+        if body.return_last_frame:
             png = await asyncio.to_thread(_encode_png, frames[-1])
             yield format_sse(LastFrameEvent(data=base64.b64encode(png).decode("ascii")))
         yield format_sse(VideoStartEvent(mime=video_mime(has_audio=audio is not None)))
@@ -115,15 +123,47 @@ async def stream_segment(
         yield format_sse(ErrorEvent(code="generation_failed", message=str(error)))
 
 
-def _decode_image(index: int, data: str) -> Image.Image:
-    """Decode one base64 reference image; raises ``ValueError`` when it is not base64 or not a readable image."""
+def _prepare_request(
+    body: GenerateRequest,
+    references: list[MiniMaxH3Reference],
+    default_request: GenerationRequest | None,
+) -> tuple[GenerationRequest, str | None]:
+    """Build the generation request over reference files in a fresh directory, which is ``None`` without references.
+
+    The caller hands the directory to ``ServerState.generate``, which removes it once generation ends.
+    """
+    if not references:
+        return build_generation_request(body, [], default_request), None
+    reference_dir = tempfile.mkdtemp(prefix="streamv2-references-")
     try:
-        image = Image.open(io.BytesIO(base64.b64decode(data, validate=True)))
-        image.load()
-    except (ValueError, OSError) as error:  # binascii.Error is a ValueError; PIL raises OSError subclasses
-        raise ValueError(
-            f"reference_images[{index - 1}] (Picture {index}) is not a decodable image: {error}") from error
-    return image
+        files = _write_reference_files(references, reference_dir)
+        return build_generation_request(body, files, default_request), reference_dir
+    except Exception:
+        shutil.rmtree(reference_dir, ignore_errors=True)
+        raise
+
+
+def _decode_reference(index: int, reference: Reference) -> MiniMaxH3Reference:
+    """Turn one request reference into a model reference over its bytes.
+
+    Raises ``ValueError`` when ``data`` is not base64 or ``MiniMaxH3Reference``
+    refuses the media type. The model decodes the bytes later, by media type.
+    """
+    try:
+        data = base64.b64decode(reference.data, validate=True)
+    except ValueError as error:  # binascii.Error is a ValueError
+        raise ValueError(f"references[{index}].data is not base64: {error}") from error
+    return MiniMaxH3Reference(source=data, media_type=reference.media_type)
+
+
+def _write_reference_files(references: list[MiniMaxH3Reference], reference_dir: str) -> list[MiniMaxH3Reference]:
+    """Write each reference's bytes to its own file in ``reference_dir``; the returned references read those files."""
+    written = []
+    for index, reference in enumerate(references):
+        path = Path(reference_dir) / str(index)
+        path.write_bytes(reference.source)
+        written.append(replace(reference, source=str(path)))
+    return written
 
 
 def _unpack_result(result: Any) -> tuple[list[np.ndarray], Any | None, int | None]:

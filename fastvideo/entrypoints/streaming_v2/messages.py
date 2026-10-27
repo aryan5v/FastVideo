@@ -20,15 +20,26 @@ class LoraSelection(BaseModel):
     strength: float | None = Field(default=None, ge=0.0)
 
 
+class Reference(BaseModel):
+    """One ordered reference: its media type and its base64 bytes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A media type of ``MiniMaxH3Reference``; the capabilities route lists the accepted ones.
+    media_type: str = Field(min_length=1)
+    # The reference file's bytes as base64 without a ``data:`` prefix.
+    data: str
+
+
 class GenerateRequest(BaseModel):
     """Body of one segment request; every generation input comes from the client."""
 
     model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(min_length=1)
-    # Base64 image bytes without a ``data:`` prefix. List order is the
-    # ``Picture 1``, ``Picture 2``, ... order that the prompt refers to.
-    reference_images: list[str] = Field(default_factory=list)
+    # List order is model order: the model numbers references per media type
+    # (``<Picture N>``, ``<Video N>``, ...) in this order. Empty is text-to-video.
+    references: list[Reference] = Field(default_factory=list)
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     num_frames: int = Field(gt=0)

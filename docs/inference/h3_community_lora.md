@@ -129,8 +129,9 @@ streaming_v2:
         source_url: https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA
 ```
 
-`GET /v1/streamv2/capabilities` reports the allow-list, the strength range of each adapter, and whether the
-server switches adapters at runtime. A request selects one adapter with `lora`, and omitting it renders the base
+`GET /v1/streamv2/capabilities` reports the allow-list, the strength range of each adapter, and in
+`runtime_switching` whether the server can change the adapter or its strength between requests (see the end of this
+section). A request selects one adapter with `lora`, and omitting it renders the base
 model:
 
 ```bash
@@ -145,17 +146,24 @@ before an adapter loads and after another request loaded one: the server then se
 instead of unloading it. The server applies the adapter under the same lock as the generation, so requests
 never interleave two adapters.
 
+A request sends its references as an ordered list of `{"media_type": "image" | "video" | "audio", "data": <base64>}`;
+`GET /v1/streamv2/capabilities` lists the limits in `max_references` and `reference_media_types`. A request without
+`references` is text-to-video, and references are validated only when sent.
+
 A request that names an unknown adapter, or a strength outside its range, gets HTTP 400 with an
 `invalid_request` error before generation starts. A request whose adapter cannot be loaded, or that asks a
 checkpoint to change an adapter it cannot change, gets an `invalid_request` error event with the loader's
 message; the server keeps serving.
 
-**Byte-identical strength 0.** `BaseLayerWithLoRA.forward` is compiled with `torch.compile`, and the compiled wrapper's numerics differ from those of the unwrapped linear, so a strength-0 render through a wrapped transformer is not byte-identical to a render of a server that never wrapped it (measured on FastH3 V2.1 NVFP4: 22 dB PSNR). Set `TORCHDYNAMO_DISABLE=1` on the server when the comparison has to be exact; then a strength-0 shot and a shot without the adapter produce the same bytes. `FASTVIDEO_LORA_SIDE_BRANCH=1` does not change this.
+**Byte-identical strength 0.** `BaseLayerWithLoRA.forward` is compiled with `torch.compile`, and the compiled
+wrapper's numerics differ from the unwrapped linear's, so a strength-0 render is not byte-identical to a render of a
+server that never wrapped the transformer (22 dB PSNR on FastH3 V2.1 NVFP4). Set `TORCHDYNAMO_DISABLE=1` on the
+server when the comparison has to be exact.
 
-Runtime switching needs the adapter to run as a side branch. Packed NVFP4 and FP8 checkpoints do that
-automatically. A dense bf16 checkpoint merges the adapter, and a checkpoint whose BF16 weights NVFP4 removed
-rejects the change (the `RuntimeError` about "Runtime LoRA adapter changes are unsupported"); set
-`FASTVIDEO_LORA_SIDE_BRANCH=1` on a dense checkpoint to switch at runtime. A side-branch layer holds one
+`runtime_switching` is true when the adapter runs as a side branch: with `FASTVIDEO_LORA_SIDE_BRANCH=1`, or on a
+packed NVFP4 export (a `transformer/nvfp4_weights.safetensors` file with `transformer_quant: NVFP4`). Otherwise it is
+false: a dense bf16 checkpoint merges the adapter, and one whose BF16 weights NVFP4 removed rejects the change with
+"Runtime LoRA adapter changes are unsupported". A side-branch layer holds one
 adapter, so stacking two adapters is not supported.
 
 ## Limitations

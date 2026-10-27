@@ -9,6 +9,7 @@ import base64
 import io
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,9 +18,17 @@ from PIL import Image
 from starlette.testclient import TestClient
 
 from fastvideo.api.results import GenerationResult
-from fastvideo.api.schema import LoRAAdapterConfig, StreamingV2LoRAConfig
+from fastvideo.api.schema import (
+    EngineConfig,
+    GeneratorConfig,
+    LoRAAdapterConfig,
+    QuantizationConfig,
+    StreamingV2LoRAConfig,
+)
+from fastvideo.entrypoints.streaming_v2.lora import adapters_attach_as_side_branch
 from fastvideo.entrypoints.streaming_v2.routes import generate as generate_route
 from fastvideo.entrypoints.streaming_v2.server import create_app
+from fastvideo.layers.quantization.nvfp4_config import H3_NVFP4_DIT_EXPORT_FILENAME
 
 _CHUNKS = [b"init-segment", b"fragment-1"]
 
@@ -33,7 +42,7 @@ def _png_base64() -> str:
 def _body(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "prompt": "a lighthouse at dusk",
-        "reference_images": [_png_base64()],
+        "references": [{"media_type": "image", "data": _png_base64()}],
         "width": 64,
         "height": 48,
         "num_frames": 4,
@@ -95,7 +104,7 @@ def test_capabilities_report_no_lora_without_a_config() -> None:
 
 def test_capabilities_report_each_adapter_without_its_load_path() -> None:
     generator = _FakeGenerator()
-    with TestClient(create_app(generator, lora_config=_two_adapters())) as client:
+    with TestClient(create_app(generator, lora_config=_two_adapters(), lora_runtime_switching=True)) as client:
         body = client.get("/v1/streamv2/capabilities").json()
 
     assert body["lora"]["supported"] is True
@@ -107,6 +116,54 @@ def test_capabilities_report_each_adapter_without_its_load_path() -> None:
          "source_url": "https://example.test/orbit"},
     ]
     assert "fal/MiniMax-H3-Realism-People-LoRA" not in json.dumps(body)
+
+
+def test_capabilities_report_runtime_switching_only_when_the_server_can_switch() -> None:
+    with TestClient(create_app(_FakeGenerator(), lora_config=_two_adapters())) as client:
+        body = client.get("/v1/streamv2/capabilities").json()
+
+    assert body["lora"]["supported"] is True
+    assert body["lora"]["runtime_switching"] is False
+
+
+def _generator_config(tmp_path: Path, quant: str | None, packed: bool) -> GeneratorConfig:
+    transformer = tmp_path / "transformer"
+    transformer.mkdir(exist_ok=True)
+    if packed:
+        (transformer / H3_NVFP4_DIT_EXPORT_FILENAME).touch()
+    quantization = None if quant is None else QuantizationConfig(transformer_quant=quant)
+    return GeneratorConfig(model_path=str(tmp_path), engine=EngineConfig(quantization=quantization))
+
+
+@pytest.mark.parametrize(
+    ("quant", "packed", "side_branch_env", "expected"),
+    [
+        ("NVFP4", True, False, True),
+        ("NVFP4", False, False, False),
+        (None, True, False, False),
+        (None, False, False, False),
+        (None, False, True, True),
+    ],
+)
+def test_adapters_attach_as_side_branch_follows_the_checkpoint_and_env(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, quant: str | None, packed: bool, side_branch_env: bool,
+        expected: bool) -> None:
+    if side_branch_env:
+        monkeypatch.setenv("FASTVIDEO_LORA_SIDE_BRANCH", "1")
+    else:
+        monkeypatch.delenv("FASTVIDEO_LORA_SIDE_BRANCH", raising=False)
+
+    assert adapters_attach_as_side_branch(_generator_config(tmp_path, quant, packed)) is expected
+
+
+def test_generate_applies_the_adapter_to_a_text_request() -> None:
+    generator = _FakeGenerator()
+    with TestClient(create_app(generator, lora_config=_two_adapters())) as client:
+        response = client.post("/v1/streamv2/generate", json=_body(references=[], lora={"id": "realism"}))
+
+    assert response.status_code == 200
+    assert generator.calls[0][:2] == ("set_lora_adapter", "realism")
+    assert generator.requests[0].inputs.references == []
 
 
 def test_generate_applies_the_adapter_before_generating() -> None:

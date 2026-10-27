@@ -1,19 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-request LoRA selection for the streaming_v2 server.
 
-The server owns exactly one generator, and FastVideo keeps the active adapter on the pipeline, so a request
-applies its adapter under the same lock as its generation. ``GET /v1/streamv2/capabilities`` reports the
-allow-list; a request carries ``{"lora": {"id": ..., "strength": ...}}``.
-
-Two FastVideo properties matter here:
-
-* ``strength=0`` is the base model. A side-branch layer returns its base layer's output directly, and a merged
-  adapter contributes a zero delta, so a request that omits ``lora`` after another request loaded an adapter
-  still renders the base model.
-* Not every checkpoint can switch at runtime. Packed NVFP4/FP8 checkpoints keep the adapter beside the packed
-  weight and switch freely; a dense checkpoint merges it, and a checkpoint whose BF16 weights NVFP4 removed
-  rejects the change. ``set_lora_adapter`` raises in that case, and the error reaches the client as an
-  ``invalid_request`` error event.
+The server owns one generator and FastVideo keeps the active adapter on its pipeline, so a request applies its
+adapter under the same lock as its generation. A request carries ``{"lora": {"id": ..., "strength": ...}}``, and
+strength 0 is exactly the base model, so a request without ``lora`` after one with it is served at strength 0.
 
 @module fastvideo.entrypoints.streaming_v2.lora
 """
@@ -21,10 +11,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from fastvideo.api.schema import LoRAAdapterConfig, StreamingV2LoRAConfig
+from fastvideo import envs
+from fastvideo.api.schema import GeneratorConfig, LoRAAdapterConfig, StreamingV2LoRAConfig
 from fastvideo.entrypoints.streaming_v2.messages import LoraSelection
+from fastvideo.layers.quantization.nvfp4_config import H3_NVFP4_DIT_EXPORT_FILENAME
 from fastvideo.logger import init_logger
 
 logger = init_logger(__name__)
@@ -51,21 +44,30 @@ def _adapter_capability(adapter: LoRAAdapterConfig) -> dict[str, Any]:
     return entry
 
 
-def lora_capabilities(config: StreamingV2LoRAConfig | None) -> dict[str, Any]:
-    """The ``lora`` block of ``GET /v1/streamv2/capabilities``.
+def adapters_attach_as_side_branch(generator: GeneratorConfig) -> bool:
+    """Whether adapters attach beside the base weights, so a request can change them on the running server.
 
-    ``supported`` is false without an allow-list, and the server then refuses any request that selects an
-    adapter. ``runtime_switching`` says that a request may change the adapter or the strength of a running
-    server; on a checkpoint that merges its adapter, such a change raises and the request fails with
-    ``invalid_request`` instead of restarting.
+    That holds with ``FASTVIDEO_LORA_SIDE_BRANCH=1`` and for a packed NVFP4 export, whose linears have no dense
+    weight to merge into. Any other checkpoint merges the adapter into dense weights, or has them purged, and
+    rejects a change.
     """
-    if config is None or not config.adapters:
+    if envs.FASTVIDEO_LORA_SIDE_BRANCH.get():
+        return True
+    quantization = generator.engine.quantization
+    if quantization is None or quantization.transformer_quant != "NVFP4":
+        return False
+    return (Path(generator.model_path) / "transformer" / H3_NVFP4_DIT_EXPORT_FILENAME).is_file()
+
+
+def lora_capabilities(runtime: LoraRuntime | None) -> dict[str, Any]:
+    """The ``lora`` block of ``GET /v1/streamv2/capabilities``."""
+    if runtime is None:
         return {"supported": False, "runtime_switching": False, "adapters": []}
     return {
         "supported": True,
-        "runtime_switching": True,
+        "runtime_switching": runtime.runtime_switching,
         "base_strength": 0.0,
-        "adapters": [_adapter_capability(adapter) for adapter in config.adapters],
+        "adapters": [_adapter_capability(adapter) for adapter in runtime.config.adapters],
     }
 
 
@@ -73,7 +75,8 @@ def lora_capabilities(config: StreamingV2LoRAConfig | None) -> dict[str, Any]:
 class LoraRuntime:
     """The adapters a request may select, and the adapter the generator currently carries."""
     config: StreamingV2LoRAConfig
-    # The adapter the pipeline currently carries; ``None`` until the first request selects one.
+    runtime_switching: bool = False
+    # ``None`` until the first request selects an adapter.
     current_id: str | None = None
     current_strength: float | None = None
     adapters: dict[str, LoRAAdapterConfig] = field(init=False)
@@ -82,11 +85,7 @@ class LoraRuntime:
         self.adapters = {adapter.id: adapter for adapter in self.config.adapters}
 
     def validate(self, selection: LoraSelection | None) -> None:
-        """Refuse a selection that names no allowed adapter or a strength outside its range.
-
-        This runs before the response starts, so an invalid selection is an HTTP 400 rather than an error event
-        after a generation has begun.
-        """
+        """Refuse an unknown adapter or a strength outside its range."""
         if selection is None:
             return
         adapter = self.adapters.get(selection.id)
@@ -99,11 +98,7 @@ class LoraRuntime:
                                    f"{adapter.max_strength:g}; got {strength:g}.")
 
     def apply(self, generator: Any, selection: LoraSelection | None) -> None:
-        """Make the selection current on ``generator``; ``None`` renders the base model.
-
-        Runs inside the generation lock, so two requests cannot interleave adapter changes. A no-op when the
-        requested adapter and strength are already current.
-        """
+        """Make the selection current on ``generator``; ``None`` sets the current adapter to strength 0."""
         if selection is None:
             if self.current_id is None or self.current_strength == 0.0:
                 return
@@ -121,8 +116,8 @@ class LoraRuntime:
         logger.info("streaming_v2 applies LoRA adapter %r at strength %g", adapter_id, strength)
         try:
             generator.set_lora_adapter(adapter_id, adapter.path, strength=strength)
-        except Exception as error:  # a bad adapter, an unreachable repo, or a checkpoint that cannot switch
-            # The pipeline may have left a partial adapter behind, so the next request must set one unconditionally.
+        except Exception as error:
+            # A partial adapter may remain, so the next request must set one unconditionally.
             self.current_id = None
             self.current_strength = None
             raise LoraRequestError(f"LoRA adapter {adapter_id!r} could not be applied: {error}") from error

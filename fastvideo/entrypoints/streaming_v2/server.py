@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -10,7 +11,7 @@ from typing import Any, Protocol
 from fastapi import FastAPI
 
 from fastvideo.api.schema import GenerationRequest, ServeConfig, StreamingV2LoRAConfig
-from fastvideo.entrypoints.streaming_v2.lora import LoraRequestError, LoraRuntime
+from fastvideo.entrypoints.streaming_v2.lora import LoraRequestError, LoraRuntime, adapters_attach_as_side_branch
 from fastvideo.entrypoints.streaming_v2.messages import LoraSelection
 from fastvideo.entrypoints.streaming_v2.routes import capabilities, generate, health
 
@@ -33,30 +34,34 @@ class ServerState:
     # Operator baseline from the serve config; only fields the operator wrote apply.
     default_request: GenerationRequest | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # ``None`` when the serve config declares no adapter; the server then refuses every ``lora`` selection.
+    # ``None`` when the serve config declares no adapter; every ``lora`` selection is then refused.
     lora: LoraRuntime | None = None
 
-    async def generate(self, request: GenerationRequest, lora: LoraSelection | None = None) -> tuple[Any, float]:
-        """Run one generation and return its result and its duration in milliseconds.
+    async def generate(
+        self,
+        request: GenerationRequest,
+        lora: LoraSelection | None = None,
+        reference_dir: str | None = None,
+    ) -> tuple[Any, float]:
+        """Apply the LoRA selection, run one generation, and return its result and duration in milliseconds.
 
-        Only the blocking ``generate()`` call is under the lock, so a finished
-        segment can stream while the next request generates. The call cannot be
-        interrupted, so the lock stays held until it returns even when the caller
-        is cancelled; otherwise a second generation could start on the same
-        pipeline. The adapter change runs under the same lock, in the worker
-        thread, so it cannot overlap a generation or another change.
+        The call cannot be interrupted, so the lock stays held until it returns even when the caller is
+        cancelled; otherwise a second generation could start on the same pipeline. The generation task, not the
+        caller, removes ``reference_dir``, the directory of the reference files that ``request`` reads.
         """
 
         async def run_locked() -> tuple[Any, float]:
-            async with self.lock:
-                if self.lora is not None:
-                    await asyncio.to_thread(self.lora.apply, self.generator, lora)
-                elif lora is not None:
-                    # The route validates first; this guards a state built by hand.
-                    raise LoraRequestError("This server declares no LoRA adapter.")
-                started = time.perf_counter()
-                result = await asyncio.to_thread(self.generator.generate, request)
-                return result, (time.perf_counter() - started) * 1000.0
+            try:
+                async with self.lock:
+                    self.validate_lora(lora)
+                    if self.lora is not None:
+                        await asyncio.to_thread(self.lora.apply, self.generator, lora)
+                    started = time.perf_counter()
+                    result = await asyncio.to_thread(self.generator.generate, request)
+                    return result, (time.perf_counter() - started) * 1000.0
+            finally:
+                if reference_dir is not None:
+                    shutil.rmtree(reference_dir, ignore_errors=True)
 
         task = asyncio.ensure_future(run_locked())
         task.add_done_callback(_retrieve_exception)
@@ -81,10 +86,13 @@ def create_app(
     generator: GeneratorLike,
     default_request: GenerationRequest | None = None,
     lora_config: StreamingV2LoRAConfig | None = None,
+    lora_runtime_switching: bool = False,
 ) -> FastAPI:
     """Build the app around an already created generator."""
     app = FastAPI()
-    lora = LoraRuntime(config=lora_config) if lora_config is not None and lora_config.adapters else None
+    lora = None
+    if lora_config is not None and lora_config.adapters:
+        lora = LoraRuntime(config=lora_config, runtime_switching=lora_runtime_switching)
     app.state.streaming_v2 = ServerState(generator=generator, default_request=default_request, lora=lora)
     app.include_router(generate.router)
     app.include_router(capabilities.router)
@@ -103,7 +111,8 @@ def run_server(serve_config: ServeConfig) -> None:
     generator = VideoGenerator.from_pretrained(config=serve_config.generator)
     try:
         uvicorn.run(
-            create_app(generator, serve_config.default_request, lora_config),
+            create_app(generator, serve_config.default_request, lora_config,
+                       adapters_attach_as_side_branch(serve_config.generator)),
             host=serve_config.server.host,
             port=serve_config.server.port,
         )

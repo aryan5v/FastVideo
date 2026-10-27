@@ -23,7 +23,8 @@ def test_capabilities_reports_hardcoded_h3_ref2va_facts() -> None:
         "name": "H3 Ref2AV",
         "min_segment_duration_sec": 5,
         "max_segment_duration_sec": 15,
-        "max_reference_images": 9,
+        "max_references": 12,
+        "reference_media_types": {"image": {"max_count": 9}, "video": {"max_count": 3}, "audio": {"max_count": 3}},
         "max_reference_aspect_ratio": 4.0,
         "frame_sizes": {"16:9": {"720p": [1344, 768]}},
         "num_frames_by_duration_sec": {
