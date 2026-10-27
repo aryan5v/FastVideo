@@ -87,6 +87,16 @@ def fake_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(generate_route, "encode_fmp4", _fake_encode)
 
 
+def test_generate_renders_a_text_request_without_references(fake_encoder: None) -> None:
+    generator = _FakeGenerator()
+    with TestClient(create_app(generator)) as client:
+        response = client.post("/v1/streamv2/generate", json=_body(reference_images=[]))
+
+    assert response.status_code == 200
+    assert [name for name, _ in _events(response.text)] == ["last_frame", "video_start", "video_chunk", "video_chunk", "video_chunk", "done"]
+    assert generator.requests[0].inputs.references == []
+
+
 def test_generate_streams_last_frame_video_and_done_in_order(fake_encoder: None) -> None:
     generator = _FakeGenerator()
     with TestClient(create_app(generator)) as client:
@@ -128,7 +138,6 @@ def test_generate_omits_last_frame_unless_requested(fake_encoder: None) -> None:
         json.dumps(_body(unknown_field=1)).encode(),
         json.dumps(_body(reference_images=["%%% not base64 %%%"])).encode(),
         json.dumps(_body(reference_images=[base64.b64encode(b"not an image").decode()])).encode(),
-        json.dumps(_body(reference_images=[])).encode(),
         json.dumps(_body(reference_images=[_png_base64()] * 10)).encode(),
     ],
 )

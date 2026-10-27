@@ -60,14 +60,17 @@ def build_generation_request(body: GenerateRequest, default_request: GenerationR
     """Merge the operator's explicit defaults with the body; the body's prompt, size, frames, seed, and images win.
 
     Denoising steps and other sampling knobs come from the operator defaults or
-    the model preset. Frames and audio are returned in memory, not saved.
+    the model preset. Frames and audio are returned in memory, not saved. A body
+    without reference images is a text-to-video request, which the served model
+    answers when it has no reference transformer; the images are checked as
+    references only when the request carries them.
     """
     kwargs: dict[str, Any] = explicit_request_updates(default_request) if default_request is not None else {}
     kwargs.update(width=body.width, height=body.height, num_frames=body.num_frames)
     if body.seed is not None:
         kwargs["seed"] = body.seed
     images = [_decode_image(index, data) for index, data in enumerate(body.reference_images, start=1)]
-    kwargs["references"] = validate_references([MiniMaxH3Reference(source=image) for image in images])
+    kwargs["references"] = (validate_references([MiniMaxH3Reference(source=image) for image in images]) if images else [])
     kwargs.update(save_video=False, return_frames=True)
     return legacy_generate_call_to_request(body.prompt, None, legacy_kwargs=kwargs)
 
