@@ -2,9 +2,14 @@
 """``GET /v1/streamv2/capabilities``: what the served model can generate."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+from fastvideo.entrypoints.streaming_v2.lora import lora_capabilities
+
+if TYPE_CHECKING:
+    from fastvideo.entrypoints.streaming_v2.server import ServerState
 
 router = APIRouter()
 
@@ -40,5 +45,12 @@ CAPABILITIES: dict[str, Any] = {
 
 
 @router.get("/v1/streamv2/capabilities")
-async def get_capabilities() -> dict[str, Any]:
-    return CAPABILITIES
+async def get_capabilities(raw_request: Request) -> dict[str, Any]:
+    """The served model's facts, plus the LoRA adapters a request may select.
+
+    The hardcoded facts describe the loaded H3 model; the ``lora`` block comes from the serve config, so a
+    deployment without adapters advertises ``{"supported": false, "adapters": []}`` and refuses ``lora``.
+    """
+    state: ServerState = raw_request.app.state.streaming_v2
+    lora = None if state.lora is None else state.lora.config
+    return {**CAPABILITIES, "lora": lora_capabilities(lora)}

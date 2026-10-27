@@ -21,6 +21,7 @@ from fastvideo.entrypoints.streaming_v2.messages import (
     ErrorEvent,
     GenerateRequest,
     LastFrameEvent,
+    LoraSelection,
     VideoChunkEvent,
     VideoStartEvent,
     format_sse,
@@ -44,11 +45,13 @@ async def generate_segment(raw_request: Request) -> Response:
     try:
         body = GenerateRequest.model_validate(await raw_request.json())
         generation_request = build_generation_request(body, state.default_request)
-    except ValueError as error:  # malformed JSON, schema violations, undecodable images, reference limits
+        # An adapter this server does not allow, or a strength outside its range, is the request's fault.
+        state.validate_lora(body.lora)
+    except ValueError as error:  # malformed JSON, schema violations, undecodable images, reference limits, LoRA
         error_body = ErrorEvent(code="invalid_request", message=str(error))
         return JSONResponse(status_code=400, content=error_body.model_dump())
     return StreamingResponse(
-        stream_segment(state, generation_request, body.return_last_frame, received),
+        stream_segment(state, generation_request, body.return_last_frame, received, body.lora),
         media_type="text/event-stream",
     )
 
@@ -74,15 +77,17 @@ async def stream_segment(
     generation_request: GenerationRequest,
     return_last_frame: bool,
     received: float,
+    lora: LoraSelection | None = None,
 ) -> AsyncIterator[str]:
     """Generate one segment and yield its SSE frames: optional ``last_frame``, ``video_start``, chunks, ``done``.
 
     A ``ValueError`` from generation is the request's fault and ends the stream
     with an ``invalid_request`` error; any other failure, including one while
-    encoding, ends it with ``generation_failed``.
+    encoding, ends it with ``generation_failed``. A LoRA adapter that fails to
+    load is the request's fault too, so it ends the same way.
     """
     try:
-        result, generation_ms = await state.generate(generation_request)
+        result, generation_ms = await state.generate(generation_request, lora)
     except ValueError as error:
         logger.warning("streaming_v2 rejected a request during generation: %s", error)
         yield format_sse(ErrorEvent(code="invalid_request", message=str(error)))

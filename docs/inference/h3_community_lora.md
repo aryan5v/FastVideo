@@ -109,6 +109,53 @@ the consumer profiles already use, for packed NVFP4 and for bf16. Pass `lora_pat
 adapter is attached when the transformer arrives: as a bf16 side branch beside packed weights, or merged into a
 dense bf16 transformer. You do not load the LoRA as a separate resident copy of the model.
 
+## Serve adapters per request
+
+The `streaming_v2` server (`fastvideo serve` with a `streaming_v2:` block) can hold an allow-list of adapters and
+apply one per request. Name each adapter and its strength range in the serve config:
+
+```yaml
+generator:
+  model_path: /models/FastVideo-FastH3-8-Step-V2.1-NVFP4-Consumer
+streaming_v2:
+  lora:
+    adapters:
+      - id: realism-people
+        path: fal/MiniMax-H3-Realism-People-LoRA
+        default_strength: 0.8
+        min_strength: 0.0
+        max_strength: 1.5
+        license: Apache-2.0
+        source_url: https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA
+```
+
+`GET /v1/streamv2/capabilities` reports the allow-list, the strength range of each adapter, and whether the
+server switches adapters at runtime. A request selects one adapter with `lora`, and omitting it renders the base
+model:
+
+```bash
+curl -s http://127.0.0.1:8029/v1/streamv2/generate \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "...", "width": 1344, "height": 768, "num_frames": 124, "seed": 7,
+       "lora": {"id": "realism-people", "strength": 0.8}}'
+```
+
+`strength` is optional and defaults to the adapter's `default_strength`. `0` is exactly the base model, both
+before an adapter loads and after another request loaded one: the server then sets the adapter's strength to 0
+instead of unloading it. The server applies the adapter under the same lock as the generation, so requests
+never interleave two adapters.
+
+A request that names an unknown adapter, or a strength outside its range, gets HTTP 400 with an
+`invalid_request` error before generation starts. A request whose adapter cannot be loaded, or that asks a
+checkpoint to change an adapter it cannot change, gets an `invalid_request` error event with the loader's
+message; the server keeps serving.
+
+Runtime switching needs the adapter to run as a side branch. Packed NVFP4 and FP8 checkpoints do that
+automatically. A dense bf16 checkpoint merges the adapter, and a checkpoint whose BF16 weights NVFP4 removed
+rejects the change (the `RuntimeError` about "Runtime LoRA adapter changes are unsupported"); set
+`FASTVIDEO_LORA_SIDE_BRANCH=1` on a dense checkpoint to switch at runtime. A side-branch layer holds one
+adapter, so stacking two adapters is not supported.
+
 ## Limitations
 
 - Block-pruned models (FastH3 Trim, 42 of 50 blocks) are not supported yet. Community LoRAs index the full
